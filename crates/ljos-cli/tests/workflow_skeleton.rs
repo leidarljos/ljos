@@ -945,6 +945,83 @@ fn concurrent_start_files_one_ticket_per_step() {
 }
 
 #[test]
+fn external_blocked_by_edges_appear_in_status_and_block_signoff() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    let stored = board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let accession = stored
+        .lines()
+        .find_map(|line| line.strip_prefix("deed "))
+        .unwrap()
+        .trim()
+        .to_string();
+    let parent = first_id(&board.ok(&["file", "Release 1.2.0", "--top", "-p", "demo"]));
+    let started = board.ok(&[
+        "workflow",
+        "--start",
+        "release",
+        &parent,
+        "--var",
+        "version=1.2.0",
+    ]);
+    let changelog = filed(&started, "changelog");
+    let version = filed(&started, "version");
+    let signoff = filed(&started, "signoff");
+    board.mark_done(&changelog);
+    board.mark_done(&version);
+    board.ok_as(
+        "alice",
+        &["vote", &signoff, "--for", "ship", "--used", "none"],
+    );
+    board.ok_as(
+        "bob",
+        &["vote", &signoff, "--for", "ship", "--used", "none"],
+    );
+    board.ok(&["deed", &signoff, "--add", &accession]);
+
+    let ext = first_id(&board.ok(&["file", "Waiting on legal", "--top", "-p", "demo"]));
+    board.ok(&["block", &version, "--on", &ext]);
+    let status = board.ok(&["workflow", &parent]);
+    assert!(!status.contains("blockers: none"), "{status}");
+    assert!(status.contains(&ext), "{status}");
+    assert!(status.contains("Waiting on legal"), "{status}");
+    let refused = board.fail(&["complete", &signoff]);
+    assert!(refused.contains(&ext), "{refused}");
+    let refused_finish = board.fail(&["finish", &signoff]);
+    assert!(refused_finish.contains(&ext), "{refused_finish}");
+
+    board.mark_done(&ext);
+    let status = board.ok(&["workflow", &parent]);
+    assert!(status.contains("blockers: none"), "{status}");
+
+    let ext2 = first_id(&board.ok(&["file", "External security hold", "--top", "-p", "demo"]));
+    board.ok(&["block", &signoff, "--on", &ext2]);
+    let sib = first_id(&board.ok(&["file", "Extra check under parent", "--parent", &parent]));
+    board.ok(&["block", &changelog, "--on", &sib]);
+
+    let status = board.ok(&["workflow", &parent]);
+    assert!(!status.contains("blockers: none"), "{status}");
+    assert!(status.contains(&ext2), "{status}");
+    assert!(status.contains(&sib), "{status}");
+    let refused = board.fail(&["complete", &signoff]);
+    assert!(refused.contains(&ext2), "{refused}");
+    assert!(refused.contains(&sib), "{refused}");
+    let refused_finish = board.fail(&["finish", &signoff]);
+    assert!(refused_finish.contains(&ext2), "{refused_finish}");
+
+    board.mark_done(&ext2);
+    board.mark_done(&sib);
+    let status = board.ok(&["workflow", &parent]);
+    assert!(status.contains("blockers: none"), "{status}");
+    let finished = board.fail(&["finish", &signoff]);
+    assert!(
+        finished.contains("is not claimed and stays TODO"),
+        "{finished}"
+    );
+    assert!(!finished.contains("is missing"), "{finished}");
+}
+
+#[test]
 fn the_feature_workflow_still_files_its_design_child() {
     let board = Board::new();
     let parent = first_id(&board.ok(&["file", "Add a codec", "--top", "-p", "demo"]));

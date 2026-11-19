@@ -423,8 +423,18 @@ pub fn status_report(parent: &str) -> Result<Option<String>> {
         out.push_str("blockers: none\n");
     } else {
         out.push_str("blockers:\n");
-        for (step, id, state, title) in &blockers {
-            out.push_str(&format!("  {id} {state} under {step}: {title}\n"));
+        for b in &blockers {
+            if b.via_edge {
+                out.push_str(&format!(
+                    "  {} {} blocking {}: {}\n",
+                    b.id, b.state, b.step, b.title
+                ));
+            } else {
+                out.push_str(&format!(
+                    "  {} {} under {}: {}\n",
+                    b.id, b.state, b.step, b.title
+                ));
+            }
         }
     }
     out.push_str("signoff needs:\n");
@@ -509,6 +519,14 @@ pub fn revise_from(name: &str, parent: &str) -> Result<String> {
     body.push_str(&format!(
         "Proposal for {name} version {version}, from {parent}.\n"
     ));
+    let rec_by_id: BTreeMap<&str, &vissue_core::views::IssueRec> = recs
+        .iter()
+        .map(|rec| (rec.heading.id.as_str(), rec))
+        .collect();
+    let id_by_key: BTreeMap<&str, &str> = rows
+        .iter()
+        .map(|row| (row.key.as_str(), row.id.as_str()))
+        .collect();
     for row in &rows {
         body.push_str(&format!("\n{} ({}, {})\n", row.key, row.id, row.state));
         if let Ok(step_card) = crate::tracker_show_json(&row.id) {
@@ -519,8 +537,30 @@ pub fn revise_from(name: &str, parent: &str) -> Result<String> {
                 body.push_str(&format!("  note: {note}\n"));
             }
         }
+        let mut seen = BTreeSet::new();
         for (id, state, title) in children_of(&recs, &row.id) {
+            seen.insert(id.clone());
             body.push_str(&format!("  blocker {id} {state}: {title}\n"));
+        }
+        let dep_ids: BTreeSet<&str> = row
+            .depends
+            .iter()
+            .filter_map(|dep| id_by_key.get(dep.as_str()).copied())
+            .collect();
+        if let Some(rec) = rec_by_id.get(row.id.as_str()) {
+            let mut blocked = rec.heading.blocked_by();
+            blocked.sort();
+            for blocker_id in blocked {
+                if dep_ids.contains(blocker_id.as_str()) || !seen.insert(blocker_id.clone()) {
+                    continue;
+                }
+                if let Some(b) = rec_by_id.get(blocker_id.as_str()) {
+                    body.push_str(&format!(
+                        "  blocker {} {}: {}\n",
+                        blocker_id, b.heading.state, b.heading.title
+                    ));
+                }
+            }
         }
     }
     let project = card["project"]
@@ -1758,15 +1798,73 @@ fn children_of(
     out
 }
 
-fn open_blockers(
-    recs: &[vissue_core::views::IssueRec],
-    rows: &[RunStep],
-) -> Vec<(String, String, String, String)> {
+struct OpenBlocker {
+    step: String,
+    id: String,
+    state: String,
+    title: String,
+    via_edge: bool,
+}
+
+fn open_blockers(recs: &[vissue_core::views::IssueRec], rows: &[RunStep]) -> Vec<OpenBlocker> {
+    let rec_by_id: BTreeMap<&str, &vissue_core::views::IssueRec> = recs
+        .iter()
+        .map(|rec| (rec.heading.id.as_str(), rec))
+        .collect();
+    let id_by_key: BTreeMap<&str, &str> = rows
+        .iter()
+        .map(|row| (row.key.as_str(), row.id.as_str()))
+        .collect();
     let mut out = Vec::new();
     for row in rows {
+        let mut seen = BTreeSet::new();
         for (id, state, title) in children_of(recs, &row.id) {
-            if !is_closed(&state) {
-                out.push((row.key.clone(), id, state, title));
+            if !is_closed(&state) && seen.insert(id.clone()) {
+                out.push(OpenBlocker {
+                    step: row.key.clone(),
+                    id,
+                    state,
+                    title,
+                    via_edge: false,
+                });
+            }
+        }
+        let dep_ids: BTreeSet<&str> = row
+            .depends
+            .iter()
+            .filter_map(|dep| id_by_key.get(dep.as_str()).copied())
+            .collect();
+        if let Some(rec) = rec_by_id.get(row.id.as_str()) {
+            let mut blocked = rec.heading.blocked_by();
+            blocked.sort();
+            for blocker_id in blocked {
+                if dep_ids.contains(blocker_id.as_str()) {
+                    continue;
+                }
+                match rec_by_id.get(blocker_id.as_str()) {
+                    Some(b) => {
+                        if !is_closed(&b.heading.state) && seen.insert(blocker_id.clone()) {
+                            out.push(OpenBlocker {
+                                step: row.key.clone(),
+                                id: blocker_id,
+                                state: b.heading.state.clone(),
+                                title: b.heading.title.clone(),
+                                via_edge: true,
+                            });
+                        }
+                    }
+                    None => {
+                        if seen.insert(blocker_id.clone()) {
+                            out.push(OpenBlocker {
+                                step: row.key.clone(),
+                                id: blocker_id,
+                                state: "UNKNOWN".into(),
+                                title: "missing blocker ticket".into(),
+                                via_edge: true,
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -1787,10 +1885,18 @@ fn signoff_lines(
             missing.push(format!("{} is {}", row.key, row.state));
         }
     }
-    for (step, id, state, title) in open_blockers(recs, rows) {
-        missing.push(format!(
-            "blocker {id} is open under {step}: {title} ({state})"
-        ));
+    for b in open_blockers(recs, rows) {
+        if b.via_edge {
+            missing.push(format!(
+                "blocker {} is open blocking {}: {} ({})",
+                b.id, b.step, b.title, b.state
+            ));
+        } else {
+            missing.push(format!(
+                "blocker {} is open under {}: {} ({})",
+                b.id, b.step, b.title, b.state
+            ));
+        }
     }
     match crate::reap::gate_quorum(&sign.id, sign.quorum, None) {
         Ok(crate::reap::QuorumGate::Met { .. }) => {}
