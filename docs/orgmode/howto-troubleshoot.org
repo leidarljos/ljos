@@ -49,6 +49,12 @@ The seat now goes beside the checkout when that place is outside every temporary
 Otherwise it goes under =~/.cache/ljos-test-seats=.
 When neither place fits, the test prints one line that says so and stops, or fails with that line when =LJOS_TEST_REQUIRE_TOOLS=1=.
 
+A =packsetd= already listening on the asked port for another home, or with another token, is not this seat's writer.
+A writer whose pack home is the directory =PACKSET_HOME= names is this seat's, even when its process home is that directory.
+=/health= can still answer, and a later =ljos send= or =ljos consensus= is refused.
+The memory row is =no= and =ljos doctor= exits 1.
+The row names =set PACKSET_PORT= for another home, or =packset stop && packset ensure= for another token.
+
 * No seat
 
 With no =LJOS_SEAT=, no =--seat=, and no seat record, the short doctor prints:

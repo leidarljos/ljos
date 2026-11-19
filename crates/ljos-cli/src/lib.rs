@@ -17170,7 +17170,7 @@ fn other_home_writer_line(base: &str) -> Option<String> {
             our_pack,
             temp: None,
         };
-        home_on_asked_port(&facts)
+        owner_line(&facts, &seat_token())
     }
 }
 
@@ -20680,6 +20680,8 @@ struct SeenWriter {
     ports: Vec<u16>,
     home: String,
     pack_home: String,
+    /// The writer's token, compared and never printed.
+    token: String,
 }
 
 /// Facts [`pack_down_line`] reads. Split out so a test can name each case.
@@ -20818,6 +20820,9 @@ fn render_down(facts: &DownFacts) -> String {
     if let Some(line) = foreign_home(facts) {
         return line;
     }
+    if let Some(line) = owner_line(facts, &seat_token()) {
+        return line;
+    }
     if let Some(line) = other_port(facts) {
         return line;
     }
@@ -20836,12 +20841,76 @@ fn render_down(facts: &DownFacts) -> String {
     )
 }
 
+/// The token this seat would send. Empty when it has none. The value is
+/// compared with a writer's token and is not printed.
+fn seat_token() -> String {
+    if let Ok(raw) = std::env::var("PACKSET_TOKEN") {
+        let raw = raw.trim();
+        if !raw.is_empty() {
+            return raw.to_string();
+        }
+    }
+    if let Ok(path) = std::env::var("PACKSET_TOKEN_FILE") {
+        let path = path.trim();
+        if !path.is_empty() {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                let text = text.trim();
+                if !text.is_empty() {
+                    return text.to_string();
+                }
+            }
+        }
+    }
+    let home = std::env::var("PACKSET_HOME")
+        .ok()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| pack_home_under(&std::env::var("HOME").unwrap_or_default()));
+    std::fs::read_to_string(Path::new(&home).join("token"))
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// A writer already listening on the port this seat asked, for another
+/// home or another token. `None` when the listener is this seat's, or
+/// when no listener explains the port.
+fn owner_line(facts: &DownFacts, our_token: &str) -> Option<String> {
+    if let Some(line) = home_on_asked_port(facts) {
+        return Some(line);
+    }
+    let port = facts.asked_port?;
+    let writer = facts
+        .writers
+        .iter()
+        .find(|writer| writer.ports.contains(&port))?;
+    let ours = our_token.trim();
+    let theirs = writer.token.trim();
+    if !ours.is_empty() && !theirs.is_empty() && ours != theirs {
+        return Some(format!(
+            "packsetd on {} belongs to another token, so {WRITER_PORT_FIX}.",
+            facts.asked
+        ));
+    }
+    None
+}
+
+/// The writer stores this seat's pack, and its process home is that
+/// directory. A different home that happens to name the same pack path
+/// is still another home.
+fn pack_is_ours(writer: &SeenWriter, facts: &DownFacts) -> bool {
+    !writer.pack_home.is_empty()
+        && !facts.our_pack.is_empty()
+        && home_paths_match(&writer.pack_home, &facts.our_pack)
+        && home_paths_match(&writer.home, &writer.pack_home)
+}
+
 fn home_on_asked_port(facts: &DownFacts) -> Option<String> {
     let port = facts.asked_port?;
     let writer = facts.writers.iter().find(|writer| {
         writer.ports.contains(&port)
             && !writer.home.is_empty()
             && !home_paths_match(&writer.home, &facts.our_home)
+            && !pack_is_ours(writer, facts)
     })?;
     Some(format!(
         "a pack writer on {} is for home {}, not {}, so set PACKSET_PORT to a free port and run `packset ensure`.",
@@ -20854,6 +20923,9 @@ fn foreign_home(facts: &DownFacts) -> Option<String> {
         return Some(line);
     }
     let writer = facts.writers.iter().find(|writer| {
+        if pack_is_ours(writer, facts) {
+            return false;
+        }
         (!writer.home.is_empty() && !home_paths_match(&writer.home, &facts.our_home))
             || (!writer.pack_home.is_empty()
                 && !home_paths_match(&writer.pack_home, &facts.our_pack))
@@ -21121,6 +21193,36 @@ fn counts_for_this_seat(
     on_asked_port || same_home || same_pack || started_here
 }
 
+/// The token a running writer was started with. An env value wins, then
+/// the file it names, then the token file in its pack home. Empty when
+/// none of those is there. The text is compared and never printed.
+#[cfg(target_os = "linux")]
+fn writer_token(home: &str, pack_home: &str, env_token: &str, token_file: &str) -> String {
+    let env_token = env_token.trim();
+    if !env_token.is_empty() {
+        return env_token.to_string();
+    }
+    let token_file = token_file.trim();
+    if !token_file.is_empty() {
+        if let Ok(text) = std::fs::read_to_string(token_file) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return text.to_string();
+            }
+        }
+    }
+    let path = if !pack_home.is_empty() {
+        Path::new(pack_home).join("token")
+    } else if !home.is_empty() {
+        Path::new(home).join(".local/share/packset/token")
+    } else {
+        return String::new();
+    };
+    std::fs::read_to_string(path)
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default()
+}
+
 /// packsetd processes of this user that explain the port this seat asked.
 /// Another user's writer is not this seat's, and this process is not one.
 /// A writer for another home, on a port this seat did not ask, and not
@@ -21162,10 +21264,17 @@ fn seen_writers(asked_port: Option<u16>, our_home: &str, our_pack: &str) -> Vec<
         if !counts_for_this_seat(on_asked, same_home, same_pack, started_with_us(pid)) {
             continue;
         }
+        let token = writer_token(
+            &home,
+            &pack_home,
+            &proc_env(pid, "PACKSET_TOKEN"),
+            &proc_env(pid, "PACKSET_TOKEN_FILE"),
+        );
         out.push(SeenWriter {
             ports,
             home,
             pack_home,
+            token,
         });
     }
     out
@@ -34089,10 +34198,25 @@ fn doctor_extend(out: &mut Vec<Habitat>, rows: impl IntoIterator<Item = Habitat>
     }
 }
 
-/// A sandbox home with no writer address names that once, without a
-/// "does not answer" prefix.
+/// A pack row that says ok while another home's writer, or another token,
+/// owns the port is not ready. A sandbox home with no writer address
+/// names that once, without a "does not answer" prefix.
 fn settle_pack_row(row: Habitat) -> Habitat {
-    if row.name == "pack" && !row.ok {
+    if row.name != "pack" {
+        return row;
+    }
+    if row.ok {
+        if let Ok(client) = pack() {
+            if let Some(line) = other_home_writer_line(client.base()) {
+                return Habitat {
+                    name: "pack",
+                    state: line,
+                    ok: false,
+                };
+            }
+        }
+    }
+    if !row.ok {
         if let Some(line) = sandbox_memory_off() {
             return Habitat {
                 name: "pack",
@@ -72031,6 +72155,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ports: vec![18761],
             home: "/home/ada".into(),
             pack_home: "/home/ada/.local/share/packset".into(),
+            token: String::new(),
         });
         let other = super::render_down(&other);
         assert!(
@@ -72046,6 +72171,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ports: vec![18761],
             home: "/home/other".into(),
             pack_home: "/home/other/.local/share/packset".into(),
+            token: String::new(),
         });
         let home = super::render_down(&home);
         assert!(
@@ -72096,6 +72222,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ports: vec![8761],
             home: "/home/other".into(),
             pack_home: "/home/other/.local/share/packset".into(),
+            token: String::new(),
         });
         let line = super::render_down(&base);
         assert_eq!(
@@ -72104,6 +72231,67 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         );
         assert_eq!(line.lines().count(), 1, "{line}");
         assert!(!line.contains('\n'));
+
+        // The process home can be the pack directory this seat named.
+        let mut named = base.clone();
+        named.our_pack = "/tmp/ljos-packsetd-seat".into();
+        named.writers[0].home = "/tmp/ljos-packsetd-seat".into();
+        named.writers[0].pack_home = "/tmp/ljos-packsetd-seat".into();
+        let named = super::render_down(&named);
+        assert!(
+            !named.contains("for home") && !named.contains("another token"),
+            "{named}"
+        );
+    }
+
+    /// A listener on the asked port that holds another token is not this
+    /// seat's writer. The line names the port and the fix, not the token.
+    #[test]
+    fn a_writer_on_the_asked_port_with_another_token_is_not_ready() {
+        let mut facts = super::DownFacts {
+            url_off: false,
+            url_set: false,
+            asked: "127.0.0.1:8761".into(),
+            asked_port: Some(8761),
+            packset: true,
+            our_home: "/home/ada".into(),
+            our_pack: "/home/ada/.local/share/packset".into(),
+            writers: Vec::new(),
+            temp: None,
+        };
+        facts.writers.push(super::SeenWriter {
+            ports: vec![8761],
+            home: "/home/ada".into(),
+            pack_home: "/home/ada/.local/share/packset".into(),
+            token: "theirs".into(),
+        });
+        let line = super::owner_line(&facts, "ours").expect("another token");
+        assert!(
+            line.contains("packsetd on 127.0.0.1:8761 belongs to another token")
+                && line.contains(super::WRITER_PORT_FIX),
+            "{line}"
+        );
+        assert!(!line.contains("ours") && !line.contains("theirs"), "{line}");
+        assert_eq!(line.lines().count(), 1, "{line}");
+        assert!(super::owner_line(&facts, "theirs").is_none());
+        assert!(super::owner_line(&facts, "").is_none());
+        facts.writers[0].home = "/home/other".into();
+        let home = super::owner_line(&facts, "ours").expect("another home");
+        assert!(
+            home.contains("set PACKSET_PORT") && !home.contains("another token"),
+            "{home}"
+        );
+        let rows = vec![super::Habitat {
+            name: "pack",
+            state: line,
+            ok: false,
+        }];
+        assert!(super::failing(&rows).contains(&"pack"));
+        let summary = super::doctor_summary(&rows);
+        assert!(
+            summary.contains("ljos is not ready") && summary.contains("memory"),
+            "{summary}"
+        );
     }
 
     /// A duplicate is the atom the pack already holds, not an error and
