@@ -1,26 +1,62 @@
 # ljos
 
-ljos stores a lesson. A later prompt shows it when the prompt bears on that lesson.
+ljos gives coding agents a memory that outlives the session and a ticket queue they share, both kept as plain files on your machine.
 
 [//]: # ([[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]])
 These notes describe ljos 0.45.2.
 [//]: # ([[[end]]])
 
+## What you get in five minutes
+
+- A lesson you write once with `ljos remember`. When a later prompt bears on it, the lesson is shown to the agent before the model reads the prompt.
+- A tracker of tickets in a git repository. While one agent has a ticket claimed, a second claim is refused and names the holder.
+- `ljos onboard`, one command that registers all of this with Claude Code, Cursor and Codex, whichever are installed.
+- A warning, not a block, when an agent is about to run a risky shell command such as a force push.
+
+No model writes or rewrites a lesson. Every store is a file you can open.
+
+## Prerequisites
+
+- Linux or macOS on x86_64 or aarch64. Windows works through Windows Subsystem for Linux (WSL) and is untested.
+- git, with `user.name` and `user.email` set. The tracker commits each change.
+- `curl` or `wget`, `tar`, and `sha256sum` (`shasum` on macOS), for `install.sh`.
+- rustc 1.89 or newer and cargo-binstall, only to install with cargo, or when no release archive fits your machine. `install.sh` then builds from source with cargo and says so on one line.
+
+## Install
+
+```
+curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed --no-onboard
+export PATH="$HOME/.local/bin:$PATH" && ljos onboard
+```
+
+`--no-embed` leaves out the encoder, a model that lets search match meaning. Search then matches words. [Install in detail](#install-in-detail) covers the encoder, each runner and what to do when install stops.
+
+## First run
+
+```
+ljos doctor
+ljos remember "Seat the kiln door only when KILN_DOOR=cold."
+ljos search "kiln door"
+```
+
+`ljos doctor` prints a row for each problem and `ljos is ready` when there is none.
+`ljos remember` prints the lesson and the first eight characters of its id.
+`ljos search` prints that lesson back.
+
 ## Achievements
 
-ljos gives coding agents a shared memory and a shared tracker on one person's machines.
-A person writes what the agents should remember, and the prompt hook hands it back when a prompt bears on it.
-Agents file and claim tickets in one git repository, and a held ticket refuses a second claim.
-When agents disagree, they vote, and ljos settles the vote.
-It stores the sentence as written. Search uses a local encoder when one is installed, and a judge sends text out only when a person configures one.
-`ljos onboard --example` lists the runners, among them Claude Code, Codex and Cursor.
+A lesson is one sentence a person or an agent wrote down. ljos stores it as written, and no model picks facts out of a transcript.
+The prompt hook, which runs before each prompt, adds the lessons that prompt bears on.
+Agents file and claim tickets in one git repository. Each agent works under a seat, the name it claims and votes under.
+When agents disagree, each casts a vote, and `ljos consensus` settles it.
+Search uses a local encoder when one is installed. A judge, an optional model that decides which lessons bear on a prompt, sees your text only when a person configures one.
+`ljos onboard --example` lists the runners, the coding agents ljos can register with, among them Claude Code, Codex and Cursor.
 
-
-- 10,504 tokens for the 22 core Model Context Protocol (MCP) tools, against 23,477 for all 54 ([measurements/mcp-size.txt](measurements/mcp-size.txt)).
+- 10,504 tokens for the 22 core Model Context Protocol (MCP) tools, against 23,477 for all 54 ([measurements/mcp-size.txt](measurements/mcp-size.txt)). MCP is how an agent calls ljos as a tool.
 - 139.1 ms warm prompt hook median on 10,000 live lessons, down from 196.3 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt), `prompt-hook.rows-10000.after`).
 - The duplicate check merged 0 of 186 near-topic lesson pairs and found 12 of 78 duplicate pairs ([measurements/lesson-duplicates.txt](measurements/lesson-duplicates.txt)).
-- packset, the memory writer, publishes a LongMemEval_S session retrieval run ([packset explanation](https://leidarljos.github.io/packset/explanation.html)). That page records the figures. This tree does not. The run scores retrieval, not answer accuracy.
-- The ljos BM25+ CPU run on that file is repeated with `sh bench/hf/run.sh`. The summary and the per-question rows are the dataset [ljos LongMemEval_S retrieval](https://huggingface.co/datasets/rgoswami/ljos-longmemeval-s).
+- packset, the program that stores and searches lessons, publishes a LongMemEval_S session retrieval run ([packset explanation](https://leidarljos.github.io/packset/explanation.html)). That page records the figures. This tree does not. The run scores retrieval, not answer accuracy.
+- The ljos BM25+ CPU run on that file is repeated with `sh bench/hf/run.sh`. BM25+ is the word ranking search uses without the encoder. The summary and the per-question rows are the dataset [ljos LongMemEval_S retrieval](https://huggingface.co/datasets/rgoswami/ljos-longmemeval-s).
 - 2,293 tests passed, 0 failed, 2 ignored on the 0.40.0 release commit ([CI run 42801686714](https://github.com/leidarljos/ljos/actions/runs/42801686714)).
 
 [What ljos does](https://leidarljos.github.io/ljos/introduction.html) lists every measured number with its method.
@@ -36,6 +72,15 @@ Letta gives the agent tools to edit its own memory. ljos has no model in that lo
 Of these, the ljos docs are the ones that describe a ballot per agent, a settle, and a handover the receiver checks before import.
 
 [How ljos compares](https://leidarljos.github.io/ljos/compare.html) has the full table, the licences, and a link to each tool's own docs, read on 2026-11-10.
+
+## Terms
+
+- Lesson: one sentence stored by `ljos remember`, with a review date.
+- Seat: the name an agent works under. `LJOS_SEAT` sets it. With none set, a write uses your login name.
+- Sitting: one agent's claimed stretch of work on a ticket, from `ljos sitting` to `ljos finish`.
+- Pack: the store of lessons that packset keeps and searches. packset is a background process, and `packset ensure` starts it.
+- Deed: a record of what a piece of work produced. The deed store keeps them, signed.
+- Encoder: the optional model that lets search match meaning. Without it search matches words.
 
 ## Thirty seconds
 
@@ -79,14 +124,9 @@ dev@laptop:~$ KILN_DOOR=cold ./kiln.sh
 kiln door seated
 ```
 
-ljos is installed with two commands. The first fetches install.sh. The second is ljos onboard.
+## Install in detail
 
-```
-curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed --no-onboard
-export PATH="$HOME/.local/bin:$PATH" && ljos onboard
-```
-
-The second command, `ljos onboard`, finds Claude Code, Cursor and Codex on this machine, and any other runner it knows, and registers the MCP server and the skill for each.
+The first install command fetches install.sh, which installs the programs. The second, `ljos onboard`, finds Claude Code, Cursor and Codex on this machine, and any other runner it knows, and registers the MCP server and the skill for each.
 One runner is one command.
 Each command prints the files it wrote and the next command.
 Run it again and those files stay as they are.
