@@ -314,7 +314,7 @@ fn a_quoted_grant_closes_own_tickets_and_a_hand_edit_does_not() {
     assert!(said.contains(&commit), "{said}");
     let calls = std::fs::read_to_string(&w.log).unwrap();
     assert!(
-        calls.contains("vissue note proj-own standing grant allowed this close"),
+        calls.contains("vissue note proj-own -- standing grant allowed this close"),
         "{calls}"
     );
     assert!(calls.contains(quote), "{calls}");
@@ -357,7 +357,7 @@ fn a_quoted_grant_closes_own_tickets_and_a_hand_edit_does_not() {
         true,
     );
     let said = text(&other);
-    assert!(other.status.success(), "other ticket closed: {said}");
+    assert_eq!(other.status.code(), Some(1), "other ticket closed: {said}");
     assert!(!said.contains("label close-unverified"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
     assert!(
@@ -385,7 +385,7 @@ fn a_quoted_grant_closes_own_tickets_and_a_hand_edit_does_not() {
         true,
     );
     let said = text(&ungranted);
-    assert!(ungranted.status.success(), "ungranted closed: {said}");
+    assert_eq!(ungranted.status.code(), Some(1), "ungranted closed: {said}");
     assert!(!said.contains("label close-unverified"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");
@@ -432,7 +432,7 @@ fn a_quoted_grant_closes_own_tickets_and_a_hand_edit_does_not() {
         true,
     );
     let said = text(&handed);
-    assert!(handed.status.success(), "hand edit closed: {said}");
+    assert_eq!(handed.status.code(), Some(1), "hand edit closed: {said}");
     assert!(!said.contains("label close-unverified"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");
@@ -460,7 +460,7 @@ fn a_quoted_grant_closes_own_tickets_and_a_hand_edit_does_not() {
         false,
     );
     let said = text(&self_grant);
-    assert!(self_grant.status.success(), "self grant: {said}");
+    assert_eq!(self_grant.status.code(), Some(1), "self grant: {said}");
     assert!(said.contains("label grant-unverified"), "{said}");
     assert!(said.contains("cannot grant itself"), "{said}");
 }
@@ -517,7 +517,7 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
     assert!(said.contains(&commit), "{said}");
     let calls = std::fs::read_to_string(&w.log).unwrap();
     assert!(
-        calls.contains("vissue note proj-else standing grant allowed this close"),
+        calls.contains("vissue note proj-else -- standing grant allowed this close"),
         "{calls}"
     );
     assert!(calls.contains(quote) && calls.contains(&commit), "{calls}");
@@ -529,7 +529,7 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
 
     let unlisted = finish_close(&w, "papers", "proj-own");
     let said = text(&unlisted);
-    assert!(unlisted.status.success(), "unlisted closed: {said}");
+    assert_eq!(unlisted.status.code(), Some(1), "unlisted closed: {said}");
     assert!(!said.contains("label close-unverified"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
     assert!(
@@ -604,8 +604,9 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
     assert_eq!(log_updates(&w, "proj-hand"), 1);
     let other = finish_close(&w, "reachbook", "proj-own");
     let said = text(&other);
-    assert!(
-        other.status.success(),
+    assert_eq!(
+        other.status.code(),
+        Some(1),
         "file grant closed another id: {said}"
     );
     assert!(!said.contains("label close-unverified"), "{said}");
@@ -640,7 +641,7 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
     .unwrap();
     let handed = finish_close(&w, "scribe", "proj-scribe");
     let said = text(&handed);
-    assert!(handed.status.success(), "hand edit closed: {said}");
+    assert_eq!(handed.status.code(), Some(1), "hand edit closed: {said}");
     assert!(!said.contains("label close-unverified"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");
@@ -651,14 +652,15 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
     );
     let edited = finish_close(&w, "papers", "proj-own");
     let said = text(&edited);
-    assert!(edited.status.success(), "edited list closed: {said}");
+    assert_eq!(edited.status.code(), Some(1), "edited list closed: {said}");
     assert!(!said.contains("label close-unverified"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
     assert_eq!(log_updates(&w, "proj-own"), 0, "a hand-edited list closed");
     let before = log_updates(&w, "proj-else");
     let again = finish_close(&w, "papers", "proj-else");
-    assert!(
-        again.status.success(),
+    assert_eq!(
+        again.status.code(),
+        Some(1),
         "edited grant still closed: {}",
         text(&again)
     );
@@ -717,7 +719,7 @@ fn a_granted_close_passes_the_hook_and_an_ungranted_close_stays_open() {
     assert!(said.contains("via: clerk"), "{said}");
     let calls = std::fs::read_to_string(&w.log).unwrap();
     assert!(
-        calls.contains("vissue note proj-own standing grant allowed this close"),
+        calls.contains("vissue note proj-own -- standing grant allowed this close"),
         "{calls}"
     );
     assert!(calls.contains(quote), "{calls}");
@@ -732,7 +734,11 @@ fn a_granted_close_passes_the_hook_and_an_ungranted_close_stays_open() {
     );
     let refused = runner_finish(&w, "clerk", "proj-clerk");
     let said = text(&refused);
-    assert!(refused.status.success(), "ungranted close wrote: {said}");
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "ungranted close wrote: {said}"
+    );
     assert!(!said.contains("label close-unverified"), "{said}");
     assert!(said.contains("a person closes a ticket"), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");

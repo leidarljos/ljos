@@ -195,7 +195,7 @@ fn a_half_recorded_yes_writes_nothing() {
     let seat = Seat::new();
     let out = seat.accept(&["--quote", "yes, keep that one about the parser"]);
     let text = said(&out);
-    assert!(out.status.success(), "{text}");
+    assert_eq!(out.status.code(), Some(1), "{text}");
     assert!(text.contains("label approval-unverified"), "{text}");
     assert!(text.contains("--at and --via"), "{text}");
     assert!(text.contains("Nothing was written"), "{text}");
@@ -211,7 +211,7 @@ fn a_yes_that_records_nothing_useful_is_refused() {
     let at = an_hour_ago();
     let out = seat.accept(&["--quote", "yes", "--at", &at, "--via", "inky"]);
     let text = said(&out);
-    assert!(out.status.success(), "{text}");
+    assert_eq!(out.status.code(), Some(1), "{text}");
     assert!(text.contains("label approval-unverified"), "{text}");
     assert!(text.contains("1 words"), "{text}");
 
@@ -231,7 +231,7 @@ fn a_yes_that_records_nothing_useful_is_refused() {
         "inky",
     ]);
     let ahead_text = said(&out);
-    assert!(out.status.success(), "{ahead_text}");
+    assert_eq!(out.status.code(), Some(1), "{ahead_text}");
     assert!(
         ahead_text.contains("label approval-unverified"),
         "{ahead_text}"

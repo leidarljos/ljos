@@ -974,3 +974,40 @@ fn a_negative_on_every_remaining_numeric_flag_names_the_value() {
         "a habit reading was read as a flag:\n{said}"
     );
 }
+#[test]
+fn a_blank_rule_pattern_exits_1() {
+    let home = Home::new();
+    let out = home.run(
+        &["rule", " ", "--why", "the command is named"],
+        &[("LJOS_SEAT", "alice")],
+    );
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("label rule-input-warning:"), "{said}");
+    assert!(
+        stdout.contains("a pattern over the command line is required"),
+        "{said}"
+    );
+    assert!(out.stderr.is_empty(), "{said}");
+}
+#[test]
+fn no_write_send_and_options_refusals_exit_1_on_stdout() {
+    let home = Home::new();
+    for (args, label) in [
+        (&["send", "bob", ""][..], "label message-input-warning:"),
+        (
+            &["options", "demo-kiln", "only"][..],
+            "label panel-incomplete:",
+        ),
+    ] {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(1), "{args:?}\n{said}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains(label),
+            "{args:?}\n{said}"
+        );
+        assert!(out.stderr.is_empty(), "{args:?}\n{said}");
+    }
+}

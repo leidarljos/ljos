@@ -62,13 +62,14 @@ pub fn add(name: &str) -> Result<String> {
     // That is how a seat that added someone else first gets back on the list.
     // Adding a different name is the same roster refusal as any other write.
     if caller_slug != slug && !listed.contains(&caller_slug) && !listed.is_empty() {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "seat-unlisted",
             format!(
                 "seat add: this seat is {caller_slug}, and it is not on the list in {}. \
                  `ljos seat add {caller_slug}` lists it, then add {slug}. Nothing was written",
                 path.display()
             ),
+            1,
         ));
     }
     let mut doc = load_doc(&path).context("seat add")?;
@@ -113,31 +114,35 @@ pub fn grant(
     let close = close_value(spec, ids_file)?;
     let quote = quote.trim();
     if quote.is_empty() {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "grant-unverified",
             "seat grant: pass the owner's words with --quote. Nothing was written",
+            1,
         ));
     }
     if chrono::DateTime::parse_from_rfc3339(at.trim()).is_err() {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "grant-unverified",
             format!("seat grant: --at {at:?} is not RFC 3339. Nothing was written"),
+            1,
         ));
     }
     let target = seat_slug_of(seat).context("seat grant")?;
     let via = seat_slug_of(via).context("seat grant")?;
     if via == target {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "grant-unverified",
             "seat grant: a seat cannot grant itself. Nothing was written",
+            1,
         ));
     }
     let caller = crate::write_seat("seat grant")?;
     let caller_slug = crate::canonical_seat_name(&caller.seat);
     if caller_slug == target {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "grant-unverified",
             "seat grant: a seat cannot grant itself. Nothing was written",
+            1,
         ));
     }
     if caller_slug != via {
@@ -203,21 +208,23 @@ pub fn close_note(issue: &str) -> Result<Option<String>> {
     let seat = crate::seat_name();
     let Some(grant) = honored_grant(&seat) else {
         let slug = crate::canonical_seat_name(&seat);
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "close-unverified",
             format!(
                 "finish: no terminal was found or a runner was detected, so a person closes a ticket from their own login terminal, or with \
              `ljos seat grant {slug} close=own --quote TEXT --at TIME --via SEAT`. \
              Nothing was written."
             ),
+            1,
         ));
     };
     if !covers(&grant, issue, &seat)? {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "close-unverified",
             format!(
                 "finish: {issue} is not {seat}'s to close. A grant of own covers a ticket this seat filed or holds. Nothing was written."
             ),
+            1,
         ));
     }
     Ok(Some(grant.note()))

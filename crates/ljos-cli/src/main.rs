@@ -943,7 +943,12 @@ enum Cmd {
         #[arg(long)]
         attempts: bool,
         /// Lowest score to keep. 34 when omitted. 0 prints every row, including a weak word match.
-        #[arg(long, value_name = "SCORE", default_value = "34", allow_hyphen_values = true)]
+        #[arg(
+            long,
+            value_name = "SCORE",
+            default_value = "34",
+            allow_hyphen_values = true
+        )]
         min_score: f64,
         /// Only this project's tickets and lessons, plus lessons that name no project.
         /// One name. A leading segment that repeats the tracker directory or its org prefix is dropped. Any other slash is refused.
@@ -1249,7 +1254,12 @@ enum Cmd {
         options: Option<String>,
         /// Ballots the decision needs. With `--deadline`, `ljos reap --apply`
         /// lapses the vote once the deadline passes short of it.
-        #[arg(long, value_name = "N", requires = "deadline", allow_hyphen_values = true)]
+        #[arg(
+            long,
+            value_name = "N",
+            requires = "deadline",
+            allow_hyphen_values = true
+        )]
         quorum: Option<usize>,
         /// RFC 3339 time the ballots are due, with `--quorum`.
         #[arg(long, value_name = "RFC3339", requires = "quorum")]
@@ -3974,6 +3984,9 @@ fn main() {
             {
                 std::process::exit(USAGE_STATUS);
             }
+            if label.status != 0 {
+                std::process::exit(i32::from(label.status));
+            }
             return;
         }
         if ljos_cli::is_read_shed(e) || ljos_cli::is_deadline_miss(e) {
@@ -5106,30 +5119,22 @@ fn refuse_range(line: String) -> ! {
 
 fn count_from_zero(cmd: &str, flag: &str, n: i64) -> u64 {
     if n < 0 {
-        refuse_range(format!(
-            "{cmd}: {flag} takes a number from 0 up, not {n}."
-        ));
+        refuse_range(format!("{cmd}: {flag} takes a number from 0 up, not {n}."));
     }
     u64::try_from(n).unwrap_or_else(|_| {
-        refuse_range(format!(
-            "{cmd}: {flag} takes a number from 0 up, not {n}."
-        ))
+        refuse_range(format!("{cmd}: {flag} takes a number from 0 up, not {n}."))
     })
 }
 
 fn count_usize_flag(cmd: &str, flag: &str, n: i64) -> usize {
     usize::try_from(count_from_zero(cmd, flag, n)).unwrap_or_else(|_| {
-        refuse_range(format!(
-            "{cmd}: {flag} takes a number from 0 up, not {n}."
-        ))
+        refuse_range(format!("{cmd}: {flag} takes a number from 0 up, not {n}."))
     })
 }
 
 fn count_u32_flag(cmd: &str, flag: &str, n: i64) -> u32 {
     u32::try_from(count_from_zero(cmd, flag, n)).unwrap_or_else(|_| {
-        refuse_range(format!(
-            "{cmd}: {flag} takes a number from 0 up, not {n}."
-        ))
+        refuse_range(format!("{cmd}: {flag} takes a number from 0 up, not {n}."))
     })
 }
 
@@ -5159,9 +5164,7 @@ fn share_gap(cmd: &str, flag: &str, value: f64) {
 
 fn finite_number(cmd: &str, flag: &str, value: f64) {
     if !value.is_finite() {
-        refuse_range(format!(
-            "{cmd}: {flag} takes a finite number, not {value}."
-        ));
+        refuse_range(format!("{cmd}: {flag} takes a finite number, not {value}."));
     }
 }
 
@@ -5643,10 +5646,7 @@ fn run_command() -> Result<()> {
                 }
             }
             if json {
-                println!(
-                    "{}",
-                    ljos_cli::remember_json_page(&json_bodies, &failed)?
-                );
+                println!("{}", ljos_cli::remember_json_page(&json_bodies, &failed)?);
             } else if split && !stored.is_empty() {
                 print!("{}", split_claims_page(split_n, &stored));
             }
