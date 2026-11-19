@@ -865,11 +865,11 @@ fn assert_step(
 
 fn expect_documented(command: &str, output: &str) {
     if command.contains("ljos doctor") && !command.contains("--all") && !command.contains("--fix") {
-        let needs_action = output.lines().any(|line| {
-            line.starts_with("warn\t")
-                || line.starts_with("no\t")
-                || (line.starts_with("info\tencoder\t") && line.contains("not installed"))
-        });
+        // An info row, including an encoder that is not installed, is printed
+        // and is not one of the warn or no rows the summary counts.
+        let needs_action = output
+            .lines()
+            .any(|line| line.starts_with("warn\t") || line.starts_with("no\t"));
         if needs_action {
             assert!(output.contains("ljos needs action"), "{command}\n{output}");
             assert!(!output.contains("ljos is ready"), "{command}\n{output}");

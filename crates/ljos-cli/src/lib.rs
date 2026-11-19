@@ -36999,12 +36999,10 @@ pub fn doctor_summary(rows: &[Habitat]) -> String {
 
 /// Whether a row in the short doctor asks the person to do something.
 fn doctor_needs_action(row: &Habitat) -> bool {
-    let word = doctor_word(row);
-    matches!(word, "no" | "warn")
-        || plain_encoder_row(row)
-        || (word == "info"
-            && (READY_PARTS.iter().any(|(_, rows)| rows.contains(&row.name))
-                || row.name == "deed store"))
+    // The number in the summary is the warn and no rows the short report
+    // prints. An info row, including an encoder that is not installed, is
+    // printed on its own and is not part of that number.
+    matches!(doctor_word(row), "no" | "warn")
 }
 
 /// The line for a seat whose tracker or deed store is not there. A seat in
@@ -70525,6 +70523,54 @@ mod tests {
         assert!(lines[2].starts_with("info\tencoder\tnot installed"));
         assert!(!short.contains("tracker"), "{short}");
         assert!(format_doctor(&rows).contains("info\tencoder\t"));
+    }
+
+    /// The number in the summary is the warn and no rows the short report
+    /// prints. An encoder that is not installed is printed and not counted.
+    #[test]
+    fn the_action_count_matches_the_warn_and_no_rows() {
+        let rows = vec![
+            habitat_row(
+                "seat source",
+                "no seat is set; reads use every seat, so run `export LJOS_SEAT=NAME`.",
+                false,
+            ),
+            habitat_row(
+                "encoder",
+                "not installed. Search matches words, so run `cargo install --locked packset-embed`.",
+                false,
+            ),
+            habitat_row(
+                "sitting gate",
+                "not active here: no agent runner is above this shell, so the person's git is not gated",
+                false,
+            ),
+            habitat_row(
+                "config",
+                "no ljos.toml key and no LJOS_ variable is set; defaults stand",
+                true,
+            ),
+            habitat_row("pack", "answers", true),
+            habitat_row("tracker", "answers", true),
+            habitat_row("policy", "ljos-policyd 0.5.0 (phronesis)", true),
+        ];
+        let short = format_doctor_short(&rows);
+        let printed = short
+            .lines()
+            .filter(|line| line.starts_with("warn\t") || line.starts_with("no\t"))
+            .count();
+        assert_eq!(printed, 1, "{short}");
+        assert!(
+            short.contains("ljos needs action: 1 row needs action"),
+            "{short}"
+        );
+        assert!(
+            short.contains(
+                "info\tencoder\tnot installed. Search matches words, so run `cargo install --locked packset-embed`."
+            ),
+            "{short}"
+        );
+        assert!(!short.contains("ljos is ready"), "{short}");
     }
 
     #[test]

@@ -62,7 +62,7 @@ warn	seat source	no seat is set; reads use every seat, so run `export LJOS_SEAT=
 info	encoder	not installed. Search matches words, so run `cargo install --locked packset-embed`.
 info	sitting gate	not active here: no agent runner is above this shell, so the person's git is not gated; under one, a commit, merge, rebase, cherry-pick or push waits for a live sitting
 ok	config	no ljos.toml key and no LJOS_ variable is set; defaults stand
-ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.
+ljos needs action: 1 row needs action. Optional extras: `ljos doctor --all`.
 #+end_src
 
 With no seat named, the =seat source= row warns that the read uses every seat. When the encoder is not installed, an =encoder= row follows and names the install command this machine can run. That is =cargo binstall --locked packset-embed= when cargo-binstall is installed, =cargo install --locked packset-embed= when cargo is, and the release install line otherwise. The sample shows the cargo line. The =sitting-gate= row is =info= and says =not active here= when no agent runner is above the shell. The config row says the defaults apply when nothing is set. A missing =ljos.toml= is not a warning. Run =ljos doctor= from your home directory. In a checkout, the config row names =.ljos/gates.toml= instead.
