@@ -654,7 +654,7 @@ enum WorkflowCmd {
     },
     /// Write the public Org page for a skeleton, steps in dependency order.
     ///
-    /// The page is written with `--out`. A committed page is compared with `--check`, which exits 1 when the file differs from a fresh render or still has a local path, a seat token, an agent id, a model name, a seat name or a line that names a bot.
+    /// Author text is written unchanged. Render refuses the page when a detection copy finds a secret, a private path, an address, a private host, an email, an invisible character, a declared seat name, or a product or tool name. Each hit names the source line and the class, and nothing is written. `--check` exits 1 when `--out` differs from a fresh render or the file has a hit.
     ///
     /// Example: `ljos workflow render release --out page.org`
     Render {
@@ -666,7 +666,7 @@ enum WorkflowCmd {
         /// Write the page here. With `--check`, this is the committed file to compare.
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
-        /// Exit 1 when `--out` differs from a fresh render or still has scrub hits.
+        /// Exit 1 when `--out` differs from a fresh render or the file has a public-text hit.
         #[arg(long)]
         check: bool,
         /// Fill `{{key}}` before rendering. Repeat for each variable.
@@ -8482,7 +8482,7 @@ fn issue_topic_and_tags(id: &str) -> (Vec<String>, Vec<String>) {
     (topic, tags)
 }
 
-/// The verb of a command that writes the tracker under this seat. Listing
+/// Whether a workflow command writes the tracker under this seat.
 fn workflow_writes(action: &Option<WorkflowCmd>, start: &Option<String>, round: bool) -> bool {
     match action {
         Some(WorkflowCmd::Define { .. } | WorkflowCmd::Revise { .. }) => true,
@@ -8594,24 +8594,23 @@ fn render_workflow(
     if !vars.is_empty() {
         skel = ljos_cli::workflow_skel::fill_vars(&skel, &vars)?;
     }
-    let page = ljos_cli::workflow_skel::render_skeleton(&skel);
+    let page = ljos_cli::workflow_skel::render_skeleton(&skel)?;
     if check {
         let Some(path) = out else {
             bail!("workflow: `--check` compares the file named with `--out`");
         };
-        let have = std::fs::read_to_string(path).unwrap_or_default();
+        let have = std::fs::read_to_string(path)
+            .with_context(|| format!("workflow: read {}", path.display()))?;
         let mut why = Vec::new();
         if have != page {
             why.push("the file differs from a fresh render".to_string());
         }
-        if ljos_cli::scrub::scrub_public(&page) != page {
-            why.push("the rendered page still has a model name or a seat name".to_string());
-        }
-        if ljos_cli::scrub::scrub_public(&have) != have {
-            why.push(
-                "the file still has a local path, a seat token, an agent id, a model name or a seat name"
-                    .to_string(),
-            );
+        let have_hits = ljos_cli::scrub::scan_public(&have);
+        if !have_hits.is_empty() {
+            why.push(format!(
+                "the file failed public scan ({})",
+                have_hits.join("; ")
+            ));
         }
         if !why.is_empty() {
             bail!("workflow: {}: {}", path.display(), why.join("; "));

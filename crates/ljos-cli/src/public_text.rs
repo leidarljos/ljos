@@ -3,14 +3,27 @@
 //! The screen detects and refuses. It never rewrites: a caller that gets a
 //! class back keeps its original string and leaves the item out.
 //!
-//! Each line is turned into a detection copy: NFKC, invisible and format
-//! characters dropped, combining marks dropped, confusable letters folded to
-//! ASCII. The copy is cut into tokens (words, CamelCase pieces, paths, URLs,
-//! numbers with their units, versions, Rust paths, `name@semver`) and each
-//! token is classified, so an ordinary version or a `std::ops::Add` is a
-//! token of its own kind before any rule for addresses or secrets sees it.
-//! Two adjacent lines are also tried joined, so a secret or an address split
-//! by a line break is still found.
+//! Each line is read through [`text_canon::canonical`], the reading every
+//! public-text screen shares: one escape layer decoded,
+//! every line break and space read alike, and the UTS #39 skeleton of each
+//! character that is not ASCII. Both readings it gives, with no escape
+//! decoded and with one escape layer decoded, are classified. A line that a
+//! decoded `%0A` or a line break other than `\n` cuts in two is read piece
+//! by piece and then joined. The copy is cut into tokens (words, CamelCase
+//! pieces, paths, URLs, numbers with their units, versions, Rust paths,
+//! `name@semver`) and each token is classified, so an ordinary version or a
+//! `std::ops::Add` is a token of its own kind before any rule for addresses
+//! or secrets sees it. Adjacent lines are also read as one string, glued
+//! and with a space between them. The path, mailbox, secret, seat and term
+//! scans run on that string, so those split by a line break are still
+//! found. Addresses are found within one line. An address broken across
+//! lines on purpose is not caught.
+//!
+//! A line with no other hit that has a character outside
+//! [`text_canon::PUBLIC_EXTRA`] and printable ASCII is refused as
+//! [`Class::Character`]. Nothing is replaced with a placeholder. The
+//! workflow render screen in `scrub` reads text the same way and refuses
+//! the same text.
 //!
 //! One function, [`scan`], answers for a whole block of lines. [`classify`]
 //! and [`classify_id`] are thin cases of it, so an item check and the check
@@ -18,13 +31,8 @@
 
 use std::net::Ipv6Addr;
 
-use icu_properties::{
-    props::{DefaultIgnorableCodePoint, GeneralCategory},
-    CodePointMapData, CodePointSetData,
-};
-use unicode_normalization::UnicodeNormalization as _;
-
-include!("public_text_fold.rs");
+use crate::text_canon::{self, canonical, Canon, Mark};
+pub use crate::text_canon::{allowed, detection_copy, PUBLIC_EXTRA};
 
 /// What a public export screens against besides the fixed patterns.
 #[derive(Clone, Debug, Default)]
@@ -53,6 +61,8 @@ pub enum Class {
     Mailbox,
     /// Org markup that Emacs would run or include when it exports the page.
     Org,
+    /// A character outside printable ASCII and [`PUBLIC_EXTRA`].
+    Character,
 }
 
 impl Class {
@@ -67,6 +77,7 @@ impl Class {
             Self::Address => "address",
             Self::Mailbox => "email",
             Self::Org => "org-markup",
+            Self::Character => "character",
         }
     }
 }
@@ -128,12 +139,12 @@ pub fn refuses(text: &str, screen: &Screen) -> bool {
 }
 
 /// The first private pattern `text` matches, if any. The caller keeps its
-/// original string: only a detection copy is normalized.
+/// original string: only a detection copy is normalized. The text is cut
+/// into lines at `\n` only; [`scan`] reads every other line break.
 #[must_use]
 pub fn classify(text: &str, screen: &Screen) -> Option<Class> {
-    let flat = text.replace("\r\n", "\n");
-    let lines: Vec<Line<'_>> = flat
-        .split(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'])
+    let lines: Vec<Line<'_>> = text
+        .split('\n')
         .filter(|line| !line.trim().is_empty())
         .map(Line::text)
         .collect();
@@ -146,52 +157,27 @@ pub fn classify_id(id: &str, screen: &Screen) -> Option<Class> {
     scan(&[Line::id(id)], screen).into_iter().next().flatten()
 }
 
-/// The detection copy of `text`: NFKC with invisible and format characters
-/// removed. A fullwidth `＊` reads as `*` and a split `g\u{200b}pt` as `gpt`.
-#[must_use]
-pub fn detection_copy(text: &str) -> String {
-    text.nfkc().filter(|c| !is_invisible(*c)).collect()
-}
-
-/// One character as the screen reads it: compatibility-folded, invisible and
-/// combining marks dropped, look-alike letters mapped to ASCII. A character
-/// that is only invisible gives nothing.
-pub(crate) fn skeleton_chars(c: char) -> Vec<char> {
-    let mut out = Vec::new();
-    let compatible: String = c.to_string().nfkc().filter(|c| !is_invisible(*c)).collect();
-    for c in compatible.nfd() {
-        if is_nonspacing(c) || is_invisible(c) {
-            continue;
-        }
-        let c = fold_lookalike(c);
-        if !c.is_ascii() {
-            if let Some(skeleton) = fold_confusable(c) {
-                out.extend(skeleton.chars());
-                continue;
-            }
-        }
-        out.push(c);
-    }
-    out
-}
-
 /// The class of each line of a block, or `None` for a clean line.
 ///
-/// A line is read alone and then with its neighbour, as one string with no
+/// A line is read alone and then with its neighbours, as one string with no
 /// separator and as one string with a space. A hit that needs the join marks
-/// both lines. A PEM block marks every line from its `BEGIN` line to its
-/// `END` line.
+/// the fewest lines that still make it. A PEM block marks every line from
+/// its `BEGIN` line to its `END` line.
 #[must_use]
 pub fn scan(lines: &[Line<'_>], screen: &Screen) -> Vec<Option<Class>> {
     let seats = seat_keys(screen);
-    let preps: Vec<Prep> = lines.iter().map(|line| Prep::new(line.text)).collect();
+    let reads: Vec<Canon> = lines.iter().map(|line| canonical(line.text)).collect();
+    let plain: Vec<Prep> = reads
+        .iter()
+        .map(|canon| Prep::from_marks(&canon.readings[0]))
+        .collect();
     let mut out: Vec<Option<Class>> = lines
         .iter()
-        .zip(&preps)
-        .map(|(line, prep)| class_of(prep, &seats, screen.internal, line.kind))
+        .zip(&reads)
+        .map(|(line, read)| line_class(read, &seats, screen.internal, line.kind))
         .collect();
     let mut inside = false;
-    for (index, prep) in preps.iter().enumerate() {
+    for (index, prep) in plain.iter().enumerate() {
         let begins = prep.l.contains("begin") && private_key(&prep.l);
         if !inside && begins {
             inside = true;
@@ -207,25 +193,63 @@ pub fn scan(lines: &[Line<'_>], screen: &Screen) -> Vec<Option<Class>> {
     }
     let mut run: Vec<usize> = Vec::new();
     for index in 0..=lines.len() {
-        let eligible = index < lines.len()
-            && out[index].is_none()
-            && lines[index].kind != Kind::Id
-            && !preps[index].s.trim().is_empty();
-        if eligible {
+        let open = index < lines.len() && out[index].is_none() && lines[index].kind != Kind::Id;
+        if open && !plain[index].s.trim().is_empty() {
             run.push(index);
             continue;
         }
-        let blank = index < lines.len()
-            && out[index].is_none()
-            && lines[index].kind != Kind::Id
-            && preps[index].s.trim().is_empty();
-        if blank {
+        if open {
             continue;
         }
-        mark_joined(&run, &preps, &seats, screen.internal, &mut out);
+        mark_joined(&run, lines, &seats, screen.internal, &mut out);
         run.clear();
     }
     out
+}
+
+/// The class of one line. Each reading is classified piece by piece, where
+/// a line break the reading found cuts it, and then joined.
+fn line_class(canon: &Canon, seats: &[String], internal: bool, kind: Kind) -> Option<Class> {
+    let readings = if kind == Kind::Id {
+        &canon.readings[..1]
+    } else {
+        &canon.readings[..]
+    };
+    for reading in readings {
+        let pieces = text_canon::lines(reading);
+        for piece in &pieces {
+            let mut prep = Prep::from_marks(piece);
+            prep.mixed = canon.mixed;
+            if let Some(class) = class_of(&prep, seats, internal, kind) {
+                return Some(class);
+            }
+        }
+        if pieces.len() > 1 {
+            if let Some(class) = pieces_class(&pieces, canon.mixed, seats, internal) {
+                return Some(class);
+            }
+        }
+    }
+    (!canon.outside.is_empty()).then_some(Class::Character)
+}
+
+/// The pieces of one reading run together, glued and with a space.
+fn pieces_class(
+    pieces: &[&[Mark]],
+    mixed: bool,
+    seats: &[String],
+    internal: bool,
+) -> Option<Class> {
+    let mut glued = Prep::empty();
+    let mut spaced = Prep::empty();
+    for (at, piece) in pieces.iter().enumerate() {
+        let mut prep = Prep::from_marks(piece);
+        prep.mixed = mixed;
+        let gap = text_canon::keeps_space(&glued.fold, &prep.fold).then_some(' ');
+        glued = glued.joined(&prep, gap);
+        spaced = spaced.joined(&prep, if at == 0 { None } else { Some(' ') });
+    }
+    joined_class(&glued, seats, internal).or_else(|| joined_class(&spaced, seats, internal))
 }
 
 /// The most lines tried as one string, and how many are shared by the next
@@ -234,26 +258,32 @@ pub fn scan(lines: &[Line<'_>], screen: &Screen) -> Vec<Option<Class>> {
 const WINDOW: usize = 200;
 const OVERLAP: usize = 20;
 
+/// The lines of `members` read as one text: their source joined with `\n`
+/// and read through [`canonical`], so a quoted-printable soft line break at
+/// the end of one line joins it to the next.
 fn window_class(
     members: &[usize],
-    preps: &[Prep],
+    lines: &[Line<'_>],
     seats: &[String],
     internal: bool,
 ) -> Option<Class> {
-    let mut glued = Prep::empty();
-    let mut spaced = Prep::empty();
-    for (at, &index) in members.iter().enumerate() {
-        glued = glued.joined(&preps[index], None);
-        spaced = spaced.joined(&preps[index], if at == 0 { None } else { Some(' ') });
-    }
-    joined_class(&glued, seats, internal).or_else(|| joined_class(&spaced, seats, internal))
+    let text = members
+        .iter()
+        .map(|&index| lines[index].text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let canon = canonical(&text);
+    canon
+        .readings
+        .iter()
+        .find_map(|reading| pieces_class(&text_canon::lines(reading), canon.mixed, seats, internal))
 }
 
 /// Try consecutive clean lines as one string, and mark the fewest lines
 /// that still make the match.
 fn mark_joined(
     run: &[usize],
-    preps: &[Prep],
+    lines: &[Line<'_>],
     seats: &[String],
     internal: bool,
     out: &mut [Option<Class>],
@@ -270,17 +300,17 @@ fn mark_joined(
             if part.len() < 2 || part.iter().any(|&index| out[index].is_some()) {
                 continue;
             }
-            let Some(class) = window_class(part, preps, seats, internal) else {
+            let Some(class) = window_class(part, lines, seats, internal) else {
                 continue;
             };
             let (mut from, mut to) = (0, part.len());
             while to - from > 2
-                && window_class(&part[from + 1..to], preps, seats, internal).is_some()
+                && window_class(&part[from + 1..to], lines, seats, internal).is_some()
             {
                 from += 1;
             }
             while to - from > 2
-                && window_class(&part[from..to - 1], preps, seats, internal).is_some()
+                && window_class(&part[from..to - 1], lines, seats, internal).is_some()
             {
                 to -= 1;
             }
@@ -297,11 +327,15 @@ fn mark_joined(
     }
 }
 
+/// The scans that run on lines read as one string: all but the Org and
+/// address ones.
 fn joined_class(prep: &Prep, seats: &[String], internal: bool) -> Option<Class> {
     if term_hit(prep, internal) {
         Some(Class::Term)
     } else if seat_hit(prep, seats) {
         Some(Class::Seat)
+    } else if path_hit(prep) {
+        Some(Class::Path)
     } else if secret_hit(prep, false) {
         Some(Class::Secret)
     } else if mailbox_hit(prep) {
@@ -336,68 +370,14 @@ fn class_of(prep: &Prep, seats: &[String], internal: bool, kind: Kind) -> Option
 // The detection copy
 // ---------------------------------------------------------------------------
 
-fn is_invisible(c: char) -> bool {
-    if c.is_ascii() {
-        return false;
-    }
-    let ignorable = CodePointSetData::new::<DefaultIgnorableCodePoint>();
-    let gc = CodePointMapData::<GeneralCategory>::new();
-    ignorable.contains(c) || gc.get(c) == GeneralCategory::Format || c == '\u{180E}'
-}
-
-fn is_nonspacing(c: char) -> bool {
-    if c.is_ascii() {
-        return false;
-    }
-    CodePointMapData::<GeneralCategory>::new().get(c) == GeneralCategory::NonspacingMark
-}
-
-/// Letters that read as an ASCII letter but are not in the confusables map
-/// for the form they take, and the look-alikes of `/`, `\` and `.`.
-fn fold_lookalike(c: char) -> char {
-    match c {
-        '\u{0410}' | '\u{0430}' | '\u{0391}' | '\u{03b1}' | '\u{0251}' | '\u{1d00}' => 'a',
-        '\u{0412}' | '\u{0432}' | '\u{044c}' => 'b',
-        '\u{0421}' | '\u{0441}' | '\u{03f9}' | '\u{03f2}' | '\u{1d04}' => 'c',
-        '\u{0501}' | '\u{0257}' | '\u{1d05}' => 'd',
-        '\u{0415}' | '\u{0435}' | '\u{0395}' | '\u{03b5}' | '\u{0454}' | '\u{1d07}' => 'e',
-        '\u{0493}' => 'f',
-        '\u{0261}' => 'g',
-        '\u{0397}' | '\u{04bb}' | '\u{041d}' | '\u{043d}' => 'h',
-        '\u{0399}' | '\u{0406}' | '\u{0456}' | '\u{0457}' | '\u{03b9}' | '\u{026a}'
-        | '\u{0131}' => 'i',
-        '\u{0408}' | '\u{0458}' | '\u{029d}' => 'j',
-        '\u{039a}' | '\u{041a}' | '\u{043a}' | '\u{03ba}' => 'k',
-        '\u{04cf}' | '\u{217c}' | '\u{029f}' => 'l',
-        '\u{039c}' | '\u{041c}' | '\u{043c}' | '\u{1d0d}' => 'm',
-        '\u{0578}' | '\u{041f}' | '\u{043f}' | '\u{03bd}' => 'n',
-        '\u{039f}' | '\u{041e}' | '\u{043e}' | '\u{03bf}' | '\u{03c3}' | '\u{1d0f}' => 'o',
-        '\u{03a1}' | '\u{0420}' | '\u{0440}' | '\u{03c1}' => 'p',
-        '\u{051b}' => 'q',
-        '\u{0433}' | '\u{0280}' => 'r',
-        '\u{0455}' | '\u{a731}' => 's',
-        '\u{03a4}' | '\u{0422}' | '\u{0442}' | '\u{03c4}' | '\u{1d1b}' => 't',
-        '\u{03c5}' | '\u{057d}' | '\u{1d1c}' => 'u',
-        '\u{0475}' => 'v',
-        '\u{051d}' | '\u{03c9}' => 'w',
-        '\u{03a7}' | '\u{0425}' | '\u{0445}' | '\u{03c7}' => 'x',
-        '\u{03a5}' | '\u{0423}' | '\u{0443}' | '\u{04af}' | '\u{03b3}' => 'y',
-        '\u{1d22}' => 'z',
-        '\u{2215}' | '\u{2044}' | '\u{29f8}' | '\u{ff0f}' => '/',
-        '\u{29f9}' | '\u{ff3c}' => '\\',
-        '\u{3002}' | '\u{2024}' | '\u{ff61}' | '\u{ff0e}' => '.',
-        other => other,
-    }
-}
-
-/// The detection copy of one line, in two alignments: `fold` keeps case and
-/// `l` is the same characters lowercased, one for one.
+/// One piece of a reading, in two alignments: `fold` keeps case and `l` is
+/// the same characters lowercased, one for one.
 struct Prep {
-    /// A letter was folded from a look-alike in another script.
+    /// A character that is not ASCII was read as ASCII.
     mixed: bool,
     /// Lines were run together with no separator, so a word may be two.
     glued: bool,
-    /// Several lines were read as one string.
+    /// More than one line was read as one string.
     joined: bool,
     /// Where in `fold` one line ends and the next begins with no separator.
     seams: Vec<usize>,
@@ -407,30 +387,16 @@ struct Prep {
 }
 
 impl Prep {
+    /// The undecoded reading of `text`, for a word or a seat name.
     fn new(text: &str) -> Self {
-        let compatible: String = text.nfkc().filter(|c| !is_invisible(*c)).collect();
-        let mut fold: Vec<char> = Vec::with_capacity(compatible.len());
-        let mut mixed = false;
-        for c in compatible.nfd() {
-            if is_nonspacing(c) || is_invisible(c) {
-                continue;
-            }
-            let original = c;
-            let c = fold_lookalike(c);
-            if !c.is_ascii() {
-                if let Some(skeleton) = fold_confusable(c) {
-                    mixed = true;
-                    fold.extend(skeleton.chars());
-                    continue;
-                }
-            } else if !original.is_ascii() {
-                mixed = true;
-            }
-            fold.push(c);
-        }
-        let mut prep = Self::from_fold(fold);
-        prep.mixed = mixed;
+        let canon = canonical(text);
+        let mut prep = Self::from_marks(&canon.readings[0]);
+        prep.mixed = canon.mixed;
         prep
+    }
+
+    fn from_marks(marks: &[Mark]) -> Self {
+        Self::from_fold(marks.iter().map(|mark| mark.c).collect())
     }
 
     fn empty() -> Self {
@@ -513,6 +479,23 @@ const INERT_KEYWORDS: &[&str] = &[
 fn org_construct(chars: &[char], structure: bool) -> bool {
     let text: String = chars.iter().collect();
     let lower = text.to_lowercase();
+    let trimmed = lower.trim_start();
+    let heading = trimmed
+        .strip_prefix('*')
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(char::is_whitespace);
+    let drawer = trimmed.strip_prefix(':').is_some_and(|rest| {
+        rest.split_once(':').is_some_and(|(name, after)| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+                && (after.trim().is_empty() || matches!(name, "properties" | "results"))
+        })
+    });
+    if !structure && (heading || drawer) {
+        return true;
+    }
     let keyword_line = if structure {
         None
     } else {
@@ -527,11 +510,19 @@ fn org_construct(chars: &[char], structure: bool) -> bool {
             return true;
         }
     }
+    let html_event = ["<img", "<svg", "<video"]
+        .iter()
+        .any(|tag| lower.contains(tag))
+        && ["onerror", "onload", "onclick", "onmouseover"]
+            .iter()
+            .any(|event| lower.contains(event));
     if lower.contains("{{{")
         || lower.contains("[[shell:")
         || lower.contains("[[elisp:")
         || lower.contains("<script")
         || lower.contains("<iframe")
+        || html_event
+        || trimmed.starts_with(":results:")
     {
         return true;
     }
@@ -547,7 +538,7 @@ fn org_construct(chars: &[char], structure: bool) -> bool {
                 return true;
             }
         }
-        let start_ok = at == 0 || !low[at - 1].is_alphanumeric();
+        let start_ok = at == 0 || !(low[at - 1].is_alphanumeric() || low[at - 1] == '_');
         if start_ok
             && (inline_babel_at(&low, at, "src_", &['{', '['])
                 || inline_babel_at(&low, at, "call_", &['(', '[']))
@@ -1298,10 +1289,21 @@ fn secret_hit(prep: &Prep, identifier: bool) -> bool {
         || scheme_hit(&prep.s)
         || user_pass(&prep.s)
         || command_login(&prep.s)
+        || webhook_hit(&prep.l)
         || cookie_hit(&prep.fold)
         || glued_password_flag(&prep.fold)
         || private_key(&prep.l)
         || opaque_hit(&prep.s, identifier)
+}
+
+fn webhook_hit(lower: &str) -> bool {
+    lower
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c: char| matches!(c, '"' | '\'' | ')' | ']' | ',' | ';')))
+        .any(|word| {
+            word.strip_prefix("https://hooks.slack.com/services/")
+                .is_some_and(|tail| tail.split('/').filter(|part| !part.is_empty()).count() >= 3)
+        })
 }
 
 /// A run of letters and digits cut by a line break, each half too short to
@@ -1333,7 +1335,13 @@ fn seam_run_hit(prep: &Prep) -> bool {
 /// export use one matcher and differ only in how a bare marker is read.
 #[must_use]
 pub fn secret_word(word: &str) -> bool {
-    word_shape(word, false) || secret_hit(&Prep::new(word), false)
+    let canon = canonical(word);
+    word_shape(word, false)
+        || canon.readings.iter().any(|reading| {
+            let mut prep = Prep::from_marks(reading);
+            prep.mixed = canon.mixed;
+            secret_hit(&prep, false)
+        })
 }
 
 const ASSIGNMENTS: &[&str] = &[
@@ -1398,6 +1406,14 @@ fn word_shape(word: &str, prose: bool) -> bool {
 /// Whether a value follows the marker at the start of `from`.
 fn marker_has_value(from: &str, marker: usize) -> bool {
     let rest = &from[marker..];
+    let value: String = rest
+        .trim_start_matches(['"', '\'', '`'])
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        .collect();
+    if placeholder_value(&value) {
+        return false;
+    }
     if from.starts_with(|c: char| c.is_ascii_uppercase())
         && from[..marker].ends_with(':')
         && rest.starts_with(':')
@@ -2265,6 +2281,7 @@ fn credential_hit(chars: &[char], digest: bool, glued: bool) -> bool {
                         Strength::Strong => true,
                         Strength::Weak => {
                             trimmed.chars().count() >= 3
+                                && !placeholder_value(trimmed)
                                 && (!matches!(mode, Mode::Flag)
                                     || trimmed.chars().any(|c| !c.is_ascii_lowercase()))
                         }
@@ -2303,6 +2320,13 @@ fn credential_hit(chars: &[char], digest: bool, glued: bool) -> bool {
         }
     }
     false
+}
+
+fn placeholder_value(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "value" | "placeholder" | "example" | "sample" | "replace_me" | "changeme"
+    )
 }
 
 /// A connector between a credential name and its value: `is`, `was`, `are`,
@@ -2630,7 +2654,11 @@ const HASH_WORDS: &[&str] = &[
     "crc",
 ];
 
-fn base64_char(c: char) -> bool {
+/// Hex lengths of a SHA-1, a SHA-256 and a SHA-512 digest. A run of one of
+/// these lengths is a commit, tree or digest id.
+pub(crate) const DIGEST_HEX_LENS: [usize; 3] = [40, 64, 128];
+
+pub(crate) fn base64_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-')
 }
 
@@ -2818,7 +2846,7 @@ fn word_slug(core: &str) -> bool {
     pieces.len() >= 3 && plain >= 2
 }
 
-fn run_is_key(text: &str, identifier: bool, hash_context: bool) -> bool {
+pub(crate) fn run_is_key(text: &str, identifier: bool, hash_context: bool) -> bool {
     let core = text.trim_matches(|c| matches!(c, '-' | '_' | '/' | '+' | '='));
     let len = core.chars().count();
     if len < 16 {
@@ -2829,7 +2857,7 @@ fn run_is_key(text: &str, identifier: bool, hash_context: bool) -> bool {
         if len < 32 || identifier {
             return false;
         }
-        let kept = matches!(len, 40 | 64 | 128)
+        let kept = DIGEST_HEX_LENS.contains(&len)
             || len % 40 == 0
             || len % 64 == 0
             || (len == 32 && hash_context)
@@ -2907,6 +2935,9 @@ const VERSION_WORDS: &[&str] = &[
     "downgrade",
     "firmware",
     "patch",
+    "ships",
+    "shipped",
+    "section",
 ];
 
 const PUBLIC_RESOLVERS: &[[u32; 4]] = &[
@@ -3040,15 +3071,12 @@ fn inet_aton(text: &str) -> Option<u32> {
     u32::try_from(value).ok()
 }
 
-/// The end of the letters, digits, `_` and dots from `start`, taking a dot
-/// only when a digit follows it.
+/// The end of the letters, digits and dots from `start`, taking a dot only
+/// when a digit follows it.
 fn ipv4_end(chars: &[char], start: usize) -> usize {
     let mut at = start;
     loop {
-        while chars
-            .get(at)
-            .is_some_and(|c| c.is_alphanumeric() || *c == '_')
-        {
+        while chars.get(at).is_some_and(|c| c.is_alphanumeric()) {
             at += 1;
         }
         if chars.get(at) == Some(&'.') && chars.get(at + 1).is_some_and(char::is_ascii_digit) {
@@ -3148,9 +3176,12 @@ fn ipv4_hit(chars: &[char]) -> bool {
         })
 }
 
-/// A plain dotted quad that reads as a mask, a resolver or a version.
+/// A plain public dotted quad that reads as a mask, a resolver or a version.
 /// A mask is contiguous: ones, then zeros.
 fn ipv4_exempt(value: u32, chars: &[char], start: usize, end: usize) -> bool {
+    if private_set(value) {
+        return false;
+    }
     let octets = value.to_be_bytes().map(u32::from);
     if value.leading_ones() + value.trailing_zeros() == 32 || PUBLIC_RESOLVERS.contains(&octets) {
         return true;
@@ -3221,8 +3252,9 @@ fn ipv6_char(c: char) -> bool {
     c.is_ascii_hexdigit() || matches!(c, ':' | '.')
 }
 
+/// A letter or digit. `_` is a boundary, as it is for an IPv4 literal.
 fn word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    c.is_alphanumeric()
 }
 
 /// Whether the text contains an IPv6 address, with or without a zone, brackets
@@ -3231,12 +3263,15 @@ fn word_char(c: char) -> bool {
 /// A run of hex digits, colons and dots is parsed with
 /// [`std::net::Ipv6Addr`], from the start of the run and from after each
 /// single colon. A literal never starts in the middle of a word, so the
-/// `::add` of `std::ops::Add` and the `::1` of `Foo::1` are paths. A literal
+/// `::add` of `std::ops::Add` and the `::1` of `Foo::1` are paths. An
+/// underscore is a boundary, as it is for an IPv4 literal, so
+/// `_2001:db8::1_` is an address and `foo_bar` stays a word. A literal
 /// with a digit is an address. One without a digit is an address when it
-/// opens or closes with `::` (`::a`, `::ffff`) or when every group is four
-/// or more digits and none is capitalized (`dead::beef`, but not the Rust
-/// path `Face::Fade`). A run never starts at a dot, so the `::a` of `x.::a`
-/// is read after it.
+/// opens or closes with `::` (`::`, `::a`, `::ffff`) or when every group is
+/// four or more digits (`dead::beef`). A capitalised name before `::` is a
+/// path, and so is `Name::<`, `Name::{` and `::new()` after that name
+/// (`Face::<T>::new()`, `Face::Fade`). A run never starts at a dot, so the
+/// `::a` of `x.::a` is read after it.
 fn ipv6_hit(chars: &[char], fold: &[char]) -> bool {
     let mut index = 0;
     while index < chars.len() {
@@ -3284,8 +3319,8 @@ fn candidate_is_ipv6(chars: &[char], fold: &[char], at: usize, end: usize) -> bo
             continue;
         }
         let text: String = chars[at..stop].iter().collect();
-        // `::` between other text is a separator (`term :: description`).
-        // Alone on the line it is the unspecified address.
+        // `::` between other text is a separator (`term :: description`,
+        // `Foo::bar`). Alone on the line it is the unspecified address.
         if text == "::" && fold.iter().any(|c| !(*c == ':' || c.is_whitespace())) {
             continue;
         }
@@ -3508,8 +3543,7 @@ const HOST_STOP: &[&str] = &[
 ];
 
 fn mailbox_hit(prep: &Prep) -> bool {
-    let decoded = decode_marks(&prep.fold);
-    let marked = replace_markers(&decoded);
+    let marked = replace_markers(&prep.fold);
     direct_email(&marked) || spelled_email(&marked)
 }
 
@@ -3520,97 +3554,6 @@ fn lower_eq(chars: &[char], at: usize, pattern: &str) -> bool {
             .iter()
             .zip(&want)
             .all(|(have, want)| have.to_lowercase().next() == Some(*want))
-}
-
-/// Numeric entities, `%xx` (also double encoded), `\uXXXX`, `\xXX` and `=40`
-/// for `@` and `.` become the character.
-fn decode_marks(chars: &[char]) -> Vec<char> {
-    let mut out = Vec::with_capacity(chars.len());
-    let mut index = 0;
-    while index < chars.len() {
-        let c = chars[index];
-        if c == '&' && chars.get(index + 1) == Some(&'#') {
-            let hex = matches!(chars.get(index + 2), Some('x' | 'X'));
-            let from = index + if hex { 3 } else { 2 };
-            let len = chars[from.min(chars.len())..]
-                .iter()
-                .take_while(|d| {
-                    if hex {
-                        d.is_ascii_hexdigit()
-                    } else {
-                        d.is_ascii_digit()
-                    }
-                })
-                .count();
-            if len > 0 && len <= 8 {
-                let digits: String = chars[from..from + len].iter().collect();
-                let code = u32::from_str_radix(&digits, if hex { 16 } else { 10 }).unwrap_or(0);
-                let end = from + len + usize::from(chars.get(from + len) == Some(&';'));
-                if code == 64 || code == 46 {
-                    out.push(if code == 64 { '@' } else { '.' });
-                    index = end;
-                    continue;
-                }
-            }
-        }
-        if lower_eq(chars, index, "&commat;") {
-            out.push('@');
-            index += 8;
-            continue;
-        }
-        if lower_eq(chars, index, "&period;") {
-            out.push('.');
-            index += 8;
-            continue;
-        }
-        if c == '%' {
-            let mut at = index + 1;
-            while lower_eq(chars, at, "25") {
-                at += 2;
-            }
-            if lower_eq(chars, at, "40") {
-                out.push('@');
-                index = at + 2;
-                continue;
-            }
-            if lower_eq(chars, at, "2e") {
-                out.push('.');
-                index = at + 2;
-                continue;
-            }
-        }
-        if c == '\\' {
-            if lower_eq(chars, index, "\\u0040") {
-                out.push('@');
-                index += 6;
-                continue;
-            }
-            if lower_eq(chars, index, "\\x40") {
-                out.push('@');
-                index += 4;
-                continue;
-            }
-            if lower_eq(chars, index, "\\u002e") {
-                out.push('.');
-                index += 6;
-                continue;
-            }
-        }
-        if c == '='
-            && chars.get(index + 1) == Some(&'4')
-            && chars.get(index + 2) == Some(&'0')
-            && index > 0
-            && chars[index - 1].is_alphanumeric()
-            && chars.get(index + 3).is_some_and(|d| d.is_alphanumeric())
-        {
-            out.push('@');
-            index += 3;
-            continue;
-        }
-        out.push(c);
-        index += 1;
-    }
-    out
 }
 
 const AT_MARKERS: &[&str] = &[
@@ -3885,25 +3828,49 @@ mod tests {
         assert_eq!(classify_id("server-a", &screen), None);
     }
 
+    fn assert_all_screens_refuse(text: &str) {
+        let screen = bare();
+        assert_eq!(classify(text, &screen), Some(Class::Address), "{text:?}");
+        assert!(!crate::scrub::scan_body(text, 1).is_empty(), "{text:?}");
+        assert!(!crate::scrub::scan_public(text).is_empty(), "{text:?}");
+    }
+
+    #[test]
+    fn an_address_on_one_line_is_refused_in_every_form() {
+        for text in [
+            "Use 10.23.45.67 for it.",
+            "at 127.0.0.1",
+            "on 169.254.2.3",
+            "on 172.16.5.4",
+            "on 192.168.1.20",
+            "on 100.64.2.3",
+            "_10.0.0.5_",
+            "ping 127.1",
+            "curl 0x7f000001/",
+            "0177.0.0.1",
+            "run `::1` now",
+            "10%2E0%2E0%2E1",
+            "10&period;0&period;0&period;1",
+            "10\\u002e0\\u002e0\\u002e1",
+            "10\\x2e0\\x2e0\\x2e1",
+            "10=2E0=2E0=2E1",
+            "10[.]0[.]0[.]1",
+        ] {
+            assert_all_screens_refuse(text);
+        }
+    }
+
     #[test]
     fn defanging_keeps_following_ipv6_text_aligned() {
         let screen = bare();
         for mark in ["[.]", "(.)", "{.}", "\\.", "[dot]", " dot "] {
             let prefix = format!("1{mark}2");
-            let address = format!("{prefix} ::a");
-            assert_eq!(
-                classify(&address, &screen),
-                Some(Class::Address),
-                "{address:?}"
-            );
-            assert!(
-                crate::scrub::scrub_public(&address) != address,
-                "{address:?}"
-            );
+            assert_all_screens_refuse(&format!("{prefix} ::a"));
 
             let text = format!("{prefix} Face::Fade");
             assert_eq!(classify(&text, &screen), None, "{text:?}");
-            assert_eq!(crate::scrub::scrub_public(&text), text, "{text:?}");
+            assert!(crate::scrub::scan_body(&text, 1).is_empty(), "{text:?}");
+            assert!(crate::scrub::scan_public(&text).is_empty(), "{text:?}");
         }
     }
 
@@ -3939,7 +3906,6 @@ mod tests {
 
     #[test]
     fn a_private_number_in_any_inet_aton_form_is_refused() {
-        let screen = bare();
         for text in [
             "00012.0.0.1",
             "0000000012.0.0.1",
@@ -3950,8 +3916,9 @@ mod tests {
             "host 10.1",
             "ping 127.1",
         ] {
-            assert_eq!(classify(text, &screen), Some(Class::Address), "{text:?}");
+            assert_all_screens_refuse(text);
         }
+        let screen = bare();
         for text in [
             "8.8.8.8",
             "release v10.0.0.5",
@@ -3961,8 +3928,35 @@ mod tests {
             "167772161 rows",
             "10.1 percent",
             "2130706433",
+            "It costs $10.05 today.",
+            "Ubuntu 10.04 LTS",
+            "it took 10.05 seconds",
+            "the meeting is at 10.05",
+            "10.00",
+            "Ubuntu 10.04.1",
+            "Ubuntu 12.04",
+            "10.0",
+            "$10.05",
+            "at 10.05",
+            "v10.0.0.5",
+            "Face::<T>::new()",
+            "use Face::{A, B};",
+            "Face::Fade",
         ] {
             assert_eq!(classify(text, &screen), None, "{text:?}");
+            assert!(crate::scrub::scan_body(text, 1).is_empty(), "{text:?}");
+            assert!(crate::scrub::scan_public(text).is_empty(), "{text:?}");
+        }
+        for text in [
+            "ip 167772161",
+            "ip 10.1",
+            "e.g.10.0.0.1",
+            "x.10.0.0.1",
+            "::",
+            "fe80::1",
+            "1[.]2 ::a",
+        ] {
+            assert_all_screens_refuse(text);
         }
         for text in [
             "ip 167772161",
@@ -3983,26 +3977,24 @@ mod tests {
 
     #[test]
     fn a_digit_free_ipv6_literal_in_a_code_span_is_refused() {
-        let screen = bare();
         for text in ["`::a`", "=::a=", "run `dead::beef` now"] {
-            assert_eq!(classify(text, &screen), Some(Class::Address), "{text:?}");
+            assert_all_screens_refuse(text);
         }
     }
 
     #[test]
     fn an_ipv6_literal_after_a_dot_is_refused() {
-        let screen = bare();
         for text in ["x.::a", "x..::a", "x.dead::beef"] {
-            assert_eq!(classify(text, &screen), Some(Class::Address), "{text:?}");
+            assert_all_screens_refuse(text);
         }
     }
 
     #[test]
     fn only_a_contiguous_netmask_is_exempt() {
-        let screen = bare();
         for text in ["255.0.255.0", "255.255.0.255", "255.254.255.0"] {
-            assert_eq!(classify(text, &screen), Some(Class::Address), "{text:?}");
+            assert_all_screens_refuse(text);
         }
+        let screen = bare();
         for text in [
             "255.255.240.0",
             "255.255.255.255",
@@ -4010,17 +4002,89 @@ mod tests {
             "0.0.0.0",
         ] {
             assert_eq!(classify(text, &screen), None, "{text:?}");
+            assert!(crate::scrub::scan_body(text, 1).is_empty(), "{text:?}");
+            assert!(crate::scrub::scan_public(text).is_empty(), "{text:?}");
         }
     }
 
     #[test]
     fn an_address_word_after_a_short_private_number_refuses_it() {
-        let screen = bare();
         for text in ["127.1 host", "10.1 is the gateway", "167772161 server"] {
-            assert_eq!(classify(text, &screen), Some(Class::Address), "{text:?}");
+            assert_all_screens_refuse(text);
         }
+        let screen = bare();
         for text in ["Ubuntu 10.04 LTS", "$10.05", "at 10.05", "10.1 percent"] {
             assert_eq!(classify(text, &screen), None, "{text:?}");
+            assert!(crate::scrub::scan_body(text, 1).is_empty(), "{text:?}");
+            assert!(crate::scrub::scan_public(text).is_empty(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn an_underscore_is_a_boundary_around_an_ipv6_address() {
+        for text in ["_2001:db8::1_", "_[2001:db8::1]:443_", "_fe80::1_"] {
+            assert_all_screens_refuse(text);
+        }
+        let screen = bare();
+        for text in ["foo_bar", "dead_beef", "a::b", "std::fmt"] {
+            assert_eq!(classify(text, &screen), None, "{text:?}");
+            assert!(crate::scrub::scan_body(text, 1).is_empty(), "{text:?}");
+            assert!(crate::scrub::scan_public(text).is_empty(), "{text:?}");
+        }
+    }
+
+    /// A wrapper never splits an address, which has no spaces. An address
+    /// broken across lines on purpose is out of scope.
+    #[test]
+    fn an_address_split_across_lines_is_not_flagged() {
+        let screen = bare();
+        for text in [
+            "see 10.0.0\n5 in the lab",
+            "10\n0\n0\n5",
+            "| 10.0.0 |\n| 5 |",
+            "1. 192\n2. 168\n3. 1\n4. 20",
+            "ping 127.\n1",
+            "prints one line and exits 1:\n2001:db8:",
+        ] {
+            assert_eq!(classify(text, &screen), None, "{text:?}");
+            assert!(crate::scrub::scan_body(text, 1).is_empty(), "{text:?}");
+            assert!(crate::scrub::scan_public(text).is_empty(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn ordinary_dotted_numbers_stay_clean() {
+        let screen = bare();
+        for text in [
+            "0.45.3",
+            "version 0.45.3",
+            "version 10.5.2",
+            "10.5",
+            "3.14159",
+            "the score was 10.5 yesterday.",
+            "8.8.8.8",
+            "1.1.1.1",
+            "use 8.8.8.8 or 1.1.1.1.",
+            "0.0.0.0",
+            "bind to 0.0.0.0.",
+            "255.255.255.0",
+            "the netmask is 255.255.255.0.",
+            "3.2.1",
+            "see section 3.2.1.",
+            "version 3.2.1.4",
+            "v1.10.0.0",
+            "1.10.0.0.5",
+            "2026-11-23",
+            "2026.11.23",
+            "the date is 2026.11.23.",
+            "10 0 0 5",
+            "width=20",
+            "résumé",
+            "release v10.0.0.5",
+        ] {
+            assert_eq!(classify(text, &screen), None, "{text:?}");
+            assert!(crate::scrub::scan_body(text, 1).is_empty(), "{text:?}");
+            assert!(crate::scrub::scan_public(text).is_empty(), "{text:?}");
         }
     }
 

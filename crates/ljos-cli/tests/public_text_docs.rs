@@ -3,8 +3,9 @@
 //! on purpose, or quotes a private shape as an example. Anything else is a
 //! false refusal.
 
-use ljos_cli::public_text::{classify, scan, Class, Line, Screen};
+use ljos_cli::public_text::{allowed, classify, scan, Class, Line, Screen};
 use std::path::{Path, PathBuf};
+use unicode_normalization::UnicodeNormalization as _;
 
 const VENDOR_WORDS: &[&str] = &[
     "claude",
@@ -39,10 +40,14 @@ const QUOTED_SHAPES: &[&str] = &[
     "/proc/net",
     "/srv/handoff",
     "127.0.0.1",
+    "10.0.0.1",
+    "10.1",
+    "167772161",
     "::a",
     "0x7f",
     "127.1",
     "alice",
+    "@example.com",
     "GITHUB_TOKEN = x",
     "dead::beef",
     "src_NAME{",
@@ -109,6 +114,7 @@ fn explained(class: Class, line: &str) -> bool {
     match class {
         Class::Term => VENDOR_WORDS.iter().any(|word| lower.contains(word)),
         Class::Secret if PLACEHOLDERS.iter().any(|p| line.contains(p)) => true,
+        Class::Character => line.chars().any(|c| !allowed(c)),
         _ => QUOTED_SHAPES.iter().any(|shape| line.contains(shape)),
     }
 }
@@ -163,4 +169,35 @@ fn every_refused_doc_line_names_a_vendor_or_quotes_a_private_shape() {
         unexplained.len(),
         unexplained.join("\n")
     );
+}
+
+/// The allowlist names every non-ASCII character the docs use, so a page that
+/// quotes the docs' own words is not refused for a character.
+#[test]
+fn every_non_ascii_character_in_the_docs_is_on_the_public_allowlist() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+    let mut missing = std::collections::BTreeSet::new();
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("org" | "rst" | "md")
+            ) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            for c in text.nfc() {
+                if !c.is_ascii() && !allowed(c) {
+                    missing.insert(format!("U+{:04X} in {}", u32::from(c), path.display()));
+                }
+            }
+        }
+    }
+    assert!(missing.is_empty(), "{missing:#?}");
 }

@@ -228,6 +228,11 @@ fn screen_line(line: &str) -> public_text::Line<'_> {
     if STRUCTURE_LINES.contains(&line)
         || line.starts_with("#+title: ")
         || line.starts_with("#+date: ")
+        || matches!(line, ":PROPERTIES:" | ":END:")
+        || line
+            .strip_prefix('*')
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(char::is_whitespace)
     {
         return public_text::Line::structure(line);
     }
@@ -861,7 +866,7 @@ fn select_policies(
 
 fn policy_text(policy: &PolicyRow) -> String {
     match (&policy.verdict, &policy.pattern) {
-        (Some(verdict), Some(pattern)) => format!("{verdict}: {pattern} — {}", policy.text),
+        (Some(verdict), Some(pattern)) => format!("{verdict}: {pattern} - {}", policy.text),
         _ => policy.text.clone(),
     }
 }
@@ -3032,15 +3037,11 @@ mod tests {
             "\u{ff33}oftware-quiet",
             "Software%2dquiet",
             "Software%2Dquiet",
-            "Software%252Dquiet",
-            "Software%25252Dquiet",
-            "Software%26%2345%3Bquiet",
             "%53oftware-quiet",
             "Software&#45;quiet",
             "Software&#x2d;quiet",
             "Software&#X2D;quiet",
             "Software&hyphen;quiet",
-            "Software&amp;#45;quiet",
             "Software\\u002dquiet",
             "Software\\u{2d}quiet",
             "Software=2Dquiet",

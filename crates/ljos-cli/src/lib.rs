@@ -194,6 +194,7 @@ pub mod swap_log;
 pub mod sync;
 pub mod table;
 pub mod takeover;
+mod text_canon;
 pub mod ticket_search;
 pub mod tool_bound;
 pub mod tools;
@@ -49939,6 +49940,51 @@ impl CommitLock {
             }
             if std::time::Instant::now() >= deadline {
                 return None;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            std::thread::sleep(flock_pause(pause, left));
+            pause = pause.saturating_mul(2).min(MAX_PAUSE);
+        }
+    }
+
+    /// [`Self::acquire_by`] for a caller that must not go on without the
+    /// lock.
+    ///
+    /// `Ok(Some)` carries the file. `Ok(None)` means another holder still had
+    /// it at `deadline`. `Err` means the file could not be opened, or
+    /// `flock` failed for a reason other than a busy lock, where
+    /// [`Self::acquire_by`] returns a lock that owns nothing.
+    pub fn try_acquire_by(
+        path: &std::path::Path,
+        mut deadline: std::time::Instant,
+    ) -> std::io::Result<Option<Self>> {
+        use std::os::unix::io::AsRawFd;
+        if let Some(wall) = wall_deadline() {
+            deadline = deadline.min(wall);
+        }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        let mut pause = std::time::Duration::from_millis(10);
+        const MAX_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
+        loop {
+            // SAFETY: flock on a descriptor this function owns.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                admit::note_list_lock();
+                return Ok(Some(Self(Some(file))));
+            }
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::EWOULDBLOCK | libc::EINTR) => {}
+                _ => return Err(err),
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
             }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             std::thread::sleep(flock_pause(pause, left));

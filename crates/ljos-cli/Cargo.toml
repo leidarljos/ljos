@@ -71,6 +71,8 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 rustix = { version = "1", features = ["fs"] }
 tempfile = "3"
+unicode-security = "0.1.3"
+html-escape = "0.2"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2", features = ["hazmat"] }

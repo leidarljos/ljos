@@ -10,8 +10,11 @@ an unmarked item stays out whatever its text says.
 - A lesson, a preference or a rule is marked when it is written:
   =ljos remember --public TEXT=, =ljos prefer --public TEXT= or
   =ljos rule --public ...=. A row that already exists is marked with
-  =ljos memories review --public ID=. The mark is the pack entity
-  =visibility:public=. A reviewed edit of a lesson takes the mark off.
+  =ljos memories review --public ID=. Repeating a private lesson with
+  =ljos remember --public= marks that row public. =ljos memories review --public=
+  records a project from =-p= or the checkout when the row names none.
+  The mark is the pack entity =visibility:public=. A reviewed edit of a lesson
+  takes the mark off.
 - A ticket is marked with the tag =public=. Marking it publishes its title,
   body and notes.
 - A ticket the page leaves out is named nowhere. Every string the page prints
@@ -20,8 +23,8 @@ an unmarked item stays out whatever its text says.
   tickets are loaded for this whenever the checkout has a tracker, with or
   without =--tree=. The id shows as =external dependency=. The text is read
   as the screen below reads it, so a look-alike hyphen or dash, a zero-width
-  mark, a full-width letter and a percent, HTML, =\u= or quoted-printable
-  escape (decoded again until the text stops changing) do not hide an id.
+  mark, a full-width letter and one layer of percent, HTML, =\u= or
+  quoted-printable escape do not hide an id.
   Org emphasis marks around the id, a line break next to its hyphen and an
   underscore for the hyphen do not hide it either, and an id with a suffix
   (=kiln-quiet-followup=, =kiln-quiet_2=) is still that id. A token is also
@@ -61,8 +64,11 @@ except that a tab or another control character becomes a space. A line that
 would open a heading, a keyword, a drawer, a block, a table, a rule, a
 comment, or a =SCHEDULED:=, =DEADLINE:= or =CLOSED:= planning line gets a
 backslash in front, and so does a zero-width or fullwidth lookalike of one.
-Tracker bookkeeping, such as a state change or a clock line, is left out, and
-the page does not name who noted, claimed or finished a ticket.
+Tracker bookkeeping is left out, and the page does not name who noted, claimed
+or finished a ticket. A state change has the form =State "DONE" from "TODO"=.
+A clock line is =CLOCK:= followed by an org time. A noted, claimed or finished
+line names one seat and nothing else. A sentence that only begins with those
+words is kept.
 
 The title is the fixed text =Project handbook=. =--title= replaces it, and a
 title that reads as private refuses the export. A heading comes from a marked
@@ -142,25 +148,45 @@ handbook: nothing was written, because 1 marked item is not public-safe
 #+end_example
 
 Each line names the kind and the id of the item and one class: =term=,
-=seat=, =path=, =secret=, =address=, =email= or =org-markup=. The text that
+=seat=, =path=, =secret=, =address=, =email=, =org-markup= or =character=. The text that
 matched is never printed. An id that reads as private is shown as
 =id withheld=. Nothing is redacted, and an existing =--out= file is left as
 it was. Reword or unmark the item and run the command again. The export does
 not read =LJOS_SEAT= or any seat of the process running it: the same tracker
 gives the same bytes under any seat name.
 
+The screen catches accidental leaks in text a person or an agent wrote
+normally: paths, private addresses, email addresses, secrets and banned terms.
+A path, an email address or a secret cut by an ordinary line wrap is still
+found. The screen is no defence against an author who deliberately obfuscates
+text. Nested encodings, homoglyph spellings of banned words, escapes split
+across lines and addresses broken across lines are outside its threat model.
+
 The screen splits the text into tokens first (words, paths, links, numbers
 with a unit, versions, Rust paths) and then classifies each token, so a
 version such as =3.12.3= or a number such as =139.1= is a number and not an
-address. It reads a normalized copy: NFKC, zero-width and bidi controls
-removed, and look-alike letters from other scripts folded. A secret split
-over three or more lines, or over a blank line, is found by joining the lines
-in a window and reading them again.
+address. It reads the text through one canonical function, the same one
+=ljos workflow render= uses. One layer of percent, HTML (numeric and named),
+=\u=, =\x= and quoted-printable escapes is decoded. The decoded text is put
+through NFKD, zero-width and bidi controls are removed, every Unicode line
+break is read as a line break and every space separator as a space. The screen
+scans each line, and then lines joined across an ordinary wrap for paths,
+email addresses, secrets and terms. It does not join an escape such as =%2=
+on one line and =F= on the next.
+
+The public character set is the backstop for odd characters. A character
+outside it, written or decoded from an escape, is refused as =character=,
+with no placeholder. The set is printable ASCII, the line break, and the
+non-ASCII characters used by these docs: =·=, =é=, =ð=, =ó=, =ʼ=, =…= and
+=−=. A base letter with combining marks counts as the letter it composes to.
+=ljos workflow render= calls the same classifier and therefore refuses the
+same text.
 
 A credential is refused when a name such as =token=, =secret=, =password=,
 =api_key= or =Authorization= is followed by === or =:=, with any spaces
 around the mark, and when the name is joined to its value by a word or an
 arrow, as in =the password is hunter=, =password => x= or =the pin is 4921=.
+A prose placeholder such as =key=value= stays.
 A name made of one of those words, such as =SECRET_KEY_BASE=, =DB_PASS=,
 =MYSQL_PWD= or =--password=, counts too, and so does a login on a command
 line (=curl -u user:pass=, =sshpass -p=), a =user:pass@= in a URL, a glued
@@ -188,23 +214,35 @@ The phrase check reads a word that ends in =ed=, =ing= or =ly= after
 
 A path, a =file:= link with an absolute or =~/= target, and a seat phrase are
 refused. The commands of the system, such as =/usr/bin/env=, and the files
-and folders ljos names for itself are not private. A model or tool name of an
-AI vendor, such as =anthropic=, =claude=, =cohere=, =hugging face=, =qwen=,
-=gemini=, =copilot-chat= or =chatgpt-5=, is refused in any case and with any
-spacing. The lowercase word =cursor= is an ordinary word, as in
-=move the cursor=. Any other casing, such as =Cursor= or =CURSOR=, names the
-product and is refused, and so is =cursor-agent= or a =.cursor= folder. The
-words of ljos itself, such as =seat=, =hook= and =mcp=, are refused because
-the page is public.
+and folders ljos names for itself are not private. Banned product and vendor
+terms are refused in any case and with any spacing. The words of ljos itself,
+such as =seat=, =hook= and =mcp=, are refused because the page is public.
 
-An IPv6 address is refused when the text parses as one, so =::a=,
+An IPv6 address is refused when the text parses as one, so =::=, =::a=,
 =dead::beef= and =2001:db8::1:abcde= are addresses. A capitalised name
-before =::= is a path. An IPv4 address is read as =inet_aton= reads it.
-Every dotted quad is refused, except a public resolver, a netmask or a
-version-context quad written in decimal. A private number of one to three
-parts, or a bare integer, is an address only beside an address word, a
-port, =//= or =@=, as in =ping 127.1=. A leading zero does not make a
-shorter number an address. An email address is refused, and so is one spelled
+before =::= is a Rust path, including =Name::<=, =Name::{= and =::new()=
+after that name, so =Face::<T>::new()= and =Face::Fade= stay. A backtick
+or verbatim span does not hide an address, and a literal may start after
+a dot, so =::a= between backticks and =x.::a= are refused. An IPv4
+address is read as the C library's =inet_aton= reads it: one to four parts,
+each hex after =0x=, octal after a leading zero, or decimal, of any length,
+with the last part filling the bytes left. Every dotted quad is refused,
+except a public resolver, a netmask or a version-context quad written in
+decimal. A netmask is ones then zeros, as in 255.255.240.0, so
+255.0.255.0 is refused. Version context is a =v= before the number, a digit before the
+dots, or a version word. A private dotted quad is refused even beside a
+version word. A private number of one to three parts, or a bare integer,
+is an address only beside an address word, a port, =//= or =@=, as in
+=ip 10.1=, =ping 167772161= or =127.1 host=. The address word, =//= and =@=
+may come before or after the number, so =10.1@= and =10.1//= are refused.
+A letter other than =v= directly before a dotted quad does not hide it, so
+=x10.0.0.1= is refused. A leading zero does not make it an address,
+so =10.05=, =10.00= and =Ubuntu 10.04 LTS= stay. A number may start after
+a dot that follows a letter, so =e.g.10.0.0.1= is refused. A digit before
+the dots is a version, so =1.10.0.0.5= and =v10.0.0.5= stay. Addresses are
+found within one line. An address broken across lines on purpose is not
+caught. An email
+address is refused, and so is one spelled
 so the at sign is not a character, with words, brackets or parentheses.
 =GitHub= is a forge name, not a vendor of models or agent tools, and it
 stays.

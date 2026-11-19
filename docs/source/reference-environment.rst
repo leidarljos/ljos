@@ -213,6 +213,7 @@ LJOS variables
 - ``LJOS_WAKE_LAUNCHER_KEY`` default unset
 - ``LJOS_WAKE_MSG`` default unset
 - ``LJOS_WAKE_SEAT`` default unset
+- ``LJOS_WORKFLOW_LOCK_WAIT`` default 30
 - ``LJOS_WRITER_PIDFILE`` default unset
 - ``LJOS_WRITER_STANDIN`` default unset
 - ``LJOS_WRITE_SCOPE`` default unset

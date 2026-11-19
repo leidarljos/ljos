@@ -686,7 +686,7 @@ fn a_hidden_id_in_a_lesson_a_preference_or_the_title_is_not_exported() {
         "-p",
         "kiln",
         "--public",
-        "Fire after KILN%252DQ7ZZ and kiln-zzzz.",
+        "Fire after KILN%2DQ7ZZ and kiln-zzzz.",
     ]);
     world.ok(&[
         "remember",

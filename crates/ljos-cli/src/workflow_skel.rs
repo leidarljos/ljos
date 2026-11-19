@@ -12,8 +12,6 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::scrub::scrub_public;
-
 const STEP_NOTE: &str = "step: ";
 const KIND_NOTE: &str = "kind: ";
 const QUORUM_NOTE: &str = "quorum: ";
@@ -71,6 +69,9 @@ pub struct Step {
     pub deed: Option<bool>,
     pub body: String,
     pub line: usize,
+    body_line: usize,
+    key_line: usize,
+    role_line: Option<usize>,
     kind_line: usize,
     depends_line: usize,
 }
@@ -79,6 +80,7 @@ pub struct Step {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skeleton {
     pub title: String,
+    pub title_line: usize,
     pub version: i64,
     pub version_line: usize,
     pub steps: Vec<Step>,
@@ -99,9 +101,18 @@ pub fn parse_vars(pairs: &[String]) -> Result<BTreeMap<String, String>> {
         if key.is_empty() {
             bail!("workflow: `--var` has an empty variable name");
         }
+        if value_has_break_or_control(value) {
+            bail!("workflow: `--var` value for `{key}` contains a line break or control character");
+        }
         map.insert(key.to_string(), value.to_string());
     }
     Ok(map)
+}
+
+fn value_has_break_or_control(value: &str) -> bool {
+    value
+        .chars()
+        .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
 }
 
 /// Parse and validate `text`. `source` is the path named in errors.
@@ -130,10 +141,17 @@ pub fn fill_vars(skel: &Skeleton, vars: &BTreeMap<String, String>) -> Result<Ske
     Ok(out)
 }
 
-/// Deterministic public Org, scrubbed, steps in topological order.
-#[must_use]
-pub fn render_skeleton(skel: &Skeleton) -> String {
-    scrub_public(&render_org(skel))
+/// Deterministic public Org with steps in topological order.
+///
+/// # Errors
+///
+/// Author text contains a class that cannot appear on a public page.
+pub fn render_skeleton(skel: &Skeleton) -> Result<String> {
+    let hits = public_hits(skel);
+    if !hits.is_empty() {
+        bail!("workflow: public render refused: {}", hits.join("; "));
+    }
+    Ok(render_org(skel))
 }
 
 /// Validate `path` and store it as a deed when the bytes or the version changed.
@@ -151,6 +169,78 @@ pub fn define_file(path: &Path) -> Result<String> {
     define_named(&name, &text, &path.display().to_string(), None)
 }
 
+fn run_lock_dir(root: &Path) -> PathBuf {
+    let dot_git = root.join(".git");
+    if dot_git.is_dir() {
+        return dot_git.join("ljos-locks");
+    }
+    if dot_git.is_file() {
+        if let Ok(out) = crate::git_at(root)
+            .args(["rev-parse", "--git-common-dir"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            if out.status.success() {
+                let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !raw.is_empty() {
+                    let p = Path::new(&raw);
+                    return if p.is_absolute() {
+                        p.join("ljos-locks")
+                    } else {
+                        root.join(p).join("ljos-locks")
+                    };
+                }
+            }
+        }
+    }
+    root.join(".ljos-locks")
+}
+
+fn acquire_run_lock(parent: &str) -> Result<crate::CommitLock> {
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    layout.require_tracker()?;
+    let slug: String = parent
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let lock_dir = run_lock_dir(layout.root());
+    std::fs::create_dir_all(&lock_dir)
+        .with_context(|| format!("workflow: create {}", lock_dir.display()))?;
+    let lock_path = lock_dir.join(format!("workflow-start-{slug}.lock"));
+    let deadline = std::time::Instant::now() + run_lock_wait();
+    match crate::CommitLock::try_acquire_by(&lock_path, deadline) {
+        Ok(Some(lock)) => Ok(lock),
+        Ok(None) => Err(anyhow::anyhow!(
+            "workflow: timed out waiting for the run lock for {parent} at {}",
+            lock_path.display()
+        )),
+        Err(err) => Err(anyhow::anyhow!(
+            "workflow: cannot lock the run for {parent} at {}: {err}",
+            lock_path.display()
+        )),
+    }
+}
+
+/// How long `--start` waits for the per-run lock.
+///
+/// `LJOS_WORKFLOW_LOCK_WAIT` is a whole number of seconds. Unset, zero, or
+/// not a number keeps the thirty-second default.
+fn run_lock_wait() -> std::time::Duration {
+    let secs = std::env::var("LJOS_WORKFLOW_LOCK_WAIT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(30);
+    std::time::Duration::from_secs(secs)
+}
+
 /// File the steps of `name` under `parent`.
 ///
 /// The run keeps the skeleton version from the first start. A later start
@@ -166,6 +256,7 @@ pub fn start_run(
     vars: &BTreeMap<String, String>,
     file: Option<&Path>,
 ) -> Result<String> {
+    let _lock = acquire_run_lock(parent)?;
     let latest = require_stored(name)?;
     let parent_card = crate::tracker_show_json(parent)
         .with_context(|| format!("workflow: {parent} is not a ticket"))?;
@@ -346,8 +437,20 @@ pub fn status_report(parent: &str) -> Result<Option<String>> {
         out.push_str("blockers: none\n");
     } else {
         out.push_str("blockers:\n");
-        for (step, id, state, title) in &blockers {
-            out.push_str(&format!("  {id} {state} under {step}: {title}\n"));
+        for b in &blockers {
+            if b.state == "MISSING" {
+                out.push_str(&format!("  {} missing blocking {}\n", b.id, b.step));
+            } else if b.via_edge {
+                out.push_str(&format!(
+                    "  {} {} blocking {}: {}\n",
+                    b.id, b.state, b.step, b.title
+                ));
+            } else {
+                out.push_str(&format!(
+                    "  {} {} under {}: {}\n",
+                    b.id, b.state, b.step, b.title
+                ));
+            }
         }
     }
     out.push_str("signoff needs:\n");
@@ -409,8 +512,10 @@ pub fn signoff_block(issue: &str) -> Result<()> {
 ///
 /// # Errors
 ///
-/// `parent` is not a run of `name`, or the tracker refuses the ticket.
+/// `parent` is not a run of `name`, another writer held the skeleton lock
+/// past the wait, or the tracker refuses the ticket.
 pub fn revise_from(name: &str, parent: &str) -> Result<String> {
+    let _lock = acquire_skeleton_lock(name)?;
     let mut stored = require_stored(name)?;
     let card = crate::tracker_show_json(parent)
         .with_context(|| format!("workflow: {parent} is not a ticket"))?;
@@ -432,6 +537,14 @@ pub fn revise_from(name: &str, parent: &str) -> Result<String> {
     body.push_str(&format!(
         "Proposal for {name} version {version}, from {parent}.\n"
     ));
+    let rec_by_id: BTreeMap<&str, &vissue_core::views::IssueRec> = recs
+        .iter()
+        .map(|rec| (rec.heading.id.as_str(), rec))
+        .collect();
+    let id_by_key: BTreeMap<&str, &str> = rows
+        .iter()
+        .map(|row| (row.key.as_str(), row.id.as_str()))
+        .collect();
     for row in &rows {
         body.push_str(&format!("\n{} ({}, {})\n", row.key, row.id, row.state));
         if let Ok(step_card) = crate::tracker_show_json(&row.id) {
@@ -442,8 +555,30 @@ pub fn revise_from(name: &str, parent: &str) -> Result<String> {
                 body.push_str(&format!("  note: {note}\n"));
             }
         }
+        let mut seen = BTreeSet::new();
         for (id, state, title) in children_of(&recs, &row.id) {
+            seen.insert(id.clone());
             body.push_str(&format!("  blocker {id} {state}: {title}\n"));
+        }
+        let dep_ids: BTreeSet<&str> = row
+            .depends
+            .iter()
+            .filter_map(|dep| id_by_key.get(dep.as_str()).copied())
+            .collect();
+        if let Some(rec) = rec_by_id.get(row.id.as_str()) {
+            let mut blocked = rec.heading.blocked_by();
+            blocked.sort();
+            for blocker_id in blocked {
+                if dep_ids.contains(blocker_id.as_str()) || !seen.insert(blocker_id.clone()) {
+                    continue;
+                }
+                if let Some(b) = rec_by_id.get(blocker_id.as_str()) {
+                    body.push_str(&format!(
+                        "  blocker {} {}: {}\n",
+                        blocker_id, b.heading.state, b.heading.title
+                    ));
+                }
+            }
         }
     }
     let project = card["project"]
@@ -484,12 +619,18 @@ pub fn revise_from(name: &str, parent: &str) -> Result<String> {
 /// There is no proposal, consensus did not settle `revise`, or the file is
 /// not a skeleton.
 pub fn revise_apply(name: &str, file: &Path) -> Result<String> {
+    let _lock = acquire_skeleton_lock(name)?;
     let stored = require_stored(name)?;
     let Some(proposal) = stored.proposal.clone() else {
         bail!(
             "workflow: {name} has no proposal; `ljos workflow revise {name} --from PARENT` files one"
         );
     };
+    if stored.applied.as_deref() == Some(proposal.as_str()) {
+        return Ok(format!(
+            "proposal {proposal} for {name} is already applied\n"
+        ));
+    }
     match crate::reap::gate_quorum(&proposal, 2, None)? {
         crate::reap::QuorumGate::Met { .. } => {}
         crate::reap::QuorumGate::Short { have, needed }
@@ -504,9 +645,26 @@ pub fn revise_apply(name: &str, file: &Path) -> Result<String> {
     }
     let text = std::fs::read_to_string(file)
         .with_context(|| format!("workflow: read {}", file.display()))?;
+    let file_version = version_of(&text).unwrap_or(0);
+    let incoming = body_without_version(&text);
+    let already_stored =
+        |version: i64, body: &str| version > file_version && body_without_version(body) == incoming;
+    if already_stored(stored.version, &stored.body)
+        || stored
+            .versions
+            .iter()
+            .any(|row| already_stored(row.version, &row.body))
+    {
+        return Ok(format!(
+            "proposal {proposal} for {name} is already applied\n"
+        ));
+    }
     let next = stored.version + 1;
     let bumped = set_version(&text, next, file)?;
-    let mut out = define_named(name, &bumped, &file.display().to_string(), Some(&proposal))?;
+    let mut out = define_locked(name, &bumped, &file.display().to_string(), Some(&proposal))?;
+    let mut stored = require_stored(name)?;
+    stored.applied = Some(proposal.clone());
+    write_stored(&stored)?;
     let _ = write_note(&proposal, &format!("revised {name} to version {next}"));
     if let Some(run) = proposal_parent(&proposal) {
         if let Ok(card) = crate::tracker_show_json(&run) {
@@ -523,7 +681,39 @@ pub fn revise_apply(name: &str, file: &Path) -> Result<String> {
         }
     }
     out.push_str(&format!("noted the proposal {proposal}\n"));
+    close_proposal(&proposal)?;
     Ok(out)
+}
+
+fn close_proposal(id: &str) -> Result<()> {
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    vissue_core::ops::update(&layout, id, Some("DONE"), None, None, None)
+        .with_context(|| format!("workflow: close proposal {id}"))?;
+    Ok(())
+}
+
+fn version_of(text: &str) -> Option<i64> {
+    for line in split_keep(text) {
+        let (body, _) = split_nl(line);
+        if let Some((key, value)) = keyword(body) {
+            if key.eq_ignore_ascii_case("version") {
+                return value.trim().parse().ok();
+            }
+        }
+    }
+    None
+}
+
+fn body_without_version(text: &str) -> String {
+    let mut kept = String::new();
+    for line in split_keep(text) {
+        let (body, _) = split_nl(line);
+        if keyword(body).is_some_and(|(key, _)| key.eq_ignore_ascii_case("version")) {
+            continue;
+        }
+        kept.push_str(line);
+    }
+    sha256_hex(kept.as_bytes())
 }
 
 fn proposal_parent(id: &str) -> Option<String> {
@@ -605,10 +795,27 @@ struct Stored {
     accession: String,
     body: String,
     proposal: Option<String>,
+    applied: Option<String>,
     versions: Vec<StoredVer>,
 }
 
+fn check_skeleton_name(name: &str) -> Result<()> {
+    if !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Ok(());
+    }
+    bail!("workflow: `{name}` is not a skeleton name");
+}
+
 fn index_path(name: &str) -> Result<PathBuf> {
+    check_skeleton_name(name)?;
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| {
@@ -654,6 +861,7 @@ fn read_stored(name: &str) -> Result<Option<Stored>> {
         accession: v["accession"].as_str().unwrap_or("").to_string(),
         body: v["body"].as_str().unwrap_or("").to_string(),
         proposal: v["proposal"].as_str().map(str::to_string),
+        applied: v["applied"].as_str().map(str::to_string),
         versions,
     }))
 }
@@ -672,6 +880,7 @@ fn pinned_stored(latest: &Stored, sha: &str, parent: &str, name: &str) -> Result
         accession: old.accession.clone(),
         body: old.body.clone(),
         proposal: latest.proposal.clone(),
+        applied: latest.applied.clone(),
         versions: Vec::new(),
     })
 }
@@ -709,18 +918,134 @@ fn write_stored(stored: &Stored) -> Result<()> {
         "accession": stored.accession,
         "body": stored.body,
         "proposal": stored.proposal,
+        "applied": stored.applied,
         "versions": versions,
     });
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "writes a file that is not a git hook"
-    )]
-    std::fs::write(&path, serde_json::to_string_pretty(&doc)?)
-        .with_context(|| format!("workflow: write {}", path.display()))?;
+    let bytes = serde_json::to_string_pretty(&doc)?;
+    write_index_atomic(&path, bytes.as_bytes())?;
     Ok(())
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "renames a path that is not a git hook"
+)]
+fn write_index_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = path
+        .parent()
+        .context("workflow: the skeleton index has no directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("workflow: create {}", dir.display()))?;
+    if path
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        bail!("workflow: {} is a symlink", path.display());
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(
+        ".{}.{}.{nanos}.tmp",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("index"),
+        std::process::id()
+    ));
+    let write_tmp = || -> Result<()> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+            .with_context(|| format!("workflow: create {}", tmp.display()))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    };
+    if let Err(err) = write_tmp() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err).with_context(|| format!("workflow: replace {}", path.display()));
+    }
+    if let Ok(dir_file) = std::fs::File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
+    Ok(())
+}
+
+struct SkeletonLock(std::fs::File);
+
+fn acquire_skeleton_lock(name: &str) -> Result<SkeletonLock> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    check_skeleton_name(name)?;
+    let index = index_path(name)?;
+    let dir = index
+        .parent()
+        .context("workflow: the skeleton index has no directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("workflow: create {}", dir.display()))?;
+    let lock_path = dir.join(format!("{name}.lock"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&lock_path)
+        .with_context(|| format!("workflow: lock {}", lock_path.display()))?;
+    let deadline = std::time::Instant::now() + run_lock_wait();
+    let mut pause = std::time::Duration::from_millis(10);
+    loop {
+        // SAFETY: flock on a descriptor this function owns.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(SkeletonLock(file));
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EWOULDBLOCK | libc::EINTR) => {}
+            _ => {
+                return Err(err).with_context(|| format!("workflow: lock {}", lock_path.display()));
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "workflow: timed out waiting for the skeleton lock for {name} at {}",
+                lock_path.display()
+            );
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        std::thread::sleep(pause.min(left));
+        pause = pause
+            .saturating_mul(2)
+            .min(std::time::Duration::from_millis(100));
+    }
+}
+
+impl Drop for SkeletonLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: the descriptor is still open.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
 fn define_named(name: &str, text: &str, source: &str, proposal: Option<&str>) -> Result<String> {
+    let _lock = acquire_skeleton_lock(name)?;
+    define_locked(name, text, source, proposal)
+}
+
+fn define_locked(name: &str, text: &str, source: &str, proposal: Option<&str>) -> Result<String> {
     let skel = parse_skeleton(text, source)?;
     let sha = sha256_hex(text.as_bytes());
     let prev = read_stored(name)?;
@@ -742,6 +1067,7 @@ fn define_named(name: &str, text: &str, source: &str, proposal: Option<&str>) ->
     let accession = store_deed(name, skel.version, text)?;
     let mut versions = Vec::new();
     let mut kept_proposal = None;
+    let mut kept_applied = None;
     if let Some(prev) = prev {
         versions = prev.versions;
         if !versions.iter().any(|row| row.sha256 == prev.sha256) {
@@ -753,6 +1079,7 @@ fn define_named(name: &str, text: &str, source: &str, proposal: Option<&str>) ->
             });
         }
         kept_proposal = prev.proposal;
+        kept_applied = prev.applied;
     }
     let stored = Stored {
         name: name.to_string(),
@@ -761,6 +1088,7 @@ fn define_named(name: &str, text: &str, source: &str, proposal: Option<&str>) ->
         accession: accession.clone(),
         body: text.to_string(),
         proposal: proposal.map(str::to_string).or(kept_proposal),
+        applied: kept_applied,
         versions,
     };
     write_stored(&stored)?;
@@ -772,36 +1100,92 @@ fn define_named(name: &str, text: &str, source: &str, proposal: Option<&str>) ->
 
 fn store_deed(name: &str, version: i64, text: &str) -> Result<String> {
     ensure_deed_dir()?;
-    let tmp = std::env::temp_dir().join(format!(
-        "ljos-workflow-{name}-{version}-{}.org",
-        std::process::id()
-    ));
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "writes a file that is not a git hook"
-    )]
-    std::fs::write(&tmp, text).with_context(|| format!("workflow: write {}", tmp.display()))?;
+    let dir = std::env::temp_dir();
+    let (mut file, path) = exclusive_deed_temp(&dir, name, version)?;
+    std::io::Write::write_all(&mut file, text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("workflow: write {}", path.display()))?;
+    drop(file);
     let seat = crate::seat_name();
     let deed_name = format!("workflow-{name}-v{version}");
+    let path_s = path.display().to_string();
     let said = crate::run_captured(
         "deedar",
         &[
-            "create",
-            "file",
-            "--path",
-            &tmp.display().to_string(),
-            "--agent",
-            &seat,
-            "--name",
-            &deed_name,
+            "create", "file", "--path", &path_s, "--agent", &seat, "--name", &deed_name,
         ],
     );
-    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(&path);
     let said = said.with_context(|| format!("workflow: deedar did not store {name}"))?;
     accession_of(&said.stdout).ok_or_else(|| {
         anyhow::anyhow!(
             "workflow: deedar stored {name} and printed no deed id\n{}",
             said.stdout
+        )
+    })
+}
+
+/// Create a new file in `dir` with `O_EXCL` and `O_NOFOLLOW`.
+///
+/// The first name is the historical pid path. A symlink there makes `open`
+/// fail, and the next name is tried. The link target is not opened.
+fn exclusive_deed_temp(dir: &Path, name: &str, version: i64) -> Result<(std::fs::File, PathBuf)> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::FromRawFd;
+
+    let pid = std::process::id();
+    let mut names = vec![format!("ljos-workflow-{name}-{version}-{pid}.org")];
+    for n in 0..16 {
+        names.push(format!("ljos-workflow-{name}-{version}-{pid}-{n}.org"));
+    }
+    let mut last = None;
+    for file_name in names {
+        let path = dir.join(&file_name);
+        let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            bail!(
+                "workflow: temp path {} contains an interior NUL",
+                path.display()
+            );
+        };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "creates a deed temp file with O_EXCL and O_NOFOLLOW, never a git hook"
+        )]
+        // SAFETY: `c_path` is a NUL-terminated path. `O_EXCL` creates the
+        // name only when it is absent. `O_NOFOLLOW` fails when that name is
+        // a symlink instead of writing through it. The descriptor is owned
+        // by the `File` below.
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd >= 0 {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "owns the descriptor opened above, never stdout or stderr"
+            )]
+            // SAFETY: `fd` was just opened and nothing else owns it.
+            let file = unsafe { std::fs::File::from_raw_fd(fd) };
+            return Ok((file, path));
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EEXIST | libc::ELOOP) => {
+                last = Some(err);
+            }
+            _ => {
+                return Err(err)
+                    .with_context(|| format!("workflow: create a temp file at {}", path.display()))
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("no temp name"))).with_context(|| {
+        format!(
+            "workflow: create a temp file in {} without following a symlink",
+            dir.display()
         )
     })
 }
@@ -906,6 +1290,7 @@ fn scan(text: &str, source: &str) -> Result<Draft> {
                 current = Some(Building::begin(line, line_no, source)?);
                 continue;
             }
+            step.body_line.get_or_insert(line_no);
             step.body.push_str(line);
             step.body.push('\n');
             continue;
@@ -969,10 +1354,11 @@ struct Building {
     key: Option<(String, usize)>,
     depends: Option<(Vec<String>, usize)>,
     kind: Option<(Kind, usize)>,
-    role: Option<String>,
+    role: Option<(String, usize)>,
     quorum: Option<usize>,
     deed: Option<bool>,
     body: String,
+    body_line: Option<usize>,
 }
 
 impl Building {
@@ -992,6 +1378,7 @@ impl Building {
             quorum: None,
             deed: None,
             body: String::new(),
+            body_line: None,
         })
     }
 }
@@ -1024,7 +1411,7 @@ fn read_prop(step: &mut Building, line: &str, line_no: usize, source: &str) -> R
             };
             step.kind = Some((kind, line_no));
         }
-        "ROLE" => step.role = Some(value.to_string()),
+        "ROLE" => step.role = Some((value.to_string(), line_no)),
         "QUORUM" => {
             let n: usize = value.parse().map_err(|_| {
                 anyhow::anyhow!(
@@ -1070,16 +1457,30 @@ fn finish_step(step: &Building, source: &str) -> Result<Step> {
     let Some((kind, kind_line)) = step.kind else {
         bail!("workflow: {source}:{key_line}: {key} has no :KIND:");
     };
+    let key_hits = crate::scrub::scan_step_key(&key, key_line);
+    if !key_hits.is_empty() {
+        bail!(
+            "workflow: {source}: step key {key:?} failed public check: {}",
+            key_hits.join("; ")
+        );
+    }
+    let leading_blank_lines = step.body.chars().take_while(|c| *c == '\n').count();
     Ok(Step {
         key,
         title: step.title.clone(),
         depends,
         kind,
-        role: step.role.clone(),
+        role: step.role.as_ref().map(|(value, _)| value.clone()),
         quorum: step.quorum,
         deed: step.deed,
-        body: step.body.trim().to_string(),
+        body: step.body.trim_matches('\n').to_string(),
         line: step.line,
+        body_line: step
+            .body_line
+            .unwrap_or(step.line)
+            .saturating_add(leading_blank_lines),
+        key_line,
+        role_line: step.role.as_ref().map(|(_, line)| *line),
         kind_line,
         depends_line,
     })
@@ -1149,10 +1550,11 @@ fn validate(draft: Draft) -> Result<Skeleton> {
             );
         }
     }
-    let (title, _) = draft.title.unwrap();
+    let (title, title_line) = draft.title.unwrap();
     let (version, version_line) = draft.version.unwrap();
     Ok(Skeleton {
         title,
+        title_line,
         version,
         version_line,
         steps: draft.steps,
@@ -1256,6 +1658,33 @@ fn topo(skel: &Skeleton) -> Result<Vec<String>> {
     Ok(order)
 }
 
+fn public_hits(skel: &Skeleton) -> Vec<String> {
+    let screen = crate::scrub::public_screen();
+    public_hits_with_screen(skel, &screen)
+}
+
+fn public_hits_with_screen(skel: &Skeleton, screen: &crate::public_text::Screen) -> Vec<String> {
+    let mut hits = crate::scrub::scan_body_with_screen(&skel.title, skel.title_line, screen);
+    for step in &skel.steps {
+        hits.extend(crate::scrub::scan_body_with_screen(
+            &step.title,
+            step.line,
+            screen,
+        ));
+        if let (Some(role), Some(line)) = (&step.role, step.role_line) {
+            hits.extend(crate::scrub::scan_role_with_screen(role, line, screen));
+        }
+        if !step.body.is_empty() {
+            hits.extend(crate::scrub::scan_body_with_screen(
+                &step.body,
+                step.body_line,
+                screen,
+            ));
+        }
+    }
+    hits
+}
+
 fn render_org(skel: &Skeleton) -> String {
     let order = topo(skel).unwrap_or_else(|_| skel.steps.iter().map(|s| s.key.clone()).collect());
     let mut out = format!("#+title: {}\n#+version: {}\n\n", skel.title, skel.version);
@@ -1288,40 +1717,26 @@ fn render_org(skel: &Skeleton) -> String {
         }
         out.push('\n');
     }
-    out.push_str("#+begin_src dot\n");
-    out.push_str("digraph workflow {\n");
-    out.push_str("  rankdir=LR;\n");
-    for key in &order {
-        let Some(step) = skel.steps.iter().find(|s| s.key == *key) else {
-            continue;
-        };
-        out.push_str(&format!(
-            "  \"{}\" [label=\"{}\"];\n",
-            dot_escape(&step.key),
-            dot_escape(&step.title)
-        ));
-    }
+    out.push_str("#+begin_example\n");
     for key in &order {
         let Some(step) = skel.steps.iter().find(|s| s.key == *key) else {
             continue;
         };
         for dep in &step.depends {
-            out.push_str(&format!(
-                "  \"{}\" -> \"{}\";\n",
-                dot_escape(dep),
-                dot_escape(&step.key)
-            ));
+            out.push_str(dep);
+            out.push_str(" -> ");
+            out.push_str(&step.key);
+            out.push('\n');
         }
     }
-    out.push_str("}\n");
-    out.push_str("#+end_src\n");
+    out.push_str("#+end_example\n");
     out
 }
 
-fn dot_escape(text: &str) -> String {
-    text.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', " ")
+/// Test helper that exercises the same screen as workflow author text.
+#[cfg(test)]
+fn rendered_page_hits(page: &str, screen: &crate::public_text::Screen) -> Vec<String> {
+    crate::scrub::scan_public_with_screen(page, screen)
 }
 
 fn fill_text(
@@ -1347,6 +1762,11 @@ fn fill_text(
                 "workflow: {source}:{line}: unknown variable {key}; pass it with `--var {key}=VALUE`"
             );
         };
+        if value_has_break_or_control(value) {
+            bail!(
+                "workflow: {source}:{line}: `--var` value for `{key}` contains a line break or control character"
+            );
+        }
         out.push_str(value);
         rest = &after[end + 2..];
     }
@@ -1732,7 +2152,7 @@ fn has_open_blocker(
         .iter()
         .any(|blocker| match state_by_id.get(blocker.as_str()) {
             Some(state) => !is_closed(state),
-            None => true,
+            None => false,
         })
 }
 
@@ -1754,15 +2174,73 @@ fn children_of(
     out
 }
 
-fn open_blockers(
-    recs: &[vissue_core::views::IssueRec],
-    rows: &[RunStep],
-) -> Vec<(String, String, String, String)> {
+struct OpenBlocker {
+    step: String,
+    id: String,
+    state: String,
+    title: String,
+    via_edge: bool,
+}
+
+fn open_blockers(recs: &[vissue_core::views::IssueRec], rows: &[RunStep]) -> Vec<OpenBlocker> {
+    let rec_by_id: BTreeMap<&str, &vissue_core::views::IssueRec> = recs
+        .iter()
+        .map(|rec| (rec.heading.id.as_str(), rec))
+        .collect();
+    let id_by_key: BTreeMap<&str, &str> = rows
+        .iter()
+        .map(|row| (row.key.as_str(), row.id.as_str()))
+        .collect();
     let mut out = Vec::new();
     for row in rows {
+        let mut seen = BTreeSet::new();
         for (id, state, title) in children_of(recs, &row.id) {
-            if !is_closed(&state) {
-                out.push((row.key.clone(), id, state, title));
+            if !is_closed(&state) && seen.insert(id.clone()) {
+                out.push(OpenBlocker {
+                    step: row.key.clone(),
+                    id,
+                    state,
+                    title,
+                    via_edge: false,
+                });
+            }
+        }
+        let dep_ids: BTreeSet<&str> = row
+            .depends
+            .iter()
+            .filter_map(|dep| id_by_key.get(dep.as_str()).copied())
+            .collect();
+        if let Some(rec) = rec_by_id.get(row.id.as_str()) {
+            let mut blocked = rec.heading.blocked_by();
+            blocked.sort();
+            for blocker_id in blocked {
+                if dep_ids.contains(blocker_id.as_str()) {
+                    continue;
+                }
+                match rec_by_id.get(blocker_id.as_str()) {
+                    Some(b) => {
+                        if !is_closed(&b.heading.state) && seen.insert(blocker_id.clone()) {
+                            out.push(OpenBlocker {
+                                step: row.key.clone(),
+                                id: blocker_id,
+                                state: b.heading.state.clone(),
+                                title: b.heading.title.clone(),
+                                via_edge: true,
+                            });
+                        }
+                    }
+                    None => {
+                        if seen.insert(blocker_id.clone()) {
+                            out.push(OpenBlocker {
+                                step: row.key.clone(),
+                                id: blocker_id,
+                                state: "MISSING".into(),
+                                title: "missing blocker ticket".into(),
+                                via_edge: true,
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -1783,10 +2261,20 @@ fn signoff_lines(
             missing.push(format!("{} is {}", row.key, row.state));
         }
     }
-    for (step, id, state, title) in open_blockers(recs, rows) {
-        missing.push(format!(
-            "blocker {id} is open under {step}: {title} ({state})"
-        ));
+    for b in open_blockers(recs, rows) {
+        if b.state == "MISSING" {
+            continue;
+        } else if b.via_edge {
+            missing.push(format!(
+                "blocker {} is open blocking {}: {} ({})",
+                b.id, b.step, b.title, b.state
+            ));
+        } else {
+            missing.push(format!(
+                "blocker {} is open under {}: {} ({})",
+                b.id, b.step, b.title, b.state
+            ));
+        }
     }
     match crate::reap::gate_quorum(&sign.id, sign.quorum, None) {
         Ok(crate::reap::QuorumGate::Met { .. }) => {}
@@ -1899,6 +2387,13 @@ mod tests {
         parse_skeleton(text, "sample.org")
     }
 
+    fn fixed_public_screen() -> crate::public_text::Screen {
+        crate::public_text::Screen {
+            seats: vec!["kiln-q7zz".to_string()],
+            internal: false,
+        }
+    }
+
     const OK: &str = "\
 #+title: Release
 #+version: 1
@@ -1928,6 +2423,87 @@ Notes for {{version}}.
 :END:
 Options: ship, hold
 ";
+
+    #[test]
+    fn a_name_like_src_dir_renders_and_inline_babel_is_refused() {
+        let prose = OK.replace(
+            "Notes for {{version}}.",
+            "Set the src_dir option and keep my_src_file{x} as it is.",
+        );
+        let page = render_skeleton(&skel(&prose).unwrap()).unwrap();
+        assert!(page.contains("src_dir option"), "{page}");
+        let screen = fixed_public_screen();
+        for line in [
+            "src_sh{ls}",
+            "run src_python[:var x=1]{x+1} now",
+            "call_check(1)",
+            "call_check[:var x=1](1)",
+        ] {
+            assert_eq!(
+                rendered_page_hits(line, &screen),
+                vec!["line 1 contains Org structure".to_string()],
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn babel_written_in_another_case_or_encoded_is_refused() {
+        let screen = fixed_public_screen();
+        for line in [
+            "#+BEGIN_SRC sh",
+            "#+\u{0392}EGIN_SRC sh",
+            "#+\u{ff22}egin_src sh",
+            "%23%2Bbegin_src sh",
+            "&#35;+CALL: x()",
+            "SRC_SH{ls}",
+            "#+begin=5Fsrc sh",
+            ":RESULTS: silent",
+        ] {
+            assert_eq!(
+                rendered_page_hits(line, &screen),
+                vec!["line 1 contains Org structure".to_string()],
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_roster_is_checked_in_each_render_field_and_the_page() {
+        fn assert_refused(skel: &Skeleton, screen: &crate::public_text::Screen, line: usize) {
+            assert_eq!(
+                public_hits_with_screen(skel, screen),
+                vec![format!("line {line} contains seat name")]
+            );
+            let page = render_org(skel);
+            assert!(
+                rendered_page_hits(&page, screen)
+                    .iter()
+                    .any(|hit| hit.ends_with("contains seat name")),
+                "{page}"
+            );
+        }
+
+        let screen = fixed_public_screen();
+        let clean = skel(OK).unwrap();
+
+        let mut title = clean.clone();
+        title.title = "Release kiln-q7zz".to_string();
+        assert_refused(&title, &screen, title.title_line);
+
+        let mut step_title = clean.clone();
+        step_title.steps[0].title = "Ask kiln-q7zz".to_string();
+        assert_refused(&step_title, &screen, step_title.steps[0].line);
+
+        let mut role = clean.clone();
+        role.steps[0].role = Some("kiln-q7zz".to_string());
+        role.steps[0].role_line = Some(role.steps[0].line);
+        assert_refused(&role, &screen, role.steps[0].line);
+
+        let mut body = clean;
+        body.steps[0].body = "Ask kiln-q7zz for notes.".to_string();
+        assert_refused(&body, &screen, body.steps[0].body_line);
+    }
 
     #[test]
     fn a_valid_skeleton_parses_and_fills() {
@@ -2051,26 +2627,29 @@ Options: ship, hold
     }
 
     #[test]
-    fn render_is_stable_and_scrubbed() {
-        let text = OK.replace(
-            "Notes for {{version}}.",
-            "Notes for {{version}} live in /home/alice/src.\nReviewed by Claude.\nRun bc-abcdef12 later.",
-        );
+    fn render_is_stable_and_refuses_private_text() {
+        let text = OK.replace("Notes for {{version}}.", "Keep this prose byte for byte.");
         let parsed = skel(&text).unwrap();
-        let once = render_skeleton(&parsed);
-        let twice = render_skeleton(&parsed);
+        let once = render_skeleton(&parsed).unwrap();
+        let twice = render_skeleton(&parsed).unwrap();
         assert_eq!(once, twice);
         assert!(once.contains("#+title: Release"), "{once}");
-        assert!(once.contains("#+begin_src dot"), "{once}");
+        assert!(!once.to_ascii_lowercase().contains("#+begin_src"), "{once}");
+        assert!(once.contains("#+begin_example"), "{once}");
         assert!(
             once.find("* Write the changelog").unwrap() < once.find("* Bump the version").unwrap()
         );
-        assert!(once.contains("\"changelog\" -> \"version\""), "{once}");
-        assert!(!once.contains("/home/alice"), "{once}");
-        assert!(!once.to_ascii_lowercase().contains("claude"), "{once}");
-        assert!(!once.contains("bc-abcdef12"), "{once}");
+        assert!(once.contains("changelog -> version"), "{once}");
+        assert!(once.contains("Keep this prose byte for byte."), "{once}");
         let order = topo(&parsed).unwrap();
         assert_eq!(order, ["changelog", "version", "signoff"]);
+
+        let private = OK.replace("Notes for {{version}}.", "Read /home/alice/src today.");
+        let err = render_skeleton(&skel(&private).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("line "), "{err}");
+        assert!(err.contains("private path"), "{err}");
     }
 
     #[test]
