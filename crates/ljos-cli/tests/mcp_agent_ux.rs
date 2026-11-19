@@ -254,6 +254,42 @@ fn descriptions_are_one_line_of_single_spaces() {
     }
 }
 
+/// `ljos_bump_plan` says what it returns, and no description sends an agent to
+/// a tool this server does not list.
+#[test]
+fn the_bump_plan_description_names_only_what_ljos_serves() {
+    let mut session = Session::open(&[("LJOS_MCP_TOOLS", "all")]);
+    let tools = listed_tools(&mut session);
+    let plan = tools["ljos_bump_plan"]["description"].as_str().unwrap();
+    assert!(!plan.contains("eb_"), "{plan}");
+    let mut found = Vec::new();
+    descriptions(&tools["ljos_bump_plan"], "ljos_bump_plan", &mut found);
+    for (at, text) in &found {
+        assert!(!text.contains("eb_package_bump"), "{at}: {text}");
+    }
+    for word in ["made", "held", "would make", "dry_run"] {
+        assert!(plan.contains(word), "{word} missing from {plan}");
+    }
+    for (name, tool) in &tools {
+        let mut found = Vec::new();
+        descriptions(tool, name, &mut found);
+        for (at, text) in &found {
+            for token in text
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|t| t.starts_with("ljos_") && t.len() > 5)
+            {
+                if token.ends_with('_') {
+                    continue;
+                }
+                assert!(
+                    tools.contains_key(token),
+                    "{at} names {token}, which this server does not list: {text}"
+                );
+            }
+        }
+    }
+}
+
 /// The tools `tools/list` gives, by name.
 fn listed_tools(session: &mut Session) -> std::collections::BTreeMap<String, serde_json::Value> {
     let listed = session.request("tools/list", serde_json::json!({}));

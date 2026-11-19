@@ -40,6 +40,7 @@ the modules built before it; ``ready`` is the frontier a seat can sit on, and ``
 refuses a module whose blockers are still open. The ids are a hash of
 the module and the generation, so running it again after the bundle
 changed adds the new modules and keeps the rest.
+Over MCP, ``ljos_bump_plan`` does the same, and its ``dry_run`` argument is ``--dry-run``. It reads ``locks/default.lock.json`` and ``package.sbom.cdx.json`` in the bundle directory, and returns one row per module with its id, module, recipe, blockers, and a result of ``made``, ``held`` or ``would make``. The core set leaves the tool out; ``LJOS_MCP_TOOLS=core,bump_plan`` adds it.
 
 When the campaign ends, its typed findings are the lessons:
 

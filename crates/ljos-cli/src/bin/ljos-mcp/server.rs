@@ -3332,7 +3332,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this after eb_package_bump on a generation bump, before anybody builds: put the bundle's modules on the tracker as child issues of the bump ticket, blockers along the dependency edges, the same ids on every run. vissue_ready then lists the modules a seat can build now, and ljos_sitting refuses the rest until their blockers close. With dry_run the rows come back and nothing is written.",
+        description = "Call this to put a bundle of EasyBuild modules on the tracker before anybody builds. It reads `locks/default.lock.json` and `package.sbom.cdx.json` in the `bundle` directory, files one child issue per module under the bump ticket in `parent`, and blocks each on the modules built before it. The ids are the same on every run, so a rerun keeps what exists and adds what is missing. It returns one row per module with its id, module, recipe, blockers and result (`made`, `held` or `would make`). `ljos_ready` then lists the modules a seat can build now, and `ljos_sitting` refuses the rest until their blockers close. With dry_run the rows come back and nothing is written.",
         annotations(
             title = "Plan a bump on the tracker",
             read_only_hint = false,
@@ -3745,7 +3745,7 @@ pub struct FindingsArgs {
 /// A bundle to put on the tracker.
 #[derive(Deserialize, JsonSchema)]
 pub struct BumpPlanArgs {
-    /// The bundle directory `eb_package_bump` wrote (`out_dir`).
+    /// The bundle directory: the one with `locks/default.lock.json` and `package.sbom.cdx.json` in it.
     pub bundle: String,
     /// The tracker project the module issues go in.
     pub project: String,
