@@ -497,6 +497,25 @@ fn revise_stores_the_next_version_after_the_proposal_settles() {
         disk.contains("#+version: 1"),
         "apply rewrites the stored copy, not the file\n{disk}"
     );
+
+    let second = board.ok(&[
+        "workflow",
+        "revise",
+        "release",
+        "--apply",
+        path.to_str().unwrap(),
+    ]);
+    assert!(
+        second.contains("already applied"),
+        "a second apply stored another version:\n{second}"
+    );
+    assert!(
+        !second.contains("version 3"),
+        "a second apply bumped the version:\n{second}"
+    );
+    let status = board.ok(&["workflow", &parent]);
+    assert!(status.contains("version 2"), "{status}");
+    assert!(!status.contains("version 3"), "{status}");
 }
 
 #[test]
@@ -671,215 +690,6 @@ fn start_keeps_the_pinned_version_after_a_newer_define() {
 }
 
 #[test]
-#[cfg(any())]
-fn render_drops_versioned_models_and_seat_names() {
-    let board = Board::new();
-    let body = SKEL.replace(
-        "Notes for {{version}}.",
-        "Notes for {{version}}.\nReviewed by GPT-4 and seat saddle.\nPacked by saddle.\n",
-    );
-    let path = board.write_skel("leak.org", &body);
-    let out = board.dir.path().join("page.org");
-    let out_s = out.to_str().unwrap();
-    board.ok(&[
-        "workflow",
-        "render",
-        "leak",
-        "--file",
-        path.to_str().unwrap(),
-        "--out",
-        out_s,
-    ]);
-    let page = std::fs::read_to_string(&out).unwrap();
-    assert!(page.contains("Notes for {{version}}."), "{page}");
-    assert!(!page.contains("GPT-4"), "{page}");
-    assert!(!page.to_ascii_lowercase().contains("saddle"), "{page}");
-    assert!(!page.to_ascii_lowercase().contains("seat saddle"), "{page}");
-
-    std::fs::write(&out, format!("{page}Reviewed by GPT-4 and seat saddle.\n")).unwrap();
-    let err = board.fail(&[
-        "workflow",
-        "render",
-        "leak",
-        "--file",
-        path.to_str().unwrap(),
-        "--out",
-        out_s,
-        "--check",
-    ]);
-    assert!(
-        err.contains("model") || err.contains("seat") || err.contains("differs"),
-        "{err}"
-    );
-    assert!(!err.contains("matches"), "{err}");
-}
-
-#[test]
-#[cfg(any())]
-fn render_scrubs_all_adversarial_classes_and_passes_check_and_org_lint() {
-    let board = Board::new();
-    let adv = concat!("\
-#+title: \u{ff27}\u{ff30}\u{ff34}4 Release
-#+version: 1
-
-* Check Cl\u{200b}aude and [[[file:/etc/passwd][x]]]
-:PROPERTIES:
-:STEP: check
-:DEPENDS:
-:KIND: do
-:ROLE: seat saddle
-:END:
-
-Update Cargo.toml to v1.2.3, e.g. the manifest, i.e. the version.
-Cl\u{200b}aude wrote this note.
-\u{ff27}\u{ff30}\u{ff34} drafted this line.
-GPT4 checked it.
-Claude3 verified it.
-ChatGPT, Anthropic, OpenAI, Gemini, Grok, Copilot, Llama, Mistral, Codex, Composer, Cursor reviewed it.
-Run a subagent, chatbot, LLM, and AI agent on it.
-Read file:///home/x and /home/x/repo today.
-Export GITHUB_TOKEN=zzz and KEY=abc with password: x before running.
-Slack x", "ox", "b-12345-abcde and gh", "p_1234567890abcdef and github", "_pat_11ABC_xyz and sk", "-proj-123456 and AKI", "AIOSFODNN7EXAMPLE.
-Connect 10.0.0.1 and 2001:db8::1 and [::1]:8761 on box.tail1234.ts.net or db.internal or nas.local.
-Mail alice@example.com or seat:carol or saddle about it.
-Click [[[file:/etc/passwd][x]]] and [[file:/home/x][x]] and [[https://example.com][link]] and [fn:1].
-
-* Sign off
-:PROPERTIES:
-:STEP: signoff
-:DEPENDS: check
-:KIND: signoff
-:END:
-
-Options: ship, hold
-");
-    let path = board.write_skel("adv.org", adv);
-    let out = board.dir.path().join("adv-public.org");
-    let out_s = out.to_str().unwrap();
-    board.ok(&[
-        "workflow",
-        "render",
-        "adv",
-        "--file",
-        path.to_str().unwrap(),
-        "--out",
-        out_s,
-    ]);
-    let page = std::fs::read_to_string(&out).unwrap();
-    assert!(page.contains("Cargo.toml"), "{page}");
-    assert!(page.contains("v1.2.3"), "{page}");
-    assert!(page.contains("e.g."), "{page}");
-    assert!(page.contains("i.e."), "{page}");
-    assert!(page.contains("* check"), "{page}");
-    assert!(page.contains("#+title: Workflow"), "{page}");
-    for leaked in [
-        "Claude",
-        "claude",
-        "GPT",
-        "gpt",
-        "ChatGPT",
-        "Anthropic",
-        "OpenAI",
-        "Gemini",
-        "Grok",
-        "Copilot",
-        "Llama",
-        "Mistral",
-        "Codex",
-        "Composer",
-        "Cursor",
-        "subagent",
-        "chatbot",
-        "LLM",
-        "AI agent",
-        "file://",
-        "file:/",
-        "/home/x",
-        "/etc/passwd",
-        "GITHUB_TOKEN",
-        "zzz",
-        "password:",
-        concat!("x", "oxb-"),
-        concat!("gh", "p_"),
-        concat!("githu", "b_pat_"),
-        concat!("s", "k-proj"),
-        concat!("AK", "IA"),
-        "10.0.0.1",
-        "2001:db8::1",
-        "::1",
-        "ts.net",
-        "db.internal",
-        "nas.local",
-        "alice@example.com",
-        "saddle",
-        "carol",
-        "[[",
-        "]]",
-        "[fn:1]",
-        "\u{200b}",
-    ] {
-        assert!(!page.contains(leaked), "leaked {leaked:?} in:\n{page}");
-    }
-
-    let checked = board.ok(&[
-        "workflow",
-        "render",
-        "adv",
-        "--file",
-        path.to_str().unwrap(),
-        "--out",
-        out_s,
-        "--check",
-    ]);
-    assert!(checked.contains("matches"), "{checked}");
-
-    if std::path::Path::new("/usr/bin/emacs").is_file() {
-        let lint = Command::new("/usr/bin/emacs")
-            .args([
-                "--batch",
-                "-Q",
-                "--eval",
-                "(progn (require (quote org)) (require (quote org-lint)) (find-file (car command-line-args-left)) (let ((issues (org-lint))) (when issues (dolist (i issues) (message \"%S\" i)) (kill-emacs 1))))",
-                out_s,
-            ])
-            .output()
-            .unwrap();
-        assert!(lint.status.success(), "org-lint failed:\n{}", text(&lint));
-    }
-
-    for dirty_line in [
-        "Cl\u{200b}aude\n",
-        "\u{ff27}\u{ff30}\u{ff34}\n",
-        "GPT4\n",
-        "Claude3\n",
-        "subagent\n",
-        "file:///home/x\n",
-        "GITHUB_TOKEN=zzz\n",
-        "password: x\n",
-        concat!("x", "ox", "b-12345-abcde\n"),
-        concat!("github", "_pat_11ABC_xyz\n"),
-        "10.0.0.1\n",
-        "2001:db8::1\n",
-        "box.ts.net\n",
-        "alice@example.com\n",
-        "[[[file:/etc/passwd][x]]]\n",
-    ] {
-        std::fs::write(&out, format!("{page}{dirty_line}")).unwrap();
-        let result = board.ljos(&[
-            "workflow",
-            "render",
-            "adv",
-            "--file",
-            path.to_str().unwrap(),
-            "--out",
-            out_s,
-            "--check",
-        ]);
-        assert!(!err.contains("matches"), "accepted {dirty_line:?}: {err}");
-    }
-}
-
-#[test]
 fn render_keeps_the_precision_corpus_byte_for_byte() {
     let board = Board::new();
     let corpus = "\
@@ -894,14 +704,18 @@ Ask Ai Weiwei.
 Use the Mistral wind.
 Cursor-based pagination.
 The term sonnet.
+hello3-mini
+xclaude sonnet 4
 firmware 1.2.3.4.
+ships 1.2.3.4
+release 1.2.3.4
 2.0.1.0.
 section 3.4.5.6.
 seat belt.
 add::fee.
 key=value.
 'the token is in the vault' (no value).
-Cargo.toml, v1.2.3, e.g., i.e., std::fs, Vec::new, 12:30, 1:02:03, TCP/IP.
+Cargo.toml, v1.2.3, e.g., i.e., std::fs::read, =std::fs::read=, Vec::new, 12:30, 1:02:03, TCP/IP.
 [[https://example.com][link]]
 ";
     for line in corpus.lines() {
@@ -988,6 +802,225 @@ fn render_refuses_each_sensitive_class_and_names_the_line() {
         );
         assert!(!out.exists(), "{prose:?} wrote an output");
     }
+}
+
+#[test]
+fn render_refuses_the_leak_corpus_and_names_each_line() {
+    let cases = [
+        (
+            concat!("token hf", "_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"),
+            "secret",
+        ),
+        (concat!("sk", "_live_51Habcdefghijklmnopqrstuv"), "secret"),
+        (concat!("sk", "_test_51Habcdefghijklmnopqrstuv"), "secret"),
+        (concat!("rk", "_live_51Habcdefghijklmnopqrstuv"), "secret"),
+        (
+            concat!(
+                "ey",
+                "JhbGciOiJIUzI1NiJ9.ey",
+                "JzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N"
+            ),
+            "secret",
+        ),
+        (concat!("-----BEGIN RSA PRIVATE", " KEY-----"), "secret"),
+        ("-----BEGIN CERTIFICATE-----", "secret"),
+        ("see https://user@example.com/x today", "secret"),
+        ("redis://:pw@cache/0", "secret"),
+        ("postgres://alice:secret@db/app", "secret"),
+        ("mysql://alice@db/app", "secret"),
+        ("mongodb+srv://alice:pw@cluster/db", "secret"),
+        ("amqp://alice:pw@mq/vhost", "secret"),
+        ("http://alice@203.0.113.5/x", "secret"),
+        ("X-API-Key: v", "secret"),
+        ("X-Auth-Token: abcdef", "secret"),
+        ("Proxy-Authorization: Basic dXNlcjpw", "secret"),
+        ("Authorization: Bearer abcdef", "secret"),
+        ("Authorization: token abcdef", "secret"),
+        ("Authorization: Basic X", "secret"),
+        ("see file:secret.org now", "private path"),
+        ("see [[file:secret.org][notes]] now", "private path"),
+        ("[[elisp:(message \"hi\")][go]]", "private path"),
+        ("[[shell:uname][go]]", "private path"),
+        ("[[help:org][h]]", "private path"),
+        ("[[info:emacs][i]]", "private path"),
+        ("see ~alice/.ssh/id_rsa now", "private path"),
+        ("hello\u{200b}world", "invisible character"),
+        ("hello\u{202e}world", "invisible character"),
+        ("\u{feff}hello", "invisible character"),
+        ("hello\u{2066}world", "invisible character"),
+        (
+            "Reviewed by G\u{0420}\u{0422}-4 today",
+            "tool or model name",
+        ),
+        ("\u{0422}\u{041e}KEN=hunter2", "secret"),
+        ("\u{0410}KIAIOSFODNN7EXAMPLE", "secret"),
+        ("ann@exampl\u{0301}e.com", "email"),
+        ("ann@example.xn--p1ai", "email"),
+        ("ping 127.0.0.1 now", "address"),
+        ("ping 169.254.1.1 now", "address"),
+        ("server at 1.2.3.4", "address"),
+        ("GPT4 wrote the note", "tool or model name"),
+        ("Claude3 wrote the note", "tool or model name"),
+        ("Gemini2 wrote the note", "tool or model name"),
+        ("Llama3 wrote the note", "tool or model name"),
+        (concat!("gh", "p_1234567890abcdef"), "secret"),
+        (concat!("AKI", "AIOSFODNN7EXAMPLE"), "secret"),
+    ];
+    let board = Board::new();
+    let body = cases
+        .iter()
+        .map(|(line, _)| *line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let org = SKEL.replace("Notes for {{version}}.", &body);
+    let path = board.write_skel("leaks.org", &org);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let out = board.dir.path().join("leaks-public.org");
+    let err = board.fail(&[
+        "workflow",
+        "render",
+        "leaks",
+        "--file",
+        path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(err.contains("public render refused"), "{err}");
+    assert!(!out.exists(), "refused render wrote {}", out.display());
+    for (prose, class) in cases {
+        let line_no = text
+            .lines()
+            .position(|line| line == prose)
+            .unwrap_or_else(|| panic!("missing line {prose:?}"))
+            + 1;
+        let hit = format!("line {line_no} contains {class}");
+        assert!(err.contains(&hit), "missing {hit} for {prose:?}:\n{err}");
+    }
+}
+
+#[test]
+fn render_refuses_var_breaks_and_org_titles() {
+    let board = Board::new();
+    let titled = SKEL
+        .replace("* Write the changelog", "* Ship {{version}}")
+        .replace("Notes for {{version}}.", "Notes only.");
+    let path = board.write_skel("var.org", &titled);
+    let out = board.dir.path().join("var-public.org");
+    let err = board.fail(&[
+        "workflow",
+        "render",
+        "var",
+        "--file",
+        path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--var",
+        "version=1.2.0\n* Injected heading",
+    ]);
+    assert!(err.contains("line break or control character"), "{err}");
+    assert!(!out.exists(), "a broken `--var` wrote {}", out.display());
+    let err = board.fail(&[
+        "workflow",
+        "render",
+        "var",
+        "--file",
+        path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--var",
+        "version=1.2.0\u{0001}bad",
+    ]);
+    assert!(err.contains("line break or control character"), "{err}");
+    assert!(!out.exists());
+
+    let org_title = SKEL.replace("* Write the changelog", "* #+begin_src shell");
+    let org_path = board.write_skel("title.org", &org_title);
+    let err = board.fail(&[
+        "workflow",
+        "render",
+        "title",
+        "--file",
+        org_path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(err.contains("Org structure"), "{err}");
+    assert!(!out.exists());
+}
+
+#[test]
+fn render_refuses_a_role_that_names_a_seat() {
+    let board = Board::new();
+    std::fs::write(
+        board.root.join("vissue.toml"),
+        "prefix = \"Software\"\nseats = [\"saddle\"]\n",
+    )
+    .unwrap();
+    let body = SKEL.replace(":KIND: do\n:END:", ":KIND: do\n:ROLE: saddle\n:END:");
+    let path = board.write_skel("role.org", &body);
+    let out = board.dir.path().join("role-public.org");
+    let err = board.fail(&[
+        "workflow",
+        "render",
+        "role",
+        "--file",
+        path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(err.contains("seat name"), "{err}");
+    assert!(err.contains("line "), "{err}");
+    assert!(!out.exists());
+
+    let author = SKEL.replace(":KIND: do\n:END:", ":KIND: do\n:ROLE: author\n:END:");
+    let author_path = board.write_skel("author.org", &author);
+    let author_out = board.dir.path().join("author-public.org");
+    board.ok(&[
+        "workflow",
+        "render",
+        "author",
+        "--file",
+        author_path.to_str().unwrap(),
+        "--out",
+        author_out.to_str().unwrap(),
+    ]);
+    let page = std::fs::read_to_string(&author_out).unwrap();
+    assert!(page.contains(":ROLE: author\n"), "{page}");
+}
+
+#[test]
+fn check_reports_a_secret_on_a_generated_line() {
+    let board = Board::new();
+    let path = board.write_skel("clean.org", SKEL);
+    let out = board.dir.path().join("clean-public.org");
+    let out_s = out.to_str().unwrap();
+    board.ok(&[
+        "workflow",
+        "render",
+        "clean",
+        "--file",
+        path.to_str().unwrap(),
+        "--out",
+        out_s,
+    ]);
+    let page = std::fs::read_to_string(&out).unwrap();
+    std::fs::write(
+        &out,
+        format!("{page}:STEP: {}\n", concat!("gh", "p_1234567890abcdef")),
+    )
+    .unwrap();
+    let err = board.fail(&[
+        "workflow",
+        "render",
+        "clean",
+        "--file",
+        path.to_str().unwrap(),
+        "--out",
+        out_s,
+        "--check",
+    ]);
+    assert!(err.contains("secret"), "{err}");
+    assert!(err.contains("line "), "{err}");
 }
 
 #[test]
@@ -1165,14 +1198,23 @@ fn start_lock_times_out_with_a_clear_error() {
     // SAFETY: `held` owns this descriptor through the command.
     assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
     let started = std::time::Instant::now();
-    let err = board.fail(&[
-        "workflow",
-        "--start",
-        "release",
-        &parent,
-        "--var",
-        "version=1.2.0",
-    ]);
+    let out = board
+        .cmd_as(
+            "saddle",
+            &[
+                "workflow",
+                "--start",
+                "release",
+                &parent,
+                "--var",
+                "version=1.2.0",
+            ],
+        )
+        .env("LJOS_WORKFLOW_LOCK_WAIT", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", text(&out));
+    let err = text(&out);
     assert!(started.elapsed() < std::time::Duration::from_secs(4));
     assert!(err.contains("timed out waiting for the run lock"), "{err}");
     assert!(err.contains(&parent), "{err}");

@@ -47,6 +47,21 @@ pub fn scan_step_key(text: &str, line: usize) -> Vec<String> {
     hits
 }
 
+/// Scan a `:ROLE:` value. A value that is a declared seat is a hit.
+#[must_use]
+pub fn scan_role(text: &str, line: usize) -> Vec<String> {
+    let mut hits = scan_author(text, line);
+    let normalized = normalize_line(text);
+    let trimmed = normalized.trim();
+    if declared_seats()
+        .iter()
+        .any(|seat| seat.eq_ignore_ascii_case(trimmed))
+    {
+        hits.push(format!("line {line} contains seat name"));
+    }
+    hits
+}
+
 /// Scan body text and reject normalized Org structure prefixes.
 #[must_use]
 pub fn scan_body(text: &str, first_line: usize) -> Vec<String> {
@@ -66,14 +81,27 @@ fn scan_with(text: &str, seats: &[String], skip_generated: bool, first_line: usi
     for (idx, line) in text.split_inclusive('\n').enumerate() {
         let line_no = first_line + idx;
         let body = line.strip_suffix('\n').unwrap_or(line);
-        if skip_generated && is_generated_line(body) {
-            continue;
+        if body.chars().any(is_invisible) {
+            hits.push(format!("line {line_no} contains invisible character"));
         }
         let normalized = normalize_line(body);
+        let chars: Vec<char> = normalized.chars().collect();
+        let generated = skip_generated && is_generated_line(body);
+        if generated {
+            let mut i = 0;
+            while i < chars.len() {
+                if let Some(end) = take_secret(&chars, i) {
+                    hits.push(format!("line {line_no} contains secret"));
+                    i = end;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
         if names_model_or_bot(&normalized) {
             hits.push(format!("line {line_no} contains tool or model name"));
         }
-        let chars: Vec<char> = normalized.chars().collect();
         let mut i = 0;
         while i < chars.len() {
             if let Some((end, kind)) = match_token(&chars, i, seats) {
@@ -122,12 +150,19 @@ fn is_invisible(c: char) -> bool {
     ignorable.contains(c) || gc.get(c) == GeneralCategory::Format || c == '\u{180E}'
 }
 
+fn is_nonspacing(c: char) -> bool {
+    let gc = CodePointMapData::<GeneralCategory>::new();
+    gc.get(c) == GeneralCategory::NonspacingMark
+}
+
+/// A copy for matching. The author's bytes stay as they were.
 fn normalize_line(line: &str) -> String {
-    let visible: String = line.chars().filter(|&c| !is_invisible(c)).collect();
-    visible
-        .nfkc()
-        .filter(|&c| !is_invisible(c))
+    let compatible: String = line.nfkc().filter(|&c| !is_invisible(c)).collect();
+    compatible
+        .nfd()
+        .filter(|&c| !is_nonspacing(c) && !is_invisible(c))
         .map(fold_lookalike)
+        .flat_map(char::to_lowercase)
         .collect()
 }
 
@@ -157,31 +192,31 @@ fn declared_seats() -> Vec<String> {
 
 fn fold_lookalike(c: char) -> char {
     match c {
-        'а' | 'α' | 'ɑ' => 'a',
-        'ь' => 'b',
-        'с' | 'ϲ' | 'ᴄ' => 'c',
+        'А' | 'а' | 'Α' | 'α' | 'ɑ' => 'a',
+        'В' | 'в' | 'ь' => 'b',
+        'С' | 'с' | 'Ϲ' | 'ϲ' | 'ᴄ' => 'c',
         'ԁ' | 'ɗ' => 'd',
-        'е' | 'є' | 'ε' | 'ᴇ' => 'e',
+        'Е' | 'е' | 'Ε' | 'ε' | 'є' | 'ᴇ' => 'e',
         'ғ' => 'f',
         'ɡ' => 'g',
-        'һ' | 'н' => 'h',
-        'і' | 'ї' | 'ι' | 'ɪ' => 'i',
-        'ј' | 'ʝ' => 'j',
-        'к' | 'κ' => 'k',
+        'Η' | 'һ' | 'Н' | 'н' => 'h',
+        'Ι' | 'І' | 'і' | 'ї' | 'ι' | 'ɪ' => 'i',
+        'Ј' | 'ј' | 'ʝ' => 'j',
+        'Κ' | 'К' | 'к' | 'κ' => 'k',
         'ӏ' | 'ⅼ' => 'l',
-        'м' | 'ᴍ' => 'm',
-        'ո' | 'п' | 'ν' => 'n',
-        'о' | 'ο' | 'σ' | 'ᴏ' => 'o',
-        'р' | 'ρ' => 'p',
+        'Μ' | 'М' | 'м' | 'ᴍ' => 'm',
+        'ո' | 'П' | 'п' | 'ν' => 'n',
+        'Ο' | 'О' | 'о' | 'ο' | 'σ' | 'ᴏ' => 'o',
+        'Ρ' | 'Р' | 'р' | 'ρ' => 'p',
         'ԛ' => 'q',
         'г' | 'ʀ' => 'r',
         'ѕ' | 'ꜱ' => 's',
-        'т' | 'τ' | 'ᴛ' => 't',
+        'Τ' | 'Т' | 'т' | 'τ' | 'ᴛ' => 't',
         'υ' | 'ս' => 'u',
         'ѵ' => 'v',
         'ԝ' | 'ω' => 'w',
-        'х' | 'χ' => 'x',
-        'у' | 'ү' | 'γ' => 'y',
+        'Χ' | 'Х' | 'х' | 'χ' => 'x',
+        'Υ' | 'У' | 'у' | 'ү' | 'γ' => 'y',
         'ᴢ' => 'z',
         other => other,
     }
@@ -237,15 +272,10 @@ fn has_product_version(chars: &[char], product: &str, joined: bool) -> bool {
             continue;
         }
         let mut n = at + needle.len();
-        if !joined {
-            if !chars.get(n).is_some_and(|c| matches!(c, ' ' | '-')) {
-                continue;
-            }
+        if chars.get(n).is_some_and(|c| matches!(c, ' ' | '-')) {
             while chars.get(n).is_some_and(|c| matches!(c, ' ' | '-')) {
                 n += 1;
             }
-        } else if chars.get(n) == Some(&'-') {
-            n += 1;
         }
         if joined && chars.get(n) == Some(&'v') {
             n += 1;
@@ -274,6 +304,9 @@ fn has_named_product_version(chars: &[char], product: &str, family: &str) -> boo
         if at + product.len() > chars.len() || chars[at..at + product.len()] != product {
             continue;
         }
+        if at > 0 && chars[at - 1].is_alphanumeric() {
+            continue;
+        }
         let mut n = at + product.len();
         if !chars.get(n).is_some_and(|c| matches!(c, ' ' | '-')) {
             continue;
@@ -296,8 +329,9 @@ fn has_named_product_version(chars: &[char], product: &str, family: &str) -> boo
 }
 
 fn has_o_series_mini(chars: &[char]) -> bool {
-    chars.windows(7).any(|window| {
-        window[0] == 'o'
+    chars.windows(7).enumerate().any(|(at, window)| {
+        (at == 0 || !chars[at - 1].is_alphanumeric())
+            && window[0] == 'o'
             && window[1].is_ascii_digit()
             && window[2] == '-'
             && window[3..] == ['m', 'i', 'n', 'i']
@@ -402,20 +436,66 @@ fn take_secret(chars: &[char], i: usize) -> Option<usize> {
     if let Some(end) = take_bearer(chars, i) {
         return Some(end);
     }
+    if let Some(end) = take_pem(chars, i) {
+        return Some(end);
+    }
+    if let Some(end) = take_jwt(chars, i) {
+        return Some(end);
+    }
     take_secret_prefix(chars, i)
 }
 
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+fn secret_name(name: &str) -> bool {
+    matches!(
+        name,
+        "token"
+            | "secret"
+            | "password"
+            | "passwd"
+            | "passphrase"
+            | "pass"
+            | "apikey"
+            | "credential"
+            | "credentials"
+            | "api_key"
+            | "access_token"
+            | "auth_token"
+            | "private_key"
+            | "signing_key"
+            | "client_secret"
+    ) || name.ends_with("_key")
+        || name.ends_with("_token")
+        || name.ends_with("_secret")
+        || name.ends_with("_password")
+        || name.ends_with("_passwd")
+        || name.ends_with("_passphrase")
+        || name.ends_with("_credential")
+        || name.ends_with("_credentials")
+        || name.ends_with("_auth")
+        || name.ends_with("_authorization")
+}
+
 fn take_secret_assign(chars: &[char], i: usize) -> Option<usize> {
-    if i > 0 && is_ident_char(chars[i - 1]) {
+    if i > 0 && is_name_char(chars[i - 1]) {
+        return None;
+    }
+    if chars.get(i) == Some(&'-') {
         return None;
     }
     let mut j = i;
     let mut has_alpha = false;
-    while j < chars.len() && is_ident_char(chars[j]) {
+    while j < chars.len() && is_name_char(chars[j]) {
         if chars[j].is_ascii_alphabetic() {
             has_alpha = true;
         }
         j += 1;
+    }
+    while j > i && chars[j - 1] == '-' {
+        j -= 1;
     }
     if !has_alpha || j >= chars.len() {
         return None;
@@ -431,50 +511,10 @@ fn take_secret_assign(chars: &[char], i: usize) -> Option<usize> {
     if sep != '=' && sep != ':' {
         return None;
     }
-    let ident: String = chars[i..ident_end]
-        .iter()
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    let eq_match = matches!(
-        ident.as_str(),
-        "token"
-            | "secret"
-            | "password"
-            | "passwd"
-            | "passphrase"
-            | "apikey"
-            | "credential"
-            | "credentials"
-    ) || ident.ends_with("_key")
-        || ident.ends_with("_token")
-        || ident.ends_with("_secret")
-        || ident.ends_with("_password")
-        || ident.ends_with("_passwd")
-        || ident.ends_with("_passphrase")
-        || ident.ends_with("_credential")
-        || ident.ends_with("_credentials")
-        || ident.ends_with("_auth");
-    let colon_match = matches!(
-        ident.as_str(),
-        "pass"
-            | "password"
-            | "passwd"
-            | "passphrase"
-            | "secret"
-            | "token"
-            | "api_key"
-            | "apikey"
-            | "access_token"
-            | "auth_token"
-            | "private_key"
-            | "signing_key"
-            | "client_secret"
-    ) || ident.ends_with("_key")
-        || ident.ends_with("_token")
-        || ident.ends_with("_secret")
-        || ident.ends_with("_password")
-        || ident.ends_with("_passwd");
-    if (sep == '=' && !eq_match) || (sep == ':' && !colon_match) {
+    let ident: String = chars[i..ident_end].iter().collect();
+    let folded = ident.replace('-', "_");
+    let named = secret_name(&ident) || (ident.contains('-') && secret_name(&folded));
+    if !named {
         return None;
     }
     let mut end = j + 1;
@@ -506,21 +546,38 @@ fn take_secret_assign(chars: &[char], i: usize) -> Option<usize> {
 }
 
 fn take_url_credentials(chars: &[char], i: usize) -> Option<usize> {
-    let after = ["https://", "http://", "ssh://", "ftp://", "wss://", "ws://"]
-        .iter()
-        .find_map(|scheme| starts_with_ignore_ascii_case(chars, i, scheme))?;
-    let mut at = after;
-    while at < chars.len() && !is_url_stop(chars[at]) && chars[at] != '/' {
-        if chars[at] == '@' {
-            let authority: String = chars[after..at].iter().collect();
-            if authority.contains(':') {
-                return Some(at + 1);
-            }
-            return None;
-        }
-        at += 1;
+    if i > 0 && is_name_char(chars[i - 1]) {
+        return None;
     }
-    None
+    if !chars.get(i).is_some_and(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let mut j = i + 1;
+    while chars
+        .get(j)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(*c, '+' | '-' | '.'))
+    {
+        j += 1;
+    }
+    let user_start = starts_with_exact(chars, j, "://")?;
+    let mut k = user_start;
+    let mut at = None;
+    while k < chars.len() && !is_url_stop(chars[k]) && chars[k] != '/' {
+        if chars[k] == '@' {
+            at = Some(k);
+            break;
+        }
+        k += 1;
+    }
+    let at = at?;
+    if at == user_start {
+        return None;
+    }
+    let userinfo = &chars[user_start..at];
+    if !userinfo.contains(&':') && !userinfo.iter().any(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(at + 1)
 }
 
 fn take_authorization(chars: &[char], i: usize) -> Option<usize> {
@@ -550,7 +607,7 @@ fn take_authorization(chars: &[char], i: usize) -> Option<usize> {
             }) {
                 n += 1;
             }
-            return (n.saturating_sub(start) >= 4).then_some(n);
+            return (n > start).then_some(n);
         }
     }
     None
@@ -577,6 +634,67 @@ fn take_bearer(chars: &[char], i: usize) -> Option<usize> {
     }
     if j - tok_start < 4 {
         return None;
+    }
+    Some(j)
+}
+
+fn take_pem(chars: &[char], i: usize) -> Option<usize> {
+    if i > 0 && chars[i - 1] == '-' {
+        return None;
+    }
+    let mut j = starts_with_exact(chars, i, "-----begin ")?;
+    let label = j;
+    while j < chars.len() && chars[j] != '-' {
+        j += 1;
+    }
+    if j == label || !chars[label..j].iter().any(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    starts_with_exact(chars, j, "-----")
+}
+
+fn take_jwt(chars: &[char], i: usize) -> Option<usize> {
+    if i > 0 && (chars[i - 1].is_ascii_alphanumeric() || matches!(chars[i - 1], '_' | '-')) {
+        return None;
+    }
+    starts_with_exact(chars, i, "eyj")?;
+    let header = scan_b64(chars, i)?;
+    if header - i < 12 || chars.get(header) != Some(&'.') {
+        return None;
+    }
+    let payload_at = header + 1;
+    starts_with_exact(chars, payload_at, "eyj")?;
+    let payload = scan_b64(chars, payload_at)?;
+    if payload - payload_at < 12 || chars.get(payload) != Some(&'.') {
+        return None;
+    }
+    let sig_at = payload + 1;
+    let sig = scan_b64(chars, sig_at)?;
+    if sig - sig_at < 8 {
+        return None;
+    }
+    if chars
+        .get(sig)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '-'))
+    {
+        return None;
+    }
+    Some(sig)
+}
+
+fn scan_b64(chars: &[char], i: usize) -> Option<usize> {
+    let mut j = i;
+    if !chars
+        .get(j)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '-'))
+    {
+        return None;
+    }
+    while chars
+        .get(j)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '-'))
+    {
+        j += 1;
     }
     Some(j)
 }
@@ -624,6 +742,18 @@ fn take_secret_prefix(chars: &[char], i: usize) -> Option<usize> {
             return Some(end);
         }
     }
+    for prefix in ["sk_live_", "sk_test_", "rk_live_", concat!("h", "f_")] {
+        if let Some(after) = starts_with_exact(chars, i, prefix) {
+            let mut end = after;
+            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+            let min = if prefix == concat!("h", "f_") { 16 } else { 8 };
+            if end - after >= min {
+                return Some(end);
+            }
+        }
+    }
     if let Some(after) = starts_with_exact(chars, i, concat!("s", "k-")) {
         let mut end = after;
         while end < chars.len()
@@ -635,8 +765,8 @@ fn take_secret_prefix(chars: &[char], i: usize) -> Option<usize> {
             return Some(end);
         }
     }
-    if let Some(after) = starts_with_exact(chars, i, concat!("AK", "IA"))
-        .or_else(|| starts_with_exact(chars, i, "ASIA"))
+    if let Some(after) =
+        starts_with_exact(chars, i, "akia").or_else(|| starts_with_exact(chars, i, "asia"))
     {
         let mut end = after;
         while end < chars.len() && chars[end].is_ascii_alphanumeric() {
@@ -666,7 +796,7 @@ fn take_secret_prefix(chars: &[char], i: usize) -> Option<usize> {
             return Some(end);
         }
     }
-    if let Some(after) = starts_with_exact(chars, i, "AIza") {
+    if let Some(after) = starts_with_exact(chars, i, "aiza") {
         let mut end = after;
         while end < chars.len()
             && (chars[end].is_ascii_alphanumeric() || matches!(chars[end], '_' | '-'))
@@ -692,29 +822,57 @@ fn take_file_url(chars: &[char], i: usize) -> Option<usize> {
     if i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
         return None;
     }
-    let after = starts_with_ignore_ascii_case(chars, i, "file:")
-        .or_else(|| starts_with_ignore_ascii_case(chars, i, "file+sys:"))
-        .or_else(|| starts_with_ignore_ascii_case(chars, i, "file+emacs:"))?;
-    if !chars
-        .get(after)
-        .is_some_and(|c| matches!(*c, '/' | '~' | '.'))
-    {
+    let after = [
+        "file+sys:",
+        "file+emacs:",
+        "file:",
+        "elisp:",
+        "shell:",
+        "help:",
+        "info:",
+    ]
+    .iter()
+    .find_map(|prefix| starts_with_exact(chars, i, prefix))?;
+    if chars.get(after).is_none_or(|c| is_link_stop(*c)) {
         return None;
     }
     let mut end = after;
-    while end < chars.len() && !is_url_stop(chars[end]) {
+    while end < chars.len() && !is_link_stop(chars[end]) {
         end += 1;
     }
-    if end > after + 1 {
-        Some(end)
-    } else {
-        None
-    }
+    (end > after).then_some(end)
+}
+
+fn is_link_stop(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`' | '[' | ']' | ',' | ';')
 }
 
 fn take_path(chars: &[char], i: usize) -> Option<usize> {
-    if chars.get(i) == Some(&'~') && chars.get(i + 1) == Some(&'/') {
-        let mut end = i + 2;
+    if chars.get(i) == Some(&'~') {
+        if i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
+            return None;
+        }
+        if chars.get(i + 1) == Some(&'/') {
+            let mut end = i + 2;
+            while end < chars.len() && !is_url_stop(chars[end]) {
+                end += 1;
+            }
+            return Some(end);
+        }
+        let mut j = i + 1;
+        if !chars.get(j).is_some_and(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        while chars
+            .get(j)
+            .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(*c, '-' | '_' | '.'))
+        {
+            j += 1;
+        }
+        if chars.get(j) != Some(&'/') {
+            return None;
+        }
+        let mut end = j + 1;
         while end < chars.len() && !is_url_stop(chars[end]) {
             end += 1;
         }
@@ -791,7 +949,7 @@ fn take_email(chars: &[char], i: usize) -> Option<usize> {
         return None;
     }
     let tld = labels.last()?;
-    if tld.chars().count() < 2 || !tld.chars().all(char::is_alphabetic) {
+    if !tld_ok(tld) {
         return None;
     }
     if domain_end < chars.len()
@@ -800,6 +958,20 @@ fn take_email(chars: &[char], i: usize) -> Option<usize> {
         return None;
     }
     Some(domain_end)
+}
+
+fn tld_ok(tld: &str) -> bool {
+    if tld.chars().count() < 2 {
+        return false;
+    }
+    if tld.chars().all(char::is_alphabetic) {
+        return true;
+    }
+    let bytes = tld.as_bytes();
+    bytes.len() > 4
+        && bytes.starts_with(b"xn--")
+        && !tld.ends_with('-')
+        && tld.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 fn scan_domain(chars: &[char], start: usize) -> Option<usize> {
@@ -1060,8 +1232,10 @@ fn take_ipv4(chars: &[char], i: usize) -> Option<usize> {
     }
     let octets = address.octets();
     let private = octets[0] == 10
+        || octets[0] == 127
         || (octets[0] == 172 && (16..=31).contains(&octets[1]))
         || (octets[0] == 192 && octets[1] == 168)
+        || (octets[0] == 169 && octets[1] == 254)
         || (octets[0] == 100 && (64..=127).contains(&octets[1]));
     if !private && !has_port && !has_cidr && !has_address_context(chars, i) {
         return None;
@@ -1151,210 +1325,4 @@ fn seat_context_before(chars: &[char], at: usize) -> bool {
             | "ljos_seat"
             | "vissue_agent"
     )
-}
-
-#[cfg(all(test, any()))]
-mod tests {
-    use super::{scan_public, scan_with, scrub_public, scrub_with};
-
-    #[test]
-    fn paths_ids_and_model_lines_leave_the_page() {
-        let raw = "\
-#+title: Release
-Write notes in /home/alice/src/app today.
-The run is bc-abcdef12 and agent-zzzz9999.
-Reviewed by Claude before the tag.
-seat:carol packed LJOS_SEAT=carol into the note.
-The changelog is the public record.
-";
-        let once = scrub_public(raw);
-        let twice = scrub_public(&once);
-        assert_eq!(once, twice, "a second pass changes the page:\n{once}");
-        assert!(scan_public(&once).is_empty(), "{once}");
-        assert!(once.contains("#+title: Release"), "{once}");
-        assert!(
-            once.contains("The changelog is the public record."),
-            "{once}"
-        );
-        assert!(!once.contains("/home/alice"), "{once}");
-        assert!(!once.contains("bc-abcdef12"), "{once}");
-        assert!(!once.contains("agent-zzzz9999"), "{once}");
-        assert!(!once.to_ascii_lowercase().contains("claude"), "{once}");
-        assert!(!once.contains("carol"), "{once}");
-        assert!(!once.contains("LJOS_SEAT"), "{once}");
-    }
-
-    #[test]
-    fn ordinary_words_and_dotted_text_stay() {
-        let raw = "\
-Both the tag and the changelog ship.
-Update Cargo.toml to v1.2.3, e.g. the crate metadata, i.e. the version.
-Use arr[0][1] and see section 3.
-";
-        assert_eq!(scrub_public(raw), raw);
-        assert!(scan_public(raw).is_empty(), "{:?}", scan_public(raw));
-    }
-
-    #[test]
-    fn versioned_model_names_and_seat_mentions_leave() {
-        let raw = "\
-Reviewed by GPT-4 and seat saddle.
-Claude 3.5 wrote the note.
-Gemini 2 checked the page.
-gpt-5.6 drafted a line.
-Llama-3 left a comment.
-Ask seat saddle today.
-See section 3.
-The changelog is the public record.
-";
-        let once = scrub_public(raw);
-        let twice = scrub_public(&once);
-        assert_eq!(once, twice, "a second pass changes the page:\n{once}");
-        assert!(scan_public(&once).is_empty(), "{once}");
-        assert!(
-            once.contains("The changelog is the public record."),
-            "{once}"
-        );
-        assert!(once.contains("See section 3."), "{once}");
-        let lower = once.to_ascii_lowercase();
-        assert!(!lower.contains("gpt-4"), "{once}");
-        assert!(!lower.contains("gpt-5.6"), "{once}");
-        assert!(!lower.contains("claude"), "{once}");
-        assert!(!lower.contains("gemini"), "{once}");
-        assert!(!lower.contains("llama"), "{once}");
-        assert!(!lower.contains("saddle"), "{once}");
-        assert!(!lower.contains("seat saddle"), "{once}");
-
-        let seats = vec!["saddle".to_string()];
-        let named = scrub_with("Packed by saddle after review.\n", &seats);
-        assert!(!named.to_ascii_lowercase().contains("saddle"), "{named}");
-        assert!(named.contains("Packed by"), "{named}");
-        assert!(named.contains("after review."), "{named}");
-        assert!(scan_with(&named, &seats).is_empty(), "{named}");
-    }
-
-    #[test]
-    fn unicode_panics_and_obfuscated_models_are_scrubbed() {
-        let raw = "\
-Cl\u{200b}aude reviewed this.
-\u{ff27}\u{ff30}\u{ff34} drafted this.
-\u{ff27}\u{ff30}\u{ff34}\u{ff14} checked this.
-C\u{00ad}l\u{200d}aude\u{feff}3 helped.
-seat s\u{200b}addle checked it.
-\u{ff30}acked cleanly with \u{ff56}\u{ff11}.\u{ff12}.\u{ff13}.
-";
-        let once = scrub_public(raw);
-        let twice = scrub_public(&once);
-        assert_eq!(once, twice, "a second pass changed:\n{once}");
-        assert!(scan_public(&once).is_empty(), "{:?}", scan_public(&once));
-        assert!(!once.to_lowercase().contains("claude"), "{once}");
-        assert!(!once.to_lowercase().contains("gpt"), "{once}");
-        assert!(!once.to_lowercase().contains("saddle"), "{once}");
-        assert!(once.contains("Packed cleanly with v1.2.3."), "{once}");
-    }
-
-    #[test]
-    fn all_model_vendor_and_agent_classes_are_dropped() {
-        let lines = [
-            "GPT4 wrote the release note.",
-            "Claude3 checked the tag.",
-            "ChatGPT drafted a line.",
-            "Anthropic policy applies.",
-            "OpenAI endpoint note.",
-            "Gemini-2.5 verified it.",
-            "Grok-4.7 reviewed it.",
-            "Copilot suggested a patch.",
-            "Llama3 ran locally.",
-            "Mistral-7B summarized.",
-            "Codex ran the build.",
-            "Composer-2.5 edited the file.",
-            "Cursor ran a cloud job.",
-            "Spawn a subagent for this.",
-            "Ask the sub-agent to verify.",
-            "A chatbot answered.",
-            "The LLM checked the diff.",
-            "An AI agent filed it.",
-            "An AI-agent noted it.",
-        ];
-        for line in lines {
-            let scrubbed = scrub_public(&format!("{line}\nKeep me.\n"));
-            assert_eq!(scrubbed, "Keep me.\n", "leaked line: {line:?}");
-            assert!(
-                !scan_public(line).is_empty(),
-                "scan_public missed: {line:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn secrets_paths_urls_ips_hosts_emails_and_links_are_scrubbed() {
-        let cases = [
-            ("file:///home/x", "file:///home/x"),
-            ("file:/etc/passwd", "file:/etc/passwd"),
-            ("/home/x/repo", "/home/x"),
-            ("GITHUB_TOKEN=zzz", "zzz"),
-            ("API_KEY=secret123", "secret123"),
-            ("KEY=abc123", "abc123"),
-            ("TOKEN=tok999", "tok999"),
-            ("password: x", "password"),
-            (concat!("x", "ox", "b-12345-abcde"), concat!("x", "oxb-")),
-            (concat!("x", "ox", "a-12345-abcde"), concat!("x", "oxa-")),
-            (concat!("x", "ox", "p-12345-abcde"), concat!("x", "oxp-")),
-            (concat!("gh", "p_1234567890abcdef"), concat!("gh", "p_")),
-            (concat!("gh", "o_1234567890abcdef"), concat!("gh", "o_")),
-            (concat!("gh", "u_1234567890abcdef"), "ghu_"),
-            (concat!("gh", "s_1234567890abcdef"), "ghs_"),
-            (concat!("gh", "r_1234567890abcdef"), "ghr_"),
-            (
-                concat!("github", "_pat_11ABCDEF_xyz"),
-                concat!("githu", "b_pat_"),
-            ),
-            (concat!("sk", "-proj-abc123456"), concat!("s", "k-proj")),
-            (concat!("AKI", "AIOSFODNN7EXAMPLE"), concat!("AK", "IA")),
-            ("10.0.0.1", "10.0.0.1"),
-            ("192.168.1.42:8080", "192.168.1.42"),
-            ("fe80::1", "fe80::1"),
-            ("2001:db8::1", "2001:db8::1"),
-            ("[::1]:8761", "::1"),
-            ("box.tail1234.ts.net", "ts.net"),
-            ("db.internal", "db.internal"),
-            ("host.local", "host.local"),
-            ("alice@example.com", "alice@example.com"),
-            ("[[[file:/etc/passwd][x]]]", "[["),
-            ("[[https://example.com][click]]", "[["),
-        ];
-        for (input, needle) in cases {
-            let line = format!("Prefix {input} suffix.\n");
-            let once = scrub_public(&line);
-            let twice = scrub_public(&once);
-            assert_eq!(once, twice, "not idempotent for {input:?}:\n{once}");
-            assert!(
-                !once.contains(needle),
-                "scrub_public leaked {needle:?} in {input:?} -> {once:?}"
-            );
-            assert!(
-                !once.contains("]]"),
-                "scrub_public leaked ]] in {input:?} -> {once:?}"
-            );
-            assert!(
-                !scan_public(input).is_empty(),
-                "scan_public missed {input:?}"
-            );
-            assert!(
-                scan_public(&once).is_empty(),
-                "scan_public flagged scrubbed output for {input:?}: {once:?} -> {:?}",
-                scan_public(&once)
-            );
-        }
-    }
-
-    #[test]
-    fn nested_smuggling_is_caught_by_fixed_point() {
-        let raw = "Cl[[file:/etc/passwd]]aude wrote this.\n";
-        let scrubbed = scrub_public(raw);
-        assert!(!scrubbed.to_lowercase().contains("claude"), "{scrubbed}");
-        assert!(!scrubbed.contains("file:"), "{scrubbed}");
-        assert!(!scrubbed.contains("[["), "{scrubbed}");
-        assert!(scan_public(&scrubbed).is_empty(), "{scrubbed}");
-    }
 }

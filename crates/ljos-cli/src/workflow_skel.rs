@@ -101,9 +101,18 @@ pub fn parse_vars(pairs: &[String]) -> Result<BTreeMap<String, String>> {
         if key.is_empty() {
             bail!("workflow: `{pair}` has an empty variable name");
         }
+        if value_has_break_or_control(value) {
+            bail!("workflow: `--var` value for `{key}` contains a line break or control character");
+        }
         map.insert(key.to_string(), value.to_string());
     }
     Ok(map)
+}
+
+fn value_has_break_or_control(value: &str) -> bool {
+    value
+        .chars()
+        .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
 }
 
 /// Parse and validate `text`. `source` is the path named in errors.
@@ -207,13 +216,26 @@ fn acquire_run_lock(parent: &str) -> Result<crate::CommitLock> {
     std::fs::create_dir_all(&lock_dir)
         .with_context(|| format!("workflow: create {}", lock_dir.display()))?;
     let lock_path = lock_dir.join(format!("workflow-start-{slug}.lock"));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + run_lock_wait();
     crate::CommitLock::acquire_by(&lock_path, deadline).ok_or_else(|| {
         anyhow::anyhow!(
             "workflow: timed out waiting for the run lock for {parent} at {}",
             lock_path.display()
         )
     })
+}
+
+/// How long `--start` waits for the per-run lock.
+///
+/// `LJOS_WORKFLOW_LOCK_WAIT` is a whole number of seconds. Unset, zero, or
+/// not a number keeps the thirty-second default.
+fn run_lock_wait() -> std::time::Duration {
+    let secs = std::env::var("LJOS_WORKFLOW_LOCK_WAIT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(30);
+    std::time::Duration::from_secs(secs)
 }
 
 /// File the steps of `name` under `parent`.
@@ -597,6 +619,11 @@ pub fn revise_apply(name: &str, file: &Path) -> Result<String> {
             "workflow: {name} has no proposal; `ljos workflow revise {name} --from PARENT` files one"
         );
     };
+    if stored.applied.as_deref() == Some(proposal.as_str()) {
+        return Ok(format!(
+            "proposal {proposal} for {name} is already applied\n"
+        ));
+    }
     match crate::reap::gate_quorum(&proposal, 2, None)? {
         crate::reap::QuorumGate::Met { .. } => {}
         crate::reap::QuorumGate::Short { have, needed }
@@ -614,6 +641,9 @@ pub fn revise_apply(name: &str, file: &Path) -> Result<String> {
     let next = stored.version + 1;
     let bumped = set_version(&text, next, file)?;
     let mut out = define_named(name, &bumped, &file.display().to_string(), Some(&proposal))?;
+    let mut stored = require_stored(name)?;
+    stored.applied = Some(proposal.clone());
+    write_stored(&stored)?;
     let _ = write_note(&proposal, &format!("revised {name} to version {next}"));
     if let Some(run) = proposal_parent(&proposal) {
         if let Ok(card) = crate::tracker_show_json(&run) {
@@ -712,6 +742,7 @@ struct Stored {
     accession: String,
     body: String,
     proposal: Option<String>,
+    applied: Option<String>,
     versions: Vec<StoredVer>,
 }
 
@@ -761,6 +792,7 @@ fn read_stored(name: &str) -> Result<Option<Stored>> {
         accession: v["accession"].as_str().unwrap_or("").to_string(),
         body: v["body"].as_str().unwrap_or("").to_string(),
         proposal: v["proposal"].as_str().map(str::to_string),
+        applied: v["applied"].as_str().map(str::to_string),
         versions,
     }))
 }
@@ -779,6 +811,7 @@ fn pinned_stored(latest: &Stored, sha: &str, parent: &str, name: &str) -> Result
         accession: old.accession.clone(),
         body: old.body.clone(),
         proposal: latest.proposal.clone(),
+        applied: latest.applied.clone(),
         versions: Vec::new(),
     })
 }
@@ -816,6 +849,7 @@ fn write_stored(stored: &Stored) -> Result<()> {
         "accession": stored.accession,
         "body": stored.body,
         "proposal": stored.proposal,
+        "applied": stored.applied,
         "versions": versions,
     });
     std::fs::write(&path, serde_json::to_string_pretty(&doc)?)
@@ -845,6 +879,7 @@ fn define_named(name: &str, text: &str, source: &str, proposal: Option<&str>) ->
     let accession = store_deed(name, skel.version, text)?;
     let mut versions = Vec::new();
     let mut kept_proposal = None;
+    let mut kept_applied = None;
     if let Some(prev) = prev {
         versions = prev.versions;
         if !versions.iter().any(|row| row.sha256 == prev.sha256) {
@@ -856,6 +891,7 @@ fn define_named(name: &str, text: &str, source: &str, proposal: Option<&str>) ->
             });
         }
         kept_proposal = prev.proposal;
+        kept_applied = prev.applied;
     }
     let stored = Stored {
         name: name.to_string(),
@@ -864,6 +900,7 @@ fn define_named(name: &str, text: &str, source: &str, proposal: Option<&str>) ->
         accession: accession.clone(),
         body: text.to_string(),
         proposal: proposal.map(str::to_string).or(kept_proposal),
+        applied: kept_applied,
         versions,
     };
     write_stored(&stored)?;
@@ -1358,11 +1395,11 @@ fn topo(skel: &Skeleton) -> Result<Vec<String>> {
 }
 
 fn public_hits(skel: &Skeleton) -> Vec<String> {
-    let mut hits = crate::scrub::scan_author(&skel.title, skel.title_line);
+    let mut hits = crate::scrub::scan_body(&skel.title, skel.title_line);
     for step in &skel.steps {
-        hits.extend(crate::scrub::scan_author(&step.title, step.line));
+        hits.extend(crate::scrub::scan_body(&step.title, step.line));
         if let (Some(role), Some(line)) = (&step.role, step.role_line) {
-            hits.extend(crate::scrub::scan_author(role, line));
+            hits.extend(crate::scrub::scan_role(role, line));
         }
         if !step.body.is_empty() {
             hits.extend(crate::scrub::scan_body(&step.body, step.body_line));
@@ -1462,6 +1499,11 @@ fn fill_text(
                 "workflow: {source}:{line}: unknown variable {key}; pass it with `--var {key}=VALUE`"
             );
         };
+        if value_has_break_or_control(value) {
+            bail!(
+                "workflow: {source}:{line}: `--var` value for `{key}` contains a line break or control character"
+            );
+        }
         out.push_str(value);
         rest = &after[end + 2..];
     }
