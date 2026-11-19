@@ -5,6 +5,54 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.45.3 (2026-11-19)
+
+### Fixes
+
+- A home under /tmp turns memory and the command guard off, and one line names that directory and the HOME to set.
+  `ljos doctor`, `ljos remember`, `ljos search` and `ljos consensus` print that line.
+  Search and consensus exit 1 instead of an empty match or an empty ballot.
+- An unknown command now names the verb it was reaching for. `ljos lessons` names `ljos search`, `ljos remember` and `ljos proposals`. A verb with an ending, the start of one verb, or a word that contains a verb names that verb as a command to run.
+- Default search output now says whether rows matched by meaning, words, or both, while `--explain` keeps the technical ranking method names.
+  Rows from an older pack that sends no ballot counts get the neutral line `Matched by the memory search.`
+- Distinct Claude Code session ids now cast separate votes from one parent shell while repeated votes from one session still fold together.
+- Explicit seat writes no longer assign that seat to later sessions whose ids were not recorded with the write.
+- Sending to an unseen recipient now exits non-zero and names the recipient in the error line.
+- The doctor summary counts the warn and no rows it prints.
+  An encoder that is not installed stays on the short report and is not part of that count.
+- The installer now ends with short next steps for adding a coding tool, command-guard help, and shell-completion help instead of a force-push example and per-shell setup lines.
+  The help lines name the installed ljos by its full path, so they run before PATH is set.
+- The installer now treats a tag without a GitHub release archive for the current target as unpublished.
+  A default pin then builds from source when rustc and cargo are present, and otherwise installs the latest release.
+  A pin you name with `--pin` or `--version` stops with a message that names the missing archive.
+- `install.sh` asked for the vissue 0.24.1 archive, which was tagged and never released, and fell back to two source builds.
+  It now installs the releases named in `.github/release-pin` (vissue 0.25.0), and `scripts/release-pin-check.sh` fails CI when a pinned archive does not resolve.
+  `.github/sibling-pin` builds the same vissue for the tests, and `scripts/release-install-check.sh` fails when the two files differ.
+  A source build is announced on one line that says it is slow.
+- `ljos doctor` reports not ready when packsetd on the asked port belongs to another home or another token.
+  The memory row names the port to set, or `packset stop && packset ensure`.
+- `ljos recall some words` now says that recall takes one ticket id and prints the `ljos search "some words"` line to run, where it was a missing command, and a test checks that `ljos search` reads unquoted words as one query beside `-p` and its other flags.
+- `ljos remember` tells you to pass a shorter text when the lesson is past 1000 characters.
+  A failed hook prints one line that says the call is allowed.
+  The guard bypass row names the count, the last rule and the log path, and leaves the command in the log.
+- `scripts/sibling-tools.sh` built packset 0.18.1 while `install.sh` installs the latest release, packset 0.18.2.
+  The test pin is now that release's commit.
+
+### Documentation
+
+- The README opens with one sentence on what ljos is and what the first five minutes give.
+  Then come the prerequisites (git, rustc 1.89 or newer, cargo-binstall), the install and a three-command first run.
+  Seat, sitting, pack, deed and encoder are defined where they are first used or in a Terms list.
+- The first-run docs use the release install command with the encoder enabled by default and name the flags that skip the encoder or onboarding.
+- `compare.org` has a section on why choose ljos over Linear, CLAUDE.md memory files or plain GitHub issues, and where each of the three is better.
+  The README points to it.
+
+### Miscellaneous
+
+- The first-run tests put their seat home beside the checkout only when that place is outside the temporary roots and has no git checkout above it, and under `~/.cache/ljos-test-seats` otherwise, so a checkout under `/tmp` no longer turns memory off for `a_confused_order_stays_plain`, `one_shell_folds_two_votes_and_names_the_settle` and `a_new_seat_follows_the_readme_and_getting_started`.
+- `scripts/release-install-check.sh` passes shellcheck, so a lint run over the release scripts has no warnings to skip.
+
+
 ## 0.45.2 (2026-11-19)
 
 ### Features

@@ -1,1 +1,0 @@
-`ljos recall some words` now says that recall takes one ticket id and prints the `ljos search "some words"` line to run, where it was a missing command, and a test checks that `ljos search` reads unquoted words as one query beside `-p` and its other flags.
