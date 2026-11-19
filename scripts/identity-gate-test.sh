@@ -63,6 +63,34 @@ GIT_COMMITTER_NAME="Ada Lovelace" \
   git commit --allow-empty -q -m "foreign committer"
 must_fail "wrong committer" "$gate" "$base..HEAD"
 
+git checkout -q -b other-github "$base"
+GIT_COMMITTER_NAME="GitHub" \
+  GIT_COMMITTER_EMAIL="other@github.com" \
+  git commit --allow-empty -q -m "non-webflow github committer"
+must_fail "other github committer" "$gate" "$base..HEAD"
+
+git checkout -q -b webflow "$base"
+git commit --allow-empty -q -m "pr head"
+GIT_COMMITTER_NAME="GitHub" \
+  GIT_COMMITTER_EMAIL="noreply@github.com" \
+  git commit --allow-empty -q -m "Merge pull request #9 from leidarljos/fix"
+"$gate" "$base..HEAD"
+
+git checkout -q -b webflow-foreign-author "$base"
+GIT_AUTHOR_NAME="Ada Lovelace" \
+  GIT_AUTHOR_EMAIL="ada@example.com" \
+  GIT_COMMITTER_NAME="GitHub" \
+  GIT_COMMITTER_EMAIL="noreply@github.com" \
+  git commit --allow-empty -q -m "webflow merge for foreign author"
+must_fail "webflow committer with non-Rohit author" "$gate" "$base..HEAD"
+
+git checkout -q -b webflow-trailer "$base"
+GIT_COMMITTER_NAME="GitHub" \
+  GIT_COMMITTER_EMAIL="noreply@github.com" \
+  git commit --allow-empty -q -m "Merge pull request #10" \
+  -m "Co-authored-by: Ada Lovelace <ada@example.com>"
+must_fail "webflow committer with trailer" "$gate" "$base..HEAD"
+
 # Dates are not judged. A later committer instant still passes.
 authored=2026-11-02T20:17:15-06:00
 committed=2026-11-03T01:03:03-06:00
@@ -195,7 +223,11 @@ missing_before=1111111111111111111111111111111111111111
 git checkout -q -B fallback-with-develop "$base"
 git commit --allow-empty -q -m "fallback keeps new work"
 git update-ref refs/remotes/origin/develop "$base"
-"$gate" "$missing_before..HEAD"
+noise=$("$gate" "$missing_before..HEAD" 2>&1)
+if [ -n "$noise" ]; then
+  echo "identity-gate-test: unexpected output on fallback with develop: $noise" >&2
+  exit 1
+fi
 git commit --allow-empty -q -m "note" \
   -m "Co-authored-by: Ada Lovelace <ada@example.com>"
 must_fail "fallback with develop catches trailer" "$gate" "$missing_before..HEAD"
@@ -209,7 +241,11 @@ GIT_AUTHOR_NAME="Ada Lovelace" \
 old_foreign=$(git rev-parse HEAD)
 git update-ref refs/remotes/origin/old "$old_foreign"
 git commit --allow-empty -q -m "fallback without develop keeps new work"
-"$gate" "$missing_before..HEAD"
+noise=$("$gate" "$missing_before..HEAD" 2>&1)
+if [ -n "$noise" ]; then
+  echo "identity-gate-test: unexpected output on fallback without develop: $noise" >&2
+  exit 1
+fi
 git commit --allow-empty -q -m "note" \
   -m "Co-authored-by: Ada Lovelace <ada@example.com>"
 must_fail "fallback without develop catches trailer" "$gate" "$missing_before..HEAD"

@@ -38,10 +38,11 @@ CI checks only the commits a push or a pull request adds. A push
 uses `before..sha`. A new branch, whose `before` is all zeros, uses
 the commits that are not on any other remote branch. A pull request
 uses `base..head`. `scripts/identity-gate.sh` checks that range and
-fails when an author or committer is not Rohit Goswami
-<rgoswami@ieee.org>, or a message has a Co-authored-by or
-Signed-off-by trailer, a generated-with line, or the machine-account
-text named in the script. Commit dates are not read. Commits already
-on the base are outside the range. `scripts/identity-gate-test.sh`
-covers a clean range, a wrong author, a wrong committer, a differing
+fails when an author is not Rohit Goswami <rgoswami@ieee.org>, a
+committer is neither that identity nor GitHub <noreply@github.com>, or
+a message has a Co-authored-by or Signed-off-by trailer, a
+generated-with line, or the machine-account text named in the script.
+Commit dates are not read. Commits already on the base are outside the
+range. `scripts/identity-gate-test.sh` covers a clean range, a wrong
+author, a wrong committer, the GitHub web-flow committer, a differing
 committer date, a foreign commit and a trailer.

@@ -1,10 +1,11 @@
 #!/bin/sh
 # Judge the commits selected by the git rev-list arguments.
-# Exit 1 when an author or committer is not Rohit Goswami
-# <rgoswami@ieee.org>, or a message line is a by-trailer, a made-with
-# line, a generated line, or a machine account mark. A Tests or note
-# paragraph is not that line. Dates are not read. Exit 2 when no range
-# was given. Commits outside the arguments are not read.
+# Exit 1 when an author is not Rohit Goswami <rgoswami@ieee.org>, a
+# committer is neither that identity nor GitHub <noreply@github.com>, or
+# a message line is a by-trailer, a made-with line, a generated line, or
+# a machine account mark. A Tests or note paragraph is not that line.
+# Dates are not read. Exit 2 when no range was given. Commits outside
+# the arguments are not read.
 # Usage: identity-gate.sh <git rev-list arguments>
 set -eu
 
@@ -42,7 +43,7 @@ fallback_hashes() {
   read_hashes -1 "$after"
 }
 
-if ! hashes=$(read_hashes "$@"); then
+if ! hashes=$(read_hashes "$@" 2>/dev/null); then
   if ! hashes=$(fallback_hashes "$@"); then
     echo "identity-gate: git rev-list failed" >&2
     exit 1
@@ -50,6 +51,7 @@ if ! hashes=$(read_hashes "$@"); then
 fi
 
 want="Rohit Goswami <rgoswami@ieee.org>"
+webflow="GitHub <noreply@github.com>"
 pat='^[[:blank:]]*(([A-Za-z0-9-]+-by|made-with)[[:blank:]]*:|cursor[_-]?agent[A-Za-z0-9_]*[[:blank:]]*[=:]|generated with|made with cursor)|seat alfa|seatalfa'
 status=0
 for hash in $hashes; do
@@ -58,7 +60,7 @@ for hash in $hashes; do
     exit 1
   }
   case "$id" in
-    "$want | $want") ;;
+    "$want | $want" | "$want | $webflow") ;;
     *)
       echo "identity-gate: wrong identity: $hash $id" >&2
       status=1
