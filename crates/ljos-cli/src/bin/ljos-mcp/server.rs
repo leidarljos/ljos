@@ -1418,9 +1418,9 @@ fn mcp_search_reading(n: usize, seat_ahead: bool) -> &'static str {
     if n == 0 {
         "Nothing matched."
     } else if seat_ahead {
-        "Place 1 is the first row, and this seat's rows come before another seat's. The score on a row runs from 0 to 100. It is not whether the sentence is true. A later line on the same matter replaces an earlier one."
+        "The first row is the closest match, and this seat's rows come before another seat's. The score on a row runs from 0 to 100. It is not whether the sentence is true. A later line on the same matter replaces an earlier one."
     } else {
-        "Place 1 is the first row. The score on a row runs from 0 to 100. It is not whether the sentence is true."
+        "The first row is the closest match. The score on a row runs from 0 to 100. It is not whether the sentence is true."
     }
 }
 
@@ -6493,5 +6493,18 @@ mod tests {
         let said = text(&checked[0]);
         assert!(said.contains("/tmp/bag"), "{said}");
         ordered(said, &["`ljos_receive`", "`ljos_current`", "`import`"]);
+    }
+
+    #[test]
+    fn mcp_search_reading_does_not_say_place_1() {
+        for seat_ahead in [true, false] {
+            let reading = mcp_search_reading(1, seat_ahead);
+            assert!(!reading.contains("Place 1"), "{reading}");
+            assert!(
+                reading.starts_with("The first row is the closest match"),
+                "{reading}"
+            );
+        }
+        assert_eq!(mcp_search_reading(0, false), "Nothing matched.");
     }
 }
