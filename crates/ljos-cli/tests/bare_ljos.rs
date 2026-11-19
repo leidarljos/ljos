@@ -224,6 +224,24 @@ fn a_mistyped_lesson_flag_names_lesson_and_exits_2() {
     );
 }
 
+#[test]
+fn file_and_finish_do_not_take_unknown_flags_as_text() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        &["file", "--unknown-flag"][..],
+        &["finish", "demo-1", "--unknown-flag"][..],
+    ] {
+        let out = run(dir.path(), args, &[]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("has no flag --unknown-flag"),
+            "{args:?}\n{said}"
+        );
+    }
+}
+
 /// The line a person reads. Stdout stays empty and the status is 2.
 const TYPO_LINES: &[(&[&str], &str)] = &[
     (
