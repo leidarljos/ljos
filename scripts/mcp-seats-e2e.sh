@@ -202,7 +202,6 @@ check("bob reviews", (not bad) and "noted" in text, text)
 bad, text = bob.tool("ljos_finish", {
     "issue": work,
     "lesson": "The review passed. The line names the seat.",
-    "close": True,
 })
 check("bob closes", (not bad) and "closed the ticket" in text, text)
 

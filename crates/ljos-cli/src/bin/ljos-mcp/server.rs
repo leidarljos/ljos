@@ -624,17 +624,115 @@ fn finish_schema(schema: &mut serde_json::Map<String, serde_json::Value>) {
     }
 }
 
+/// The input schema `tools/list` sends for one tool: properties, `seat`, and
+/// no draft-specific keywords a strict client would drop.
+fn published_input_schema(
+    name: &str,
+    schema: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut schema = schema.clone();
+    offer_seat(name, &mut schema);
+    finish_schema(&mut schema);
+    schema
+}
+
 /// The tool as `tools/list` sends it.
 fn publish_tool(tool: &mut Tool) {
-    let mut schema = tool.input_schema.as_ref().clone();
-    offer_seat(&tool.name, &mut schema);
-    finish_schema(&mut schema);
+    let schema = published_input_schema(&tool.name, tool.input_schema.as_ref());
     tool.input_schema = std::sync::Arc::new(schema);
     if let Some(output) = tool.output_schema.take() {
         let mut schema = output.as_ref().clone();
         finish_schema(&mut schema);
         tool.output_schema = Some(std::sync::Arc::new(schema));
     }
+}
+
+const ISSUE_ID_ALIAS: &str = "id";
+const ISSUE_KIND_ALIAS: &str = "kind";
+const SERDE_ARGUMENT_ALIASES: &[(&str, &str)] =
+    &[("issue", ISSUE_ID_ALIAS), ("issue_kind", ISSUE_KIND_ALIAS)];
+
+fn schema_property_names(schema: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .map(|properties| properties.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn schema_accepts_issue(schema: &serde_json::Map<String, serde_json::Value>) -> bool {
+    schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|properties| properties.contains_key("issue"))
+}
+
+/// Alias names this schema's arguments also accept through serde aliases.
+/// An alias is accepted only while the schema name is absent from the call.
+fn schema_argument_aliases(
+    schema: &serde_json::Map<String, serde_json::Value>,
+    arguments: &serde_json::Map<String, serde_json::Value>,
+) -> std::collections::BTreeSet<String> {
+    let Some(properties) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return std::collections::BTreeSet::new();
+    };
+    SERDE_ARGUMENT_ALIASES
+        .iter()
+        .filter_map(|(field, alias)| {
+            (properties.contains_key(*field)
+                && !properties.contains_key(*alias)
+                && !arguments.contains_key(*field))
+            .then_some((*alias).to_string())
+        })
+        .collect()
+}
+
+/// Move `id` to `issue` on tools whose schema lists `issue`, does not list
+/// `id`, and the call named only `id`.
+fn apply_issue_id_alias(
+    schema: &serde_json::Map<String, serde_json::Value>,
+    arguments: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    if !schema_accepts_issue(schema) {
+        return;
+    }
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object);
+    if properties.is_some_and(|map| map.contains_key(ISSUE_ID_ALIAS)) {
+        return;
+    }
+    if arguments.contains_key("issue") {
+        return;
+    }
+    if let Some(id) = arguments.remove(ISSUE_ID_ALIAS) {
+        arguments.insert("issue".into(), id);
+    }
+}
+
+/// One line when the call names an argument the schema does not list.
+/// Nothing runs and nothing is written.
+fn unknown_arguments_line(
+    tool: &str,
+    schema: &serde_json::Map<String, serde_json::Value>,
+    arguments: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    let property_names = schema_property_names(schema);
+    let mut allowed: std::collections::BTreeSet<String> = property_names.iter().cloned().collect();
+    allowed.insert("seat".into());
+    for alias in schema_argument_aliases(schema, arguments) {
+        allowed.insert(alias);
+    }
+    let unknown = arguments
+        .keys()
+        .find(|key| !allowed.contains(key.as_str()))?;
+    let takes = schema_property_names(schema).join(", ");
+    Some(format!(
+        "{tool} has no argument {unknown}; it takes {takes}"
+    ))
 }
 
 #[derive(Clone)]
@@ -767,6 +865,7 @@ pub struct AccessionArgs {
 #[derive(Deserialize, JsonSchema)]
 pub struct DeedArgs {
     /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
+    #[serde(alias = "id")]
     pub issue: String,
     /// An accession to cite. Absent, the tool lists what the issue cites.
     pub add: Option<String>,
@@ -804,7 +903,7 @@ pub struct FileArgs {
 #[derive(Deserialize, JsonSchema)]
 pub struct NoteArgs {
     /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`. Omitted or blank is the issue this seat has.
-    #[serde(default)]
+    #[serde(default, alias = "id")]
     pub issue: String,
     /// The note, one or two sentences, such as `Tried a longer timeout; the
     /// 429s came from the proxy.`
@@ -815,6 +914,7 @@ pub struct NoteArgs {
 #[derive(Deserialize, JsonSchema)]
 pub struct OptionsArgs {
     /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
+    #[serde(alias = "id")]
     pub issue: String,
     /// Two or more options, such as `accept` and `reject`. A comma inside
     /// one string splits it.
@@ -825,6 +925,7 @@ pub struct OptionsArgs {
 #[derive(Deserialize, JsonSchema)]
 pub struct IssueArgs {
     /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
+    #[serde(alias = "id")]
     pub issue: String,
 }
 
@@ -832,6 +933,7 @@ pub struct IssueArgs {
 #[derive(Deserialize, JsonSchema)]
 pub struct ShowArgs {
     /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
+    #[serde(alias = "id")]
     pub issue: String,
     /// Print every note. Absent, the page keeps the latest eight.
     #[serde(default)]
@@ -867,6 +969,7 @@ pub struct DigestArgs {
 #[derive(Deserialize, JsonSchema)]
 pub struct ConsensusArgs {
     /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
+    #[serde(alias = "id")]
     pub issue: String,
     /// Also run the tracker's own settle, whose numbers can differ from the
     /// model crate's once trust rows exist.
@@ -878,6 +981,7 @@ pub struct ConsensusArgs {
 #[derive(Deserialize, JsonSchema)]
 pub struct PredictArgs {
     /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
+    #[serde(alias = "id")]
     pub issue: String,
     /// The option you expect to win, or an object of option to share.
     pub expect: serde_json::Value,
@@ -961,6 +1065,7 @@ fn expect_text(value: &serde_json::Value) -> Option<String> {
 #[derive(Deserialize, JsonSchema)]
 pub struct VoteArgs {
     /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
+    #[serde(alias = "id")]
     pub issue: String,
     /// Option to vote for, one the issue's `Options:` line names, such as `accept` or `reject`. `ljos_options` writes that line. Absent, the tool shows the tally.
     pub choice: Option<String>,
@@ -996,6 +1101,7 @@ pub struct BriefArgs {
     /// The persona's name, as written with `ljos_persona`.
     pub name: String,
     /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
+    #[serde(alias = "id")]
     pub issue: String,
 }
 
@@ -1092,7 +1198,7 @@ pub struct ClaimNodeArgs {
 #[derive(Deserialize, JsonSchema)]
 pub struct StartArgs {
     /// The tracker issue to claim. Absent, file one from the task.
-    #[serde(default)]
+    #[serde(default, alias = "id")]
     pub issue: Option<String>,
     /// The repository this work is in. Absent, the last checkout this seat
     /// booked a commit in, or the working directory when that is a git checkout.
@@ -1171,6 +1277,7 @@ pub struct TrustArgs {
 #[derive(Deserialize, JsonSchema)]
 pub struct LearnArgs {
     /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
+    #[serde(alias = "id")]
     pub issue: String,
     /// The option that turned out right.
     pub outcome: String,
@@ -1230,7 +1337,7 @@ pub struct GradeArgs {
 #[derive(Deserialize, JsonSchema)]
 pub struct SittingArgs {
     /// The tracker id of the issue (`proj-1a2b`). Absent when `plan` files a new parent.
-    #[serde(default)]
+    #[serde(default, alias = "id")]
     pub issue: Option<String>,
     /// The title of a new parent, such as `Add retry to the client`. It and
     /// `items` are filed in one tracker commit, then the parent is sat.
@@ -1259,6 +1366,7 @@ pub struct SittingArgs {
 #[derive(Deserialize, JsonSchema)]
 pub struct PlaybookBindArgs {
     /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
+    #[serde(alias = "id")]
     pub issue: String,
     /// The recipe name: sit, arena, land, company-panel, overnight, feature.
     pub name: String,
@@ -1280,7 +1388,7 @@ pub struct PlaybookRow {
 #[serde(deny_unknown_fields)]
 pub struct FinishSittingArgs {
     /// The tracker id of the issue. Absent, the issue `ljos_start` claimed.
-    #[serde(default)]
+    #[serde(default, alias = "id")]
     pub issue: Option<String>,
     /// `done` (the default), `failed`, or `cancelled`.
     pub status: Option<String>,
@@ -1788,7 +1896,7 @@ pub struct SendMailArgs {
     #[serde(default)]
     pub interrupt: Option<bool>,
     /// The vissue issue this message is about. A reply keeps it.
-    #[serde(default)]
+    #[serde(default, alias = "id")]
     pub issue: Option<String>,
     /// Write to a seat this pack has not heard from yet. Without it, a
     /// seat the pack does not know is refused, with the seats it knows.
@@ -3735,6 +3843,7 @@ impl LjosServer {
 #[derive(Deserialize, JsonSchema)]
 pub struct PickUpArgs {
     /// The tracker id of the work, when known.
+    #[serde(alias = "id")]
     pub issue: Option<String>,
 }
 
@@ -3750,7 +3859,7 @@ pub struct FindingsArgs {
     #[serde(default)]
     pub all: bool,
     /// Cite the state file as a deed on this issue.
-    #[serde(default)]
+    #[serde(default, alias = "id")]
     pub issue: Option<String>,
 }
 
@@ -4813,13 +4922,32 @@ impl ServerHandler for LjosServer {
             ))])
             .into());
         }
+        let mut request = request;
+        let name = request.name.to_string();
+        let input_schema = Self::tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == request.name)
+            .map(|tool| published_input_schema(&tool.name, tool.input_schema.as_ref()));
+        if let Some(tool_schema) = &input_schema {
+            if let Some(arguments) = request.arguments.as_mut() {
+                apply_issue_id_alias(tool_schema, arguments);
+            }
+            if let Some(arguments) = request.arguments.as_ref() {
+                if let Some(line) = unknown_arguments_line(&name, tool_schema, arguments) {
+                    return Ok(attach_next(
+                        &name,
+                        CallToolResult::error(vec![ContentBlock::text(line)]).into(),
+                    ));
+                }
+            }
+        }
         // The seat file can name the tracker. Read it before deciding the
         // tracker is missing. A fifo is not opened.
         ljos_cli::load_seat_env();
         if let Some(line) = tracker_refusal(&request.name, request.arguments.as_ref()) {
             return Ok(CallToolResult::error(vec![ContentBlock::text(line)]).into());
         }
-        let name = request.name.to_string();
         let _activity = ljos_cli::idle_drop::call_started();
         let seat_text = match seat_argument(request.arguments.as_ref()) {
             Ok(text) => text,
@@ -4919,7 +5047,6 @@ impl ServerHandler for LjosServer {
         .await;
         // Seat validation belongs to the server; strict handlers receive only
         // their operation arguments and still reject undeclared fields.
-        let mut request = request;
         let thread = thread_in_meta(&context.meta.0);
         let (session, agent) = call_identity(&context.meta.0);
         let mut seat = seat;
@@ -5967,6 +6094,64 @@ mod tests {
         assert!(next_step("ljos_prefer").contains("ljos_finish"));
         assert!(!ljos_cli::bookkeep::mcp_tool_writes("ljos_start"));
         assert!(!ljos_cli::bookkeep::mcp_tool_writes("ljos_guard_check"));
+    }
+
+    #[test]
+    fn unknown_tool_arguments_name_the_field_and_take_listed_names() {
+        let tool = LjosServer::tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "ljos_note")
+            .expect("ljos_note");
+        let schema = published_input_schema(&tool.name, tool.input_schema.as_ref());
+        let args: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({"id": "proj-1a2b", "text": "saw it"}))
+                .unwrap();
+        assert!(unknown_arguments_line("ljos_note", &schema, &args).is_none());
+        let bad: serde_json::Map<String, serde_json::Value> = serde_json::from_value(
+            serde_json::json!({"id": "proj-1a2b", "issue": "proj-9z9z", "text": "x"}),
+        )
+        .unwrap();
+        let line = unknown_arguments_line("ljos_note", &schema, &bad).expect("id with issue");
+        assert_eq!(
+            line,
+            "ljos_note has no argument id; it takes issue, text, seat"
+        );
+        let typo: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({"isue": "proj-1a2b", "text": "x"})).unwrap();
+        let line = unknown_arguments_line("ljos_note", &schema, &typo).expect("unknown field");
+        assert!(line.contains("has no argument isue"), "{line}");
+        assert!(line.contains("it takes issue, text, seat"), "{line}");
+
+        let file = LjosServer::tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "ljos_file")
+            .expect("ljos_file");
+        let file_schema = published_input_schema(&file.name, file.input_schema.as_ref());
+        let with_kind: serde_json::Map<String, serde_json::Value> = serde_json::from_value(
+            serde_json::json!({"title": "Probe", "project": "demo", "kind": "task"}),
+        )
+        .unwrap();
+        assert!(unknown_arguments_line("ljos_file", &file_schema, &with_kind).is_none());
+    }
+
+    #[test]
+    fn issue_id_alias_moves_id_into_issue_before_the_handler_runs() {
+        let tool = LjosServer::tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "ljos_note")
+            .expect("ljos_note");
+        let schema = published_input_schema(&tool.name, tool.input_schema.as_ref());
+        let mut args: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({"id": "proj-alias", "text": "n"})).unwrap();
+        apply_issue_id_alias(&schema, &mut args);
+        assert_eq!(
+            args.get("issue").and_then(serde_json::Value::as_str),
+            Some("proj-alias")
+        );
+        assert!(args.get("id").is_none());
     }
 
     /// A finish that did not run must not tell the model the claim is released.

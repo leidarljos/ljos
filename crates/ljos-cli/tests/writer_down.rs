@@ -562,18 +562,6 @@ fn walk_mcp(seat: &Seat, case: &Case, dead: u16) {
         thread::sleep(Duration::from_secs(90));
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
-    let args = serde_json::json!({
-        "text": LESSON,
-        "query": "kiln fire",
-        "issue": "probe-1a2b",
-        "id": "atom-kept",
-        "pattern": "git push --force*",
-        "verdict": "deny",
-        "why": "a force push rewrites a published branch",
-        "name": "kiln",
-        "to": "bee",
-        "seat": "ada"
-    });
     let mut stdin = child.stdin.take().unwrap();
     writeln!(
         stdin,
@@ -599,17 +587,33 @@ fn walk_mcp(seat: &Seat, case: &Case, dead: u16) {
     // The list answer is not in hand yet. Ask the memory tools by name,
     // then every name the list returns is checked from the same process
     // after a second session below.
-    for (id, name) in [
-        (3_u64, "ljos_remember"),
-        (4, "ljos_search"),
-        (5, "ljos_recall"),
-        (6, "ljos_prefer"),
+    for (id, name, arguments) in [
+        (
+            3_u64,
+            "ljos_remember",
+            serde_json::json!({"text": LESSON, "seat": "ada"}),
+        ),
+        (
+            4,
+            "ljos_search",
+            serde_json::json!({"query": "kiln fire", "seat": "ada"}),
+        ),
+        (
+            5,
+            "ljos_recall",
+            serde_json::json!({"issue": "probe-1a2b", "seat": "ada"}),
+        ),
+        (
+            6,
+            "ljos_prefer",
+            serde_json::json!({"text": LESSON, "seat": "ada"}),
+        ),
     ] {
         writeln!(
             stdin,
             "{}",
             serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{
-                "name": name, "arguments": args
+                "name": name, "arguments": arguments
             }})
         )
         .unwrap();
@@ -725,7 +729,7 @@ fn walk_mcp(seat: &Seat, case: &Case, dead: u16) {
             stdin,
             "{}",
             serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{
-                "name": name, "arguments": args
+                "name": name, "arguments": serde_json::json!({})
             }})
         )
         .unwrap();

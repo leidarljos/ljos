@@ -46,13 +46,13 @@ A failure is one line and names the command.
 A missing tracker names ``ljos onboard``.
 A busy pack names ``ljos search`` or ``ljos remember``.
 An unknown tool names ``tools/list`` and ``ljos help``.
-Arguments that do not parse name the field that failed and the ``ljos help`` page for the tool.
+A call that names an argument the schema does not list is refused in one line that names the unknown argument and the accepted ones; nothing runs and nothing is written. Arguments that do not parse name the field that failed and the ``ljos help`` page for the tool.
 A failed call ends with a ``next:`` line that names the tool to call again once the line above is fixed, and ``ljos_guard_check`` adds that the command is not to run.
 An unknown method, or a line that is not JSON, names ``ljos mcp --help``.
 Setting ``LJOS_SEAT`` applies to reads only; a write on a shared ljos mcp server with no ``seat`` argument and no stamped session is refused and names ``ljos seat``.
 
 A result whose text starts with ``label`` is a refusal that is not an ``isError`` result, such as ``seat-unlisted`` or ``claim-conflict``. The call did not do its work, and the ``next:`` line says to follow the step the label names and call the tool again.
-Every tool that takes an issue says the id is the tracker id ``ljos_ready`` prints, such as ``proj-1a2b``. ``ljos_vote`` takes any option from the issue's ``Options:`` line in ``choice``, such as ``keep``, ``drop``, ``accept``, or ``reject``, and ``ljos_options`` writes that line.
+Every tool that takes an issue says the id is the tracker id ``ljos_ready`` prints, such as ``proj-1a2b``. Agents often pass ``id`` instead of ``issue``; both are read on those tools. ``ljos_vote`` takes any option from the issue's ``Options:`` line in ``choice``, such as ``keep``, ``drop``, ``accept``, or ``reject``, and ``ljos_options`` writes that line.
 
 ``ljos_claim`` takes ``takeover`` set to true to take a ticket over from another seat whose claim looks stale, the step ``ljos claim ID --takeover`` takes. A holder that is running, or whose claim moved inside the lease, is refused with the ``claim-conflict`` label and nothing changes. The old holder is named in a note on the ticket. ``ljos_start`` and ``ljos_sitting`` already claim, and the server claims on the first write, so call ``ljos_claim`` only to name the issue yourself. A named worker occupies one slot, and a ``busy`` refusal names the held node. ``ljos_finish`` or ``ljos_release`` frees it. ``ljos_deed`` is the same: a git commit is cited as a deed for you, so call it for the other deeds.
 
