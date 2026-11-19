@@ -1406,19 +1406,31 @@ fn wants_in_pack(status: &str) -> bool {
     status == "in-pack" || status == "already in pack"
 }
 
+/// Statuses `ljos proposals --status` accepts, in the order the usage line names them.
+pub const PROPOSAL_STATUSES: &[&str] = &[
+    "open",
+    "proposed",
+    "accepted",
+    "refused",
+    "already-in-pack",
+    "in-pack",
+    "already in pack",
+];
+
 /// Whether `status` is a known `--status` filter for `ljos proposals`.
 #[must_use]
 pub fn is_valid_status(status: &str) -> bool {
-    matches!(
-        status.trim(),
-        "open"
-            | "proposed"
-            | "accepted"
-            | "refused"
-            | "already-in-pack"
-            | "in-pack"
-            | "already in pack"
-    )
+    PROPOSAL_STATUSES.contains(&status.trim())
+}
+
+/// Every accepted status, with `or` before the last, for the usage line.
+#[must_use]
+pub fn proposal_status_list() -> String {
+    let last = PROPOSAL_STATUSES[PROPOSAL_STATUSES.len() - 1];
+    let mut out = PROPOSAL_STATUSES[..PROPOSAL_STATUSES.len() - 1].join(", ");
+    out.push_str(", or ");
+    out.push_str(last);
+    out
 }
 
 fn status_selected(rec: &Record, status: &str, held: &[Value]) -> bool {

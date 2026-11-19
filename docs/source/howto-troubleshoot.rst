@@ -296,8 +296,8 @@ command shape, even when old queued lessons exist:
 Free text on recall
 ===================
 
-``ljos recall`` takes one ticket id.
-Text with spaces or without a project prefix exits 2 and points at the search command:
+``ljos recall`` takes one ticket id, including a 32-hex tracker id.
+Text with spaces, or a word that is not an id, exits 2 and points at the search command:
 
 .. code:: text
 

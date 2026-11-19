@@ -3524,6 +3524,10 @@ fn looks_like_ticket_id(raw: &str) -> bool {
     if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
         return false;
     }
+    // A claim-graph node is 32 hex, the same form `ljos release` accepts.
+    if trimmed.len() == 32 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return true;
+    }
     if let Some((project, suffix)) = vissue_id_parts(trimmed) {
         return project.split('/').all(|seg| {
             !seg.is_empty()
@@ -5289,7 +5293,8 @@ fn run_command() -> Result<()> {
                         trimmed
                     };
                     eprintln!(
-                        "proposals: --status takes open, accepted, refused, already-in-pack, or in-pack, not {bad}."
+                        "proposals: --status takes {}, not {bad}.",
+                        ljos_cli::admit::proposal_status_list()
                     );
                     std::process::exit(USAGE_STATUS);
                 }

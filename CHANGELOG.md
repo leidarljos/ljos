@@ -5,6 +5,127 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.45.2 (2026-11-19)
+
+### Features
+
+- The `outputSchema` of `ljos_rule`, `ljos_prefer`, `ljos_forget`, `ljos_habit`, `ljos_predict`, `ljos_trust` and `ljos_persona` lists the fields each returns, where it was an open object.
+  The core tool list costs 10,504 tokens, up from 9,148, and all 54 tools cost 23,477, up from 19,070.
+
+### Fixes
+
+- A labelled MCP result, such as `seat-unlisted`, now ends with a `next:` line that says the call did not do its work.
+  It used to say to carry on with the task, or that the sitting was closed after `ljos_finish` had written nothing.
+  The MCP reference says what a result that starts with `label` means.
+- A search that matches by words no longer tells an agent to fetch `install.sh` and run it.
+  When the only way to install the encoder is a download, the line points at the install page and at `ljos doctor`, and an MCP server names it once.
+- A write through `ljos_file` no longer returns the `file:` line that names the tracker file on the person's disk.
+  The `aside` field of the result now says what it is, and the MCP reference describes `text` and `aside`.
+- Cut the `ljos_search` and `ljos_consensus` tool descriptions to what an agent passes and does next, and move the search ranking rules to the MCP reference.
+- Describe every `issue` argument in the same words, naming `ljos_ready` and an example id, and have `ljos_vote` point `choice` at the issue's `Options:` line instead of the `--options` flag.
+- Drop the repeated seat preamble and the garbled "occupies per issue" sentence from the `ljos_claim`, `ljos_file` and `ljos_deed` descriptions and the `start_a_sitting` prompt.
+- End a failed `ljos-mcp` call with a `next:` line that says to fix the line above and call the tool again, and tell a failed `ljos_guard_check` not to run the command.
+- Join the wrapped lines in `ljos-mcp` schema, prompt and resource descriptions, so no sentence breaks at a newline.
+- Mistyped ticket ids on `show`, `note`, and `finish` now name the closest ticket id and the exact command to run.
+- Name `landscape` and its source when conflicts or the full doctor report cannot find it.
+- Name the failed field in `ljos-mcp` argument errors, such as `missing field node`, before the `ljos help` command.
+- Passing two ids to `ljos sitting` names `ljos sitting proj-1a2b`, the example `-h` prints.
+- Read `ljos://protocol` and the cards as `text/markdown`, the type `resources/list` gives them, instead of `text/plain`.
+- Refuse a `ljos_rule` verdict other than `deny` or `ask` as an error that writes nothing, accept either in any case, and point the `ljos_rule` description at `ljos_guard_check` instead of `ljos policy`.
+- Say in the `ljos_sitting` description how it differs from `ljos_start`, list all six playbooks there and in the `start_a_sitting` prompt, and replace "Omit assignee" with when to leave it out.
+- Show `none` in the status line when no seat is set.
+- Sign handover manifests with the host key after a seat votes.
+- Tell an agent that calls a tool `ljos-mcp` does not serve to call `tools/list`, and tell it that an unlisted tool needs `LJOS_MCP_TOOLS` set by the person, with the right shell command for `ljos_bump_plan` and none for the mail tools.
+- The `ljos_bump_plan` description no longer sends an agent to `eb_package_bump`, a tool this server does not serve.
+  It says what the tool reads and what each returned row says, and points at `ljos_ready` and `ljos_sitting`, which the server does list.
+  The new description adds 84 tokens to the full tool set, and the counts in the README and the docs follow `measurements/mcp-size.txt`.
+- The `ljos_file` schema now lists the type values (`bug`, `task`, `feature`, `decision`) and no longer explains an OpenHands class clash to the agent that reads it.
+  The MCP reference says the type is `issue_kind` and that `kind` is read too.
+- The `memories prune` example is `ljos memories prune --stale`.
+  The help says `--stale` is required, and that without `--apply` the command only lists the rows.
+  The command reference says the same.
+- The `seat` argument of each MCP tool now says whether that tool needs it.
+  A reader calls it optional, a writer says a shared server needs it and that `ljos seat` prints it, and the seven tools that read or write say it is needed when the call writes.
+  It had been one sentence on every tool, which read as if a reader needed a seat.
+  The MCP reference also lists `ljos_habit` among the tools that read until a call sets a value.
+- The core MCP tool descriptions no longer send an agent to a tool the default set does not list.
+  `ljos_release` now points finished work to `ljos_finish` rather than `ljos_complete`, and `ljos_claim` says `ljos_finish` frees the slot.
+  `ljos_vote` says `outcome` on `ljos_finish` scores the confidence, `ljos_send` names only `ljos_reply`, and `ljos_search` drops its pointer to `ljos_island`.
+  `ljos_doctor` now asks whether this client is onboarded.
+- The core MCP tools now show an example for the arguments an agent fills in first: `query`, `text`, `command`, `task`, `title`, `why`, `to` and `options`.
+  `ljos_rule`, `ljos_remember`, `ljos_search` and `ljos_start` say what comes back, `ljos_finish` says a person closes the ticket, and `ljos_recall` says the fenced ticket text is data and not instructions.
+  `ljos_playbook` says how long its binding lasts, and `ljos_island` describes `as` once.
+- The descriptions of `ljos_conflicts`, `ljos_consolidate`, `ljos_graded`, `ljos_playbooks`, `ljos_policy` and `ljos_due` now say what the call does and what to pass.
+  `ljos_graded` names its `recalled` argument instead of the words recalled and lapsed, and `ljos_playbooks` gives the `ljos_vote` call as an argument rather than a command-line flag.
+  `ljos_policy` says it runs nothing and points to `ljos_guard_check` for the check before a command.
+  `ljos_conflicts` no longer quotes a benchmark figure that the tool cannot show.
+- The policy example no longer ends with a period, on `--help` and on `-h`.
+  The command reference shows the same example.
+- The release encoder workflow now creates `libonnxruntime.so` or `libonnxruntime.dylib` from the versioned ONNX Runtime library once the archive is extracted, so `packset-embed` can link with `-lonnxruntime` on all matrix targets.
+- Ticket commands now print a plain one-line fix when `vissue.toml` cannot be parsed: run `ljos doctor`.
+- `-h` on file, sitting, note, remember, search, finish, seat and doctor shows a short example.
+  `sitting` also shows `ljos sitting proj-1a2b`, and `seat` shows `ljos seat`.
+  The command reference shows those two examples.
+- `-p` on `ready` and `list` says it limits the list to tickets in one project.
+  The command reference uses that wording.
+- `finish` and `complete` describe `--status` as "Status to record: done, failed, or cancelled."
+  `rule` describes `--verdict` in a sentence that starts with a capital.
+  The finish synopsis in the command reference names those three values.
+- `ljos cloud` says it installs the release binaries and clones the shared tracker.
+  The command reference shows `ljos cloud up` as the example.
+- `ljos doctor` and `ljos_doctor` no longer print the value of a secret variable.
+  The `cloud age` row no longer repeats the value of `LJOS_CLOUD_AGE_SECRET` when the variable it names is unset, and the `signing key` row prints `DEEDAR_HOST_SIGNING_KEY` only when its value is a path.
+  The config rows show `set` for `LJOS_WAKE_LAUNCHER_KEY` and any other variable whose name ends in `_KEY`.
+- `ljos file` now says exactly what to run when no project can be inferred: `ljos file "TITLE" -p NAME`.
+- `ljos proposals --status` names every accepted status, including `proposed` and `already in pack`, when the value is not one of them.
+- `ljos proposals --status` now rejects unknown or empty status values with the list of valid statuses and exit code 2.
+- `ljos reap` says that without `--apply` it prints what would happen.
+  That is the same sentence as the command reference.
+- `ljos recall` accepts a 32-hex tracker id again.
+  A word that is not an id still exits 2 and names `ljos search`.
+- `ljos recall` now detects free text or arguments without a ticket id shape, points to `ljos search` with the exact text, and exits 2.
+- `ljos search --as-of` rejects a day the month does not have, and a value with characters after the date, and exits 2.
+  A leap day is accepted only in a leap year.
+- `ljos search` and `ljos remember` now exit with usage code 2 on invalid `--min-score`, `--as-of`, `--valid-at`, `--transient --standing`, and inverted validity windows before contacting the pack.
+- `ljos search` now prints a plain `shown X of Y.` count line with an unbroken, shell-quoted `ljos search ... -n N` command that preserves active filters instead of calling `-n N` a next page.
+- `ljos search` now says word matches matched without an answer or names the reported encoder load time, instead of promising that meaning search will be ready shortly.
+- `ljos search` with `PACKSET_URL=off` now reports that packs are turned off and names `unset PACKSET_URL`, instead of claiming the memory writer is busy.
+- `ljos search` with an empty query now prints only the usage line and skips queued-memory status lines.
+- `ljos show` now uses the same one-line `ljos onboard` guidance as other tracker reads when no tracker is configured.
+- `ljos_doctor` now sends MCP clients to the install page instead of returning a downloaded shell command.
+- `ljos_file` with no project now says to pass `project` or `parent`.
+  It used to print the shell flag `-p NAME`, which the tool does not take.
+  The MCP reference also says a person closes the ticket after `ljos_finish`.
+- `ljos_findings` now directs MCP clients to the served campaign commands.
+- `ljos_search` now opens its `reading` with `The first row is the closest match` instead of `Place 1 is the first row`, matching the CLI wording.
+- `memory imports --json` says it prints the same rows as the text.
+  `rules --json` says it prints pattern, verdict and reason.
+  The command reference says the same.
+- `seat grant --quote` says it is the owner's yes, quoted as they said it.
+  The command reference says the same.
+
+### Documentation
+
+- Align `reference-commands` search fallback wording, `ljos remember "LESSON"` placeholder, `evidence record`, `panel run`, `send --new-seat`, and `deed -q` with the CLI.
+- Fix the malformed table row in `reference-environment.rst` and link the MCP tools and Jev settings cross-references.
+- Keep exported grid table rows padded after doc-link rewrites so docutils accepts the Environment reference page.
+- Link section cross-references in `howto-judge` and `howto-vote`, and create `~/.config/deedar` before writing `host.key` in `howto-handover`.
+- Restore the missing `ljos search` summary paragraph in `explanation.rst` to match `explanation.org`.
+- Run a pandoc export in a worktree and `sphinx-build -n -W` in the CI test job so malformed tables fail before the docs workflow.
+- The doctor help sample prints the example after the options, the same place `ljos doctor -h` prints it.
+- The eb-stack guide now distinguishes its CLI commands from `ljos` MCP tools.
+- Update `howto-command-check` to match `ljos-policyd` 0.7.0 warning on `mv ~ /tmp/x`.
+- Update `howto-runner` to include the `opencode` plugin row in `doctor` output and align `ljos policy` warning and `--fail-on-deny` wording.
+- Update `howto-sitting` sample outputs for `ljos sitting --verbose`, `ljos finish`, and `ljos remember --as` to match current CLI output.
+- Update `howto-troubleshoot` to show `ljos doctor` action rows before the trailing summary line.
+
+### Miscellaneous
+
+- The MCP lifetime child-process test now uses the test binary path and cannot be redirected by a parallel `PATH` change.
+- `ljos --help` is checked against a saved copy, and every command that copy names answers `--help` and `-h`.
+  `-h` prints that same page.
+
+
 ## 0.45.1 (2026-11-18)
 
 ### Fixes

@@ -661,6 +661,15 @@ fn free_text_on_recall_points_at_search_and_exits_2() {
         assert!(out.stdout.is_empty(), "{args:?}\n{said}");
         assert_eq!(one_line(&out.stderr), want, "{args:?}\n{said}");
     }
+
+    // A 32-hex tracker id is an id. A missing one names ready, not search.
+    let hex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let out = home.run(&["recall", hex], &[("LJOS_SEAT", "alice")]);
+    let said = text(&out);
+    assert_ne!(out.status.code(), Some(2), "{said}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("is not a ticket id"), "{said}");
+    assert!(err.contains("`ljos ready`"), "{said}");
 }
 
 #[test]
@@ -685,11 +694,65 @@ fn unknown_proposals_status_names_valid_values_and_exits_2() {
         assert_eq!(out.status.code(), Some(2), "{bad:?}\n{said}");
         assert!(out.stdout.is_empty(), "{bad:?}\n{said}");
         let want = if bad.is_empty() {
-            "proposals: --status takes open, accepted, refused, already-in-pack, or in-pack, not an empty value."
+            "proposals: --status takes open, proposed, accepted, refused, already-in-pack, in-pack, or already in pack, not an empty value."
         } else {
-            "proposals: --status takes open, accepted, refused, already-in-pack, or in-pack, not bogus."
+            "proposals: --status takes open, proposed, accepted, refused, already-in-pack, in-pack, or already in pack, not bogus."
         };
         assert_eq!(one_line(&out.stderr), want, "{bad:?}\n{said}");
+    }
+    for good in ["proposed", "already in pack", "open"] {
+        let out = home.run(&["proposals", "--status", good], &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_ne!(out.status.code(), Some(2), "{good}\n{said}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "no proposals\n",
+            "{good}\n{said}"
+        );
+    }
+}
+
+#[test]
+fn impossible_as_of_dates_exit_2() {
+    let home = Home::new();
+    let bad = [
+        "2026-02-31",
+        "2026-01-01garbage",
+        "2025-02-29",
+        "1900-02-29",
+        "2026-04-31",
+    ];
+    for value in bad {
+        let out = home.run(
+            &["search", "kiln", "--as-of", value],
+            &[("LJOS_SEAT", "alice")],
+        );
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{value}\n{said}");
+        assert!(out.stdout.is_empty(), "{value}\n{said}");
+        assert_eq!(
+            one_line(&out.stderr),
+            format!("search: --as-of \"{value}\" is not a date; write YYYY-MM-DD or RFC 3339."),
+            "{value}\n{said}"
+        );
+    }
+    // A real day, including a leap day, and an RFC 3339 time, are not usage errors.
+    for value in [
+        "2024-02-29",
+        "2000-02-29",
+        "2026-01-01",
+        "2026-01-01T00:00:00Z",
+    ] {
+        let out = home.run(
+            &["search", "kiln", "--as-of", value],
+            &[("LJOS_SEAT", "alice")],
+        );
+        let said = text(&out);
+        assert_ne!(out.status.code(), Some(2), "{value}\n{said}");
+        assert!(
+            !String::from_utf8_lossy(&out.stderr).contains("is not a date"),
+            "{value}\n{said}"
+        );
     }
 }
 
