@@ -71,6 +71,9 @@ Basic Memory is a shared notebook of Markdown. ljos's memory is short claims wit
 Letta gives the agent tools to edit its own memory. ljos has no model in that loop.
 Of these, the ljos docs are the ones that describe a ballot per agent, a settle, and a handover the receiver checks before import.
 
+Against Linear, a CLAUDE.md file or plain GitHub issues, ljos adds a claim that refuses a second holder and a lesson that comes back when a prompt bears on it. Each of the three is better at something ljos does not do.
+[Why ljos, and when not](https://leidarljos.github.io/ljos/compare.html#against-linear-claude-md-memory-files-and-github-issues) says where.
+
 [How ljos compares](https://leidarljos.github.io/ljos/compare.html) has the full table, the licences, and a link to each tool's own docs, read on 2026-11-10.
 
 ## Terms
@@ -276,7 +279,7 @@ The official MCP Registry lists the server from the crates.io page of `ljos`, an
 | Page | Answer |
 |---|---|
 | [What ljos does](https://leidarljos.github.io/ljos/introduction.html) | Features and every measured number |
-| [How ljos compares](https://leidarljos.github.io/ljos/compare.html) | beads, Mem0, Letta, Zep, Basic Memory, git-bug |
+| [How ljos compares](https://leidarljos.github.io/ljos/compare.html) | beads, Mem0, Letta, Zep, Basic Memory, git-bug, Linear, CLAUDE.md, GitHub issues |
 | [Getting started](https://leidarljos.github.io/ljos/getting-started.html) | Tutorial: install, remember, search, a ticket, a second seat |
 | [How-to guides](https://leidarljos.github.io/ljos/howto.html) | One task a page: runners, memory, sittings, votes, handover |
 | [Two agents on one repository](https://leidarljos.github.io/ljos/howto-agents.html) | The seat each session gets, mail between them, and how they split the tickets |

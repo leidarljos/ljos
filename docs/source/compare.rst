@@ -79,6 +79,70 @@ Where each one is ahead
   them to other trackers (`README <https://github.com/git-bug/git-bug>`__).
   ljos keeps its tracker in a separate repository and has no bridges.
 
+Against Linear, CLAUDE.md memory files and GitHub issues
+========================================================
+
+Most people reach ljos from one of these three. Each is better than ljos
+at something, and the lists below say what. Read on 2026-11-19.
+
+Linear
+------
+
+Linear is a hosted tracker for teams. It has cycles, projects, triage, a
+GitHub integration, its own agent and an MCP server
+(`docs <https://linear.app/docs>`__).
+
+- Why ljos: a ticket is an Org heading in a git repository you own. There
+  is no account and no server to run. A claim on a held ticket is refused
+  and names the holder, and the tickets sit beside the memory and the
+  votes.
+- Where Linear is better: it has a web app people want to open, planning
+  views across a team, triage of work nobody planned, integrations with
+  GitHub, Slack, Sentry and Jira, and roles and permissions. ljos has no
+  web app and no planning views. If people use the tracker more than
+  agents do, use Linear.
+
+CLAUDE.md memory files
+----------------------
+
+A CLAUDE.md file is Markdown that Claude Code loads at the start of each
+session. Claude Code also keeps auto memory, notes it writes itself.
+Claude treats both as context, not as enforced configuration
+(`docs <https://code.claude.com/docs/en/memory>`__).
+
+- Why ljos: a lesson is one sentence with a review date, shown when a
+  prompt bears on it instead of on every session. One store serves Claude
+  Code, Cursor and Codex. A lesson an agent writes is labelled
+  agent-derived until a person accepts it, and a claim nobody reviews
+  sinks in search.
+- Where CLAUDE.md is better: it needs no install, lives in the repository,
+  and is reviewed in a pull request like code. The model reads all of it
+  each session, so nothing depends on a hook picking the right lesson,
+  and ljos can miss one that bears on the prompt. It keeps standing
+  instructions and architecture as prose, which short claims do not. With
+  one runner, one repository and rules that fit on a page, a CLAUDE.md is
+  enough.
+
+Plain GitHub issues
+-------------------
+
+GitHub Issues tracks bugs, ideas and tasks with sub-issues, projects,
+labels, milestones and links to pull requests
+(`docs <https://docs.github.com/en/issues/tracking-your-work-with-issues/learning-about-issues/about-issues>`__).
+
+- Why ljos: an agent files, reads and claims tickets from the command line
+  with no token and no API call. Only one seat can claim a ticket at a time, and
+  ``ljos block`` records what a ticket waits on. The tracker sits in a
+  git repository next to the memory and the votes.
+- Where GitHub is better: your contributors and users are already there,
+  and strangers can file an issue. A pull request can close an issue with
+  a keyword, and the web and mobile apps and notifications are done. The
+  ljos tracker is a separate repository with no bridge to GitHub issues.
+
+Using them together is reasonable: keep public reports in GitHub Issues
+and standing rules in a CLAUDE.md, and put what agents claim and learn in
+ljos.
+
 What only ljos does here
 ========================
 
@@ -104,17 +168,19 @@ See :doc:`Use ljos with graphify <howto-graphify>`.
 Pick by job
 ===========
 
-===================================================================== ============
+===================================================================== =====================
 You want                                                              Look at
-===================================================================== ============
+===================================================================== =====================
 an app that learns facts from chat logs                               Mem0, Zep
 an agent that edits its own long-term memory                          Letta
 a shared notebook of Markdown for you and the agent                   Basic Memory
 a ticket queue for agents with a SQL store                            beads
 bugs that travel with the code in git                                 git-bug
 a map of the code in this repository                                  graphify
+a tracker people plan in, with a web app                              Linear, GitHub Issues
+standing instructions the model reads every session                   CLAUDE.md
 two or more agents on one tracker, voting, with memory a person wrote ljos
-===================================================================== ============
+===================================================================== =====================
 
 Sources
 =======
@@ -127,4 +193,7 @@ Read on 2026-11-10.
 - Zep and Graphiti: `Zep concepts <https://help.getzep.com/concepts>`__ (fact invalidation, provenance), `Graphiti README <https://github.com/getzep/graphiti>`__ (graph databases, model and embedder, Apache-2.0).
 - Basic Memory: `README <https://github.com/basicmachines-co/basic-memory>`__ (Markdown files, Model Context Protocol server, semantic search, optional cloud, AGPL-3.0).
 - git-bug: `README <https://github.com/git-bug/git-bug>`__ (issues in git, bridges, GPL-3.0).
+- Linear, read on 2026-11-19: `docs <https://linear.app/docs>`__ (cycles, projects, triage, integrations, agent, MCP server).
+- Claude Code memory, read on 2026-11-19: `How Claude remembers your project <https://code.claude.com/docs/en/memory>`__ (CLAUDE.md, auto memory, context not enforced configuration).
+- GitHub Issues, read on 2026-11-19: `About issues <https://docs.github.com/en/issues/tracking-your-work-with-issues/learning-about-issues/about-issues>`__ (sub-issues, projects, linked pull requests).
 - graphify, read on 2026-11-13: `README <https://github.com/Graphify-Labs/graphify>`__ (``graphify-out/graph.json``, ``graph.schema_version``, the ``/graphify`` skill, Apache-2.0).
