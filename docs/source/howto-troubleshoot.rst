@@ -303,6 +303,16 @@ Text with spaces, or a word that is not an id, exits 2 and points at the search 
 
    recall: "usability first-run ljos cli" is not a ticket id, so run `ljos search "usability first-run ljos cli"`.
 
+Words typed without quotes are several arguments, and recall takes one id.
+The line says so and prints the search that runs:
+
+.. code:: text
+
+   $ ljos recall some words
+   ljos: recall takes one ticket id, so run `ljos search "some words"` to look up words.
+
+``ljos search`` takes the same words without quotes as one query, beside ``-p``, ``-n`` and its other flags, so ``ljos search lexical default`` and ``ljos search "lexical default"`` are the same search.
+
 A word that is not a command
 ============================
 

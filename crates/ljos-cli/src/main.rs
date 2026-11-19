@@ -1545,6 +1545,7 @@ enum Cmd {
     ///
     /// When no lesson is stored on the issue, the line names `ljos remember`.
     /// Free text or an argument without a ticket id exits 2 and points at `ljos search`.
+    /// Several unquoted words exit 2 and print `ljos search "WORDS"`.
     /// A busy memory store is asked again for `LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset, `0` does not wait).
     /// The wait follows `Retry-After` or a JSON `retry_ms`.
     /// When it stays busy, the rows are ranked by words and one line says the memory pack was busy.
@@ -2711,6 +2712,36 @@ fn lessons_topic(typed: &str) -> bool {
     )
 }
 
+/// More than one word after `recall`. It takes one ticket id, so the
+/// words are a search the person forgot to quote.
+///
+/// A first word that is a ticket id is the ticket, and the line names
+/// the one-id form. Otherwise the line prints the search that runs.
+fn recall_words_sentence(args: &[String]) -> String {
+    let split = args.iter().position(|arg| arg == "--");
+    let before = command_words_rest(&args[..split.unwrap_or(args.len())]);
+    let after = split.map_or(&[][..], |at| &args[at + 1..]);
+    let words: Vec<&str> = before
+        .iter()
+        .skip(1)
+        .chain(after)
+        .map(String::as_str)
+        .collect();
+    match words.first() {
+        Some(first) if !first.starts_with('-') && looks_like_ticket_id(first) => {
+            format!("ljos: recall takes one ticket id, so run `ljos recall {first}`.")
+        }
+        _ => {
+            let search = recall_search_command(&words.join(" "));
+            if search.contains('`') {
+                format!("ljos: recall takes one ticket id, so run {search} to look up words.")
+            } else {
+                format!("ljos: recall takes one ticket id, so run `{search}` to look up words.")
+            }
+        }
+    }
+}
+
 /// The three verbs for a lessons word, each as a line that runs.
 ///
 /// Words typed straight after it are the query: `ljos lessons kiln` is
@@ -2818,6 +2849,9 @@ fn listing_sentence(typed: &str) -> Option<String> {
 fn command_sentence(typed: &str, args: &[String]) -> String {
     let path = command_words(args, typed);
     let here = words_at(&path);
+    if here.at == ["recall"] && here.commands.is_empty() {
+        return recall_words_sentence(args);
+    }
     if let Some(line) = ticket_id_sentence(typed, &here.at, here.form.as_ref()) {
         return line;
     }

@@ -518,3 +518,77 @@ fn a_word_two_verbs_start_with_is_not_guessed() {
         "ljos: no command mem, so run `ljos help`.\n"
     );
 }
+
+#[test]
+fn recall_with_several_words_prints_the_search_that_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let cases: [(&[&str], &str); 7] = [
+        (
+            &["recall", "some", "words"],
+            "ljos: recall takes one ticket id, so run `ljos search \"some words\"` to look up words.\n",
+        ),
+        (
+            &["recall", "some", "words", "--json"],
+            "ljos: recall takes one ticket id, so run `ljos search \"some words\"` to look up words.\n",
+        ),
+        (
+            &["--seat", "ada", "recall", "cold", "metal"],
+            "ljos: recall takes one ticket id, so run `ljos search \"cold metal\"` to look up words.\n",
+        ),
+        (
+            &["recall", "x", "y z"],
+            "ljos: recall takes one ticket id, so run `ljos search \"x y z\"` to look up words.\n",
+        ),
+        (
+            &["recall", "--", "--odd", "words"],
+            "ljos: recall takes one ticket id, so run `ljos search -- \"--odd words\"` to look up words.\n",
+        ),
+        (
+            &["recall", "demo-1a2b", "and", "more"],
+            "ljos: recall takes one ticket id, so run `ljos recall demo-1a2b`.\n",
+        ),
+        (
+            &["recall", "usability"],
+            "recall: \"usability\" is not a ticket id, so run `ljos search \"usability\"`.\n",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = run(dir.path(), args, &[]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), want, "{args:?}");
+    }
+}
+
+#[test]
+fn search_takes_unquoted_words_as_one_query_beside_its_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let forms: [&[&str]; 4] = [
+        &["search", "lexical", "default"],
+        &["search", "--limit", "3", "lexical", "default"],
+        &["search", "-n", "3", "lexical", "--", "default"],
+        &["search", "lexical default"],
+    ];
+    for args in forms {
+        let out = run(dir.path(), args, &[]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(0), "{args:?}\n{said}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("Nothing matched \"lexical default\""),
+            "{args:?}\n{said}"
+        );
+    }
+    for args in [
+        &["search", "lexical", "default", "-p", "demo"][..],
+        &["search", "-p", "demo", "lexical", "default"][..],
+    ] {
+        let out = run(dir.path(), args, &[]);
+        let said = text(&out);
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("project: demo is not a project"),
+            "{args:?}\n{said}"
+        );
+        assert!(!said.contains("no command"), "{args:?}\n{said}");
+    }
+}
