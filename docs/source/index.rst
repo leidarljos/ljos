@@ -54,7 +54,7 @@ Install
 
 .. code:: console
 
-   $ sh scripts/install.sh --no-embed
+   $ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh --no-embed
    $ export PATH="$HOME/.local/bin:$PATH"
    $ cd "$HOME"
    $ ljos doctor
@@ -64,11 +64,11 @@ Install
    ok	config	no ljos.toml key and no LJOS_ variable is set; defaults stand
    ljos needs action: 1 row needs action. Optional extras: `ljos doctor --all`.
 
-With no seat named, the ``seat source`` row warns that the read uses every seat. When the encoder is not installed, an ``encoder`` row follows and names the install command this machine can run. That is ``cargo binstall --locked packset-embed`` when cargo-binstall is installed, ``cargo install --locked packset-embed`` when cargo is, and the release install line otherwise. The sample shows the cargo line. The ``sitting-gate`` row is ``info`` and says ``not active here`` when no agent runner is above the shell. The config row says the defaults apply when nothing is set. A missing ``ljos.toml`` is not a warning. Run ``ljos doctor`` from your home directory. In a checkout, the config row names ``.ljos/gates.toml`` instead.
+With no seat named, the ``seat source`` row warns that the read uses every seat. When the encoder is not installed, an ``encoder`` row follows and names the install command this machine can run. That is ``cargo binstall --locked packset-embed`` when cargo-binstall is installed, ``cargo install --locked packset-embed`` when cargo is, and the release install line otherwise. The install command above skips the encoder, so the sample shows the cargo line. Leave out ``--no-embed`` and the encoder is installed, and that row is not printed. The ``sitting-gate`` row is ``info`` and says ``not active here`` when no agent runner is above the shell. The config row says the defaults apply when nothing is set. A missing ``ljos.toml`` is not a warning. Run ``ljos doctor`` from your home directory. In a checkout, the config row names ``.ljos/gates.toml`` instead.
 
-From a checkout, that script installs the published release. The release is a complete install of ljos and the sibling tools. A release attaches the same script as ``install.sh``.
+The release is a complete install of ljos, the sibling tools and the encoder. The installer downloads the encoder model and onboards each coding runner it finds.
 The copy on the 0.41.1 release asked for a vissue archive that project does not publish. The 0.41.2 script fetches the archive the vissue release publishes.
-``--no-embed`` leaves out the encoder, and search matches words.
+The flag ``--no-embed`` skips the encoder and its model download. The flag ``--no-onboard`` leaves runner registration for later.
 The installer checks each download against its published SHA-256 sum.
 It then runs ``ljos onboard`` for each coding runner it finds. When ``ljos doctor``
 prints ``ljos is ready``, you are done. A row it prints instead names the
