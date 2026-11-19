@@ -32,7 +32,10 @@ struct Seat {
 
 impl Seat {
     fn open() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("ljos onboard home ")
+            .tempdir()
+            .unwrap();
         for sub in [
             ".config",
             ".local/share",
@@ -92,6 +95,42 @@ impl Seat {
             .output()
             .unwrap()
     }
+}
+
+#[test]
+fn reonboarding_repairs_an_unquoted_auggie_hook_entry() {
+    let seat = Seat::open();
+    let augment = seat.root.path().join(".augment");
+    std::fs::create_dir_all(&augment).unwrap();
+    let settings = augment.join("settings.json");
+    let script = augment.join("ljos-guard-auggie.sh");
+    std::fs::write(
+        &settings,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "launch-process",
+                    "hooks": [{
+                        "type": "command",
+                        "command": script.display().to_string(),
+                        "timeout": 20_000
+                    }]
+                }]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let out = seat.ljos(&["onboard", "--harness", "auggie"]);
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    let body: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    let hooks = body["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(hooks.len(), 1, "{body}");
+    let command = hooks[0]["hooks"][0]["command"].as_str().unwrap();
+    assert_eq!(command, format!("'{}'", script.display()), "{body}");
 }
 
 #[test]
