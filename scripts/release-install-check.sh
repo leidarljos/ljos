@@ -17,7 +17,7 @@
 # stub archives, so it does not run the release binaries.
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+ROOT=$(CDPATH="" cd -- "$(dirname "$0")/.." && pwd)
 REL=$ROOT/.github/workflows/release.yml
 INSTALL=$ROOT/scripts/install.sh
 RELEASE_DIST=
@@ -50,6 +50,7 @@ $want"
 # release.yml: name="ljos-${TAG}-${{ matrix.target }}" and that directory
 # is the tar. install.sh asks for ljos-vVERSION-TARGET.tar.gz, and TAG is
 # v plus the crate version.
+# shellcheck disable=SC2016 # the pattern is literal text from the workflow
 grep -F -q 'ljos-${TAG}-${{ matrix.target }}' "$REL" ||
   die "release.yml no longer names the archive ljos-TAG-target"
 
@@ -79,7 +80,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   read -r name _repo _commit ver _extra <<EOF
 $trim
 EOF
-  grep -E -q "^$name[[:space:]]+$ver\$" "$ROOT/.github/release-pin" ||
+  grep -E -q "^${name}[[:space:]]+${ver}\$" "$ROOT/.github/release-pin" ||
     die ".github/release-pin does not name $name $ver, the version in .github/sibling-pin"
 done < "$ROOT/.github/sibling-pin"
 
@@ -170,6 +171,7 @@ pack() {
 }
 
 for target in $want; do
+  # shellcheck disable=SC2046 # the pin file is a list of name=version words
   got=$(sh "$INSTALL" --print-assets --target "$target" $(cat "$PINS") | sort -u)
   exp=$(expected_for "$target")
   [ "$got" = "$exp" ] || die "install.sh archives for $target:
@@ -196,6 +198,7 @@ done
 need_bins="ljos ljos-mcp packset packsetd packset-mcp vissue vissue-mcp deedar claimdag ljos-policyd ljos-consensus"
 for target in $want; do
   home=$(mktemp -d "${TMPDIR:-/tmp}/ljos-release-home.XXXXXX")
+  # shellcheck disable=SC2046 # the pin file is a list of name=version words
   sh "$INSTALL" --asset-dir "$ASSETS" --target "$target" --no-embed --no-onboard \
     --no-modify-path --no-build --bin-dir "$home/bin" $(cat "$PINS") \
     > "$home/out" 2> "$home/err" || die "install.sh failed for $target:
@@ -211,6 +214,7 @@ done
 fake=$(mktemp -d "${TMPDIR:-/tmp}/ljos-release-fake.XXXXXX")
 trap 'rm -rf "$STAGE" "$ASSETS" "$fake"; rm -f "$PINS"' EXIT INT TERM
 printf '%s\n' '#!/bin/sh' 'echo rustc 1.83.0 \(fake\)' > "$fake/rustc"
+# shellcheck disable=SC2016 # the fake cargo script expands CARGO_MARKER itself
 printf '%s\n' '#!/bin/sh' 'echo cargo-was-run >> "$CARGO_MARKER"' 'exit 1' > "$fake/cargo"
 # install.sh reads curl's stdout as the HTTP status. The releases API
 # answers with a release that omits the archive for this target.
@@ -271,11 +275,13 @@ $(cat "$home/err")"
 }
 
 home=
+# shellcheck disable=SC2046 # the pin file is a list of name=version words
 run_missing --asset-dir "$ASSETS" --target "$target" \
   --no-embed --no-onboard --no-modify-path $(cat "$PINS")
 expect_line "a missing vissue archive" "$asset_line"
 
 # --no-build does not change that refusal.
+# shellcheck disable=SC2046 # the pin file is a list of name=version words
 run_missing --asset-dir "$ASSETS" --target "$target" \
   --no-embed --no-onboard --no-modify-path --no-build $(cat "$PINS")
 expect_line "--no-build with --asset-dir" "$asset_line"
@@ -284,11 +290,13 @@ expect_line "--no-build with --asset-dir" "$asset_line"
 # version error, and cargo is not started.
 ljos_asset="ljos-v$LJOS_VER-$target.tar.gz"
 source_line="install.sh: ljos $LJOS_VER has no release archive $ljos_asset for $target. List versions at https://github.com/leidarljos/ljos/releases, then run \`sh install.sh --version VER\`."
+# shellcheck disable=SC2046 # the pin file is a list of name=version words
 run_missing --target "$target" \
   --no-embed --no-onboard --no-modify-path $(cat "$PINS")
 expect_line "release without target archive" "$source_line"
 
 # --no-build gives the same version error.
+# shellcheck disable=SC2046 # the pin file is a list of name=version words
 run_missing --target "$target" \
   --no-embed --no-onboard --no-modify-path --no-build $(cat "$PINS")
 expect_line "--no-build with no archive" "$source_line"
