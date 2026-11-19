@@ -29,7 +29,7 @@ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-The installer includes the encoder and downloads its model, then onboards the coding runners it finds. Pass `--no-embed` to skip the encoder and its model download, or `--no-onboard` to register runners later. [Install in detail](#install-in-detail) covers each runner and what to do when install stops.
+The installer includes the encoder and downloads its model, then onboards the coding runners it finds. Pass `--no-embed` to skip the encoder and its model download, or `--no-onboard` to register runners later. If you install Claude Code, Cursor or Codex afterwards, run `ljos onboard`. [Install in detail](#install-in-detail) covers each runner and what to do when install stops.
 
 ## First run
 

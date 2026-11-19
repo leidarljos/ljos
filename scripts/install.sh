@@ -1274,11 +1274,8 @@ if [ "$ONBOARD" = 1 ]; then
     fi
   done < "$TMP/runners"
   if [ "$found_any" = 0 ]; then
-    say "  none found. Setting up the ticket tracker, the memory writer, and the deed store."
-    say "  The deed store keeps signed records of the work."
-    say "  No coding tool is installed, so no runner was registered."
-    say "  After you install an agent, run \`ljos onboard\`."
-    say "  \`ljos onboard --example\` lists those tools. \`ljos onboard --harness NAME\` registers the one you name."
+    say "  No coding tool is installed."
+    say "  Setting up the ticket tracker, memory writer, and deed store."
     if ! ljos onboard --harness all > "$TMP/onboard-seat" 2>&1; then
       say "  seat setup reported a problem:"
       sed 's/^/    /' "$TMP/onboard-seat"
@@ -1318,26 +1315,8 @@ esac
 if [ -n "$root" ]; then
   say "memory and the command guard are off because the home is under ${root} (${home_real}); set HOME to a directory outside ${root}"
 fi
-# `--no-onboard` has not set up the guard or the pack home, so the
-# force-push sample would be a command the person did not ask to try.
 if [ "$ONBOARD" = 1 ]; then
-  say "The guard lets a force push run, with a warning:"
-  # A push onto main also trips the sitting gate, which hides this warning.
-  # A topic branch shows the force-push rule on its own. Ask from the home
-  # directory, and ignore a git dir the caller exported.
-  (
-    cd "$HOME" || exit 1
-    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX \
-      GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE
-    # The sample is a warning to read. It is not a command this person ran,
-    # so it does not land in their bypass log. The token stays in the pack
-    # home onboard made. Pointing the sample at the empty directory made
-    # the search say it had no token.
-    mkdir -p "$TMP/policy-demo"
-    pack_home=${XDG_DATA_HOME:-$HOME/.local/share}/packset
-    XDG_DATA_HOME="$TMP/policy-demo" PACKSET_HOME="$pack_home" \
-      ljos policy -- git push --force origin topic
-  ) || true
+  say "Command guard: run \`ljos policy --help\`."
 fi
 if [ "$CLOUD" = 1 ]; then
   if "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
@@ -1383,15 +1362,17 @@ if [ "$ONBOARD" = 1 ]; then
 else
   next_cmd="ljos onboard"
 fi
-if [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; then
+if [ "$ONBOARD" = 1 ] && [ "$found_any" = 0 ] \
+  && { [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; }; then
+  say "Done in $secs s. This shell does not run the ljos just installed until PATH is set."
+  say "Next: $PATH_LINE"
+  say "Then install Claude Code, Cursor or Codex, and run \`ljos onboard\`."
+elif [ "$ONBOARD" = 1 ] && [ "$found_any" = 0 ]; then
+  say "Done in $secs s. Next: install Claude Code, Cursor or Codex, then run \`ljos onboard\`."
+elif [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; then
   say "Done in $secs s. This shell does not run the ljos just installed until PATH is set."
   say "Next: $PATH_LINE && $next_cmd"
 else
   say "Done in $secs s. Next: \`$next_cmd\`."
 fi
-say "Shell completion is one line in the shell's startup file. This script does not write that file."
-say "  bash: source <(ljos completions bash)"
-say "  zsh: source <(ljos completions zsh)"
-say "  fish: ljos completions fish | source"
-say "  powershell: ljos completions powershell | Out-String | Invoke-Expression"
-say "  elvish: eval (ljos completions elvish)"
+say "Shell completion: run \`ljos completions --help\`."

@@ -25,6 +25,7 @@ Linux and macOS are supported. Windows works through Windows Subsystem for Linux
 The release is a complete install of ljos, the sibling tools and the encoder.
 The installer downloads the encoder model and onboards the coding runners it finds.
 Pass ``--no-embed`` to skip the encoder and its model download, or ``--no-onboard`` to register runners later.
+If you install Claude Code, Cursor or Codex afterwards, run ``ljos onboard``.
 From a checkout, ``sh scripts/install.sh --from-checkout`` installs that checkout instead.
 
 ``ljos`` with no arguments prints what ljos is, the seat it would use and where that came from, then ``install``, ``doctor``, ``remember`` and ``search``, and where the command reference is. The install line is left off when this binary is the installed program. A read with no seat named says it uses every seat, because no seat was named. ``ljos help`` lists the rest.

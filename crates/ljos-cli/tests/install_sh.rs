@@ -189,12 +189,15 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
         assert_eq!(text.matches(PATH_LINE).count(), 1, "{rc}:\n{text}");
     }
     assert!(read(&home.join(".zshrc")).starts_with("# mine\n\n"));
-    assert!(first.contains("source <(ljos completions bash)"), "{first}");
     assert!(
-        first.contains("ljos completions powershell | Out-String | Invoke-Expression"),
+        first.contains("Shell completion: run `ljos completions --help`."),
         "{first}"
     );
-    assert!(first.contains("eval (ljos completions elvish)"), "{first}");
+    assert!(
+        !first.contains("source <(ljos completions bash)"),
+        "{first}"
+    );
+    assert!(!first.contains("completions powershell"), "{first}");
     assert!(
         !read(&home.join(".bashrc")).contains("ljos completions"),
         "install wrote a completion line into ~/.bashrc:\n{}",
@@ -513,15 +516,27 @@ fn install_with_no_coding_tool_leaves_a_seat_a_sitting_opens_on() {
     let installed = said(&out);
     assert!(out.status.success(), "{installed}");
     assert!(
-        installed.contains(
-            "none found. Setting up the ticket tracker, the memory writer, and the deed store."
-        ),
+        installed.contains("Setting up the ticket tracker, memory writer, and deed store."),
         "{installed}"
     );
     assert!(
-        installed.contains("The deed store keeps signed records of the work."),
+        installed.contains("Then install Claude Code, Cursor or Codex, and run `ljos onboard`."),
         "{installed}"
     );
+    assert_eq!(
+        installed.matches("No coding tool is installed").count(),
+        1,
+        "{installed}"
+    );
+    assert!(
+        installed.contains("Command guard: run `ljos policy --help`."),
+        "{installed}"
+    );
+    assert!(
+        installed.contains("Shell completion: run `ljos completions --help`."),
+        "{installed}"
+    );
+    assert!(!installed.contains("bash: source"), "{installed}");
     assert!(!installed.contains("reported a problem"), "{installed}");
 
     let home = machine.home();
@@ -825,12 +840,10 @@ fn from_dir_in_a_checkout_does_not_say_it_fetches_the_release() {
     assert!(!text.contains("not this checkout"), "{text}");
 }
 
-/// The force-push sample keeps its bypass log out of the seat's data
-/// directory, and still reads the pack home onboard made. A sample that
-/// loses that home prints a token warning the seat does not have.
-/// `--no-onboard` skips the sample.
+/// The final screen points to the guard and completion help instead of
+/// running a policy sample or printing every shell's setup line.
 #[test]
-fn the_policy_sample_keeps_the_pack_home() {
+fn the_final_screen_keeps_optional_help_short() {
     let dir = tempfile::tempdir().unwrap();
     let progs = dir.path().join("progs");
     std::fs::create_dir_all(&progs).unwrap();
@@ -867,24 +880,21 @@ fn the_policy_sample_keeps_the_pack_home() {
         .unwrap();
     let text = said(&out);
     assert!(out.status.success(), "{text}");
-    let pack = home.join(".local/share/packset");
-    assert!(
-        text.contains(&format!("PACKSET_HOME={}", pack.display())),
-        "{text}"
-    );
     assert!(
         home.join(".local/state/ljos").is_dir(),
         "the install left the state directory missing"
     );
-    assert!(text.contains("/policy-demo"), "{text}");
     assert!(
-        text.contains("policy -- git push --force origin topic"),
+        text.contains("Command guard: run `ljos policy --help`."),
         "{text}"
     );
     assert!(
-        !text.contains("no token"),
-        "the sample said the search had no token:\n{text}"
+        text.contains("Shell completion: run `ljos completions --help`."),
+        "{text}"
     );
+    assert!(!text.contains("policy -- git push --force"), "{text}");
+    assert!(!text.contains("bash: source"), "{text}");
+    assert!(!text.contains("powershell:"), "{text}");
 
     let skipped = dir.path().join("skipped");
     let quiet = Command::new("sh")
@@ -901,14 +911,7 @@ fn the_policy_sample_keeps_the_pack_home() {
         .unwrap();
     let quiet_text = said(&quiet);
     assert!(quiet.status.success(), "{quiet_text}");
-    assert!(
-        !quiet_text.contains("policy -- git push --force origin topic"),
-        "{quiet_text}"
-    );
-    assert!(
-        !quiet_text.contains("The guard lets a force push run"),
-        "{quiet_text}"
-    );
+    assert!(!quiet_text.contains("Command guard:"), "{quiet_text}");
     assert!(
         quiet_text.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
         "{quiet_text}"
@@ -1006,11 +1009,10 @@ fn a_second_install_says_it_replaced_the_programs() {
     assert!(!text.contains("Next: `ljos doctor`."), "{text}");
 }
 
-/// An install that runs onboard names `ljos doctor` next. `--no-onboard`
-/// names `ljos onboard`, including the PATH line when this shell does not
-/// have the bin dir yet.
+/// An install without a coding tool names `ljos onboard` next, including the
+/// PATH line when this shell does not have the bin dir yet.
 #[test]
-fn the_next_line_names_onboard_until_install_runs_it() {
+fn the_next_line_names_onboard_until_a_coding_tool_is_installed() {
     let dir = tempfile::tempdir().unwrap();
     let progs = dir.path().join("progs");
     std::fs::create_dir_all(&progs).unwrap();
@@ -1061,8 +1063,11 @@ fn the_next_line_names_onboard_until_install_runs_it() {
         .unwrap();
     let text = said(&out);
     assert!(out.status.success(), "{text}");
-    assert!(text.contains("Next: `ljos doctor`."), "{text}");
-    assert!(!text.contains("&& ljos onboard"), "{text}");
+    assert!(
+        text.contains("Next: install Claude Code, Cursor or Codex, then run `ljos onboard`."),
+        "{text}"
+    );
+    assert!(!text.contains("`ljos doctor`"), "{text}");
 }
 
 /// Replacing ljos-mcp while a process still has the old file mapped.
