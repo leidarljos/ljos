@@ -35,6 +35,12 @@ python3 docs/scripts/gen_samples.py
 git diff --exit-code
 ```
 
+The Doc export step runs this.
+
+```
+bash docs/scripts/check_docs_export.sh
+```
+
 The `deny` job runs this one.
 
 ```

@@ -1,0 +1,1 @@
+Run a pandoc export in a worktree and `sphinx-build -n -W` in the CI test job so malformed tables fail before the docs workflow.
