@@ -826,3 +826,143 @@ fn equals_binds_a_hyphen_leading_lesson_value() {
     assert_ne!(out.status.code(), Some(2), "{said}");
     assert!(!said.contains("--lesson needs a value"), "{said}");
 }
+
+#[test]
+fn a_negative_on_every_remaining_numeric_flag_names_the_value() {
+    let home = Home::new();
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &["panel", "demo-kiln", "--designers", "-1"],
+            "panel: --designers takes a number from 0 up, not -1.",
+        ),
+        (
+            &["claim", "--slack", "-1"],
+            "claim: --slack takes a number from 0 up, not -1.",
+        ),
+        (
+            &["learn", "demo-kiln", "--outcome", "keep", "--beta", "-0.5"],
+            "learn: --beta takes a number in (0, 1), not -0.5.",
+        ),
+        (
+            &["learn", "demo-kiln", "--outcome", "keep", "--share", "-1"],
+            "learn: --share takes a number in [0, 1), not -1.",
+        ),
+        (
+            &["finish", "demo-kiln", "--beta", "-0.5"],
+            "finish: --beta takes a number in (0, 1), not -0.5.",
+        ),
+        (
+            &["trust", "alice", "bob", "-0.5"],
+            "trust: weight takes a number in (0, 1], not -0.5.",
+        ),
+        (
+            &[
+                "supervise",
+                "worker",
+                "--harness",
+                "codex",
+                "--exit",
+                "clean",
+                "--at",
+                "-1",
+            ],
+            "supervise: --at takes a number from 0 up, not -1.",
+        ),
+        (
+            &[
+                "supervise",
+                "worker",
+                "--harness",
+                "codex",
+                "--exit",
+                "clean",
+                "--at",
+                "0",
+                "--max-restarts",
+                "-1",
+            ],
+            "supervise: --max-restarts takes a number from 0 up, not -1.",
+        ),
+        (
+            &[
+                "supervise",
+                "worker",
+                "--harness",
+                "codex",
+                "--exit",
+                "clean",
+                "--at",
+                "0",
+                "--window",
+                "-5",
+            ],
+            "supervise: --window takes a number from 0 up, not -5.",
+        ),
+        (
+            &[
+                "supervise",
+                "worker",
+                "--harness",
+                "codex",
+                "--exit",
+                "clean",
+                "--at",
+                "0",
+                "--failures",
+                "-1",
+            ],
+            "supervise: --failures takes a number from 0 up, not -1.",
+        ),
+        (
+            &[
+                "supervise",
+                "worker",
+                "--harness",
+                "codex",
+                "--exit",
+                "clean",
+                "--at",
+                "0",
+                "--failures=-1",
+            ],
+            "supervise: --failures takes a number from 0 up, not -1.",
+        ),
+        (
+            &["complete", "demo-kiln", "--gen", "-1"],
+            "complete: --gen takes a number from 0 up, not -1.",
+        ),
+        (
+            &["finish", "demo-kiln", "--gen", "-2"],
+            "finish: --gen takes a number from 0 up, not -2.",
+        ),
+        (
+            &[
+                "handover",
+                "--out",
+                "bag",
+                "--issue",
+                "demo-kiln",
+                "--since-size",
+                "-1",
+            ],
+            "handover: --since-size takes a number from 0 up, not -1.",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert_eq!(one_line(&out.stderr), *want, "{args:?}\n{said}");
+        assert!(
+            !said.contains("has no flag") && !said.contains("unexpected argument"),
+            "a negative was read as a flag:\n{said}"
+        );
+    }
+    let habit = home.run(&["habit", "temp", "-5"], &[("LJOS_SEAT", "alice")]);
+    let said = text(&habit);
+    assert!(
+        !said.contains("has no flag") && !said.contains("unexpected argument"),
+        "a habit reading was read as a flag:\n{said}"
+    );
+}

@@ -167,7 +167,7 @@ enum MemCmd {
         #[arg(long)]
         stale: bool,
         /// How many days without a recall counts as never recalled. The default is 30.
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = 30, allow_hyphen_values = true)]
         days: i64,
         /// Remove the memories the report names. Without this, the command only lists them.
         #[arg(long)]
@@ -506,7 +506,7 @@ enum ProposalCmd {
 #[derive(Args, Debug)]
 struct HookArgs {
     /// Most memories to inject per call; each is injected once between compactions.
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, default_value_t = 5, allow_hyphen_values = true)]
     limit: usize,
     /// The event, for a runner whose payload does not name it
     /// (`PreToolUse`, `PostToolUse`, `PreInvocation`, `Stop`).
@@ -588,7 +588,7 @@ struct ReadyArgs {
     #[arg(long, conflicts_with = "json")]
     mine: bool,
     /// How many tickets to print. `-n` is this flag. The default page prints 20.
-    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["all", "mine"])]
+    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["all", "mine"], allow_hyphen_values = true)]
     limit: Option<usize>,
     /// Print every ticket on the page.
     #[arg(long, conflicts_with_all = ["limit", "mine"])]
@@ -899,7 +899,7 @@ enum Cmd {
         #[arg(allow_hyphen_values = true)]
         query: Vec<String>,
         /// Most hits to print.
-        #[arg(short = 'n', long, default_value_t = 10)]
+        #[arg(short = 'n', long, default_value_t = 10, allow_hyphen_values = true)]
         limit: u32,
         /// Score the top hits again, slower and sharper, by reading the text itself.
         #[arg(long)]
@@ -932,7 +932,7 @@ enum Cmd {
         #[arg(long)]
         attempts: bool,
         /// Lowest score to keep. 34 when omitted. 0 prints every row, including a weak word match.
-        #[arg(long, value_name = "SCORE", default_value = "34")]
+        #[arg(long, value_name = "SCORE", default_value = "34", allow_hyphen_values = true)]
         min_score: f64,
         /// Only this project's tickets and lessons, plus lessons that name no project.
         /// One name. A leading segment that repeats the tracker directory or its org prefix is dropped. Any other slash is refused.
@@ -949,7 +949,7 @@ enum Cmd {
     /// Example: `ljos conflicts`
     Conflicts {
         /// Most pairs to print.
-        #[arg(short = 'n', long, default_value_t = 12)]
+        #[arg(short = 'n', long, default_value_t = 12, allow_hyphen_values = true)]
         limit: usize,
     },
     /// Close a memory that a later one rewrites.
@@ -1044,7 +1044,7 @@ enum Cmd {
     /// Example: `ljos hubs`
     Hubs {
         /// Most hubs to print.
-        #[arg(short = 'n', long, default_value_t = 10)]
+        #[arg(short = 'n', long, default_value_t = 10, allow_hyphen_values = true)]
         limit: usize,
         /// Print JSON. The human page is left off.
         #[arg(long)]
@@ -1170,7 +1170,7 @@ enum Cmd {
         options: Option<String>,
         /// Ballots the decision needs. With `--deadline`, `ljos reap --apply`
         /// lapses the vote once the deadline passes short of it.
-        #[arg(long, value_name = "N", requires = "deadline")]
+        #[arg(long, value_name = "N", requires = "deadline", allow_hyphen_values = true)]
         quorum: Option<usize>,
         /// RFC 3339 time the ballots are due, with `--quorum`.
         #[arg(long, value_name = "RFC3339", requires = "quorum")]
@@ -1401,7 +1401,7 @@ enum Cmd {
         #[arg(long, requires = "webhook")]
         key_env: Option<String>,
         /// Seconds before a wake command is stopped (default 30).
-        #[arg(long, requires = "command")]
+        #[arg(long, requires = "command", allow_hyphen_values = true)]
         timeout: Option<u64>,
         /// Remove the seat's wake.
         #[arg(long, conflicts_with = "fire")]
@@ -1534,7 +1534,7 @@ enum Cmd {
         #[arg(long, conflicts_with = "mine")]
         stale: bool,
         /// Days untouched before a claim is stale. The default is `LJOS_STALE_DAYS`, or 7.
-        #[arg(long, value_name = "N", requires = "stale")]
+        #[arg(long, value_name = "N", requires = "stale", allow_hyphen_values = true)]
         days: Option<i64>,
         /// Print the stale claims as a JSON array. With neither `--mine` nor `--stale`, passed to `vissue claims`.
         #[arg(long)]
@@ -1601,7 +1601,7 @@ enum Cmd {
         /// Probability in (0, 1] that the choice is the outcome. Recorded;
         /// `ljos learn` scores it once the outcome is named, and no settle
         /// or push cite weighs it.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         confidence: Option<f64>,
         /// Ids of stored files this ballot used, comma-separated, or `none`.
         /// Required when `--for` is set.
@@ -1656,7 +1656,7 @@ enum Cmd {
         /// The tracker id of the issue.
         issue: String,
         /// Most events to print, the latest kept.
-        #[arg(short = 'n', long, default_value_t = 60)]
+        #[arg(short = 'n', long, default_value_t = 60, allow_hyphen_values = true)]
         limit: usize,
         /// Print JSON. The human page is left off.
         #[arg(long)]
@@ -1684,8 +1684,8 @@ enum Cmd {
         #[arg(long)]
         harness: Option<String>,
         /// How many designers `run` spawns. Each files one candidate from the brief alone.
-        #[arg(long, default_value_t = 3)]
-        designers: usize,
+        #[arg(long, default_value_t = 3, allow_hyphen_values = true)]
+        designers: i64,
         /// Print the sessions and prompts and do not spawn.
         #[arg(long)]
         dry_run: bool,
@@ -1703,7 +1703,7 @@ enum Cmd {
         /// Name of the voter.
         name: String,
         /// How far the persona moves off its ballot in a settle; 1 is a plain voter.
-        #[arg(long, default_value_t = 0.5)]
+        #[arg(long, default_value_t = 0.5, allow_hyphen_values = true)]
         anchor: f64,
         /// How this persona reads the work, in a sentence or two.
         #[arg(long, required_unless_present = "retire", allow_hyphen_values = true)]
@@ -1759,19 +1759,19 @@ enum Cmd {
         #[arg(long, default_value = "permanent")]
         restart: String,
         /// Restarts allowed inside the window before the supervisor gives up.
-        #[arg(long, default_value_t = 3)]
-        max_restarts: u32,
+        #[arg(long, default_value_t = 3, allow_hyphen_values = true)]
+        max_restarts: i64,
         /// The intensity window, in seconds.
-        #[arg(long, default_value_t = 60)]
-        window: u64,
+        #[arg(long, default_value_t = 60, allow_hyphen_values = true)]
+        window: i64,
         /// `clean` or `crash`.
         #[arg(long)]
         exit: String,
         /// Seconds since the epoch. The window is read from this clock.
-        #[arg(long)]
-        at: u64,
+        #[arg(long, allow_hyphen_values = true)]
+        at: i64,
         /// Earlier exits already counted, comma-separated seconds.
-        #[arg(long, default_value = "")]
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
         failures: String,
         /// The persona home herdr starts in.
         #[arg(long, default_value = ".")]
@@ -1872,8 +1872,8 @@ enum Cmd {
         #[arg(long)]
         role: Option<String>,
         /// How far from the best next ticket the claim may reach. A larger number considers more tickets.
-        #[arg(long)]
-        slack: Option<usize>,
+        #[arg(long, allow_hyphen_values = true)]
+        slack: Option<i64>,
     },
     /// Give a ticket back. It is open again, and the claim generation moves.
     ///
@@ -1899,7 +1899,7 @@ enum Cmd {
         #[arg(long)]
         stale: bool,
         /// Days untouched before a claim is stale. The default is `LJOS_STALE_DAYS`, or 7.
-        #[arg(long, value_name = "N", requires = "stale")]
+        #[arg(long, value_name = "N", requires = "stale", allow_hyphen_values = true)]
         days: Option<i64>,
         /// Hand the day-counted claims back. Without this, `--days` only prints them.
         #[arg(long, requires = "stale")]
@@ -1924,8 +1924,8 @@ enum Cmd {
         #[arg(long)]
         status: Option<String>,
         /// Claim generation recorded when the work was taken. Absent: the live one. A stale generation is refused.
-        #[arg(long)]
-        gen: Option<u64>,
+        #[arg(long, allow_hyphen_values = true)]
+        gen: Option<i64>,
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
@@ -2088,7 +2088,7 @@ enum Cmd {
         no_file: bool,
         /// Ballots the decision needs. Short of it the reading says so and
         /// exits 1: nothing is decided yet.
-        #[arg(long, value_name = "N")]
+        #[arg(long, value_name = "N", allow_hyphen_values = true)]
         quorum: Option<usize>,
         /// With `--quorum`, the RFC 3339 time the ballots were due. Past it
         /// and still short, the vote has lapsed: the tracker notes `quorum
@@ -2130,6 +2130,7 @@ enum Cmd {
         /// Who is being weighed. A seat or a persona name.
         to: String,
         /// How much FROM counts TO, from just above 0 up to 1.
+        #[arg(allow_hyphen_values = true)]
         weight: f64,
         /// Ids of stored files this row stands on. Repeat for several.
         #[arg(long)]
@@ -2305,8 +2306,8 @@ enum Cmd {
         #[arg(long)]
         to: Option<String>,
         /// The log size the receiver kept last time (`size=` in its kept head): the bag then carries the bridge from it.
-        #[arg(long)]
-        since_size: Option<u64>,
+        #[arg(long, allow_hyphen_values = true)]
+        since_size: Option<i64>,
         /// Carry only the atoms tagged `scope:NAME`, sealed with age to that scope's recipients in `.ljos/sync.toml`.
         #[arg(long, value_name = "NAME")]
         scope: Option<String>,
@@ -2399,6 +2400,7 @@ enum Cmd {
         /// The habit's name; absent, list every habit.
         name: Option<String>,
         /// The reading; absent, show the habit.
+        #[arg(allow_hyphen_values = true)]
         value: Option<f64>,
         /// The unit the reading is in, for the reader.
         #[arg(long, default_value = "", allow_hyphen_values = true)]
@@ -2509,11 +2511,11 @@ enum Cmd {
         #[arg(long, requires = "outcome")]
         new_option: bool,
         /// The factor a refuted voter shrinks by when an outcome is named.
-        #[arg(long, default_value_t = LEARN_BETA)]
+        #[arg(long, default_value_t = LEARN_BETA, allow_hyphen_values = true)]
         beta: f64,
         /// Claim generation recorded when the work was taken. Absent: the live one. A stale generation is refused.
-        #[arg(long)]
-        gen: Option<u64>,
+        #[arg(long, allow_hyphen_values = true)]
+        gen: Option<i64>,
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
@@ -2566,7 +2568,7 @@ enum Cmd {
         #[arg(short, long)]
         project: String,
         /// Expectation-maximisation rounds.
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 20, allow_hyphen_values = true)]
         rounds: usize,
     },
     /// Record that one due review was graded.
@@ -2594,10 +2596,10 @@ enum Cmd {
         #[arg(long)]
         new_option: bool,
         /// The factor a refuted voter shrinks by.
-        #[arg(long, default_value_t = LEARN_BETA)]
+        #[arg(long, default_value_t = LEARN_BETA, allow_hyphen_values = true)]
         beta: f64,
         /// How far a voter who was wrong for a long time moves back toward a full vote after this step. 0 leaves the new weight as the step set it.
-        #[arg(long, default_value_t = 0.0)]
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
         share: f64,
         /// `record` (the default) counts each voter's hits and misses so far. `hedge` shrinks a voter who was wrong by `--beta`, then moves `--share` of the way back.
         #[arg(long, default_value = "record")]
@@ -4972,6 +4974,80 @@ fn dispatch_hook(seat_flag: Option<String>, hook: HookArgs) -> Result<()> {
     run_hook(hook)
 }
 
+fn refuse_range(line: String) -> ! {
+    eprintln!("{line}");
+    std::process::exit(USAGE_STATUS);
+}
+
+fn count_from_zero(cmd: &str, flag: &str, n: i64) -> u64 {
+    if n < 0 {
+        refuse_range(format!(
+            "{cmd}: {flag} takes a number from 0 up, not {n}."
+        ));
+    }
+    u64::try_from(n).unwrap_or_else(|_| {
+        refuse_range(format!(
+            "{cmd}: {flag} takes a number from 0 up, not {n}."
+        ))
+    })
+}
+
+fn count_usize_flag(cmd: &str, flag: &str, n: i64) -> usize {
+    usize::try_from(count_from_zero(cmd, flag, n)).unwrap_or_else(|_| {
+        refuse_range(format!(
+            "{cmd}: {flag} takes a number from 0 up, not {n}."
+        ))
+    })
+}
+
+fn count_u32_flag(cmd: &str, flag: &str, n: i64) -> u32 {
+    u32::try_from(count_from_zero(cmd, flag, n)).unwrap_or_else(|_| {
+        refuse_range(format!(
+            "{cmd}: {flag} takes a number from 0 up, not {n}."
+        ))
+    })
+}
+
+fn open_unit(cmd: &str, flag: &str, value: f64) {
+    if !(value.is_finite() && value > 0.0 && value < 1.0) {
+        refuse_range(format!(
+            "{cmd}: {flag} takes a number in (0, 1), not {value}."
+        ));
+    }
+}
+
+fn unit_interval(cmd: &str, flag: &str, value: f64) {
+    if !(value.is_finite() && value > 0.0 && value <= 1.0) {
+        refuse_range(format!(
+            "{cmd}: {flag} takes a number in (0, 1], not {value}."
+        ));
+    }
+}
+
+fn share_gap(cmd: &str, flag: &str, value: f64) {
+    if !(value.is_finite() && (0.0..1.0).contains(&value)) {
+        refuse_range(format!(
+            "{cmd}: {flag} takes a number in [0, 1), not {value}."
+        ));
+    }
+}
+
+fn finite_number(cmd: &str, flag: &str, value: f64) {
+    if !value.is_finite() {
+        refuse_range(format!(
+            "{cmd}: {flag} takes a finite number, not {value}."
+        ));
+    }
+}
+
+fn closed_unit(cmd: &str, flag: &str, value: f64) {
+    if !(value.is_finite() && (0.0..=1.0).contains(&value)) {
+        refuse_range(format!(
+            "{cmd}: {flag} takes a number in [0, 1], not {value}."
+        ));
+    }
+}
+
 /// A value-taking flag whose next word is itself a flag of this command.
 /// An equals sign binds the text, so that text is the value.
 fn missing_flag_value(args: &[String]) -> Option<String> {
@@ -7000,6 +7076,7 @@ fn run_command() -> Result<()> {
             dry_run,
             cloud,
         } => {
+            let designers = count_usize_flag("panel", "--designers", designers);
             if cloud {
                 if issue == "run" || run_issue.is_some() {
                     bail!(
@@ -7037,6 +7114,7 @@ fn run_command() -> Result<()> {
             check,
             retire,
         } => {
+            closed_unit("persona", "--anchor", anchor);
             if retire {
                 print!("{}", ljos_cli::retire_persona(&name, replace)?);
                 ljos_cli::refresh_agents();
@@ -7080,6 +7158,9 @@ fn run_command() -> Result<()> {
             cwd,
             script,
         } => {
+            let max_restarts = count_u32_flag("supervise", "--max-restarts", max_restarts);
+            let window = count_from_zero("supervise", "--window", window);
+            let at = count_from_zero("supervise", "--at", at);
             let restart = ljos_cli::plugin::Restart::parse(&restart).with_context(|| {
                 format!("restart {restart}: permanent, transient, or temporary")
             })?;
@@ -7090,9 +7171,18 @@ fn run_command() -> Result<()> {
                 .split(',')
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| {
-                    s.trim()
-                        .parse::<u64>()
-                        .with_context(|| format!("failure time {s}"))
+                    let s = s.trim();
+                    match s.parse::<i64>() {
+                        Ok(n) if n < 0 => {
+                            refuse_range(format!(
+                                "supervise: --failures takes a number from 0 up, not {n}."
+                            ));
+                        }
+                        Ok(n) => Ok(n as u64),
+                        Err(_) => s
+                            .parse::<u64>()
+                            .with_context(|| format!("failure time {s}")),
+                    }
                 })
                 .collect::<Result<Vec<_>>>()?;
             let mut sup = ljos_cli::plugin::Supervisor {
@@ -7176,6 +7266,7 @@ fn run_command() -> Result<()> {
             role,
             slack,
         } => {
+            let slack = slack.map(|n| count_usize_flag("claim", "--slack", n));
             let assignee = assignee_for("claim", assignee.as_deref(), false)?;
             match node.filter(|_| !next) {
                 Some(node) => {
@@ -7280,6 +7371,7 @@ fn run_command() -> Result<()> {
             gen,
             assignee,
         } => {
+            let gen = gen.map(|n| count_from_zero("complete", "--gen", n));
             let assignee = assignee_for("complete", assignee.as_deref(), false)?;
             stop_ticket_node(&node);
             print!("{}", complete(&node, status.as_deref(), &assignee, gen)?)
@@ -7648,6 +7740,7 @@ fn run_command() -> Result<()> {
             why,
             about,
         } => {
+            unit_interval("trust", "weight", weight);
             let row = Trust {
                 from,
                 to,
@@ -7797,6 +7890,7 @@ fn run_command() -> Result<()> {
             since_size,
             scope,
         } => {
+            let since_size = since_size.map(|n| count_from_zero("handover", "--since-size", n));
             for id in &issue {
                 stop_ticket(id);
             }
@@ -7874,6 +7968,7 @@ fn run_command() -> Result<()> {
             source,
         } => match (name, value) {
             (Some(name), Some(value)) => {
+                finite_number("habit", "value", value);
                 let every_s = parse_every(&every)?;
                 let (body, prev) = habit(&name, value, &unit, every_s, &source)?;
                 println!("{}", write_ack(&body, false));
@@ -8036,6 +8131,8 @@ fn run_command() -> Result<()> {
             json,
             quiet,
         } => {
+            open_unit("finish", "--beta", beta);
+            let gen = gen.map(|n| count_from_zero("finish", "--gen", n));
             let (issue, inferred) = match issue {
                 Some(raw) => (raw, false),
                 None => {
@@ -8120,6 +8217,8 @@ fn run_command() -> Result<()> {
             share,
             rule,
         } => {
+            open_unit("learn", "--beta", beta);
+            share_gap("learn", "--share", share);
             stop_ticket(&id);
             let forecasts = forecasts_from_json(&ljos_cli::raw_ballot_json(&id)?)?;
             let (outcome, off) = ljos_cli::named_outcome(
@@ -8540,6 +8639,52 @@ mod flag_text {
             Cli::try_parse_from(words(args)).unwrap_or_else(|err| {
                 panic!("{what} refused a leading hyphen:\n{err}");
             });
+        }
+    }
+
+    #[test]
+    fn every_numeric_flag_accepts_a_leading_minus() {
+        on_stack(every_numeric_flag_accepts_a_leading_minus_inner);
+    }
+
+    fn every_numeric_flag_accepts_a_leading_minus_inner() {
+        let mut cmd = Cli::command();
+        cmd.build();
+        let mut left_out = Vec::new();
+        numeric_left_out(&cmd, &mut Vec::new(), &mut left_out);
+        assert!(
+            left_out.is_empty(),
+            "numeric flags left out of the hyphen value:\n{}",
+            left_out.join("\n")
+        );
+    }
+
+    fn numeric_left_out(cmd: &clap::Command, path: &mut Vec<String>, left_out: &mut Vec<String>) {
+        for arg in cmd.get_arguments() {
+            if !arg.get_action().takes_values() {
+                continue;
+            }
+            let id = arg.get_value_parser().type_id();
+            let numeric = id == std::any::TypeId::of::<i64>()
+                || id == std::any::TypeId::of::<i32>()
+                || id == std::any::TypeId::of::<u64>()
+                || id == std::any::TypeId::of::<u32>()
+                || id == std::any::TypeId::of::<usize>()
+                || id == std::any::TypeId::of::<f64>()
+                || id == std::any::TypeId::of::<f32>();
+            if numeric && !arg.is_allow_hyphen_values_set() {
+                let name = arg
+                    .get_long()
+                    .map(|long| format!("--{long}"))
+                    .or_else(|| arg.get_short().map(|short| format!("-{short}")))
+                    .unwrap_or_else(|| arg.get_id().to_string());
+                left_out.push(format!("{} {name}", path.join(" ")));
+            }
+        }
+        for sub in cmd.get_subcommands() {
+            path.push(sub.get_name().to_string());
+            numeric_left_out(sub, path, left_out);
+            path.pop();
         }
     }
 }
