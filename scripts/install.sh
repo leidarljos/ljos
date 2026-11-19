@@ -787,13 +787,20 @@ wait_for_attests() {
   done < "$TMP/attest.pids"
 }
 
-# exists when the tag is published, missing when GitHub says it is not,
-# unknown when the question could not be asked.
+# exists only when GitHub published a release with ASSET, missing when it
+# published neither, noarchive when the release omits ASSET, and unknown
+# when the question could not be asked. A bare git tag is not a release.
 release_state() {
   repo=$1
   ver=$2
-  if fetch "https://github.com/$OWNER/$repo/releases/tag/v$ver" "$TMP/tag-$repo-$ver"; then
-    printf '%s' exists
+  asset=$3
+  answer="$TMP/release-$repo-$ver"
+  if fetch "https://api.github.com/repos/$OWNER/$repo/releases/tags/v$ver" "$answer"; then
+    if grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"$asset\"" "$answer"; then
+      printf '%s' exists
+    else
+      printf '%s' noarchive
+    fi
     return 0
   fi
   case $FETCH_KIND in
@@ -854,9 +861,15 @@ install_one() {
       missing)
         rm -f "$TMP/$asset"
         if [ -n "$ver" ]; then
-          rel=$(release_state "$repo" "$ver")
-          if [ "$rel" = missing ]; then
+          rel=$(release_state "$repo" "$ver" "$asset")
+          if [ "$rel" = missing ] || [ "$rel" = noarchive ]; then
             if user_asked "$repo"; then
+              if [ "$rel" = noarchive ]; then
+                if [ "$repo" = ljos ]; then
+                  die "$repo $ver has no release archive $asset for $TARGET. List versions at https://github.com/$OWNER/$repo/releases, then run \`sh install.sh --version VER\`."
+                fi
+                die "$repo $ver has no release archive $asset for $TARGET. List versions at https://github.com/$OWNER/$repo/releases, then run \`sh install.sh --pin $repo=VER\`."
+              fi
               if [ "$repo" = ljos ]; then
                 die "$repo $ver has no release. List versions at https://github.com/$OWNER/$repo/releases, then run \`sh install.sh --version VER\`."
               fi
