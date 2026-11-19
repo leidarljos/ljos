@@ -175,6 +175,18 @@ fn a_missing_tracker_program_names_the_install_and_exits_1() {
 }
 
 #[test]
+fn conflicts_names_the_missing_landscape_program_and_its_source() {
+    let home = Home::new();
+    let out = home.run(&["conflicts"], &[]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert_eq!(
+        one_line(&out.stderr),
+        "conflicts: `landscape` was not found on PATH; install it from https://github.com/leidarljos/landscape"
+    );
+}
+
+#[test]
 fn a_missing_claim_program_names_the_install_and_exits_1() {
     let home = Home::new();
     // A TODO ticket that nobody has claimed stops before the claim graph.

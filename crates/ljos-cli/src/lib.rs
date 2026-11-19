@@ -33758,6 +33758,7 @@ const SEAT_BINS: &[(&str, &str)] = &[
     ("packset-embed", "packset-embed"),
     ("packset-mcp", "packset"),
     ("ljos-hud", "ljos-hud"),
+    ("landscape", "landscape"),
 ];
 
 /// First `N.N.N` in a `--version` line.
@@ -35312,6 +35313,11 @@ pub fn doctor_seat() -> Vec<Habitat> {
             ),
             (None, _, _) if *bin == "ljos-hud" => (
                 "not on PATH and ljos statusline works without it, so run `cargo install --locked ljos-hud`."
+                    .to_string(),
+                false,
+            ),
+            (None, _, _) if *bin == "landscape" => (
+                "not on PATH; install it from https://github.com/leidarljos/landscape."
                     .to_string(),
                 false,
             ),
@@ -39581,7 +39587,7 @@ pub fn packset_hubs(limit: usize) -> Result<Value> {
 pub fn conflicts(limit: usize) -> Result<String> {
     if which::which("landscape").is_err() {
         bail!(
-            "conflicts: `landscape` is not on PATH; it is the optional habitat that reads the pack's geometry (leidarljos/landscape)"
+            "conflicts: `landscape` was not found on PATH; install it from https://github.com/leidarljos/landscape"
         );
     }
     let client = pack()?;

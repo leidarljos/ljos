@@ -49,7 +49,7 @@ The line says what went wrong and the command that fixes it.
 ``consolidate [--apply]``
    Stores: pack. The pairs where a later claim rewrites an earlier one; ``--apply`` closes the earlier ones' windows.
 ``conflicts [-n N]``
-   Stores: pack. Candidate contradictions by geometry: the lowest passes between single memories, read by the optional ``landscape`` habitat. The habitat is not part of this repository. When it is not on ``PATH`` the command says so and writes nothing.
+   Stores: pack. Candidate contradictions by geometry: the lowest passes between single memories, read by the optional ``landscape`` habitat. The habitat is not part of this repository. When it is not on ``PATH`` the command names https://github.com/leidarljos/landscape as its source and writes nothing.
 ``hubs [-n N] [--json]``
    Stores: pack. The memories most other memories point at, highest first. The page names the score and how many memories point at the row. PageRank ranks a memory by how many others point at it, and by how linked those are. ``--json`` prints the rows.
 ``island CUE [--fire] [--as PERSONA] [--json]``

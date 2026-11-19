@@ -7,7 +7,8 @@ Check the seat
 
 
 ``ljos doctor`` prints whether the seat is ready and the rows that need action, and exits 1 when a required part does not answer, the note queue is damaged, or the tracker root is missing or not writable.
-``ljos doctor --all`` prints every row.
+``ljos doctor --all`` prints every row, including the optional ``landscape``
+program used by ``ljos conflicts``. Its missing row links to the source.
 
 .. [[[cog import ljos_version as v; v.lines("", "The block is the ``ljos`` row from that command on a scratch seat, taken from ljos {version}.", "")]]]
 
