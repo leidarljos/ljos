@@ -1017,6 +1017,18 @@ fn no_write_send_and_options_refusals_exit_1_on_stdout() {
 }
 
 #[test]
+fn a_very_long_idle_span_does_not_overflow() {
+    let home = Home::new();
+    let out = home.run(
+        &["reap", "--idle", "99999999999999999d"],
+        &[("LJOS_SEAT", "alice")],
+    );
+    let said = text(&out);
+    assert_ne!(out.status.code(), Some(101), "{said}");
+    assert!(!said.contains("panicked"), "{said}");
+}
+
+#[test]
 fn an_empty_value_on_a_count_flag_is_named() {
     let home = Home::new();
     let out = home.run(
