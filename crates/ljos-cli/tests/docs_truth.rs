@@ -383,6 +383,35 @@ fn tool_names(env: &[(&str, &str)]) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn the_eb_stack_pages_name_cli_commands_not_unserved_mcp_tools() {
+    for rel in [
+        "docs/orgmode/howto-eb-stack.org",
+        "docs/source/howto-eb-stack.rst",
+    ] {
+        let text = page(rel);
+        for name in [
+            "eb_recipe_check",
+            "eb_package_bump",
+            "eb_recipe_lint",
+            "eb_target_doctor",
+            "eb_campaign_run",
+            "eb_campaign_status",
+        ] {
+            assert!(!text.contains(name), "{rel} names {name}");
+        }
+        for command in [
+            "eb-stack recipe check",
+            "eb-stack package bump",
+            "eb-stack recipe lint",
+            "eb-stack target doctor",
+            "eb-stack campaign",
+        ] {
+            assert!(text.contains(command), "{rel} omits {command}");
+        }
+    }
+}
+
 fn listed_between(text: &str, from: &str, to: &str) -> BTreeSet<String> {
     let (_, after) = text
         .split_once(from)
