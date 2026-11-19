@@ -694,6 +694,50 @@ fn unknown_proposals_status_names_valid_values_and_exits_2() {
 }
 
 #[test]
+fn impossible_as_of_dates_exit_2() {
+    let home = Home::new();
+    let bad = [
+        "2026-02-31",
+        "2026-01-01garbage",
+        "2025-02-29",
+        "1900-02-29",
+        "2026-04-31",
+    ];
+    for value in bad {
+        let out = home.run(
+            &["search", "kiln", "--as-of", value],
+            &[("LJOS_SEAT", "alice")],
+        );
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{value}\n{said}");
+        assert!(out.stdout.is_empty(), "{value}\n{said}");
+        assert_eq!(
+            one_line(&out.stderr),
+            format!("search: --as-of \"{value}\" is not a date; write YYYY-MM-DD or RFC 3339."),
+            "{value}\n{said}"
+        );
+    }
+    // A real day, including a leap day, and an RFC 3339 time, are not usage errors.
+    for value in [
+        "2024-02-29",
+        "2000-02-29",
+        "2026-01-01",
+        "2026-01-01T00:00:00Z",
+    ] {
+        let out = home.run(
+            &["search", "kiln", "--as-of", value],
+            &[("LJOS_SEAT", "alice")],
+        );
+        let said = text(&out);
+        assert_ne!(out.status.code(), Some(2), "{value}\n{said}");
+        assert!(
+            !String::from_utf8_lossy(&out.stderr).contains("is not a date"),
+            "{value}\n{said}"
+        );
+    }
+}
+
+#[test]
 fn invalid_flag_values_on_search_and_remember_exit_2() {
     let home = Home::new();
     let cases: [(&[&str], &str); 5] = [

@@ -40019,7 +40019,7 @@ pub fn packset_search_as_of(
     let _owner = pack_link::OwnerOnce::enter();
     let as_of = as_of.map(str::trim).filter(|s| !s.is_empty());
     let stamp = match as_of {
-        Some(at) if days_of_stamp(Some(at)).is_none() => {
+        Some(at) if !valid_as_of(at) => {
             bail!("search: --as-of {at:?} is not a date; write YYYY-MM-DD or RFC 3339")
         }
         // A date alone is its start; the pack wants the instant spelt out.
@@ -51379,10 +51379,14 @@ pub fn age_of(ts: Option<&str>, now: &str) -> String {
     }
 }
 
-/// Whether `ts` opens with a `YYYY-MM-DD` calendar date as `--as-of` expects.
+/// Whether `ts` is a real `YYYY-MM-DD` date, or an RFC 3339 time on a real
+/// date, as `--as-of` expects. The whole value has to be that form. A day
+/// the month does not have, a leap day outside a leap year, or characters
+/// after the date, is not one.
 #[must_use]
 pub fn valid_as_of(ts: &str) -> bool {
-    days_of_stamp(Some(ts)).is_some()
+    let date = ts.len() == 10 && chrono::NaiveDate::parse_from_str(ts, "%Y-%m-%d").is_ok();
+    date || chrono::DateTime::parse_from_rfc3339(ts).is_ok()
 }
 
 /// Days since the epoch of an RFC 3339 stamp's date, or none when the
