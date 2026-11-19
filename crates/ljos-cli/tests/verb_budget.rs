@@ -4,6 +4,11 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/sibling.rs"]
+mod sibling;
+#[path = "common/tools.rs"]
+mod tools;
+
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -294,33 +299,53 @@ fn a_note_returns_when_the_tracker_does_not_answer() {
 
 #[test]
 fn a_tracker_timeout_then_retry_writes_one_note() {
+    if tools::halt(tools::Tool::Vissue) {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
+    let tracker = dir.path().join("tracker");
+    let layout = vissue_core::Layout::new(&tracker, "Software");
+    std::fs::create_dir_all(layout.projects_dir()).unwrap();
+    let issue = vissue_core::ops::create(
+        &layout,
+        "demo",
+        "A slow note",
+        vissue_core::CreateOpts {
+            quiet: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let issue = issue.trim();
     let noted = dir.path().join("noted");
-    let state = dir.path().join("first");
+    let real = sibling::require("vissue").unwrap_or_else(|line| panic!("{line}"));
     script(
         dir.path(),
         "vissue",
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = note ]; then\n  if [ ! -f '{}' ]; then\n    : > '{}'\n    sleep 2\n    exit 0\n  fi\n  printf '%s\\n' \"$*\" >> '{}'\n  exit 0\nfi\nexit 0\n",
-            state.display(),
-            state.display(),
-            noted.display()
+            "#!/bin/sh\nif [ \"$1\" = note ]; then\n  printf '%s\\n' \"$*\" >> '{}'\n  '{}' \"$@\"\n  code=$?\n  [ \"$(wc -l < '{}')\" != 1 ] || sleep 2\n  exit \"$code\"\nfi\nexec '{}' \"$@\"\n",
+            noted.display(),
+            real.display(),
+            noted.display(),
+            real.display()
         ),
     );
     let home = home_of(dir.path());
     let path = format!(
-        "{}:{}",
+        "{}:{}:{}",
         dir.path().display(),
+        real.parent().unwrap().display(),
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
     );
     let started = Instant::now();
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
-        .args(["note", "demo-n", "hello"])
+        .args(["note", issue, "hello"])
         .current_dir(dir.path())
         .env("PATH", &path)
         .env("HOME", &home)
         .env("XDG_RUNTIME_DIR", &home)
-        .env("VISSUE_ROOT", home.join("tracker"))
+        .env("VISSUE_ROOT", &tracker)
+        .env("VISSUE_NO_ROUTE", "1")
         .env("PACKSET_URL", "http://127.0.0.1:9")
         .env("LJOS_SEAT", "ada")
         .env("LJOS_HOOKD", "off")
@@ -339,5 +364,19 @@ fn a_tracker_timeout_then_retry_writes_one_note() {
     let wrote = std::fs::read_to_string(&noted).unwrap_or_default();
     let notes: Vec<&str> = wrote.lines().collect();
     assert_eq!(notes.len(), 1, "{wrote}");
-    assert_eq!(notes[0], "note demo-n hello", "{wrote}");
+    assert_eq!(notes[0], format!("note {issue} -- hello"), "{wrote}");
+    let doc =
+        vissue_core::IssueDoc::parse_file("demo", &layout.project_issues_path("demo")).unwrap();
+    let card = doc
+        .headings
+        .iter()
+        .find(|heading| heading.id == issue)
+        .unwrap();
+    assert_eq!(
+        card.logbook
+            .iter()
+            .filter(|entry| entry.note.as_deref() == Some("hello"))
+            .count(),
+        1
+    );
 }

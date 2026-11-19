@@ -13696,10 +13696,9 @@ fn file_yes_no(parent: Option<&str>, prompt: &str) -> Result<String> {
         argv.push("--parent".into());
         argv.push(parent.to_string());
     }
-    argv.push("--body".into());
-    argv.push(body);
-    argv.push("--tags".into());
-    argv.push("decision,panel".into());
+    argv.push(format!("--body={body}"));
+    argv.push("--tags=decision,panel".into());
+    argv.push("--".into());
     argv.push(title);
     issue_spot::forget_reads();
     let mut cmd = std::process::Command::new(which::which("vissue").context("vissue not on PATH")?);
@@ -14813,7 +14812,7 @@ pub fn held_issue() -> Option<String> {
     holders.iter().find_map(|holder| {
         let out = run_captured_within(
             "vissue",
-            &["claims", "--by", holder, "--json"],
+            &["claims", &format!("--by={holder}"), "--json"],
             None,
             tracker_verb_wait(),
         )
@@ -26469,7 +26468,7 @@ pub fn bind_playbook(issue: &str, name: &str) -> Result<()> {
         return Ok(());
     }
     let note = format!("{PLAYBOOK_NOTE_PREFIX} {name}");
-    match run_captured("vissue", &["note", issue, &note]) {
+    match run_captured("vissue", &["note", issue, "--", &note]) {
         Ok(_) => {
             let _ = write_playbook_cache(issue, name);
             Ok(())
@@ -27000,7 +26999,14 @@ pub(crate) fn workflow_child(
     let project = project_name(project).map_err(anyhow::Error::msg)?;
     let said = run_captured(
         "vissue",
-        &["q", "-p", &project, "--parent", parent, "-t", kind, title],
+        &[
+            "q",
+            &format!("--project={project}"),
+            &format!("--parent={parent}"),
+            &format!("--type={kind}"),
+            "--",
+            title,
+        ],
     )?;
     let id = said.stdout.trim().to_string();
     if id.is_empty() {
@@ -27146,7 +27152,7 @@ fn note_objections_below(issue: &str, state: &converge::PanelState) -> Result<()
             objection.text,
             objection.target
         );
-        run_captured("vissue", &["note", issue, &text])?;
+        run_captured("vissue", &["note", issue, "--", &text])?;
     }
     Ok(())
 }
@@ -27269,7 +27275,7 @@ pub fn workflow_round(parent: &str) -> Result<String> {
                 cfg.veto.join(", "),
                 cfg.quorum
             );
-            run_captured("vissue", &["append", &id, &body])?;
+            run_captured("vissue", &["append", &id, "--", &body])?;
             let mut out = format!("filed panel round {n}: {id}\n");
             out.push_str(&persist_tracker(&id, "filed a panel round"));
             if let Some(s) = workflow_status(parent)? {
@@ -28007,7 +28013,7 @@ pub fn body_with_options(body: Option<String>, raw: &[String]) -> Result<Option<
 /// Fewer than two options, or the tracker did not append.
 pub fn append_issue_options(issue: &str, raw: &[String]) -> Result<String> {
     let line = options_line(raw)?;
-    let said = run_captured("vissue", &["append", issue, &line])
+    let said = run_captured("vissue", &["append", issue, "--", &line])
         .with_context(|| format!("options: {issue} was not updated"))?;
     let persisted = persist_tracker(issue, "noted options");
     Ok(format!("{}{persisted}", said.stdout))
@@ -28114,18 +28120,12 @@ pub fn cast_jev(name: &str, issue: &str, b: &jev::Ballot) -> Result<()> {
     // The forecast first: a ballot cast with its forecast refused would
     // stand half recorded, and the command would still say it failed.
     write_prediction(issue, &voter, &serde_json::to_string(&b.forecast)?)?;
+    let choice = format!("--for={}", b.choice);
+    let used = format!("--used={voter}");
+    let confidence = format!("--confidence={p}");
     run_captured_as(
         "vissue",
-        &[
-            "vote",
-            issue,
-            "--for",
-            &b.choice,
-            "--used",
-            &voter,
-            "--confidence",
-            &p,
-        ],
+        &["vote", issue, &choice, &used, &confidence],
         Some(&voter),
     )?;
     let _ = write_trust(&judge_trust_row(&model), &[]);
@@ -28143,7 +28143,7 @@ pub fn cast_jev(name: &str, issue: &str, b: &jev::Ballot) -> Result<()> {
 }
 
 fn note_jev(issue: &str, text: &str) {
-    let _ = run_captured("vissue", &["note", issue, text]);
+    let _ = run_captured("vissue", &["note", issue, "--", text]);
 }
 
 /// What a Jev ballot did: cast under the persona's name, or handed to a
@@ -39099,6 +39099,7 @@ pub fn handover_scoped(
                     "export",
                     "--into",
                     &atoms_dir.display().to_string(),
+                    "--",
                     &client.workspace(),
                 ],
             ) {
@@ -39141,7 +39142,7 @@ pub fn handover_scoped(
     }
 
     lines.push(
-        run_captured("vissue", &["satchel", "--seal", &out.display().to_string()])?
+        run_captured("vissue", &["satchel", &format!("--seal={}", out.display())])?
             .stdout
             .trim_end()
             .to_string(),
@@ -39229,7 +39230,7 @@ pub fn receive(
     lines.push(
         run_captured(
             "vissue",
-            &["satchel", "--verify", &dir.display().to_string()],
+            &["satchel", &format!("--verify={}", dir.display())],
         )?
         .stdout
         .trim_end()
@@ -41047,23 +41048,25 @@ pub fn file_issue(
     quorum_deadline: Option<(usize, &str)>,
 ) -> Result<(String, String, String, Result<String>)> {
     let project = project_name(project).map_err(anyhow::Error::msg)?;
-    let mut argv: Vec<String> = vec!["create".into(), "-p".into(), project.clone()];
+    let mut argv: Vec<String> = vec!["create".into(), format!("--project={project}")];
     for (flag, value) in [
         ("--parent", parent),
-        ("-t", kind),
+        ("--type", kind),
         ("--tags", tags),
         ("--priority", priority),
-        ("--body", body),
     ] {
         if let Some(v) = value {
-            argv.push(flag.into());
-            argv.push(v.to_string());
+            argv.push(format!("{flag}={v}"));
         }
     }
-    argv.push(title.to_string());
+    if let Some(body) = body {
+        argv.push(format!("--body={body}"));
+    }
     if quiet {
         argv.push("-q".into());
     }
+    argv.push("--".into());
+    argv.push(title.to_string());
     let said = match run_captured_within("vissue", &argv, Some(agent), tracker_verb_wait()) {
         Ok(said) => said,
         Err(err)
@@ -41077,7 +41080,7 @@ pub fn file_issue(
     let id = created_issue_id(&text);
     if let (Some((n, d)), false) = (quorum_deadline, id.is_empty()) {
         let note = format!("{}{n} by {}", reap::QUORUM_NOTE, d.trim());
-        run_captured("vissue", &["note", &id, &note])?;
+        run_captured("vissue", &["note", &id, "--", &note])?;
     }
     let inbox = text
         .lines()
@@ -48282,7 +48285,7 @@ pub fn reopen(issue: &str) -> Result<String> {
         }
     }
     let note = undo::reopen_note(&caller, state);
-    if let Err(e) = run_captured("vissue", &["note", issue, &note]) {
+    if let Err(e) = run_captured("vissue", &["note", issue, "--", &note]) {
         eprintln!("ljos reopen: the note on {issue} was not written: {e:#}");
     }
     let mut out = format!("{issue} reopened as {prior}\n");
@@ -48947,7 +48950,7 @@ pub fn finish(
     // The ticket closes only when asked, so a blocker on it stays a blocker.
     if let Some(state) = closed_as {
         if let Some(note) = &close_note {
-            run_as("vissue", &["note", issue, note], None).with_context(|| {
+            run_as("vissue", &["note", issue, "--", note], None).with_context(|| {
                 format!("finish: could not note the grant on the ticket {issue}")
             })?;
         }
@@ -55416,7 +55419,10 @@ fn tracker_note_already_written(args: &[impl AsRef<str>]) -> bool {
         return false;
     }
     let issue = args.get(1).map(AsRef::as_ref).unwrap_or_default();
-    let text = args.get(2).map(AsRef::as_ref).unwrap_or_default();
+    let mut text = args.get(2).map(AsRef::as_ref).unwrap_or_default();
+    if text == "--" {
+        text = args.get(3).map(AsRef::as_ref).unwrap_or_default();
+    }
     !issue.trim().is_empty() && !text.trim().is_empty() && note_landed(issue, text)
 }
 
@@ -56243,12 +56249,9 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
             &[
                 "create",
                 "file",
-                "--name",
-                &name,
-                "--path",
-                &state.display().to_string(),
-                "--agent",
-                &seat,
+                &format!("--name={name}"),
+                &format!("--path={}", state.display()),
+                &format!("--agent={seat}"),
             ],
         ) {
             Ok(said) => said.stdout,
@@ -56479,8 +56482,15 @@ pub fn bump_plan(
             run_captured(
                 "vissue",
                 &[
-                    "create", "-p", project, "--id", &row.id, "--parent", parent, "-t", "task",
-                    "--quiet", "--body", &body, &title,
+                    "create",
+                    &format!("--project={project}"),
+                    &format!("--id={}", row.id),
+                    &format!("--parent={parent}"),
+                    "--type=task",
+                    "--quiet",
+                    &format!("--body={body}"),
+                    "--",
+                    &title,
                 ],
             )
             .with_context(|| format!("bump-plan: create {} ({})", row.id, row.module))?;

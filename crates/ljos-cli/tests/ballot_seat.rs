@@ -28,7 +28,7 @@ fn a_persona_ballot_is_recorded_when_no_seat_is_named() {
         dir.path(),
         "vissue",
         &format!(
-            "#!/bin/sh\necho \"vissue $* VISSUE_AGENT=${{VISSUE_AGENT:-}}\" >> '{log_s}'\ncase \"$1 $3\" in\n  show*) echo '{{}}' ;;\n  'vote --for') echo \"[{{\\\"agent\\\":\\\"$VISSUE_AGENT\\\",\\\"choice\\\":\\\"$4\\\"}}]\" > '{drawer_s}' ;;\n  'vote --json') cat '{drawer_s}' 2>/dev/null || echo '[]' ;;\nesac\nexit 0\n"
+            "#!/bin/sh\necho \"vissue $* VISSUE_AGENT=${{VISSUE_AGENT:-}}\" >> '{log_s}'\ncase \"$1 $3\" in\n  show*) echo '{{}}' ;;\n  'vote --for='*) choice=${{3#--for=}}; echo \"[{{\\\"agent\\\":\\\"$VISSUE_AGENT\\\",\\\"choice\\\":\\\"$choice\\\"}}]\" > '{drawer_s}' ;;\n  'vote --json') cat '{drawer_s}' 2>/dev/null || echo '[]' ;;\nesac\nexit 0\n"
         ),
     );
     let home = dir.path().join("home");
@@ -82,7 +82,7 @@ fn a_persona_ballot_is_recorded_when_no_seat_is_named() {
     assert!(said.contains("reviewer cast by "), "{cast:?}");
     let calls = std::fs::read_to_string(&log).unwrap();
     assert!(
-        calls.contains("vissue vote proj-aaaa --for a --used none VISSUE_AGENT=reviewer"),
+        calls.contains("vissue vote proj-aaaa --for=a --used=none VISSUE_AGENT=reviewer"),
         "{calls}"
     );
 }

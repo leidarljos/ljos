@@ -144,7 +144,7 @@ fn a_note_with_no_id_uses_the_open_sitting() {
     assert!(out.status.success(), "{text}");
     assert!(
         seat.calls()
-            .contains(&format!("vissue note {OPEN} the melt held")),
+            .contains(&format!("vissue note {OPEN} -- the melt held")),
         "the note missed the open sitting:\n{}\n{text}",
         seat.calls()
     );
@@ -294,7 +294,7 @@ fn a_note_on_another_ticket_warns_and_still_writes() {
     assert!(out.status.success(), "{text}calls:\n{}", seat.calls());
     assert!(
         seat.calls()
-            .contains(&format!("vissue note {OTHER} the melt held")),
+            .contains(&format!("vissue note {OTHER} -- the melt held")),
         "the named ticket was not written:\n{}",
         seat.calls()
     );
@@ -352,7 +352,7 @@ fn quiet_hides_the_other_sitting_line() {
     assert!(note.status.success(), "{note_text}calls:\n{}", seat.calls());
     assert!(
         seat.calls()
-            .contains(&format!("vissue note {OTHER} the melt held")),
+            .contains(&format!("vissue note {OTHER} -- the melt held")),
         "{}",
         seat.calls()
     );
@@ -388,7 +388,7 @@ fn a_note_on_the_open_sitting_does_not_warn() {
     assert!(out.status.success(), "{text}");
     assert!(
         seat.calls()
-            .contains(&format!("vissue note {OPEN} the melt held")),
+            .contains(&format!("vissue note {OPEN} -- the melt held")),
         "{}",
         seat.calls()
     );

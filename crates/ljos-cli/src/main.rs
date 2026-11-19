@@ -1282,6 +1282,7 @@ enum Cmd {
         /// The issue id.
         issue: String,
         /// The options, separated by commas.
+        #[arg(allow_hyphen_values = true)]
         options: String,
     },
     /// Open a panel for a decision prompt: file or reuse the issue, sit it, and start one headless member per brief.
@@ -6828,7 +6829,7 @@ fn run_command() -> Result<()> {
             // `noted on` line used to follow it.
             let captured = ljos_cli::run_for(
                 "vissue",
-                &["note", &issue, &text],
+                &["note", &issue, "--", &text],
                 ljos_cli::tracker_verb_wait(),
             )?;
             eprint!("{}", captured.stderr);
@@ -7212,14 +7213,11 @@ fn run_command() -> Result<()> {
                     let mut args = vec![
                         "vote".to_string(),
                         issue.clone(),
-                        "--for".into(),
-                        c,
-                        "--used".into(),
-                        used.to_string(),
+                        format!("--for={c}"),
+                        format!("--used={used}"),
                     ];
                     if let Some(p) = confidence {
-                        args.push("--confidence".into());
-                        args.push(format!("{p}"));
+                        args.push(format!("--confidence={p}"));
                     }
                     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                     ljos_cli::hook_timed("vote_cast", || run_as("vissue", &refs, Some(&who)))?;
@@ -7228,19 +7226,19 @@ fn run_command() -> Result<()> {
                         ljos_cli::hook_timed("vote_readback", || {
                             ljos_cli::raw_ballot_rows(&issue).unwrap_or_default()
                         });
-                    if !ljos_cli::tracker_holds_ballot(&rows, &who, &args[3]) {
+                    if !ljos_cli::tracker_holds_ballot(&rows, &who, &c) {
                         bail!(
                         "the tracker does not hold a ballot from {who} for {} on {issue}: nothing was cast",
-                        args[3]
+                        c
                     );
                     }
-                    println!("recorded on the tracker: {who} for {} on {issue}", args[3]);
+                    println!("recorded on the tracker: {who} for {c} on {issue}");
                     cast.keep();
                     // Every ballot, a persona's included, is signed and bound to
                     // this connection. The push gate still counts only seat
                     // ballots; the panel gate counts the session, not the seat.
                     match ljos_cli::hook_timed("vote_sign", || {
-                        ljos_cli::ballot_sig::sign_ballot(&issue, &who, &args[3])
+                        ljos_cli::ballot_sig::sign_ballot(&issue, &who, &c)
                     }) {
                         Ok(said) => print!("{said}"),
                         Err(e) => eprintln!("ljos vote: {e:#}"),
@@ -7255,7 +7253,7 @@ fn run_command() -> Result<()> {
                     print!("{}", ljos_cli::persist_tracker(&issue, "ballot cast"));
                     if let Some((reason, child_id)) = &against_note {
                         let note = format!("{who}: against: {reason} (child {child_id})");
-                        run_as("vissue", &["note", &issue, &note], Some(&who))?;
+                        run_as("vissue", &["note", &issue, "--", &note], Some(&who))?;
                         println!(
                         "no ballot linked to child {child_id}. {issue} stays open while {child_id} is open. After `ljos finish {child_id} --close`, replace the ballot: `ljos vote {issue} --withdraw --as {who}` then `ljos vote {issue} --for OPTION --used none --as {who}`, then `ljos consensus {issue}`."
                     );

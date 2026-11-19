@@ -110,7 +110,10 @@ fn file_top_defaults_to_the_seat_project() {
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
     assert_eq!(id, "kiln-ab12");
     let creates = std::fs::read_to_string(seat.dir.path().join("calls.log")).unwrap();
-    assert!(creates.contains("vissue create -p demo"), "{creates}");
+    assert!(
+        creates.contains("vissue create --project=demo"),
+        "{creates}"
+    );
 }
 
 #[test]

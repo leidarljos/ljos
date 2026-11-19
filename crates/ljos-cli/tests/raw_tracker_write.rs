@@ -276,7 +276,7 @@ fn the_vissue_children_ljos_runs_are_not_refused() {
     assert!(out.status.success(), "{said}");
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        calls.contains("vissue note ljos-ab12 halfway there"),
+        calls.contains("vissue note ljos-ab12 -- halfway there"),
         "{calls}\n{said}"
     );
 }

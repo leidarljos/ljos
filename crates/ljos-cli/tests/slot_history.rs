@@ -115,8 +115,8 @@ fn a_vote_on_a_long_tracker_matches_and_does_not_pickaxe() {
                cat '{drawer_s}' 2>/dev/null || echo '[]'\n\
                exit 0\n\
              fi\n\
-             if [ \"$1\" = vote ] && [ \"$3\" = --for ]; then\n\
-               printf '[{{\"agent\":\"%s\",\"choice\":\"%s\"}}]\\n' \"$VISSUE_AGENT\" \"$4\" > '{drawer_s}'\n\
+             if [ \"$1\" = vote ] && [ \"${{3#--for=}}\" != \"$3\" ]; then\n\
+               printf '[{{\"agent\":\"%s\",\"choice\":\"%s\"}}]\\n' \"$VISSUE_AGENT\" \"${{3#--for=}}\" > '{drawer_s}'\n\
                exit 0\n\
              fi\n\
              if [ \"$1\" = show ]; then\n\
