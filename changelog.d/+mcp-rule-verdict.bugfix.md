@@ -1,1 +1,0 @@
-Refuse a `ljos_rule` verdict other than `deny` or `ask` as an error that writes nothing, accept either in any case, and point the `ljos_rule` description at `ljos_guard_check` instead of `ljos policy`.
