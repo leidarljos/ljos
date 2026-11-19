@@ -18485,11 +18485,7 @@ pub fn hook_failure_output(input: &str, event: Option<&str>, error: &str) -> Opt
     if !is_gate_event(&call.event) {
         return None;
     }
-    let error: String = error
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let note = unhealthy_note(error.trim());
+    let note = unhealthy_note(&hook_fault_line(error));
     if call.shape.is_cursor() {
         let mut out = serde_json::Map::new();
         out.insert("permission".into(), Value::String("allow".into()));
@@ -18523,7 +18519,7 @@ pub fn answer_failed_gate(error: &str) {
     GATE_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = std::io::Write::write_all(&mut out, text.as_bytes());
     let _ = std::io::Write::flush(&mut out);
-    eprintln!("ljos hook: {error}; the call is allowed");
+    eprintln!("ljos hook: {}; the call is allowed", hook_fault_line(error));
     std::process::exit(0);
 }
 
@@ -35205,15 +35201,29 @@ pub fn bypass_summary(bytes: &[u8], path: &str) -> String {
         String::new()
     };
     let s = |k: &str| last[k].as_str().unwrap_or("").to_string();
+    // The command stays in the log. A doctor row names the count, the last
+    // rule and the path, so a newline or a backtick in the command cannot
+    // split the row or hide the rule.
     format!(
-        "{} command{} ran past the guard; last at {}: `{}` past {} ({}); see {path}{damaged}",
+        "{} command{} in the guard bypass log; last rule {} ({}); see {path}{damaged}",
         rows.len(),
         if rows.len() == 1 { "" } else { "s" },
-        local_when(&s("ts")),
-        s("command"),
-        s("rule"),
-        s("how"),
+        one_line_field(&s("rule")),
+        one_line_field(&s("how")),
     )
+}
+
+/// One field of a doctor row: the first run of words, with backticks
+/// flattened, cut so a long rule cannot split the row.
+fn one_line_field(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = flat.replace('`', "'");
+    if flat.chars().count() <= 80 {
+        flat
+    } else {
+        let cut: String = flat.chars().take(79).collect();
+        format!("{cut}…")
+    }
 }
 
 fn policy_row() -> Habitat {
@@ -52685,6 +52695,20 @@ fn guard_note_of(text: &str) -> Option<String> {
     rest.contains("unhealthy").then(|| rest.to_string())
 }
 
+/// One line for a hook failure. A writer error's cause chain can carry
+/// newlines; a hook answer and the note beside it stay one line.
+#[must_use]
+pub fn hook_fault_line(error: &str) -> String {
+    let flat = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    const CAP: usize = 160;
+    if flat.chars().count() <= CAP {
+        flat
+    } else {
+        let cut: String = flat.chars().take(CAP - 1).collect();
+        format!("{cut}…")
+    }
+}
+
 /// What a person reads when the guard timed out or crashed: the call is
 /// allowed, and `why` says which failure it was.
 #[must_use]
@@ -68980,14 +69004,26 @@ mod tests {
         assert_eq!(rows[1]["how"], "grant 0a1b");
         let said = bypass_summary(text.as_bytes(), "LOG");
         assert!(
-            said.starts_with("2 commands ran past the guard")
-                && said.contains("`terraform destroy` past ask pack: cloud (grant 0a1b)")
+            said.starts_with("2 commands in the guard bypass log")
+                && said.contains("last rule ask pack: cloud (grant 0a1b)")
                 && said.ends_with("see LOG"),
             "{said}"
         );
+        assert!(!said.contains("terraform"), "{said}");
         assert_eq!(
             bypass_summary(b"", "LOG"),
             "no command has run past the guard"
+        );
+        let secret = "{\"command\":\"terraform destroy `secret`\\nAKIA\",\"how\":\"grant\\n0a1b\",\"rule\":\"ask pack: cloud\",\"kind\":\"warn\"}\n";
+        let hidden = bypass_summary(secret.as_bytes(), "LOG");
+        assert_eq!(hidden.lines().count(), 1, "{hidden}");
+        assert!(
+            !hidden.contains("terraform") && !hidden.contains("secret") && !hidden.contains('`'),
+            "{hidden}"
+        );
+        assert!(
+            hidden.contains("last rule ask pack: cloud (grant 0a1b)"),
+            "{hidden}"
         );
     }
 
@@ -69092,7 +69128,7 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         let state = bypass_row().state;
         assert!(
-            state.starts_with("2 commands ran past the guard"),
+            state.starts_with("2 commands in the guard bypass log"),
             "{state}"
         );
     }
@@ -69174,7 +69210,7 @@ mod tests {
         mixed.extend_from_slice(b"{\"command\":\"caf\xc3\n");
         let said = bypass_summary(&mixed, "LOG");
         assert!(
-            said.starts_with("1 command ran past the guard")
+            said.starts_with("1 command in the guard bypass log")
                 && said.contains("damaged: 1 row could not be read"),
             "{said}"
         );
@@ -76053,6 +76089,17 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "{out}"
         );
         assert!(!out.trim().contains('\n'));
+        let chain = "pack refused\n\nCaused by:\n    connection reset";
+        let flat = hook_fault_line(chain);
+        assert_eq!(flat.lines().count(), 1, "{flat}");
+        assert!(
+            flat.contains("Caused by") && flat.contains("connection reset"),
+            "{flat}"
+        );
+        let long = "x".repeat(400);
+        let cut = hook_fault_line(&long);
+        assert!(cut.chars().count() <= 160, "{}", cut.chars().count());
+        assert!(cut.ends_with('…'), "{cut}");
         let read = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeReadFile","file_path":"/w/a"}"#;
         assert_eq!(
             hook_failure_output(read, None, "x").as_deref(),

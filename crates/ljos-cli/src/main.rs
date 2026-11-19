@@ -5125,7 +5125,7 @@ fn run_command() -> Result<()> {
             let chars = text.chars().count();
             if chars > ljos_cli::REMEMBER_TEXT_CAP {
                 eprintln!(
-                    "remember: the text is {chars} characters, past {}, and it needs one or two sentences, so run `ljos remember`.",
+                    "remember: the text is {chars} characters, past {}, and it needs one or two sentences, so pass a shorter text to `ljos remember`.",
                     ljos_cli::REMEMBER_TEXT_CAP
                 );
                 std::process::exit(USAGE_STATUS);

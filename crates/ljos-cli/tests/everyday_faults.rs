@@ -302,7 +302,7 @@ fn a_very_long_remember_names_the_command_and_exits_2() {
     assert_eq!(
         line,
         format!(
-            "remember: the text is {chars} characters, past 1000, and it needs one or two sentences, so run `ljos remember`."
+            "remember: the text is {chars} characters, past 1000, and it needs one or two sentences, so pass a shorter text to `ljos remember`."
         )
     );
 }

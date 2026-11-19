@@ -29,6 +29,10 @@ It warns on these commands:
 
 Each warning is one line, ``allow\twarn\tRULE\tWARNING``, and the label is
 kept in ``$XDG_DATA_HOME/ljos/bypass.jsonl``.
+The doctor ``guard bypass`` row names how many commands are in that log, the last rule and the path.
+It does not print the command.
+A hook that fails before a verdict allows the call and prints one line, ``ljos hook: ...; the call is allowed``, and tells you to run ``ljos doctor``.
+A text past 1000 characters is refused by ``ljos remember`` with one line that says to pass a shorter text.
 
 ljos keeps two checks of its own, because only ljos knows the tracker and the sitting:
 
