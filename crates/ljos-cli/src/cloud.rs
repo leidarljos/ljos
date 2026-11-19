@@ -399,6 +399,16 @@ pub fn merge_org_cli(base: &Path, ours: &Path, theirs: &Path) -> Result<()> {
     crate::tracker_push::merge_org_files(base, ours, theirs).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// Whether `taken` is at least `lease` seconds before `now`.
+/// A lease that does not fit in a timestamp is not elapsed: casting it to
+/// `i64` would make it negative and every claim would look idle.
+fn claim_past_lease(taken: i64, lease: u64, now: i64) -> bool {
+    let Ok(lease) = i64::try_from(lease) else {
+        return false;
+    };
+    taken.saturating_add(lease) <= now
+}
+
 /// Hand back `STARTED` claims this machine made whose owner is gone and
 /// whose claim is older than `lease` seconds. A claim is this machine's
 /// when a hold record here names it. Another machine's claim has no record
@@ -437,7 +447,7 @@ pub fn reap_gone_owners(seat: Option<&str>, lease: u64) -> String {
             continue;
         }
         let idle = match heading.claimed_at().and_then(crate::reap::org_ts) {
-            Some(taken) => taken.saturating_add(lease as i64) <= now,
+            Some(taken) => claim_past_lease(taken, lease, now),
             None => true,
         };
         if !idle {
@@ -4346,6 +4356,15 @@ lrwxr-xr-x  0 0 0 0 Jan  1  1970 bin/packset-embed -> /etc/passwd
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_lease_that_does_not_fit_does_not_idle_a_fresh_claim() {
+        let now = 1_700_000_000;
+        assert!(!claim_past_lease(now, u64::MAX, now));
+        assert!(!claim_past_lease(now - 10, u64::MAX, now));
+        assert!(claim_past_lease(now - 1_000, 10, now));
+        assert!(!claim_past_lease(now, 10, now));
+    }
 
     const SECRET: &str = "AGE-SECRET-KEY-1PLANTED\n";
 
