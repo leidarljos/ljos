@@ -632,7 +632,6 @@ enum Cmd {
     #[command(after_help = "Example: `ljos remember \"The lexical default is BM25+.\"`")]
     Remember {
         /// The lesson to store.
-        #[arg(allow_hyphen_values = true)]
         text: Vec<String>,
         /// Remember as this persona: the lesson comes back to it first in its next brief.
         #[arg(long = "as")]
@@ -674,7 +673,6 @@ enum Cmd {
     /// Example: `ljos prefer "CombMNZ over RRF for fusing two ballots."`
     Prefer {
         /// The preference to store.
-        #[arg(allow_hyphen_values = true)]
         text: Vec<String>,
         /// Prefer as this persona.
         #[arg(long = "as")]
@@ -898,7 +896,6 @@ enum Cmd {
     #[command(after_help = "Example: `ljos search \"lexical default\"`")]
     Search {
         /// Words to look for.
-        #[arg(allow_hyphen_values = true)]
         query: Vec<String>,
         /// Most hits to print.
         #[arg(short = 'n', long, default_value_t = 10, allow_hyphen_values = true)]
@@ -1064,7 +1061,6 @@ enum Cmd {
     /// Example: `ljos island codec`
     Island {
         /// Words that name the task.
-        #[arg(allow_hyphen_values = true)]
         cue: Vec<String>,
         /// Strengthen the links among the strongest eight memories.
         #[arg(long)]
@@ -1145,7 +1141,6 @@ enum Cmd {
     #[command(after_help = "Example: `LJOS_SEAT=alice ljos file \"Pick a codec\" -p demo`")]
     File {
         /// The issue's title.
-        #[arg(allow_hyphen_values = true)]
         title: String,
         /// The parent issue; the held issue when omitted.
         #[arg(long)]
@@ -1244,12 +1239,7 @@ enum Cmd {
     #[command(after_help = "Example: `ljos note \"the door seats when it is cold\"`")]
     Note {
         /// The note, or an issue id and then the note.
-        #[arg(
-            value_name = "WORDS",
-            required = true,
-            num_args = 1..,
-            allow_hyphen_values = true
-        )]
+        #[arg(value_name = "WORDS", required = true, num_args = 1..)]
         words: Vec<String>,
         /// Print the tracker and sync lines. Without it, a commit that landed
         /// is quiet, and so is a push that landed. A refusal is still printed.
@@ -1302,12 +1292,7 @@ enum Cmd {
     /// Example: `ljos send bob "the codec is chosen"`
     Send {
         /// The seat and the message, or with `--group` the message alone.
-        #[arg(
-            value_name = "WORDS",
-            required = true,
-            num_args = 1..,
-            allow_hyphen_values = true
-        )]
+        #[arg(value_name = "WORDS", required = true, num_args = 1..)]
         words: Vec<String>,
         /// Write to every other member of this group.
         #[arg(long)]
@@ -1365,7 +1350,7 @@ enum Cmd {
         /// The id `send` printed.
         id: String,
         /// The reply; several words are one reply.
-        #[arg(required = true, num_args = 1.., allow_hyphen_values = true)]
+        #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
         /// Show this ahead of other mail on the next prompt.
         #[arg(long)]
@@ -1799,7 +1784,6 @@ enum Cmd {
         /// The persona to ask.
         name: String,
         /// What to ask, in words.
-        #[arg(allow_hyphen_values = true)]
         text: Vec<String>,
     },
     /// List each persona: name, anchor, domains, view, and who defined it.
@@ -2510,11 +2494,7 @@ enum Cmd {
         #[arg(long, allow_hyphen_values = true)]
         lesson: Option<String>,
         /// The lesson given after the issue without `--lesson`, as agents often write it.
-        #[arg(
-            value_name = "LESSON",
-            conflicts_with = "lesson",
-            allow_hyphen_values = true
-        )]
+        #[arg(value_name = "LESSON", conflicts_with = "lesson")]
         lesson_text: Option<String>,
         /// The option that turned out right, when the ballots are in and the world has said.
         #[arg(long, allow_hyphen_values = true)]
@@ -8655,18 +8635,32 @@ mod flag_text {
         }
 
         let cases: &[(&[&str], &str)] = &[
-            (&["remember", "-x"], "remember text"),
-            (&["search", "-x"], "search query"),
-            (&["note", "-x"], "note text"),
-            (&["file", "-x", "-p", "demo"], "file title"),
-            (&["prefer", "-x"], "prefer text"),
-            (&["ask", "editor", "-x"], "ask text"),
-            (&["finish", "demo-kiln", "-x"], "finish lesson text"),
+            (&["remember", "--", "-x"], "remember text"),
+            (&["search", "--", "-x"], "search query"),
+            (&["note", "--", "-x"], "note text"),
+            (&["file", "-p", "demo", "--", "-x"], "file title"),
+            (&["prefer", "--", "-x"], "prefer text"),
+            (&["ask", "editor", "--", "-x"], "ask text"),
+            (&["finish", "demo-kiln", "--", "-x"], "finish lesson text"),
         ];
         for (args, what) in cases {
             Cli::try_parse_from(words(args)).unwrap_or_else(|err| {
                 panic!("{what} refused a leading hyphen:\n{err}");
             });
+        }
+        let flagged = Cli::try_parse_from(words(&["search", "-x"]));
+        assert!(
+            flagged.is_err(),
+            "a bare -x on search is a flag, not the query"
+        );
+        for args in [
+            &["file", "--unknown-flag"][..],
+            &["finish", "demo-kiln", "--unknown-flag"][..],
+        ] {
+            assert!(
+                Cli::try_parse_from(words(args)).is_err(),
+                "{args:?} treated an unknown flag as text"
+            );
         }
     }
 
