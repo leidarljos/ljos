@@ -46,12 +46,12 @@ impl World {
             run.display(),
         );
         let mut cmd = Command::new("bash");
+        seat_env::clear(&mut cmd);
         cmd.args(["--noprofile", "--norc", "-c", &body])
             .env("CURSOR_CONVERSATION_ID", parent_id)
             .env("HOME", &home)
             .env("XDG_RUNTIME_DIR", &run)
             .stdin(Stdio::null());
-        seat_env::clear(&mut cmd);
         cmd.output().unwrap()
     }
 }
@@ -132,11 +132,11 @@ fn a_parent_cursor_id_in_another_home_does_not_leak_after_a_write_without_xdg_ru
         stub.display(),
     );
     let mut cmd = Command::new("bash");
+    seat_env::clear(&mut cmd);
     cmd.args(["--noprofile", "--norc", "-c", &script])
         .env("CURSOR_CONVERSATION_ID", "0199c0de-cursor-parent-only")
         .env("HOME", parent_root.path())
         .stdin(Stdio::null());
-    seat_env::clear(&mut cmd);
     let out = cmd.output().unwrap();
     let text = said(&out);
     assert!(out.status.success(), "{text}");
