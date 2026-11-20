@@ -1551,7 +1551,7 @@ enum Cmd {
     /// The id breaks the last tie.
     /// The page prints the first 20, headed `ready  shown X of Y`.
     /// `-n N` prints N tickets. `--limit N` is the same flag. `--all` prints every ticket.
-    /// A page that leaves tickets off ends with one line naming `--limit`, `--all`, `-p` and `--mine`.
+    /// A limited page ends with one line naming `--limit`, `--all`, `-p` and `--mine`.
     /// `--json` prints `shown`, `total` and `rows` for that same page and that same order.
     /// `--mine` names the next unfinished item of each plan this seat holds.
     /// When the open sitting's ticket is not a plan, the line names that ticket and says it has no plan items.
