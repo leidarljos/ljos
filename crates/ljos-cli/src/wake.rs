@@ -327,6 +327,14 @@ pub fn set_command(seat: &str, command: &str, timeout: Option<u64>) -> Result<St
     if command.is_empty() {
         bail!("wake: empty command");
     }
+    if let Some(timeout) = timeout {
+        if i64::try_from(timeout).is_err() {
+            bail!(
+                "wake: --timeout takes a number no larger than {}, not {timeout}.",
+                i64::MAX
+            );
+        }
+    }
     let warned = warning(command).map_err(|why| anyhow::anyhow!("wake: {why}"))?;
     let next = Wake {
         command: Some(command.to_string()),
@@ -1180,6 +1188,21 @@ mod tests {
             std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
         }
         (lock, dir)
+    }
+
+    #[test]
+    fn set_command_rejects_a_timeout_that_does_not_fit_toml() {
+        let (_lock, _dir) = isolated();
+        let err = set_command("inky", "true", Some(u64::MAX))
+            .expect_err("an oversized timeout must be refused");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "wake: --timeout takes a number no larger than {}, not {}.",
+                i64::MAX,
+                u64::MAX
+            )
+        );
     }
 
     #[test]
