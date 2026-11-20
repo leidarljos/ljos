@@ -706,6 +706,140 @@ fn a_sync_seals_new_atoms_without_opening_its_own_log() {
 }
 
 #[test]
+fn a_sync_with_no_new_atoms_commits_nothing_while_its_log_does_not_open() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, _, _) = sealed_log();
+    let head = w.head();
+    let before = w.pieces();
+    w.forget_opened();
+    w.fail_opens(true);
+    let said = w.sync();
+    assert!(said.contains("unchanged since the last export"), "{said}");
+    assert_eq!(w.head(), head, "{said}");
+    assert_eq!(w.pieces(), before, "{said}");
+    assert_eq!(git(&w.repo, &["status", "--porcelain"]), "", "{said}");
+}
+
+/// Every file below `.ljos/atoms` in the checkout, with its bytes and the
+/// time it was last written.
+fn atom_files(repo: &Path) -> BTreeMap<PathBuf, (Vec<u8>, std::time::SystemTime)> {
+    fn walk(dir: &Path, out: &mut BTreeMap<PathBuf, (Vec<u8>, std::time::SystemTime)>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                let at = entry.metadata().unwrap().modified().unwrap();
+                out.insert(path.clone(), (std::fs::read(&path).unwrap(), at));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(&repo.join(".ljos/atoms"), &mut out);
+    out
+}
+
+/// Bytes of the blobs the origin's newest commit added or changed.
+fn blob_bytes_of_last_commit(w: &World) -> u64 {
+    git(
+        &w.origin,
+        &[
+            "diff-tree",
+            "-r",
+            "--no-commit-id",
+            "--diff-filter=AM",
+            "main",
+        ],
+    )
+    .lines()
+    .filter_map(|line| line.split_whitespace().nth(3))
+    .map(|oid| w.blob_size(oid))
+    .sum()
+}
+
+#[test]
+fn two_syncs_with_no_change_write_no_byte_and_make_no_commit() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, _, _) = sealed_log();
+    let objects = || git(&w.repo, &["count-objects", "-v"]);
+    let (head, origin, files, counted) = (
+        git(&w.repo, &["rev-parse", "HEAD"]),
+        w.head(),
+        atom_files(&w.repo),
+        objects(),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    for n in 1..=2 {
+        let said = w.sync();
+        assert!(
+            said.contains("unchanged since the last export"),
+            "sync {n}: {said}"
+        );
+        assert_eq!(
+            git(&w.repo, &["rev-parse", "HEAD"]),
+            head,
+            "sync {n}: {said}"
+        );
+        assert_eq!(w.head(), origin, "sync {n}: {said}");
+        let now = atom_files(&w.repo);
+        let written: Vec<&PathBuf> = now
+            .iter()
+            .filter(|(path, file)| files.get(*path) != Some(*file))
+            .map(|(path, _)| path)
+            .collect();
+        assert!(written.is_empty(), "sync {n} wrote {written:?}: {said}");
+        assert_eq!(now.len(), files.len(), "sync {n}: {said}");
+        assert_eq!(objects(), counted, "sync {n} wrote git objects: {said}");
+    }
+}
+
+/// Atoms in the large store of
+/// [`one_atom_writes_one_atom_of_bytes_over_a_small_or_large_store`]. The
+/// small one has [`LOG_ATOMS`].
+const LARGE_ATOMS: usize = 1500;
+
+#[test]
+fn one_atom_writes_one_atom_of_bytes_over_a_small_or_large_store() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let mut written = Vec::new();
+    for store in [LOG_ATOMS, LARGE_ATOMS] {
+        let w = world();
+        for n in 0..store {
+            w.add(lesson(n, LINE));
+        }
+        w.sync();
+        let whole = w.blob_size(&w.log_blob());
+        let mut bytes = Vec::new();
+        // Past 64 segments, where a sync used to seal the store whole.
+        for k in 0..SYNCS {
+            w.add(lesson(store + k, LINE));
+            let said = w.sync();
+            assert!(said.contains("1 changed"), "{said}");
+            let b = blob_bytes_of_last_commit(&w);
+            assert!(
+                b < 2 * LINE as u64,
+                "one atom of {LINE} bytes wrote {b} blob bytes over a {whole} byte store of {store} atoms: {said}"
+            );
+            bytes.push(b);
+        }
+        eprintln!("measure: {store} atoms ({whole} sealed bytes): one-atom syncs wrote {bytes:?}");
+        written.push(bytes);
+    }
+    let most = |bytes: &[u64]| *bytes.iter().max().unwrap();
+    let least = |bytes: &[u64]| *bytes.iter().min().unwrap();
+    assert!(
+        most(&written[1]) < least(&written[0]) + LINE as u64 / 4,
+        "a one-atom sync wrote more over the large store: {written:?}"
+    );
+}
+
+#[test]
 fn a_temp_file_left_by_a_cut_write_is_not_committed() {
     if tools::halt(tools::Tool::AgeKeygen) {
         return;
