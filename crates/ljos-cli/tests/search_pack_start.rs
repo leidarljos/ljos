@@ -14,8 +14,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const HIT: &str = "the kiln schedule is the morning plan";
-const STARTING: &str = "Memory is starting, so try again in a few seconds.";
-const STARTING_WORDS: &str = "Used word search because memory is still starting.";
+const STARTING: &str =
+    "Memory is starting, so try again in a few seconds. If this persists, run `ljos doctor`.";
+const STARTING_WORDS: &str =
+    "Memory is starting, so these results are ranked by words. If this persists, run `ljos doctor`.";
 const BUSY_WORDS: &str = "The memory pack was busy, so these rows are word matches; run the search again for ranked results.";
 const TRIP: &str = "pack busy try again fallback word ranking";
 
@@ -458,7 +460,9 @@ fn an_error_string_that_quotes_the_query_is_busy_not_starting() {
     let said = text(&out);
     assert_eq!(out.status.code(), Some(1), "{said}");
     assert!(
-        said.contains("The memory pack was busy and no words matched."),
+        said.contains(
+            "Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`."
+        ),
         "{said}"
     );
     assert!(!said.contains(BUSY_WORDS), "{said}");

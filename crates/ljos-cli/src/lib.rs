@@ -21,6 +21,7 @@ pub mod ballot_sig;
 pub mod book_queue;
 pub mod bookkeep;
 pub mod call_deadline;
+mod private_file;
 pub mod capture;
 mod claim_age;
 pub mod cloud;
@@ -31,6 +32,7 @@ pub mod config_diag;
 pub mod converge;
 mod cwd_probe;
 mod deedbag;
+pub mod degraded;
 pub mod digest;
 mod doctor_fix;
 pub mod extract;
@@ -15026,6 +15028,38 @@ pub fn search_rank_line(ranking: &Ranking, hits: &[Hit]) -> String {
     ranking_sentence(ranking, true)
 }
 
+/// Say on stderr how the rows about to be printed were ranked. A writer
+/// that is starting, busy or not running is the one line of [`degraded`].
+pub fn say_search_rank(ranking: &Ranking, hits: &[Hit]) {
+    if !say_degraded_ranking(ranking) {
+        let rank = search_rank_for_person(&search_rank_line(ranking, hits));
+        if !rank.is_empty() {
+            eprint!("{rank}");
+        }
+    }
+}
+
+/// [`say_search_rank`] for a recall, which does not know its rows here.
+pub fn say_ranking(ranking: &Ranking) {
+    if !say_degraded_ranking(ranking) {
+        let rank = search_rank_for_person(&ranking_line(ranking));
+        if !rank.is_empty() {
+            eprint!("{rank}");
+        }
+    }
+}
+
+fn say_degraded_ranking(ranking: &Ranking) -> bool {
+    if ranking.mode != "lexical" {
+        return false;
+    }
+    let Some(state) = degraded::State::of_reason(ranking.reason) else {
+        return false;
+    };
+    degraded::say(state);
+    true
+}
+
 /// The line when the shown rows came from both the meaning and the word
 /// retrievers.
 pub const MEANING_AND_WORDS_LINE: &str = "Matched by meaning and words.";
@@ -15131,24 +15165,11 @@ fn lexical_reason(ranking: &Ranking, shown: bool) -> String {
     if ranking.reason == "encoder unavailable" {
         return encoder_missing_search_line();
     }
-    if ranking.reason == WRITER_DOWN_REASON {
-        return writer_down_search_line(shown);
-    }
-    if ranking.reason == WRITER_BUSY_REASON {
-        return writer_busy_search_line(shown);
+    if let Some(state) = degraded::State::of_reason(ranking.reason) {
+        return degraded_search_line(state);
     }
     if ranking.reason == PACK_OFF_REASON {
         return pack_off_search_line(shown);
-    }
-    if ranking.reason == MEMORY_SEARCH_BUSY_REASON {
-        return if shown {
-            MEMORY_SEARCH_BUSY_LINE.to_string()
-        } else {
-            MEMORY_SEARCH_BUSY_EMPTY_LINE.to_string()
-        };
-    }
-    if ranking.reason == MEMORY_STARTING_REASON {
-        return MEMORY_STARTING_FALLBACK_LINE.to_string();
     }
     ranking.reason.to_string()
 }
@@ -15163,58 +15184,12 @@ pub const WRITER_BUSY_REASON: &str = "writer is busy";
 pub const PACK_OFF_REASON: &str = "packs turned off";
 
 /// The ranking reason when the writer reported busy until the short wait
-/// ran out. The line is [`MEMORY_SEARCH_BUSY_LINE`].
+/// ran out. The line is [`degraded::BUSY_LINE`].
 pub const MEMORY_SEARCH_BUSY_REASON: &str = "memory search was busy";
 
-/// The one line when search used words because the writer stayed busy
-/// and those words matched.
-pub const MEMORY_SEARCH_BUSY_LINE: &str = "The memory pack was busy, so these rows are word matches; run the search again for ranked results.";
-
-/// The one line when that word fallback matched nothing.
-pub const MEMORY_SEARCH_BUSY_EMPTY_LINE: &str = "The memory pack was busy and no words matched.";
-
-/// The stderr line for a busy word fallback. `shown` is whether rows follow.
-#[must_use]
-pub fn search_busy_line(shown: bool) -> String {
-    format!(
-        "{}\n",
-        if shown {
-            MEMORY_SEARCH_BUSY_LINE
-        } else {
-            MEMORY_SEARCH_BUSY_EMPTY_LINE
-        }
-    )
-}
-
 /// The ranking reason when the pack has not opened and the warm-up budget
-/// ran out. The line is [`MEMORY_STARTING_FALLBACK_LINE`].
+/// ran out. The line is [`degraded::STARTING_LINE`].
 pub const MEMORY_STARTING_REASON: &str = "memory is still starting";
-
-/// The one line when search used words because the pack has not opened.
-pub const MEMORY_STARTING_FALLBACK_LINE: &str =
-    "Used word search because memory is still starting.";
-
-thread_local! {
-    static WRITER_FALLBACK: std::cell::RefCell<Option<(u64, String)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Remember why this search is using the word ranking, and how many
-/// seconds the next try should wait. `detail` is the writer's own line,
-/// empty when it sent none.
-pub fn note_writer_fallback(secs: u64, detail: &str) {
-    let detail = detail.trim();
-    let detail = if detail.is_empty() || detail == "degraded" || detail == PACK_READ_BUSY_LINE {
-        String::new()
-    } else {
-        detail.to_string()
-    };
-    WRITER_FALLBACK.with(|cell| *cell.borrow_mut() = Some((secs.max(1), detail)));
-}
-
-fn writer_fallback() -> (u64, String) {
-    WRITER_FALLBACK.with(|cell| cell.borrow().clone().unwrap_or_else(|| (1, String::new())))
-}
 
 fn pack_off_search_line(shown: bool) -> String {
     let what = if shown {
@@ -15227,39 +15202,13 @@ fn pack_off_search_line(shown: bool) -> String {
     )
 }
 
-fn writer_down_search_line(shown: bool) -> String {
-    if let Some(line) = sandbox_memory_off() {
-        return line;
+fn degraded_search_line(state: degraded::State) -> String {
+    if state == degraded::State::Down {
+        if let Some(line) = sandbox_memory_off() {
+            return line;
+        }
     }
-    let what = if shown {
-        "these rows were matched by words"
-    } else {
-        "nothing was matched by words"
-    };
-    format!("The memory writer is not running, so {what}; run `packset ensure`.")
-}
-
-fn writer_busy_search_line(shown: bool) -> String {
-    let (secs, detail) = writer_fallback();
-    let what = if shown {
-        "these rows were matched by words"
-    } else {
-        "nothing was matched by words"
-    };
-    let because = if detail.is_empty() {
-        "The memory writer is busy".to_string()
-    } else {
-        format!("The memory writer is busy ({detail})")
-    };
-    let wait = if secs == 1 {
-        "1 second".to_string()
-    } else {
-        format!("{secs} seconds")
-    };
-    format!(
-        "{because}, so {what}; rerun `{}` in {wait}.",
-        current_invocation()
-    )
+    state.line().to_string()
 }
 
 /// The parenthetical on [`ranking_line`] when words are the mode this
@@ -15551,8 +15500,8 @@ fn search_can_fall_back(err: &anyhow::Error) -> bool {
 
 /// What a search, a remember, or a finish lesson prints when the pack has
 /// not finished starting inside [`search_warmup_wait`] and word search
-/// cannot stand in. A search of now uses [`MEMORY_STARTING_FALLBACK_LINE`].
-pub const MEMORY_STARTING_LINE: &str = "Memory is starting, so try again in a few seconds.";
+/// cannot stand in. A search of now uses [`degraded::STARTING_LINE`].
+pub const MEMORY_STARTING_LINE: &str = degraded::STARTING_REFUSAL;
 
 /// A pack that has not opened. The type is the signal.
 /// The display text is [`MEMORY_STARTING_LINE`]. Words in a query are not this.
@@ -17469,6 +17418,11 @@ fn word_ranked(client: &PacksetClient, cue: &str, limit: usize) -> Vec<(Value, f
     let Ok(atoms) = rows_read(client, &client.workspace()) else {
         return Vec::new();
     };
+    rank_rows(atoms, cue, limit)
+}
+
+/// [`word_ranked`] over `atoms`, wherever they were read from.
+fn rank_rows(atoms: SharedRows, cue: &str, limit: usize) -> Vec<(Value, f64)> {
     let memo = WORD_RANKED.lock().ok().filter(|_| atoms_memo_on());
     if let Some((_, _, _, ranked)) = memo.as_ref().and_then(|last| {
         last.as_ref().filter(|(held, asked, n, _)| {
@@ -17525,25 +17479,73 @@ fn relevant_atoms(client: &PacksetClient, cue: &str, limit: usize) -> Vec<Value>
 /// `SHA-1` for `sha1`, are added when they share a content word.
 #[must_use]
 pub fn search_by_words(query: &str, limit: u32) -> Vec<Hit> {
-    let mut hits = if let Ok(client) = pack() {
-        let mut hits = word_ranked(&client, query, limit as usize)
-            .into_iter()
-            .filter_map(|(atom, score)| {
-                let mut hit = atom_as_hit(&atom)?;
-                hit.score = score;
-                hit.ts = written_at(&atom);
-                Some(hit)
-            })
-            .collect();
-        widen_word_hits(&client, query, &mut hits);
-        hits
-    } else {
-        Vec::new()
+    let client = pack().ok();
+    let listed = client
+        .as_ref()
+        .and_then(|client| rows_read(client, &client.workspace()).ok());
+    let mut hits = match (client.as_ref(), listed) {
+        (Some(client), Some(rows)) => {
+            let mut hits = ranked_hits(rows, query, limit as usize);
+            widen_word_hits(client, query, &mut hits);
+            hits
+        }
+        _ => local_store_hits(query, limit as usize),
     };
-    prefer_calling_seat(&mut hits);
-    memory_port::append_recall(&mut hits, query, limit as usize);
-    conceal_bookkeeping(&mut hits);
+    finish_word_hits(&mut hits, query, limit as usize);
     hits
+}
+
+fn finish_word_hits(hits: &mut Vec<Hit>, query: &str, limit: usize) {
+    prefer_calling_seat(hits);
+    memory_port::append_recall(hits, query, limit);
+    conceal_bookkeeping(hits);
+}
+
+/// The hits of [`rank_rows`], scored and stamped as the pack's own rows are.
+fn ranked_hits(rows: SharedRows, query: &str, limit: usize) -> Vec<Hit> {
+    rank_rows(rows, query, limit)
+        .into_iter()
+        .filter_map(|(atom, score)| {
+            let mut hit = atom_as_hit(&atom)?;
+            hit.score = score;
+            hit.ts = written_at(&atom);
+            Some(hit)
+        })
+        .collect()
+}
+
+/// Word-ranked hits from the listing a prompt hook last kept on disk, for
+/// a read whose writer cannot list. It is the last whole listing this seat
+/// read, under whatever pack stamp, so a lesson written since is missing
+/// and one retired since can still show. Empty when no hook has kept one.
+fn local_store_hits(query: &str, limit: usize) -> Vec<Hit> {
+    ranked_hits(std::sync::Arc::new(local_store_rows()), query, limit)
+}
+
+/// The live rows of the listing a hook last kept, see [`local_store_hits`].
+fn local_store_rows() -> Vec<Row> {
+    let Some((text, carried)) = newest_listing(&pack_workspace()) else {
+        return Vec::new();
+    };
+    let Some((rows, trusted)) = last_listing::<Row>(&text) else {
+        return Vec::new();
+    };
+    // A writer that is not answering cannot prove the token, so a listing
+    // read under it is trusted only by a reader that carries it now.
+    let trusted = trusted && carried;
+    let now = now_utc();
+    let seat = seat_name();
+    let rows: Vec<Row> = rows
+        .into_iter()
+        .filter(|row| row.live(&now))
+        .filter(|row| {
+            let atom = serde_json::json!({"source": row.source, "entities": row.entities});
+            memory_port::kept_for_seat(&atom, &seat)
+        })
+        .map(|row| if trusted { row } else { row.into_agents() })
+        .collect();
+    read_claims(rows.len());
+    rows
 }
 
 /// Atoms the lexical scan did not keep, when [`word_rank`] can still match
@@ -22298,7 +22300,7 @@ fn listed_of<T: Listed>(
         .as_ref()
         .and_then(|_| listing_cache_path(workspace, token));
     if let (Some(path), Some(stamp)) = (&cache, &stamp) {
-        if let Some((atoms, trusted)) = cached_listing::<T>(path, stamp) {
+        if let Some((atoms, trusted)) = cached_listing::<T>(path, stamp, &seat_name()) {
             read_claims(atoms.len());
             // A listing kept before the sidecar existed, or by another
             // version, has none that fits: this hook writes it through
@@ -22369,23 +22371,7 @@ fn listed_of<T: Listed>(
 /// A proposal list reads this when the memory service does not answer in
 /// time. It does not ask the service, and it does not walk export files.
 pub(crate) fn local_listing_atoms(workspace: &str) -> Vec<Value> {
-    let mut found: Option<(std::time::SystemTime, PathBuf)> = None;
-    for token in [true, false] {
-        let Some(path) = listing_cache_path(workspace, token) else {
-            continue;
-        };
-        let Ok(meta) = std::fs::metadata(&path) else {
-            continue;
-        };
-        let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        if found.as_ref().is_none_or(|(at, _)| modified > *at) {
-            found = Some((modified, path));
-        }
-    }
-    let Some((_, path)) = found else {
-        return Vec::new();
-    };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Some((text, _)) = newest_listing(workspace) else {
         return Vec::new();
     };
     let Ok(value) = serde_json::from_str::<Value>(&text) else {
@@ -22395,8 +22381,10 @@ pub(crate) fn local_listing_atoms(workspace: &str) -> Vec<Value> {
         return Vec::new();
     };
     read_claims(atoms.len());
+    let seat = seat_name();
     atoms
         .iter()
+        .filter(|atom| memory_port::kept_for_seat(atom, &seat))
         .map(|atom| {
             serde_json::json!({
                 "kind": atom["kind"],
@@ -22407,36 +22395,105 @@ pub(crate) fn local_listing_atoms(workspace: &str) -> Vec<Value> {
         .collect()
 }
 
-/// `$XDG_DATA_HOME/ljos/listing-<workspace>-<token>.json`: the last whole
-/// listing a hook read, with the pack stamp it was read under.
+/// The text of the newer of this reader's kept listings for `workspace`,
+/// when a hook kept one, and whether it is the one read with the token.
+///
+/// The listing under the token is read only when this process carries that
+/// token now, so a reader the writer would not have answered in full never
+/// gets what an authorized read kept. Each file is opened once by
+/// [`private_file::open_private_file`], and the text is read from that descriptor.
+fn newest_listing(workspace: &str) -> Option<(String, bool)> {
+    let tagged = carried_token_tag().is_some();
+    let mut found: Option<(std::time::SystemTime, std::fs::File, bool)> = None;
+    for token in [true, false] {
+        if token && !tagged {
+            continue;
+        }
+        let Some(path) = listing_cache_path(workspace, token) else {
+            continue;
+        };
+        let Some((file, meta)) = private_file::open_private_file(&path) else {
+            continue;
+        };
+        let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if found.as_ref().is_none_or(|(at, _, _)| modified > *at) {
+            found = Some((modified, file, token));
+        }
+    }
+    let (_, file, token) = found?;
+    Some((private_file::read_open_file(file)?, token))
+}
+
+/// A short tag of the token this process would send, when it may send it.
+/// The tag names the authorization a kept listing was read under, so a
+/// listing kept under one token is not read under another.
+fn carried_token_tag() -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let client = pack().ok()?;
+    if !client.may_carry() {
+        return None;
+    }
+    let token = packset_client::token()?;
+    Some(hex::encode(&Sha256::digest(token.as_bytes())[..6]))
+}
+
+/// The rows of the listing `text` whatever stamp it was kept under, and
+/// whether the read that kept them carried the seat's token.
+fn last_listing<T: serde::de::DeserializeOwned>(text: &str) -> Option<(Vec<T>, bool)> {
+    #[derive(serde::Deserialize)]
+    #[serde(bound = "T: serde::de::DeserializeOwned")]
+    struct Kept<T> {
+        trusted: bool,
+        atoms: Vec<T>,
+    }
+    let kept: Kept<T> = serde_json::from_str(text).ok()?;
+    Some((kept.atoms, kept.trusted))
+}
+
+/// `$XDG_DATA_HOME/ljos/listing-<workspace>@<seat>-<who>.json`: the last
+/// whole listing a hook read, with the pack stamp it was read under.
+/// `<who>` is `open` for a read without the token, else `t` and a tag of
+/// the token the read carried. The workspace and the seat are written with
+/// [`memory_port::encode_name`], which keeps no two names alike and never
+/// writes `@`, so two workspaces, two seats or two tokens never share a
+/// name. A name cut down to its letters and digits would give `a.b` and
+/// `ab` one file.
 fn listing_cache_path(workspace: &str, token: bool) -> Option<PathBuf> {
-    let safe: String = workspace
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    let who = if token { "seat" } else { "open" };
+    let who = match token.then(carried_token_tag).flatten() {
+        Some(tag) => format!("t{tag}"),
+        None => "open".to_string(),
+    };
     Some(
         data_base()?
             .join("ljos")
-            .join(format!("listing-{safe}-{who}.json")),
+            .join(listing_file_name(workspace, &seat_name(), &who)),
     )
+}
+
+fn listing_file_name(workspace: &str, seat: &str, who: &str) -> String {
+    let workspace = memory_port::encode_name(workspace);
+    let seat = memory_port::encode_name(seat);
+    format!("listing-{workspace}@{seat}-{who}.json")
 }
 
 /// The cached listing at `path` when it was read under `stamp`.
 fn cached_listing<T: serde::de::DeserializeOwned>(
     path: &Path,
     stamp: &str,
+    seat: &str,
 ) -> Option<(Vec<T>, bool)> {
     #[derive(serde::Deserialize)]
     #[serde(bound = "T: serde::de::DeserializeOwned")]
     struct Kept<T> {
         stamp: String,
+        #[serde(default)]
+        seat: String,
         trusted: bool,
         atoms: Vec<T>,
     }
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = private_file::read_private_file(path)?;
     let kept: Kept<T> = serde_json::from_str(&text).ok()?;
-    (kept.stamp == stamp).then_some((kept.atoms, kept.trusted))
+    (kept.stamp == stamp && kept.seat == seat).then_some((kept.atoms, kept.trusted))
 }
 
 /// Keep `atoms` at `path` under `stamp`, through a temporary file, so a
@@ -22445,24 +22502,43 @@ fn keep_listing(path: &Path, stamp: &str, atoms: &[Value], trusted: bool) {
     #[derive(serde::Serialize)]
     struct Kept<'a> {
         stamp: &'a str,
+        seat: String,
         trusted: bool,
         atoms: &'a [Value],
     }
     let Ok(doc) = serde_json::to_string(&Kept {
         stamp,
+        seat: seat_name(),
         trusted,
         atoms,
     }) else {
         return;
     };
     let Some(dir) = path.parent() else { return };
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
-    }
     let tmp = dir.join(format!(".listing-{}.tmp", std::process::id()));
-    if std::fs::write(&tmp, doc).is_ok() && std::fs::rename(&tmp, path).is_err() {
+    if write_private_through(dir, &tmp, path, doc.as_bytes()).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
+}
+
+/// Write `bytes` to `tmp` and rename it to `path`. A directory made for
+/// the purpose is `0700` and the file is `0600`, because a kept listing is
+/// the seat's memory. A directory that is already there is used only when
+/// it is this user's own, see [`private_file::ensure_private_dir`].
+fn write_private_through(dir: &Path, tmp: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    private_file::ensure_private_dir(dir)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(tmp)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(bytes)?;
+    std::fs::rename(tmp, path)
 }
 
 /// Beside the cached listing, `listing-<workspace>-<who>-tokens.txt`: for
@@ -22513,7 +22589,7 @@ fn keep_tokens(listing: &Path, stamp: &str, atoms: &[impl Claim]) {
     }
     let Some(dir) = path.parent() else { return };
     let tmp = dir.join(format!(".tokens-{}.tmp", std::process::id()));
-    if std::fs::write(&tmp, out).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+    if write_private_through(dir, &tmp, &path, out.as_bytes()).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
 }
@@ -22522,7 +22598,7 @@ fn keep_tokens(listing: &Path, stamp: &str, atoms: &[impl Claim]) {
 /// `atoms`, when it is there, is this version's, and has a line per atom.
 /// False when there is no such sidecar.
 fn seed_tokens(listing: &Path, stamp: &str, atoms: &[impl Claim]) -> bool {
-    let Ok(text) = std::fs::read_to_string(tokens_sidecar_path(listing)) else {
+    let Some(text) = private_file::read_private_file(&tokens_sidecar_path(listing)) else {
         return false;
     };
     let mut lines = text.lines();
@@ -22565,16 +22641,20 @@ fn seed_words(text: &str, words: Vec<String>, acronyms: &[String]) {
     seed_text_memo(&MATCH_STREAM_MEMO, text, stream_with(words, acronyms));
 }
 
+/// The workspace this seat reads: `PACKSET_WORKSPACE`, else the seat's own.
+fn pack_workspace() -> String {
+    std::env::var("PACKSET_WORKSPACE")
+        .ok()
+        .filter(|w| !w.is_empty())
+        .unwrap_or_else(|| SEAT_WORKSPACE.to_string())
+}
+
 pub fn pack() -> Result<PacksetClient> {
     load_seat_env();
     scope_pack_port()?;
-    let workspace = std::env::var("PACKSET_WORKSPACE")
-        .ok()
-        .filter(|w| !w.is_empty())
-        .unwrap_or_else(|| SEAT_WORKSPACE.to_string());
     Ok(PacksetClient::from_env()
         .context("PACKSET_URL=off: this seat has no pack on purpose")?
-        .with_workspace(workspace))
+        .with_workspace(pack_workspace()))
 }
 
 /// The pack's last write, RFC 3339, for a HUD watch. `None` when the
@@ -37747,7 +37827,13 @@ pub fn begin_quiet_sitting() {
     reset_claim_fold();
 }
 
+/// The quiet sitting's line for an encoder that is not answering. A writer
+/// that did not answer has already been said once, in [`degraded`], and
+/// that line covers the rows the doctor and the sections would report.
 fn note_degraded(out: &mut String) {
+    if degraded::said() {
+        return;
+    }
     SAID_DEGRADED.with(|said| {
         if !said.get() {
             said.set(true);
@@ -39199,7 +39285,7 @@ pub fn sitting_due_report(issue: &str) -> Result<String> {
 fn sitting_due_and_atoms(issue: &str, title: &str) -> Result<(String, Vec<Value>)> {
     let atoms = if let Some(listing) = sitting_listing() {
         if !listing.ok {
-            bail!(PACK_READ_BUSY_LINE);
+            return Err(pack_busy_err());
         }
         listing.atoms.as_ref().clone()
     } else {
@@ -42934,6 +43020,9 @@ pub fn recall_for_command(issue: &str) -> Result<String> {
         bail!("{text}");
     }
     if text.trim().is_empty() {
+        if degraded::said() {
+            return Ok(format!("No lesson on {issue} matched by words.\n"));
+        }
         Ok(empty_issue_memory(issue))
     } else {
         Ok(text)
@@ -43095,8 +43184,10 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
             // The pack read already failed inside this clock. Word matches
             // from this seat's memory slot do not open another socket.
             let cues = recall_cues(issue);
+            let own = tagged_with_issue(&local_store_rows(), issue);
             let mut hits = Vec::new();
             for cue in &cues {
+                hits.extend(local_store_hits(cue, RELATED_MEMORY_CAP));
                 memory_port::append_recall(&mut hits, cue, RELATED_MEMORY_CAP);
             }
             let _ = word_rank::apply_relevance_floor(
@@ -43104,12 +43195,9 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
                 &cues.join(" "),
                 word_rank::DEFAULT_MIN_SCORE,
             );
-            if hits.is_empty() {
-                bail!(PACK_READ_BUSY_LINE);
-            }
             return Ok(recall_lines(
-                &hits,
-                Vec::new(),
+                &own,
+                hits,
                 &cues.join(" "),
                 &now_utc(),
                 include_notes,
@@ -43141,6 +43229,8 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     let _busy = pack_link::BusyRetry::enter();
     let mut woke = false;
     let mut word_fallback = false;
+    let person = include_notes;
+    let mut degraded_state: Option<degraded::State> = None;
     let mut ask = |what: &dyn Fn() -> Result<Vec<Hit>>| -> Result<Vec<Hit>> {
         match what() {
             Err(err) if is_memory_starting(&err) || is_reported_busy(&err) => Err(err),
@@ -43169,6 +43259,18 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     // the call is not started again.
     let own = match ask(&|| issue_memories(issue)) {
         Ok(hits) => hits,
+        // A person asked, so a writer that is starting or busy still gets
+        // an answer: the lessons filed on the issue in the kept listing.
+        Err(err)
+            if person
+                && matches!(
+                    degraded::of_error(&err),
+                    Some(degraded::State::Starting | degraded::State::Busy)
+                ) =>
+        {
+            degraded_state = degraded::of_error(&err);
+            tagged_with_issue(&local_store_rows(), issue)
+        }
         // A pack that has not opened sheds the listing. Word search below
         // is the page. A busy pack that stayed busy does the same, and the
         // page says word search was used.
@@ -43188,6 +43290,23 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     for cue in &cues {
         match ask(&|| search_ranked(cue, pool)) {
             Ok(hits) => related.extend(hits),
+            Err(err) if person && degraded::of_error(&err).is_some() => {
+                let state = degraded::of_error(&err).unwrap_or(degraded::State::Busy);
+                let words: Vec<Hit> = cues
+                    .iter()
+                    .flat_map(|cue| search_by_words(cue, pool))
+                    .collect();
+                if state == degraded::State::Down
+                    && words.is_empty()
+                    && own.is_empty()
+                    && related.is_empty()
+                {
+                    return Ok(recall_down(&err));
+                }
+                related.extend(words);
+                degraded_state.get_or_insert(state);
+                break;
+            }
             Err(err) if is_memory_starting(&err) => {
                 let words = search_by_words(cue, pool);
                 if words.is_empty() && own.is_empty() && related.is_empty() {
@@ -43212,6 +43331,10 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     if word_fallback {
         note_forced_ranking(lexical_ranking(MEMORY_SEARCH_BUSY_REASON));
     }
+    if let Some(state) = degraded_state {
+        note_forced_ranking(lexical_ranking(state.reason()));
+        degraded::say(state);
+    }
     let _ = word_rank::apply_relevance_floor(
         &mut related,
         &cues.join(" "),
@@ -43226,7 +43349,7 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
         false,
     );
     if starting_fallback {
-        text.insert_str(0, &format!("{MEMORY_STARTING_FALLBACK_LINE}\n"));
+        text.insert_str(0, &format!("{}\n", degraded::STARTING_LINE));
     }
     Ok(text)
 }
@@ -45812,8 +45935,6 @@ const SITTING_QUERY_CHARS: usize = 400;
 /// leaves it unparsed rather than ranking a pack-sized body.
 const SITTING_LIST_CAP: usize = 512 * 1024;
 
-pub const SITTING_WORDS_LINE: &str = "ranked by words; the pack search did not answer in time\n";
-
 /// The one line a sitting or a finish prints when the claim graph does not
 /// answer. The tracker already holds the claim or the release.
 pub const LOCAL_CLAIM_LINE: &str =
@@ -45835,10 +45956,6 @@ fn claim_graph_marked_down() -> bool {
     CLAIM_GRAPH_DOWN.with(|cell| cell.get())
 }
 
-/// The one line a sitting prints when the related-memory search did not
-/// answer. Recall stays on word matches, and the rest of the sitting continues.
-pub const MEMORY_WORD_LINE: &str = "These are word matches; the pack did not answer.\n";
-
 /// The one line a quiet sitting prints when the pack or the encoder did
 /// not answer. `--verbose` keeps the section that failed.
 pub const MEMORY_DEGRADED_LINE: &str = "matched by words (encoder not installed)\n";
@@ -45852,6 +45969,8 @@ struct SittingListing {
     ok: bool,
     searched: bool,
     query: String,
+    /// Why the read did not answer, when it did not.
+    state: Option<degraded::State>,
 }
 
 impl Clone for SittingListing {
@@ -45861,6 +45980,7 @@ impl Clone for SittingListing {
             ok: self.ok,
             searched: self.searched,
             query: self.query.clone(),
+            state: self.state,
         }
     }
 }
@@ -45896,19 +46016,22 @@ impl SittingListingGuard {
                     ok: true,
                     searched,
                     query: ticket.to_string(),
+                    state: None,
                 },
-                Err(_) => SittingListing {
+                Err(err) => SittingListing {
                     atoms: std::sync::Arc::new(Vec::new()),
                     ok: false,
                     searched: false,
                     query: ticket.to_string(),
+                    state: Some(degraded::of_error(&err).unwrap_or(degraded::State::Busy)),
                 },
             },
-            Err(_) => SittingListing {
+            Err(err) => SittingListing {
                 atoms: std::sync::Arc::new(Vec::new()),
                 ok: false,
                 searched: false,
                 query: ticket.to_string(),
+                state: degraded::of_error(&err),
             },
         };
         SITTING_LISTING.with(|slot| *slot.borrow_mut() = Some(listing));
@@ -46254,15 +46377,15 @@ pub fn sitting_stream_started(
     let _quiet_pack = pack_link::QuietPack::enter();
     let ticket = sitting_search_text(issue, &title);
     let _listing = SittingListingGuard::enter(&ticket);
-    let mut fell_back = false;
     // The search is over, whether it answered or the deadline passed.
     // Say so before doctor, which probes other programs and must not be
     // what a person waits on to hear that recall is on word matches.
     // A search that answered found a healthy pack: send lessons that were
     // waiting, inside the clock this read already armed.
-    if sitting_listing().is_some_and(|listing| !listing.ok) {
-        fell_back = true;
-        emit_piece(&mut out, &mut emit, MEMORY_WORD_LINE);
+    if let Some(listing) = sitting_listing().filter(|listing| !listing.ok) {
+        if let Some(state) = listing.state {
+            degraded::say(state);
+        }
     } else {
         let sent = replay_ready_lessons();
         if !sent.is_empty() {
@@ -46321,14 +46444,10 @@ pub fn sitting_stream_started(
     let (due, _atoms) = match sitting_due_and_atoms(issue, &title) {
         Ok(pair) => pair,
         Err(e) if is_pack_busy(&e) || pack_memory_down(&e) => {
-            fell_back = true;
-            (
-                format!(
-                    "memory-unavailable: {}\n{SITTING_WORDS_LINE}",
-                    e.to_string().replace('\n', " ")
-                ),
-                Vec::new(),
-            )
+            if sitting_listing().is_none() {
+                degraded::say(degraded::of_error(&e).unwrap_or(degraded::State::Busy));
+            }
+            (String::new(), Vec::new())
         }
         Err(e) => (format!("due: {e:#}\n"), Vec::new()),
     };
@@ -46346,10 +46465,12 @@ pub fn sitting_stream_started(
     // list and a sitting used to show fewer than recall.
     match recall_memories_with(issue, true) {
         Ok(text) => piece.push_str(&text),
-        Err(e) if is_pack_busy(&e) => fell_back = true,
+        Err(e) if is_pack_busy(&e) => {
+            degraded::say(degraded::State::Busy);
+        }
         Err(e) => piece.push_str(&format!("recall: {e:#}\n")),
     }
-    piece.push_str(words_line(&mut fell_back));
+    note_stalled();
     emit_piece(&mut out, &mut emit, &piece);
 
     let mut piece = String::new();
@@ -46382,7 +46503,7 @@ pub fn sitting_stream_started(
                 )),
             }
         }
-        piece.push_str(words_line(&mut fell_back));
+        note_stalled();
         emit_piece(&mut out, &mut emit, &piece);
     }
 
@@ -46399,12 +46520,10 @@ pub fn sitting_stream_started(
             &format!("tracker text for {issue}"),
             &said.stdout,
         )),
-        Err(e) if call_deadline::stalled(&e.to_string()) => {
-            piece.push_str(words_line(&mut fell_back));
-        }
+        Err(e) if call_deadline::stalled(&e.to_string()) => note_stalled(),
         Err(e) => piece.push_str(&format!("recall: {e:#}\n")),
     }
-    piece.push_str(words_line(&mut fell_back));
+    note_stalled();
     emit_piece(&mut out, &mut emit, &piece);
 
     // The sweep is a write with its own long budget. A sitting does not
@@ -46420,7 +46539,7 @@ pub fn sitting_stream_started(
         Ok(text) => piece.push_str(&text),
         Err(e) => piece.push_str(&format!("timeline: {e:#}\n")),
     }
-    piece.push_str(words_line(&mut fell_back));
+    note_stalled();
     emit_piece(&mut out, &mut emit, &piece);
     let next = plan::next_item_line(issue);
     if !next.is_empty() {
@@ -46430,14 +46549,11 @@ pub fn sitting_stream_started(
     Ok(out)
 }
 
-/// The one line that says recall fell back to words. Empty once it has
-/// been said, and empty when the search budget is still unused.
-fn words_line(said: &mut bool) -> &'static str {
-    if *said || !pack_link::search_stalled() {
-        return "";
+/// Say that recall fell back to words when the search budget ran out.
+fn note_stalled() {
+    if pack_link::search_stalled() {
+        degraded::say(degraded::State::Busy);
     }
-    *said = true;
-    SITTING_WORDS_LINE
 }
 
 /// Whether `err` is a claim that should leave the sitting open and be
@@ -82849,57 +82965,22 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             ),
             ranking_line(&missing)
         );
-        note_writer_fallback(3, "");
-        let memory_busy = Ranking {
-            mode: "lexical",
-            reason: MEMORY_SEARCH_BUSY_REASON,
-        };
-        assert_eq!(
-            ranking_line(&memory_busy),
-            "The memory pack was busy and no words matched.\n"
-        );
-        assert_eq!(
-            search_rank_line(&memory_busy, &[]),
-            "The memory pack was busy and no words matched.\n"
-        );
-        assert_eq!(
-            search_rank_line(
-                &memory_busy,
-                &[hit("oak", "Oak Tree on Nov 23 is the morning plan.", 0.2)]
-            ),
-            "The memory pack was busy, so these rows are word matches; run the search again for ranked results.\n"
-        );
-        let busy = Ranking {
-            mode: "lexical",
-            reason: WRITER_BUSY_REASON,
-        };
-        let busy_line = ranking_line(&busy);
-        assert!(
-            busy_line
-                .starts_with("The memory writer is busy, so nothing was matched by words; rerun `")
-                && busy_line.contains("in 3 seconds."),
-            "{busy_line}"
-        );
-        let shown = search_rank_line(
-            &busy,
-            &[hit("oak", "Oak Tree on Nov 23 is the morning plan.", 0.2)],
-        );
-        assert!(
-            shown.contains("these rows were matched by words") && shown.contains("rerun `"),
-            "{shown}"
-        );
-        let down = Ranking {
-            mode: "lexical",
-            reason: WRITER_DOWN_REASON,
-        };
-        assert_eq!(
-            ranking_line(&down),
-            "The memory writer is not running, so nothing was matched by words; run `packset ensure`.\n"
-        );
-        assert!(
-            search_rank_line(&down, &[]).contains("packset ensure"),
-            "an empty page still names the command that starts the writer"
-        );
+        let rows = [hit("oak", "Oak Tree on Nov 23 is the morning plan.", 0.2)];
+        for (reason, state) in [
+            (MEMORY_STARTING_REASON, degraded::State::Starting),
+            (MEMORY_SEARCH_BUSY_REASON, degraded::State::Busy),
+            (WRITER_BUSY_REASON, degraded::State::Busy),
+            (WRITER_DOWN_REASON, degraded::State::Down),
+        ] {
+            let ranking = Ranking {
+                mode: "lexical",
+                reason,
+            };
+            let line = format!("{}\n", state.line());
+            assert_eq!(ranking_line(&ranking), line);
+            assert_eq!(search_rank_line(&ranking, &[]), line);
+            assert_eq!(search_rank_line(&ranking, &rows), line);
+        }
         assert_eq!(
             ranking_line(&Ranking {
                 mode: "semantic",
@@ -88462,5 +88543,62 @@ mod claim_chunks_tests {
             "{next}"
         );
         assert!(next.ends_with("...)"), "{next}");
+    }
+    #[test]
+    fn a_kept_listing_and_its_sidecar_are_private_to_their_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("share").join("ljos");
+        let path = dir.join("listing-ws@bob-open.json");
+        let atoms = vec![serde_json::json!({"id": "a", "kind": "lesson", "text": "a kiln plan"})];
+        super::keep_listing(&path, "stamp", &atoms, false);
+        super::keep_tokens(&path, "stamp", &atoms);
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700, "the cache directory");
+        assert_eq!(mode(&path), 0o600, "the listing");
+        assert_eq!(
+            mode(&super::tokens_sidecar_path(&path)),
+            0o600,
+            "the token sidecar"
+        );
+    }
+
+    #[test]
+    fn a_group_writable_token_sidecar_is_not_seeded_from() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let path = root
+            .path()
+            .join("share")
+            .join("ljos")
+            .join("listing-ws@bob-open.json");
+        let atoms = vec![serde_json::json!({"id": "a", "kind": "lesson", "text": "a kiln plan"})];
+        super::keep_listing(&path, "stamp", &atoms, false);
+        super::keep_tokens(&path, "stamp", &atoms);
+        let sidecar = super::tokens_sidecar_path(&path);
+        assert!(super::seed_tokens(&path, "stamp", &atoms), "the sidecar");
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(
+            !super::seed_tokens(&path, "stamp", &atoms),
+            "a sidecar another user can write"
+        );
+    }
+
+    #[test]
+    fn two_workspaces_or_seats_never_share_a_listing_name() {
+        let names: Vec<String> = ["ab", "a.b", "a_b", "a-b", "a b", "a/b", "a%2Fb", "a@b", "."]
+            .iter()
+            .flat_map(|w| {
+                ["bob", "b.ob", "bob-open", "bo b"]
+                    .iter()
+                    .map(|seat| super::listing_file_name(w, seat, "open"))
+            })
+            .collect();
+        let distinct: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(distinct.len(), names.len(), "{names:?}");
+        assert_eq!(
+            super::listing_file_name("ws", "bob", "open"),
+            "listing-ws@bob-open.json"
+        );
     }
 }

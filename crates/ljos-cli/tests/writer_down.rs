@@ -421,10 +421,10 @@ fn walk_commands(seat: &Seat, case: &Case, dead: u16) {
         "search {} should fall back\n{search_said}",
         case.name
     );
-    assert!(
-        search_said.contains("The memory writer is not running")
-            && search_said.contains("packset ensure"),
-        "search {} did not say it fell back\n{search_said}",
+    assert_eq!(
+        search_said.matches("Memory is not running, so these results are ranked by words. If this persists, run `ljos doctor`.").count(),
+        1,
+        "search {} did not say once that it fell back\n{search_said}",
         case.name
     );
 

@@ -41,7 +41,8 @@ impl Drop for RealSeatHome {
 const HIT: &str = "d-SEAMS keeps the migrate video beside the cut.";
 const LESSON: &str = "Cold metal seats the door.";
 const QUEUED_LINE: &str = "Memory busy: queued 1 write, it will be saved on a later call.";
-const BUSY_MISS: &str = "The memory pack was busy and no words matched.";
+const BUSY_MISS: &str =
+    "Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`.";
 
 fn read_request(sock: &mut std::net::TcpStream) -> (String, String) {
     let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
