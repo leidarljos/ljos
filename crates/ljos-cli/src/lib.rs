@@ -7381,10 +7381,13 @@ pub fn onboard_detected(dry: bool, skills: Option<&Path>) -> Result<Vec<Step>> {
 /// What `ljos onboard` says when this machine has no coding tool.
 /// The stores are named either way. A dry run has not written them yet.
 fn no_runner_line(dry: bool) -> String {
-    let setup = if dry {
-        "It would set up the tracker, the memory writer and the deed store."
-    } else {
-        "The tracker, the memory writer and the deed store are set up."
+    let memory_off = sandbox_memory_off().is_some()
+        || std::env::var("PACKSET_URL").is_ok_and(|url| url.trim() == "off");
+    let setup = match (dry, memory_off) {
+        (true, true) => "It would set up the tracker and the deed store.",
+        (false, true) => "The tracker and the deed store are set up.",
+        (true, false) => "It would set up the tracker, the memory writer and the deed store.",
+        (false, false) => "The tracker, the memory writer and the deed store are set up.",
     };
     format!(
         "found no coding tool on this machine. {setup} Next: `ljos doctor`. \
@@ -72867,8 +72870,17 @@ lesson, due yesterday, seat ada
     /// stores are still prepared, or doctor names a tracker that is not there.
     #[test]
     fn a_seat_with_no_runner_still_gets_its_tracker() {
+        use std::os::unix::fs::PermissionsExt as _;
+
         let _g = env_guard();
         let _seat = HermeticSeat::new();
+        let bin = _seat._dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let packset = bin.join("packset");
+        std::fs::write(&packset, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&packset, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        let _env = HoldEnv::set(&[("PACKSET_URL", ""), ("PATH", &path)]);
         let steps =
             super::onboard_detected_with_lookup(true, None, &|_| false).expect("dry onboard");
         let whats: Vec<&str> = steps.iter().map(|s| s.what.as_str()).collect();
@@ -72878,7 +72890,7 @@ lesson, due yesterday, seat ada
         assert!(
             runners
                 .detail
-                .contains("would set up the tracker, the memory writer and the deed store."),
+                .contains("would set up the tracker and the deed store."),
             "{steps:?}"
         );
         assert!(runners.detail.contains("Next: `ljos doctor`."), "{steps:?}");
@@ -72927,6 +72939,8 @@ lesson, due yesterday, seat ada
 
     #[test]
     fn a_real_onboard_with_no_runner_says_the_stores_are_set_up() {
+        let _g = env_guard();
+        let _env = HoldEnv::set(&[("HOME", "/ljos-no-runner-test-home"), ("PACKSET_URL", "")]);
         let live = super::no_runner_line(false);
         assert!(
             live.contains("The tracker, the memory writer and the deed store are set up."),
@@ -72934,6 +72948,35 @@ lesson, due yesterday, seat ada
         );
         assert!(live.contains("Next: `ljos doctor`."), "{live}");
         assert!(!live.contains("so run `ljos onboard`."), "{live}");
+    }
+
+    #[test]
+    fn a_real_home_dry_onboard_names_the_memory_writer() {
+        let _g = env_guard();
+        let _env = HoldEnv::set(&[("HOME", "/ljos-no-runner-test-home"), ("PACKSET_URL", "")]);
+        let dry = super::no_runner_line(true);
+        assert!(
+            dry.contains("would set up the tracker, the memory writer and the deed store."),
+            "{dry}"
+        );
+        assert!(dry.contains("Next: `ljos doctor`."), "{dry}");
+    }
+
+    #[test]
+    fn packset_off_omits_the_memory_writer_from_no_runner_setup() {
+        let _g = env_guard();
+        let _env = HoldEnv::set(&[
+            ("HOME", "/ljos-no-runner-test-home"),
+            ("PACKSET_URL", "off"),
+        ]);
+        for (dry, expected) in [
+            (true, "It would set up the tracker and the deed store."),
+            (false, "The tracker and the deed store are set up."),
+        ] {
+            let line = super::no_runner_line(dry);
+            assert!(line.contains(expected), "{line}");
+            assert!(!line.contains("memory writer"), "{line}");
+        }
     }
 
     /// A seat setup makes the state directory, so the first doctor does

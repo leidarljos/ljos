@@ -84,7 +84,10 @@ over stdio:
    $ ljos onboard --harness json
    {"mcpServers": {"ljos": {"type": "stdio", "command": "ljos-mcp", "args": [], "env": {}}}}
 
-``ljos onboard`` with no ``--harness`` onboards every runner it finds, at a terminal or in a pipe, and a pipe prints that JSON on stdout with the setup lines on stderr after the tracker, the memory writer and the deed store are set up.
+``ljos onboard`` with no ``--harness`` onboards every runner it finds, at a terminal or in a pipe, and a pipe prints that JSON on stdout with the setup lines on stderr.
+The tracker and deed store are set up.
+Outside a temporary home, the memory writer is set up too.
+Under a temporary home, memory is off unless ``PACKSET_URL`` names a pack.
 ``ljos onboard --harness json`` prints the JSON alone and leaves those stores unchanged.
 Paste it where the runner keeps its MCP servers.
 

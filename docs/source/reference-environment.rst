@@ -240,7 +240,19 @@ Vissue settings ljos passes through
 A temporary HOME or working directory
 -------------------------------------
 
-ljos treats a ``HOME`` under ``/tmp``, ``/var/tmp``, ``/private/tmp``, ``/dev/shm`` or ``$TMPDIR`` as a test sandbox. There the hook's command check is off, and memory is off, unless ``PACKSET_URL`` names a writer. With no writer address the memory row, the guard row, ``ljos remember``, ``ljos search`` and ``ljos consensus`` print one line, ``memory and the command guard are off because the home is under /tmp (HOME); set HOME to a directory outside /tmp``, naming whichever of those directories the home is under. Search and consensus exit 1 with that line. That home does not start a pack writer: ``ljos onboard`` and ``ljos doctor --fix`` do not run ``packset ensure`` there, so a trial install does not leave a writer that nothing stops. A working directory under one of those, with a ``HOME`` outside them, is not a sandbox: ``cd /tmp && rm -rf ~/proj`` is judged. ``LJOS_GUARD=on`` keeps the check on under a temporary ``HOME``, which is how a test suite exercises it; ``LJOS_OFF`` still switches it off. When ``PACKSET_URL`` is set the guard row keeps the temporary-directory reason. ``ljos doctor`` shows a ``guard`` row marked ``warn`` whenever the check is off, from ``LJOS_OFF`` or from a temporary ``HOME``. ``install.sh`` prints the same line at the end of an install into a temporary ``HOME``.
+ljos treats a ``HOME`` under ``/tmp``, ``/var/tmp``, ``/private/tmp``, ``/dev/shm`` or ``$TMPDIR`` as a test sandbox.
+There the hook's command check is off, and memory is off, unless ``PACKSET_URL`` names a writer.
+With no writer address the memory row, the guard row, ``ljos remember``, ``ljos search`` and ``ljos consensus`` print one line, ``memory and the command guard are off because the home is under /tmp (HOME); set HOME to a directory outside /tmp``, naming whichever of those directories the home is under.
+A failed first ``ljos remember`` prints no seat notice before that line.
+Search and consensus exit 1 with that line.
+That home does not start a pack writer: ``ljos onboard`` and ``ljos doctor --fix`` do not run ``packset ensure`` there, so a trial install does not leave a writer that nothing stops.
+A working directory under one of those, with a ``HOME`` outside them, is not a sandbox: ``cd /tmp && rm -rf ~/proj`` is judged.
+``LJOS_GUARD=on`` keeps the check on under a temporary ``HOME``, which is how a test suite exercises it; ``LJOS_OFF`` still switches it off.
+When ``PACKSET_URL`` is set the guard row keeps the temporary-directory reason.
+``ljos doctor`` shows a ``guard`` row marked ``warn`` whenever the check is off, from ``LJOS_OFF`` or from a temporary ``HOME``.
+With no ``PACKSET_URL``, ``install.sh`` prints that memory-and-guard line.
+When ``PACKSET_URL`` is ``off``, the setup line says memory is off and the guard-only line follows.
+When ``PACKSET_URL`` names a writer, the setup line names the memory writer and the guard-only line follows.
 
 A runner's table may also name ``start`` and ``resume``, the argv that open
 a session in a persona's home and resume the latest one there; a

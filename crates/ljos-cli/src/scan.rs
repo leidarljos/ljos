@@ -847,8 +847,8 @@ enum ReadyPiece {
 const READY_HINT: &str = "See more with `--limit` or `--all`. Narrow with `-p` or `--mine`.";
 
 /// The ready page. `limit` is how many tickets to print. `None` prints
-/// every row. The header is `ready  shown X of Y`. A page that leaves
-/// tickets off ends with [`READY_HINT`].
+/// every row. The header is `ready  shown X of Y`. A limited page ends
+/// with [`READY_HINT`], including when every available row fits.
 #[must_use]
 pub fn ready_page(raw: &str, limit: Option<usize>) -> String {
     let raw = strip_ansi(raw);
@@ -885,7 +885,7 @@ pub fn ready_page(raw: &str, limit: Option<usize>) -> String {
             }
         }
     }
-    if take < total {
+    if limit.is_some() {
         out.push_str(&wrap(READY_HINT, COLS));
         out.push('\n');
     }
@@ -987,6 +987,8 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("claimed 3d by ada"), "{text}");
+        let limited = ready_page(&raw, Some(20));
+        assert!(limited.trim_end().ends_with(READY_HINT), "{limited}");
         assert!(
             text.lines().all(|line| line.chars().count() <= COLS),
             "{text}"

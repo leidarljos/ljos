@@ -53,15 +53,34 @@ The script names the cause and the command that fixes it.
 - The OS or CPU is not Linux or macOS on x86_64 or aarch64. The script prints one line naming those systems and ``cargo install --locked`` for the seat programs. On Windows, run the script inside WSL.
 - ``curl`` or ``wget``, ``tar``, or ``sha256sum`` is missing. On macOS the checksum tool is ``shasum``. The script names the missing tool. Install it and run ``sh install.sh`` again. Programs already unpacked are ``sh install.sh --from-dir DIR``.
 - A checksum does not match, or the download stops early. The script stops, deletes the partial file, and says to run ``sh install.sh`` again.
-- The install directory is not writable. The script names it and ``sh install.sh --bin-dir DIR``.
-- The install directory is not on ``PATH``. The script prints the line for bash (``~/.bashrc``), zsh (``~/.zshrc``) and fish (``~/.config/fish/config.fish``). It does not edit those files. ``--modify-path`` writes the bash and zsh lines. The Next line puts that directory on PATH and names the following command. With ``--no-onboard`` that command is ``ljos onboard``. An install that already ran ``ljos onboard`` names ``ljos doctor``.
+- The install directory is not writable.
+  The script names it and ``sh install.sh --bin-dir DIR``.
+  An empty or blank ``--bin-dir`` is refused before a program is installed.
+  A colon or newline is refused because that directory becomes one ``PATH`` entry.
+  A relative directory is normalized before the script checks ``PATH``.
+- The install directory is not on ``PATH``.
+  The script prints the line for bash (``~/.bashrc``), zsh (``~/.zshrc``), dash (``~/.profile``) and fish (``~/.config/fish/config.fish``).
+  Each line uses the absolute install path and quotes it for that shell.
+  The script does not edit those files.
+  ``--modify-path`` writes ``~/.profile`` and ``~/.bashrc``, and writes ``~/.zshrc`` only when that file already exists.
+  The Next line puts that directory on PATH and names the following command.
+  With ``--no-onboard`` that command is ``ljos onboard``.
+  An install that already ran ``ljos onboard`` names ``ljos doctor``.
+  The command guard and shell completion hints print one POSIX line, plus a fish line when fish needs different quoting.
 - An older ``ljos`` is earlier on ``PATH``. The script names both binaries and prints the ``export PATH`` line that puts the new one first.
 - Running the script again over the same version says it reinstalled that version. An older install says it updated, and names both versions.
 - ``--version VER`` or ``--pin REPO=VER`` for a release that does not exist says so, names the releases page, and the command ``sh install.sh --version VER`` or ``sh install.sh --pin REPO=VER``. A version the script itself names, when that release is not published and Rust is not installed, installs the latest release of that program and says so. With Rust installed, it builds that version from source.
 - A running ``ljos-mcp`` keeps the previous binary. Restart the assistant, or ``kill`` the pid the script prints, then run ``ljos doctor``.
 
-``ljos onboard`` with no coding tool installed says so. It still sets up the ticket tracker, the memory writer, and the deed store, and the line names those three and ``ljos doctor`` as the next command. The deed row names its directory and says it is for signed records of finished work. Install an agent, then run ``ljos onboard``. ``ljos onboard --example`` lists the tools.
-A pipe sets up the same three, with the Model Context Protocol (MCP) entry as the only text on stdout and the setup lines on stderr.
+``ljos onboard`` with no coding tool installed says so.
+It still sets up the ticket tracker and deed store.
+Outside a temporary home, it also sets up the memory writer.
+Under a temporary home, memory is off unless ``PACKSET_URL`` names a pack.
+The line names that setup and ``ljos doctor`` as the next command.
+The deed row names its directory and says it is for signed records of finished work.
+Install an agent, then run ``ljos onboard``.
+``ljos onboard --example`` lists the tools.
+A pipe follows the same temporary-home rule, with the Model Context Protocol (MCP) entry as the only text on stdout and the setup lines on stderr.
 
 ``ljos offboard`` after a hand edit that it cannot undo names the file and leaves the ljos entry. Edit that file, delete the ljos entry, and run ``ljos offboard`` again.
 
@@ -77,8 +96,10 @@ It builds from source with ``cargo`` where a platform has no release.
 ``--no-embed`` leaves out the encoder. Search then matches words, and a search prints ``matched by words (encoder not installed)`` and names the install command ``ljos doctor`` names when that command is a cargo one. When it would be a download run through a shell, the line points at the install page, https://leidarljos.github.io/ljos/getting-started.html#install, and at ``ljos doctor`` instead. An MCP server names that install step on its first such search and leaves it off later searches.
 
 Read the script before you run it. It is ``scripts/install.sh`` in this repository.
-It runs ``ljos onboard`` for each coding runner it finds. With none found, it still sets up
-the ticket tracker, the memory writer and the deed store.
+It runs ``ljos onboard`` for each coding runner it finds.
+With none found, it still sets up the ticket tracker and deed store.
+Outside a temporary home, it also sets up the memory writer.
+Under a temporary home, memory is off unless ``PACKSET_URL`` names a pack.
 
 The tracker commits each change, so git needs an identity:
 
@@ -122,8 +143,10 @@ Its ticket row names the new tracker directory and the configuration file it wro
 Its memory row says the writer started without printing its local address.
 ``ljos onboard --example`` lists the runners ljos knows.
 
-Nothing else needs a variable set. ``ljos onboard`` makes a deed store, a tracker and a
-config file for ``vissue``, and it starts the memory writer.
+Nothing else needs a variable set.
+``ljos onboard`` makes a deed store, a tracker and a config file for ``vissue``.
+Outside a temporary home, it also starts the memory writer.
+Under a temporary home, memory is off unless ``PACKSET_URL`` names a pack.
 
 The runner runs a hook only after you trust it. Trust each ljos hook in the runner.
 Trust it again after an upgrade rewrites one.
@@ -255,11 +278,25 @@ A plan files one parent and its checklist in a single tracker commit, claims the
    $ LJOS_SEAT=alice ljos ready --mine
    next: day-ef56  pick a default
 
-``ljos ready`` without ``--mine`` prints the first 20 open tickets, headed ``ready  shown X of Y``, and ends a short page with a hint naming ``--limit``, ``--all``, ``-p`` and ``--mine``. This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last. ``--all`` prints every ticket, and ``--limit N`` prints N.
+``ljos ready`` without ``--mine`` prints the first 20 open tickets, headed ``ready  shown X of Y``, and ends a short page with a hint naming ``--limit``, ``--all``, ``-p`` and ``--mine``, even when every ticket fits.
+This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last.
+``--all`` prints every ticket, and ``--limit N`` prints N.
 
 ``ljos list`` and ``ljos ls`` are the same command. They take the same flags, including ``-p PROJECT``, and print the same page.
 
-To work one ticket with no plan, run ``ljos sitting ID``. It claims the ticket and prints what the seat remembers about it. ``ljos note "TEXT"`` writes on that ticket, and ``ljos finish`` with no id ends the sitting and leaves the ticket open. ``ljos finish --close`` closes it, once the work is accepted. From a container, a CI runner, ``setsid``, or a parent that carries a runner's variables, that close is refused. The refusal is one sentence: no terminal was found or a runner was detected, so a person closes the ticket from their own login terminal, or with ``ljos seat grant``. Nothing was written. An agent is not that person. A plain ``ljos finish`` has ended the sitting, so close that ticket by its id with ``ljos finish ID --close``. ``ljos finish --close`` with no id and no open sitting says so and names that form. While a sitting is open, ``ljos file`` files the new ticket under it, and ``--top`` files it at the top of the project. With no plan, ``ljos ready --mine`` prints ``no unfinished item``, because it names the next item of a plan.
+To work one ticket with no plan, run ``ljos sitting ID``.
+It claims the ticket and prints what the seat remembers about it.
+``ljos note "TEXT"`` writes on that ticket, and ``ljos finish`` with no id ends the sitting and leaves the ticket open.
+``ljos finish --close`` closes it, once the work is accepted.
+From a container, a CI runner, ``setsid``, or a parent that carries a runner's variables, that close is refused.
+The refusal is one sentence: no terminal was found or a runner was detected, so a person closes the ticket from their own login terminal, or with ``ljos seat grant``.
+Nothing was written.
+An agent is not that person.
+A plain ``ljos finish`` has ended the sitting, so close that ticket by its id with ``ljos finish ID --close``.
+``ljos finish --close`` with no id and no open sitting says so and names that form.
+While a sitting is open, ``ljos file`` files the new ticket under it, and ``--top`` files it at the top of the project.
+While a non-plan sitting is open, ``ljos ready --mine`` names its ticket and says it ``has no plan items``.
+After plain ``ljos finish`` ends that sitting, ``ljos ready --mine`` prints ``no unfinished item``.
 
 The ids are the ones that run printed. The parent is claimed. Each item stays open until ``ljos finish`` ticks it. A sitting with no ``--verbose`` prints the claim, one line for claims still held, what the seat remembers, and the close. With ``--no-embed`` the pack has no encoder, so the sitting prints ``matched by words (encoder not installed)``. Quiet claims are ``N quiet claims are still yours (ljos release --stale)``. Claims untouched for longer than ``LJOS_STALE_DAYS`` (7) are one line, ``ljos claims --stale``. ``ljos sitting ISSUE --verbose`` prints every section.
 Under a runner the holder on the ``STARTED`` line can be ``alice`` plus ``@`` and a session tag. The claim command below prints the seat name.

@@ -27,6 +27,62 @@ fn said(out: &Output) -> String {
     )
 }
 
+#[test]
+fn install_docs_distinguish_temporary_home_memory() {
+    for rel in [
+        "scripts/install.sh",
+        "docs/orgmode/getting-started.org",
+        "docs/source/getting-started.rst",
+    ] {
+        let text = page(rel);
+        assert!(
+            text.contains("Under a temporary home, memory is off unless"),
+            "{rel} does not name the named-pack exception"
+        );
+    }
+}
+
+#[test]
+fn environment_docs_name_packset_off_install_output() {
+    for (rel, off, address) in [
+        (
+            "docs/orgmode/reference-environment.org",
+            "When =PACKSET_URL= is =off=, the setup line says memory is off and the guard-only line follows.",
+            "When =PACKSET_URL= names a writer, the setup line names the memory writer and the guard-only line follows.",
+        ),
+        (
+            "docs/source/reference-environment.rst",
+            "When ``PACKSET_URL`` is ``off``, the setup line says memory is off and the guard-only line follows.",
+            "When ``PACKSET_URL`` names a writer, the setup line names the memory writer and the guard-only line follows.",
+        ),
+    ] {
+        let text = page(rel);
+        assert!(text.contains(off), "{rel} does not name the off output");
+        assert!(
+            text.contains(address),
+            "{rel} does not name the writer output"
+        );
+    }
+}
+
+#[test]
+fn getting_started_distinguishes_open_non_plan_sittings() {
+    for rel in [
+        "docs/orgmode/getting-started.org",
+        "docs/source/getting-started.rst",
+    ] {
+        let text = page(rel);
+        assert!(
+            text.contains("has no plan items"),
+            "{rel} does not name the open non-plan sitting output"
+        );
+        assert!(
+            text.contains("no unfinished item"),
+            "{rel} does not name the output after the sitting ends"
+        );
+    }
+}
+
 #[cfg(unix)]
 fn script(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;
