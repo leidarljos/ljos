@@ -916,7 +916,8 @@ pub struct FileFromArgs {
     pub rows: Vec<serde_json::Map<String, serde_json::Value>>,
     /// A JSONL or CSV file with those columns, instead of `rows`.
     pub path: Option<String>,
-    /// The project; absent, the first parent's.
+    /// The project for a row with no parent. A row with one goes to its
+    /// parent's project.
     pub project: Option<String>,
     /// The parent for a row that names none.
     pub parent: Option<String>,

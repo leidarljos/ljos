@@ -1,9 +1,10 @@
 //! `ljos file --from FILE`: many tickets in one tracker commit.
 //!
 //! Every row is read and checked before anything is written. The writes go
-//! through `vissue_core::ops::create`, as a plan's checklist does. The
-//! project's directory is copied first, and a row the tracker refuses puts
-//! it back, so the tracker is left as it was. The commit names the first
+//! through `vissue_core::ops::create`, as a plan's checklist does. Each
+//! row goes where a single `ljos file` would put it. Every project
+//! directory the batch writes is copied first, and a row the tracker
+//! refuses puts them back, so the tracker is left as it was. The commit names the first
 //! id and how many more.
 
 use std::collections::BTreeMap;
@@ -250,23 +251,101 @@ fn restore(dir: &Path, before: &BTreeMap<PathBuf, Vec<u8>>) -> Result<()> {
     Ok(())
 }
 
-/// What `ljos file --from` filed.
-pub struct Filed {
-    pub ids: Vec<String>,
+/// A row with the project and parent it is filed under.
+#[derive(Debug, Clone)]
+pub struct Placed {
+    pub row: Row,
     pub project: String,
-    pub persisted: String,
+    pub parent: Option<String>,
 }
 
-/// File `rows` into one project and commit the tracker once.
-///
-/// The project is `--project`, else the project of the first parent named,
-/// else `LJOS_PROJECT`.
+/// Where each row goes, by the rules a single `ljos file` follows: a row
+/// with a parent, its own or `--parent`, is filed in that parent's project,
+/// whatever `-p` names; one without is filed in `-p`, else the checkout's
+/// project, else `LJOS_PROJECT`. `--top` keeps a row with no parent at
+/// the top of its project. The second value is each distinct line
+/// [`crate::file_placement`] printed about a placement.
 ///
 /// # Errors
 ///
-/// No project is known, the project is projected from another tracker, or
-/// the tracker refuses a row. A refused row leaves the tracker as it was.
-pub fn file_rows(rows: &[Row], defaults: &Defaults) -> Result<Filed> {
+/// A row has no project, or a project name is refused.
+pub fn place_rows(
+    rows: &[Row],
+    defaults: &Defaults,
+    top: bool,
+) -> Result<(Vec<Placed>, Vec<String>)> {
+    let mut placed = Vec::with_capacity(rows.len());
+    let mut notes: Vec<String> = Vec::new();
+    for (at, row) in rows.iter().enumerate() {
+        let line = at + 1;
+        let parent = row.parent.clone().or_else(|| defaults.parent.clone());
+        let named_parent = parent.is_some();
+        let top_row = top && !named_parent;
+        let (parent, project, note) =
+            crate::file_placement(top_row, parent, defaults.project.clone(), None);
+        if project.is_none() && parent.is_none() {
+            if let Some(note) = note.as_deref().filter(|n| n.starts_with("project: ")) {
+                bail!("file --from: row {line}: {}", note.trim_end());
+            }
+        }
+        let project = project.or_else(|| {
+            if top_row || named_parent || defaults.project.is_some() {
+                return None;
+            }
+            std::env::var("LJOS_PROJECT")
+                .ok()
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+        });
+        let project = match project {
+            Some(project) => project,
+            None if top_row => crate::seat_tracker_project_no_cwd().with_context(|| {
+                format!("file --from: row {line}: no project, so pass `-p NAME`")
+            })?,
+            None => bail!(
+                "file --from: row {line}: no project, so pass `-p NAME` or give the row a parent"
+            ),
+        };
+        if let Some(note) = note {
+            if !notes.contains(&note) {
+                notes.push(note);
+            }
+        }
+        placed.push(Placed {
+            row: row.clone(),
+            project,
+            parent,
+        });
+    }
+    Ok((placed, notes))
+}
+
+/// What `ljos file --from` filed.
+pub struct Filed {
+    pub ids: Vec<String>,
+    /// Each project a row went to, in the order first used.
+    pub projects: Vec<String>,
+    pub persisted: String,
+}
+
+/// One project file the batch writes, as it was and as this batch last
+/// left it.
+struct Board {
+    project: String,
+    issues: PathBuf,
+    dir: PathBuf,
+    before: BTreeMap<PathBuf, Vec<u8>>,
+    ours: Vec<u8>,
+}
+
+/// File every placed row and commit the tracker once.
+///
+/// # Errors
+///
+/// A project is not in the tracker or is projected from another tracker,
+/// or the tracker refuses a row. A refused row leaves the tracker as it
+/// was, unless another writer changed a project file meanwhile.
+pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
     let layout = vissue_core::Layout::resolve(None, None)?;
     layout
         .require_tracker_to_create()
@@ -276,67 +355,76 @@ pub fn file_rows(rows: &[Row], defaults: &Defaults) -> Result<Filed> {
             .map_err(|_| anyhow::anyhow!("file --from: --priority {p:?} is not A, B or C"))?,
         None => None,
     };
-    let first_parent = rows
-        .iter()
-        .find_map(|r| r.parent.clone())
-        .or_else(|| defaults.parent.clone());
-    let named = match (&defaults.project, &first_parent) {
-        (Some(project), _) => project.clone(),
-        (None, Some(parent)) => {
-            let hit = vissue_core::Router::load(layout.clone())?
-                .find_by_id(parent)
-                .map_err(|_| crate::unknown_ticket(parent))?;
-            hit.project
-        }
-        (None, None) => std::env::var("LJOS_PROJECT")
-            .ok()
-            .map(|p| p.trim().to_string())
-            .filter(|p| !p.is_empty())
-            .context("file --from: no project, so pass `-p NAME` or a parent column")?,
-    };
-    let project = crate::project_name(&named).map_err(anyhow::Error::msg)?;
-    let project = vissue_core::store::resolve_existing_project_case(&layout, &project)
-        .with_context(|| format!("file --from: no project {project:?} in the tracker"))?;
-    if vissue_core::projection::boards(layout.root())
-        .unwrap_or_default()
-        .iter()
-        .any(|b| b.source != "self" && b.project.eq_ignore_ascii_case(&project))
-    {
-        bail!("file --from: {project} is projected from another tracker; file its tickets with `ljos file` one at a time");
-    }
-    let issues = layout.project_issues_path(&project);
-    let dir = issues
-        .parent()
-        .map(Path::to_path_buf)
-        .context("file --from: the project file has no directory")?;
-    let before = snapshot(&dir)?;
-    let read = || std::fs::read(&issues).unwrap_or_default();
-    // The bytes after this batch's last write. Another writer that changes
-    // the file mid-batch ends it, and its row is never put back over.
-    let mut ours = read();
-    let mut ids = Vec::with_capacity(rows.len());
-    for (at, row) in rows.iter().enumerate() {
+    let projected = vissue_core::projection::boards(layout.root()).unwrap_or_default();
+    let mut boards: Vec<Board> = Vec::new();
+    let mut at_board = Vec::with_capacity(placed.len());
+    for (at, place) in placed.iter().enumerate() {
         let line = at + 1;
-        if read() != ours {
+        let named = crate::project_name(&place.project)
+            .map_err(|e| anyhow::anyhow!("file --from: row {line}: {e}"))?;
+        let project = vissue_core::store::resolve_existing_project_case(&layout, &named)
+            .with_context(|| {
+                format!("file --from: row {line}: no project {named:?} in the tracker")
+            })?;
+        if let Some(i) = boards.iter().position(|b| b.project == project) {
+            at_board.push(i);
+            continue;
+        }
+        if projected
+            .iter()
+            .any(|b| b.source != "self" && b.project.eq_ignore_ascii_case(&project))
+        {
+            bail!("file --from: row {line}: {project} is projected from another tracker; file its tickets with `ljos file` one at a time");
+        }
+        let issues = layout.project_issues_path(&project);
+        let dir = issues
+            .parent()
+            .map(Path::to_path_buf)
+            .context("file --from: the project file has no directory")?;
+        let before = snapshot(&dir)?;
+        let ours = std::fs::read(&issues).unwrap_or_default();
+        at_board.push(boards.len());
+        boards.push(Board {
+            project,
+            issues,
+            dir,
+            before,
+            ours,
+        });
+    }
+    let read = |path: &Path| std::fs::read(path).unwrap_or_default();
+    // Another writer that changes a project file mid-batch ends it, and its
+    // row is never put back over.
+    let changed = |boards: &[Board]| {
+        boards
+            .iter()
+            .find(|b| read(&b.issues) != b.ours)
+            .map(|b| b.issues.display().to_string())
+    };
+    let mut ids: Vec<String> = Vec::with_capacity(placed.len());
+    for (at, place) in placed.iter().enumerate() {
+        let line = at + 1;
+        let board = at_board[at];
+        if read(&boards[board].issues) != boards[board].ours {
             bail!(
                 "file --from: another writer changed {} before row {line}, so the batch stopped; the {} tickets filed are on the tracker and not committed: {}",
-                issues.display(),
+                boards[board].issues.display(),
                 ids.len(),
                 ids.join(" ")
             );
         }
-        let parent = row.parent.clone().or_else(|| defaults.parent.clone());
+        let row = &place.row;
         let kind = row.kind.clone().or_else(|| defaults.kind.clone());
         let tags = row.tags.clone().or_else(|| defaults.tags.clone());
         let made = vissue_core::ops::create(
             &layout,
-            &project,
+            &boards[board].project,
             &row.title,
             vissue_core::ops::CreateOpts {
                 priority: row.priority.or(default_priority),
                 issue_type: kind.as_deref(),
                 tags: tags.as_deref(),
-                parent: parent.as_deref(),
+                parent: place.parent.as_deref(),
                 body: row.body.as_deref(),
                 quiet: true,
                 ..vissue_core::ops::CreateOpts::default()
@@ -345,33 +433,33 @@ pub fn file_rows(rows: &[Row], defaults: &Defaults) -> Result<Filed> {
         match made {
             Ok(text) => {
                 ids.push(text.trim().to_string());
-                ours = read();
+                boards[board].ours = read(&boards[board].issues);
             }
             Err(e) => {
-                if read() != ours {
+                if let Some(path) = changed(&boards) {
                     bail!(
-                        "file --from: row {line}: {e}; another writer changed {} meanwhile, so the {} tickets filed are on the tracker and not committed: {}",
-                        issues.display(),
+                        "file --from: row {line}: {e}; another writer changed {path} meanwhile, so the {} tickets filed are on the tracker and not committed: {}",
                         ids.len(),
                         ids.join(" ")
                     );
                 }
-                let undone = match restore(&dir, &before) {
-                    Ok(()) => {
-                        // A poller may have read the rows written so far;
-                        // the log is append-only, so the undo is one more write.
-                        let _ = vissue_core::events::emit_issues_write(
-                            &vissue_core::events::events_dir(&layout),
-                            &project,
-                            &issues,
-                        );
-                        format!(
-                            "nothing was filed: the {} tickets written before it were taken back",
-                            ids.len()
-                        )
+                let mut undone = format!(
+                    "nothing was filed: the {} tickets written before it were taken back",
+                    ids.len()
+                );
+                for b in &boards {
+                    if let Err(r) = restore(&b.dir, &b.before) {
+                        undone = format!("putting {} back failed: {r:#}", b.dir.display());
+                        break;
                     }
-                    Err(r) => format!("putting {} back failed: {r:#}", dir.display()),
-                };
+                    // A poller may have read the rows written so far;
+                    // the log is append-only, so the undo is one more write.
+                    let _ = vissue_core::events::emit_issues_write(
+                        &vissue_core::events::events_dir(&layout),
+                        &b.project,
+                        &b.issues,
+                    );
+                }
                 bail!("file --from: row {line}: {e}; {undone}");
             }
         }
@@ -379,7 +467,7 @@ pub fn file_rows(rows: &[Row], defaults: &Defaults) -> Result<Filed> {
     let persisted = crate::persist_tracker_many(&ids, "filed");
     Ok(Filed {
         ids,
-        project,
+        projects: boards.into_iter().map(|b| b.project).collect(),
         persisted,
     })
 }

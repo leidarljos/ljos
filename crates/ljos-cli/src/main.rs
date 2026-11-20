@@ -1184,7 +1184,9 @@ enum Cmd {
     /// the columns title, body, tags, parent, priority and type, in one
     /// tracker commit, and prints the new ids one per line. `-p`, `-t`,
     /// `--tags`, `--priority` and `--parent` fill a column a row leaves
-    /// empty. A row that cannot be filed files none of them.
+    /// empty, and each row is placed as `ljos file` places one: a row with
+    /// a parent goes to that parent's project. A row that cannot be filed
+    /// files none of them.
     ///
     /// Example: `LJOS_SEAT=alice ljos file "Pick a codec" -p demo`
     #[command(
@@ -1199,7 +1201,7 @@ enum Cmd {
         #[arg(
             long,
             value_name = "FILE",
-            conflicts_with_all = ["title", "top", "body", "options", "quorum", "deadline", "json"]
+            conflicts_with_all = ["title", "body", "options", "quorum", "deadline", "json"]
         )]
         from: Option<PathBuf>,
         /// The parent issue; the held issue when omitted.
@@ -6283,17 +6285,22 @@ fn run_command() -> Result<()> {
                     tags,
                     priority,
                 };
-                let filed = ljos_cli::bulk_file::file_rows(&rows, &defaults)?;
+                let (placed, notes) = ljos_cli::bulk_file::place_rows(&rows, &defaults, top)?;
+                let filed = ljos_cli::bulk_file::file_rows(&placed, &defaults)?;
                 ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
                 for id in &filed.ids {
                     println!("{id}");
                 }
-                let mut rest = format!(
-                    "filed {} tickets in {}\n{}",
-                    filed.ids.len(),
-                    filed.project,
-                    filed.persisted
+                let mut rest = notes.concat();
+                let _ = std::fmt::Write::write_fmt(
+                    &mut rest,
+                    format_args!(
+                        "filed {} tickets in {}\n",
+                        filed.ids.len(),
+                        filed.projects.join(", ")
+                    ),
                 );
+                rest.push_str(&filed.persisted);
                 if !git_detail(verbose) {
                     rest = ljos_cli::without_routine_git(&rest);
                 }

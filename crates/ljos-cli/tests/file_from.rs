@@ -153,3 +153,93 @@ fn the_mcp_tool_files_rows_in_one_commit() {
         "{org}"
     );
 }
+
+/// A second project with one ticket, committed.
+fn other_project(world: &World) {
+    let dir = world.tracker().join("Software/other");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("issues.org"),
+        "* TODO [#B] Other plan\n:PROPERTIES:\n:ID:         other-c3d4\n:END:\n",
+    )
+    .unwrap();
+    world.git(&["add", "."]);
+    world.git(&["commit", "-q", "-m", "other"]);
+}
+
+#[test]
+fn each_row_is_filed_in_its_parents_project() {
+    let world = World::new();
+    other_project(&world);
+    let before = world.commits();
+    let file = world.write(
+        "rows.jsonl",
+        format!(
+            "{{\"title\": \"Under demo\", \"parent\": \"{ISSUE}\"}}\n{{\"title\": \"Under other\", \"parent\": \"other-c3d4\"}}\n"
+        ),
+    );
+    let filed = world.ljos(&["file", "--from", &file]);
+    assert!(filed.status.success(), "{}", said(&filed));
+    let ids: Vec<String> = stdout(&filed).lines().map(str::to_string).collect();
+    assert_eq!(ids.len(), 2, "{}", said(&filed));
+    assert!(ids[0].starts_with("demo-"), "{ids:?}");
+    assert!(ids[1].starts_with("other-"), "{ids:?}");
+    assert!(
+        stderr(&filed).contains("filed 2 tickets in demo, other"),
+        "{}",
+        said(&filed)
+    );
+    assert_eq!(world.commits(), before + 1);
+    let demo = std::fs::read_to_string(world.tracker().join("Software/demo/issues.org")).unwrap();
+    let other = std::fs::read_to_string(world.tracker().join("Software/other/issues.org")).unwrap();
+    assert!(
+        demo.contains("Under demo") && !demo.contains("Under other"),
+        "{demo}"
+    );
+    assert!(other.contains("Under other"), "{other}");
+    assert!(other.contains(":PARENT:     other-c3d4"), "{other}");
+    let changed = world.git(&["show", "--name-only", "--format=", "HEAD"]);
+    assert!(
+        changed.contains("Software/demo/issues.org")
+            && changed.contains("Software/other/issues.org"),
+        "{changed}"
+    );
+
+    // `-p` does not move a row away from its parent's project, as with a
+    // single `ljos file --parent`.
+    let file = world.write(
+        "pinned.jsonl",
+        "{\"title\": \"Still under other\", \"parent\": \"other-c3d4\"}\n",
+    );
+    let filed = world.ljos(&["file", "--from", &file, "-p", "demo"]);
+    assert!(filed.status.success(), "{}", said(&filed));
+    assert!(stdout(&filed).starts_with("other-"), "{}", said(&filed));
+    assert!(
+        stderr(&filed).contains("filed in other, the project of its parent other-c3d4"),
+        "{}",
+        said(&filed)
+    );
+}
+
+#[test]
+fn a_refused_row_takes_back_every_project_it_wrote() {
+    let world = World::new();
+    other_project(&world);
+    let before = world.commits();
+    let files = tracked(&world);
+    let file = world.write(
+        "rows.jsonl",
+        format!(
+            "{{\"title\": \"Under demo\", \"parent\": \"{ISSUE}\"}}\n{{\"title\": \"Under other\", \"parent\": \"other-c3d4\"}}\n{{\"title\": \"Lost\", \"parent\": \"other-zzzz\"}}\n"
+        ),
+    );
+    let filed = world.ljos(&["file", "--from", &file]);
+    assert_eq!(filed.status.code(), Some(1), "{}", said(&filed));
+    assert!(
+        stderr(&filed).contains("row 3: --parent other-zzzz"),
+        "{}",
+        said(&filed)
+    );
+    assert_eq!(tracked(&world), files);
+    assert_eq!(world.commits(), before);
+}
