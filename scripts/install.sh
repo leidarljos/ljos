@@ -1205,6 +1205,7 @@ PROFILE_MARK='# Added by the ljos installer: its programs on PATH.'
 posix_dir=$(posix_word "$BIN_DIR")
 fish_dir=$(fish_word "$BIN_DIR")
 PATH_LINE="export PATH=$posix_dir:\$PATH"
+FISH_PATH_LINE="fish_add_path --path $fish_dir"
 add_to_profiles() {
   added=
   for rc in .profile .bashrc .zshrc; do
@@ -1260,7 +1261,18 @@ shell_profiles() {
   say "$BIN_DIR is not on PATH. Add one line to the shell profile named here. This script does not edit that file."
   say "  bash (~/.bashrc): $PATH_LINE"
   say "  zsh (~/.zshrc): $PATH_LINE"
-  say "  fish (~/.config/fish/config.fish): fish_add_path --path $fish_dir"
+  say "  dash (~/.profile): $PATH_LINE"
+  say "  fish (~/.config/fish/config.fish): $FISH_PATH_LINE"
+}
+shell_path_lines() {
+  say "$1:"
+  say "  bash, zsh, dash: $PATH_LINE"
+  say "  fish: $FISH_PATH_LINE"
+}
+shell_next_lines() {
+  say "Next:"
+  say "  bash, zsh, dash: $PATH_LINE && $1"
+  say "  fish: $FISH_PATH_LINE; and $1"
 }
 shell_command_lines() {
   command_posix=$(posix_word "$BIN_DIR/ljos")
@@ -1276,18 +1288,17 @@ case ":$PATH:" in
   *) if [ "$MODIFY_PATH" = 1 ] && [ "$CLOUD" = 0 ]; then
        added=$(add_to_profiles)
        if [ -n "$added" ]; then
-         say "Added $BIN_DIR to PATH in$added; a new shell finds ljos. In this one, run:"
+         say "Added $BIN_DIR to PATH in$added; a new shell finds ljos."
        else
-         say "Your shell profiles already add $BIN_DIR to PATH. In this shell, run:"
+         say "Your shell profiles already add $BIN_DIR to PATH."
        fi
      else
        shell_profiles
-       say "In this shell, run:"
      fi
-     say "  $PATH_LINE"
      if [ "$MODIFY_PATH" = 1 ] && [ "$CLOUD" = 0 ]; then
-       say "  fish (~/.config/fish/config.fish): fish_add_path --path $fish_dir"
+       say "  fish (~/.config/fish/config.fish): $FISH_PATH_LINE"
      fi
+     shell_path_lines "In this shell, run the line for your shell"
      PATH="$BIN_DIR:$PATH"; export PATH ;;
 esac
 if [ -n "$AHEAD" ] && [ -x "$BIN_DIR/ljos" ] && ! same_bin "$AHEAD" "$BIN_DIR/ljos"; then
@@ -1296,7 +1307,8 @@ if [ -n "$AHEAD" ] && [ -x "$BIN_DIR/ljos" ] && ! same_bin "$AHEAD" "$BIN_DIR/lj
   say "PATH finds $AHEAD${old:+ ($old)} before $BIN_DIR/ljos${new:+ ($new)}."
   if [ "$PATH_HAD_BIN" = 1 ]; then
     say "  This shell would run the older one. Put the new install first:"
-    say "  $PATH_LINE"
+    say "  bash, zsh, dash: $PATH_LINE"
+    say "  fish: $FISH_PATH_LINE"
   else
     say "  The line above puts $BIN_DIR first, ahead of $AHEAD."
   fi
@@ -1428,13 +1440,13 @@ fi
 if [ "$ONBOARD" = 1 ] && [ "$found_any" = 0 ] \
   && { [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; }; then
   say "Done in $secs s. This shell does not run the ljos just installed until PATH is set."
-  say "Next: $PATH_LINE"
+  shell_path_lines "Next"
   say "Then install Claude Code, Cursor or Codex, and run \`ljos onboard\`."
 elif [ "$ONBOARD" = 1 ] && [ "$found_any" = 0 ]; then
   say "Done in $secs s. Next: install Claude Code, Cursor or Codex, then run \`ljos onboard\`."
 elif [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; then
   say "Done in $secs s. This shell does not run the ljos just installed until PATH is set."
-  say "Next: $PATH_LINE && $next_cmd"
+  shell_next_lines "$next_cmd"
 else
   say "Done in $secs s. Next: \`$next_cmd\`."
 fi
