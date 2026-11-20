@@ -19,9 +19,57 @@ mod tools;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 const BOARD: &str = "Software/Software/issues.org";
 const OTHER: &str = "Software/Other/issues.org";
+
+/// A note written the way vissue writes one, but with a pause between the
+/// read and the write while the file's issues lock is held. Not a test:
+/// it returns at once unless the wrapper ran it.
+#[test]
+#[ignore = "run by the vissue wrapper"]
+fn vissue_held_note() {
+    let (Ok(args), Ok(hold)) = (
+        std::env::var("LJOS_SHIM_ARGS"),
+        std::env::var("SHIM_HOLD_NOTE_MS"),
+    ) else {
+        return;
+    };
+    let args: Vec<&str> = args
+        .strip_suffix('\x1f')
+        .unwrap_or(&args)
+        .split('\x1f')
+        .collect();
+    let ["note", id, text @ ..] = args.as_slice() else {
+        panic!("the held note does not run vissue {args:?}");
+    };
+    let hold = Duration::from_millis(hold.parse().unwrap());
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    let (_, path, project) = vissue_core::store::find_by_id(&layout, id)
+        .unwrap()
+        .unwrap();
+    vissue_core::store::with_issues_lock(&path, || {
+        let mut doc = vissue_core::IssueDoc::parse_file(&project, &path)?;
+        if let Ok(mark) = std::env::var("SHIM_HELD_MARK") {
+            std::fs::write(mark, "held").unwrap();
+        }
+        std::thread::sleep(hold);
+        let heading = doc.headings.iter_mut().find(|h| h.id == *id).unwrap();
+        heading.logbook.insert(
+            0,
+            vissue_core::model::LogEntry {
+                timestamp: vissue_core::model::LogEntry::now(),
+                from_state: None,
+                to_state: None,
+                note: Some(text.join(" ")),
+                raw: None,
+            },
+        );
+        doc.write()
+    })
+    .unwrap();
+}
 
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -80,6 +128,7 @@ fn seed_board(project: &str, ids: &[String], quoted: Option<(&str, &str)>) -> St
 
 struct Board {
     dir: tempfile::TempDir,
+    remote: PathBuf,
     wrapper_bin: PathBuf,
 }
 
@@ -182,6 +231,7 @@ exit $code\n",
         }
         Self {
             dir,
+            remote,
             wrapper_bin: bin,
         }
     }
@@ -262,6 +312,27 @@ exit $code\n",
     fn board_on(&self, host: &str) -> String {
         std::fs::read_to_string(self.tracker(host).join(BOARD)).unwrap()
     }
+
+    fn board_on_remote(&self) -> String {
+        let out = Command::new("git")
+            .arg("--git-dir")
+            .arg(&self.remote)
+            .args(["show", &format!("main:{BOARD}")])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+}
+
+fn wait_for(path: &Path, within: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < within {
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
 }
 
 /// Every way a board read back can be wrong. Empty when it is right.
@@ -296,7 +367,9 @@ fn board_faults(text: &str, must_hold: &[String], notes: &[(String, String)]) ->
         let lines: Vec<String> = heading.logbook.iter().map(|e| e.render()).collect();
         let mut once = BTreeSet::new();
         for line in &lines {
-            if !once.insert(line) {
+            // `stamp_note_seat` names the seat again above a note another
+            // seat put on top, so a seat line may repeat across notes.
+            if !once.insert(line) && !line.starts_with("- Noted by ") {
                 faults.push(format!("{} has {line:?} twice", heading.id));
             }
             let Some(rest) = line.strip_prefix("- Claimed by ") else {
@@ -329,6 +402,222 @@ fn board_faults(text: &str, must_hold: &[String], notes: &[(String, String)]) ->
         }
     }
     faults
+}
+
+fn first_line(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn seats_on_two_hosts_claim_file_and_note_one_board_at_once() {
+    if !tools_ready() {
+        return;
+    }
+    let board = Board::new(12);
+    let seeded: Vec<String> = (1..=12).map(|n| format!("Software-t{n:03}")).collect();
+    let mut must_hold = seeded.clone();
+
+    // A push from host A rebases the board while a note on host A is
+    // between its read and its write. The push comes from a write to the
+    // other project's file, which takes that file's lock and not this one.
+    let filed = board.run(
+        "B",
+        "stirrup",
+        &["file", "Filed on host B", "-p", "Software"],
+        &[],
+    );
+    assert!(filed.ok(), "{}", filed.said());
+    must_hold.push(first_line(&filed.out));
+    let mark = board.dir.path().join("A/held");
+    let mark_s = mark.to_str().unwrap().to_string();
+    let held = board.spawn(
+        "A",
+        "saddle",
+        &["note", "Software-t001", "written while a push rebased"],
+        &[
+            ("SHIM_HOLD_NOTE_MS", "2500"),
+            ("SHIM_HELD_MARK", mark_s.as_str()),
+            ("LJOS_TRACKER_LOCK_WAIT", "10"),
+        ],
+    );
+    assert!(
+        wait_for(&mark, Duration::from_secs(20)),
+        "the held note never took the lock"
+    );
+    let other = board.run(
+        "A",
+        "bridle",
+        &["note", "Other-x001", "a note on the other board"],
+        &[],
+    );
+    assert!(other.ok(), "{}", other.said());
+    let held = held.wait_with_output().unwrap();
+    let held = Ran {
+        host: "A",
+        args: vec!["note".into(), "Software-t001".into()],
+        out: held,
+    };
+    assert!(held.ok(), "{}", held.said());
+    let mut notes_a = vec![(
+        "Software-t001".to_string(),
+        "written while a push rebased".to_string(),
+    )];
+
+    // eessi on host B claims a ticket whose drawer another ticket quotes.
+    let quoted = board.run("B", "eessi", &["claim", "Software-t009"], &[]);
+    assert!(quoted.ok(), "{}", quoted.said());
+
+    // Then every seat at once. eessi sits on both hosts.
+    let mut jobs: Vec<(&'static str, Vec<String>, Child)> = Vec::new();
+    let seats: [(&'static str, &str, &str); 6] = [
+        ("A", "eessi", "Software-t002"),
+        ("A", "saddle", "Software-t003"),
+        ("A", "bridle", "Software-t004"),
+        ("B", "eessi", "Software-t005"),
+        ("B", "stirrup", "Software-t006"),
+        ("B", "girth", "Software-t007"),
+    ];
+    for (host, seat, own) in seats {
+        let lines = [
+            vec!["claim".to_string(), own.to_string()],
+            vec![
+                "note".to_string(),
+                own.to_string(),
+                format!("{host} {seat} on its own ticket"),
+            ],
+            vec![
+                "file".to_string(),
+                format!("Filed by {host} {seat}"),
+                "-p".into(),
+                "Software".into(),
+            ],
+        ];
+        for args in lines {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            jobs.push((host, args.clone(), board.spawn(host, seat, &refs, &[])));
+        }
+        if !(host == "B" && seat == "eessi") {
+            let args = vec![
+                "note".to_string(),
+                "Software-t010".to_string(),
+                format!("{host} {seat} on the shared ticket"),
+            ];
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            jobs.push((host, args.clone(), board.spawn(host, seat, &refs, &[])));
+        }
+    }
+
+    let mut notes_b = Vec::new();
+    let mut refused = Vec::new();
+    for (host, args, child) in jobs {
+        let ran = Ran {
+            host,
+            args,
+            out: child.wait_with_output().unwrap(),
+        };
+        if !ran.ok() {
+            refused.push(ran.said());
+            continue;
+        }
+        match ran.args[0].as_str() {
+            "file" => must_hold.push(first_line(&ran.out)),
+            "note" => {
+                let note = (ran.args[1].clone(), ran.args[2].clone());
+                if host == "A" {
+                    notes_a.push(note);
+                } else {
+                    notes_b.push(note);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Each host pushes what it has left, then reads the remote back.
+    for (host, seat) in [("A", "saddle"), ("B", "stirrup"), ("A", "saddle")] {
+        let ran = board.run(
+            host,
+            seat,
+            &["note", "Other-x001", &format!("flush from {host} {seat}")],
+            &[],
+        );
+        assert!(ran.ok(), "{}", ran.said());
+    }
+
+    let mut faults = Vec::new();
+    for line in &refused {
+        faults.push(format!("a command said it failed: {line}"));
+    }
+    let on_a = board.board_on("A");
+    for fault in board_faults(&on_a, &must_hold, &notes_a) {
+        faults.push(format!("host A: {fault}"));
+    }
+    let on_b = board.board_on("B");
+    for fault in board_faults(&on_b, &must_hold, &notes_b) {
+        faults.push(format!("host B: {fault}"));
+    }
+    let remote = board.board_on_remote();
+    let all_notes: Vec<(String, String)> = notes_a.iter().chain(&notes_b).cloned().collect();
+    for fault in board_faults(&remote, &must_hold, &all_notes) {
+        faults.push(format!("remote: {fault}"));
+    }
+    assert!(
+        faults.is_empty(),
+        "{}\n\nremote board:\n{remote}",
+        faults.join("\n")
+    );
+}
+
+/// Host B adds a board host A has never had. While a seat on A keeps that
+/// board's issues lock, as a writer between its read and its rename does,
+/// A's push waits to replay B's commit instead of writing the board under
+/// the writer, and is written once the lock is free.
+#[test]
+fn a_board_the_remote_adds_is_locked_before_the_replay_writes_it() {
+    if !tools_ready() {
+        return;
+    }
+    let board = Board::new(3);
+    let fresh = "Software/Fresh/issues.org";
+    let b = board.tracker("B");
+    std::fs::create_dir_all(b.join("Software/Fresh")).unwrap();
+    std::fs::write(
+        b.join(fresh),
+        seed_board("Fresh", &["Fresh-f001".to_string()], None),
+    )
+    .unwrap();
+    git(&b, &["add", fresh]);
+    git(&b, &["commit", "-q", "-m", "a board B added"]);
+    git(&b, &["push", "-q", "origin", "HEAD:main"]);
+
+    let board_file = board.tracker("A").join(fresh);
+    std::fs::create_dir_all(board_file.parent().unwrap()).unwrap();
+    let held =
+        ljos_cli::CommitLock::acquire(&PathBuf::from(format!("{}.lock", board_file.display())));
+    let note = "written while B's board arrives";
+    let child = board.spawn("A", "saddle", &["note", "Software-t001", note], &[]);
+    std::thread::sleep(Duration::from_millis(2500));
+    let early = board_file.exists();
+    drop(held);
+    let out = child.wait_with_output().unwrap();
+    let said = format!(
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !early,
+        "the replay wrote {fresh} while a seat on A had its issues lock\n{said}"
+    );
+    assert!(out.status.success(), "{said}");
+    assert!(board_file.exists(), "{said}");
+    let remote = board.board_on_remote();
+    assert!(remote.contains(note), "{said}\n{remote}");
 }
 
 /// A claim the tracker deferred is retried by the seat's next note, under

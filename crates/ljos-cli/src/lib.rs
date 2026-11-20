@@ -46654,7 +46654,7 @@ fn wait_for_sitting_lock(path: &Path, what: &str, total: std::time::Duration) ->
     Ok(())
 }
 
-fn issues_lock_path(path: &Path) -> PathBuf {
+pub(crate) fn issues_lock_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".lock");
     PathBuf::from(name)
@@ -48533,6 +48533,13 @@ impl CommitLock {
             std::thread::sleep(flock_pause(pause, left));
             pause = pause.saturating_mul(2).min(MAX_PAUSE);
         }
+    }
+
+    /// Whether this guard has the lock. A file that could not be opened,
+    /// a failed `flock` and a deadline that ran out all leave it empty.
+    #[must_use]
+    pub(crate) fn taken(&self) -> bool {
+        self.0.is_some()
     }
 
     /// Whether another process holds the private lock at `path` now. It

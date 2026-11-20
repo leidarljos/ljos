@@ -157,6 +157,13 @@ The printed row is:
 A claim the tracker did not answer for is not a claim, whether its wait ran out or a tool call's bound stopped ``vissue`` with ``vissue timed out``.
 ``ljos claim`` exits 1 and names ``ljos claim ID`` again, and a claim a note retries stays pending until the tracker records it.
 
+A push replays the remote's commits under the commit lock and the issues lock of every board, a board only the remote has included.
+When one of those locks cannot be taken, the push stops before the checkout changes, and a replay that fails is undone before the locks are let go:
+
+.. code:: text
+
+   tracker git: committed chore(issues): Software-t001 noted by saddle; push queued: push: /tmp/seat/tracker/Software/Software/issues.org.lock was not locked (it could not be opened, or another writer kept it past the wait), so the checkout was not rebased; the next push tries again
+
 A missing habitat binary
 ========================
 
