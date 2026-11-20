@@ -1120,15 +1120,22 @@ enum Cmd {
     ///
     /// A child of the issue this conversation holds, unless `--parent`
     /// names another or `--top` none, in the parent's project. `-p` naming
-    /// another project files at its top level. A held issue the tracker
-    /// does not have is dropped, and the ticket is filed at the top of the
-    /// project. With no held issue, no `--parent`, no `-p`, and no project
-    /// in checkout config or `LJOS_PROJECT`, the command exits 1 and names
-    /// `-p NAME`. The heading and the path go
-    /// to stderr. A commit that landed is not printed, and neither is a push
+    /// another project files at its top level. `--top` does not read the
+    /// held issue. Without it, a held issue the tracker does not have, as
+    /// on a tracker with no `issues.org`, is not the parent: the ticket is
+    /// filed at the top of the project, and that hold is cleared once the
+    /// ticket is filed. A refusal for want of a usable project names the
+    /// hold, and a file that fails leaves it. With no held issue, no
+    /// `--parent` and no `-p`, the project is the checkout's config (not
+    /// under `--top`), then `LJOS_PROJECT`, then the `project` key of this
+    /// seat's `[seats.NAME]` row in the tracker's `vissue.toml`. The
+    /// tracker's prefix is never taken. With none of those, the command
+    /// exits 1 and names `-p PROJECT`. The heading and the path go to
+    /// stderr. A commit that landed is not printed, and neither is a push
     /// that landed. A refused commit, a refused push, or a push that was
-    /// skipped is one sentence naming the command to run. `--verbose` prints
-    /// the tracker and sync lines. `--json` keeps those lines in fields.
+    /// skipped is one sentence naming the command to run. `--verbose`
+    /// prints the tracker and sync lines. `--json` keeps those lines in
+    /// fields.
     ///
     /// Example: `LJOS_SEAT=alice ljos file "Pick a codec" -p demo`
     #[command(after_help = "Example: `LJOS_SEAT=alice ljos file \"Pick a codec\" -p demo`")]
@@ -2419,7 +2426,7 @@ enum Cmd {
         /// No parent for the plan, even while an issue is held.
         #[arg(long, requires = "plan")]
         top: bool,
-        /// The project the plan is filed in. Pass it with `--plan`. Absent: this checkout's prefix, else Software.
+        /// The project the plan is filed in. Pass it with `--plan`. Absent: the held issue's, the checkout's, `LJOS_PROJECT`, then the seat's `project` in `vissue.toml`, else the command exits 1.
         /// One name. A leading segment that repeats the tracker directory or its org prefix is dropped. Any other slash is refused.
         #[arg(short = 'p', long)]
         project: Option<String>,
@@ -6179,21 +6186,25 @@ fn run_command() -> Result<()> {
                 }
             }
             // Resolve before any line that says the ticket was filed. A
-            // hold the tracker does not have is cleared and the ticket
-            // goes to the top of the project. An alias becomes the id
-            // on disk, so the parent vissue is asked for exists.
+            // hold the tracker does not have is not the parent, and the
+            // ticket goes to the top of the project. That hold is cleared
+            // only once the ticket is filed, and a refusal before then
+            // names it. An alias becomes the id on disk, so the parent
+            // vissue is asked for exists.
             let mut dropped = None;
             if let Some(id) = held.clone() {
                 match ljos_cli::resolve_held_parent(&id) {
                     Ok(Some(canonical)) => held = Some(canonical),
                     Ok(None) => {
-                        ljos_cli::clear_hold_for(&id);
                         held = None;
                         dropped = Some(id);
                     }
                     Err(err) => return Err(err),
                 }
             }
+            let refuse = |line: &str| {
+                anyhow::anyhow!("{}", ljos_cli::gone_hold_refusal(dropped.as_deref(), line))
+            };
             let no_hold = held.is_none();
             let (parent, mut project, passed_over) =
                 ljos_cli::file_placement(top, parent, project, held);
@@ -6203,34 +6214,21 @@ fn run_command() -> Result<()> {
                     .as_deref()
                     .is_some_and(|line| line.starts_with("project: "))
             {
-                anyhow::bail!("{}", passed_over.unwrap_or_default().trim_end());
+                return Err(refuse(passed_over.unwrap_or_default().trim_end()));
             }
-            // A plain file with no hold and no `-p` may still name one
-            // project through `LJOS_PROJECT`.
-            if project.is_none() && no_hold && !top && !named_parent && !named_project {
-                project = std::env::var("LJOS_PROJECT")
-                    .ok()
-                    .map(|name| name.trim().to_string())
-                    .filter(|name| !name.is_empty());
+            // With no hold, no `--parent` and no `-p`, the project is
+            // `LJOS_PROJECT`, then the seat's home project. The checkout
+            // was already asked above, except under `--top`.
+            if project.is_none() && no_hold && !named_parent && !named_project {
+                project = ljos_cli::default_project(false);
             }
-            let project = match project {
-                Some(project) => project,
-                // `--top` still needs a project the caller named. A plain
-                // file, with no checkout prefix and no hold, uses the
-                // seat's default project. Nothing is asked. The line is
-                // printed once the ticket exists, so a missing tracker
-                // stays one error line.
-                None if top => ljos_cli::seat_tracker_project_no_cwd().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "no project: name one with -p, or a parent with --parent, so run `ljos file \"TITLE\" -p NAME`."
-                    )
-                })?,
-                // A plain file still needs a known project from the sitting,
-                // config, or `LJOS_PROJECT`.
-                None => anyhow::bail!(
-                    "no project: name one with -p NAME, so run `ljos file \"TITLE\" -p NAME`."
-                ),
+            let Some(project) = project else {
+                return Err(refuse(&ljos_cli::no_project_refusal(
+                    "ljos file \"TITLE\" -p PROJECT",
+                )));
             };
+            // `LJOS_PROJECT` and the seat row are not checked above.
+            ljos_cli::project_name(&project).map_err(|line| refuse(&line))?;
             let qd = match (quorum, deadline.as_deref()) {
                 (Some(n), Some(d)) => Some((n, d)),
                 _ => None,
@@ -6265,6 +6263,7 @@ fn run_command() -> Result<()> {
             // A failure above printed nothing that says the ticket was filed.
             if !id.is_empty() {
                 if let Some(gone) = &dropped {
+                    ljos_cli::clear_hold_for(gone);
                     eprintln!("held issue {gone} is gone; filed at the top of {project}");
                 } else if let Some(id) = &other_tracker {
                     eprintln!(

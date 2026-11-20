@@ -14113,7 +14113,7 @@ fn hit_in_project(hit: &Hit, project: &str) -> bool {
 }
 
 /// Whether `head` is the tracker root's directory or the org prefix.
-fn layout_segment(head: &str) -> bool {
+pub(crate) fn layout_segment(head: &str) -> bool {
     if head.is_empty() {
         return false;
     }
@@ -14197,7 +14197,43 @@ pub fn resolve_held_parent(id: &str) -> Result<Option<String>> {
     match ticket_refusal(id) {
         Some(msg) if msg.contains("not found") => Ok(None),
         Some(msg) => bail!("{msg}"),
+        None if tracker_has_no_boards() => Ok(None),
         None => Ok(Some(id.to_string())),
+    }
+}
+
+/// Whether every tracker the root routes to can be listed and has no
+/// `issues.org`, so no id is one of its tickets. A root with neither a
+/// `vissue.toml` nor a prefix directory is not a tracker, and one that
+/// cannot be resolved or listed is not empty: the caller asks vissue.
+fn tracker_has_no_boards() -> bool {
+    let Ok(layout) = vissue_core::Layout::resolve(None, None) else {
+        return false;
+    };
+    if !layout.root().join("vissue.toml").is_file() && !layout.projects_dir().is_dir() {
+        return false;
+    }
+    let layouts = vissue_core::Router::load(layout.clone())
+        .map(|router| {
+            router
+                .unique_layouts()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|_| vec![layout]);
+    layouts.iter().all(|layout| {
+        vissue_core::store::list_projects(layout).is_ok_and(|projects| projects.is_empty())
+    })
+}
+
+/// `line` led by the sentence that names a held id the tracker does not
+/// have, so a refusal before filing still says which hold was not used.
+#[must_use]
+pub fn gone_hold_refusal(gone: Option<&str>, line: &str) -> String {
+    match gone {
+        Some(gone) => format!("held issue {gone} is gone, so it is not the parent; {line}"),
+        None => line.to_string(),
     }
 }
 
@@ -14364,70 +14400,37 @@ pub fn file_placement(
     (parent, project, passed_over)
 }
 
-/// The project this seat names without an explicit `-p`: `LJOS_PROJECT`,
-/// this checkout, then the `prefix=` line of `vissue identity`.
+/// The project a new ticket goes in when no `-p`, `--parent` or held issue
+/// names one: this checkout's project when `checkout` is set, then
+/// `LJOS_PROJECT`, then the `project` key of this seat's row in the
+/// tracker's `vissue.toml`. The tracker's prefix and directory name are
+/// not on that list: on a shared tracker they name the catch-all project
+/// every seat would pile its tickets into. The name is returned as
+/// written, so the caller's [`project_name`] check refuses a bad one.
 #[must_use]
-pub fn seat_tracker_project() -> Option<String> {
-    if let Ok(name) = std::env::var("LJOS_PROJECT") {
-        let name = name.trim();
-        if !name.is_empty() {
-            if let Ok(name) = project_name(name) {
-                return Some(name);
-            }
-        }
-    }
-    if let Some((name, _)) = cwd_project() {
-        if let Ok(name) = project_name(&name) {
+pub fn default_project(checkout: bool) -> Option<String> {
+    if checkout {
+        if let Some((name, _)) = cwd_project() {
             return Some(name);
         }
     }
-    run_captured_within(
-        "vissue",
-        &["identity"],
-        None,
-        std::time::Duration::from_secs(1),
-    )
-    .ok()
-    .and_then(|said| {
-        said.stdout.lines().find_map(|line| {
-            let value = line.trim().strip_prefix("prefix=")?.trim();
-            (!value.is_empty()).then(|| value.to_string())
-        })
-    })
-    .and_then(|name| project_name(&name).ok())
-}
-
-/// The project this seat names without an explicit `-p`, while skipping
-/// checkout probing: `LJOS_PROJECT`, then the `prefix=` line of
-/// `vissue identity`.
-#[must_use]
-pub fn seat_tracker_project_no_cwd() -> Option<String> {
     if let Ok(name) = std::env::var("LJOS_PROJECT") {
         let name = name.trim();
         if !name.is_empty() {
-            if let Ok(name) = project_name(name) {
-                return Some(name);
-            }
+            return Some(name.to_string());
         }
     }
-    if cwd_probe::walks_off() {
-        return None;
-    }
-    if std::env::var("VISSUE_ROOT")
-        .ok()
-        .is_some_and(|root| root.trim().is_empty())
-    {
-        return None;
-    }
-    run_captured("vissue", &["identity"])
-        .ok()
-        .and_then(|said| {
-            said.stdout.lines().find_map(|line| {
-                let value = line.trim().strip_prefix("prefix=")?.trim();
-                (!value.is_empty()).then(|| value.to_string())
-            })
-        })
-        .and_then(|name| project_name(&name).ok())
+    seat_roster::home_project(&seat_name())
+}
+
+/// The one line printed when nothing names a project for a new ticket.
+/// `run` is the command to run, with `-p PROJECT` in it.
+#[must_use]
+pub fn no_project_refusal(run: &str) -> String {
+    format!(
+        "no project: name one with -p PROJECT or set project under [seats.{}] in the tracker's vissue.toml, so run `{run}`.",
+        canonical_seat_name(&seat_name())
+    )
 }
 
 /// The project this checkout is, and why. A `.ljos/project` line wins,

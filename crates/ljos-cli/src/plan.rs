@@ -37,15 +37,28 @@ pub fn open_plan(
         bail!("plan: the title is empty");
     }
     let items = clean_items(items)?;
-    let project = crate::project_name(&named_project(project)).map_err(anyhow::Error::msg)?;
-    if !top {
+    // A hold the tracker does not have is not the parent. It is named in a
+    // refusal and cleared only once the plan is filed.
+    let mut held = if top { None } else { crate::held_issue() };
+    let mut gone = None;
+    if let Some(id) = held.clone() {
+        held = crate::resolve_held_parent(&id)?;
+        if held.is_none() {
+            gone = Some(id);
+        }
+    }
+    let refuse =
+        |line: &str| anyhow::anyhow!("{}", crate::gone_hold_refusal(gone.as_deref(), line));
+    let project =
+        named_project(project, held.as_deref()).map_err(|err| refuse(&err.to_string()))?;
+    let project = crate::project_name(&project).map_err(|line| refuse(&line))?;
+    if !top && gone.is_none() {
         if let Some((id, hold)) = crate::live_held_issue() {
             if let Some(line) = stale_hold_plan_line(&id, &hold.since) {
                 eprintln!("{line}");
             }
         }
     }
-    let held = if top { None } else { crate::held_issue() };
     let (tracker_parent, _, _) =
         crate::file_placement(top, None, Some(project.clone()), held.clone());
     let _held = Batch::enter();
@@ -62,7 +75,12 @@ pub fn open_plan(
         let _ = crate::persist_tracker(id, "filed");
     }
     let committed = crate::flush_tracker_commits();
-    let text = render(&parent, title, &children, &committed);
+    let mut text = String::new();
+    if let Some(gone) = &gone {
+        crate::clear_hold_for(gone);
+        text = format!("held issue {gone} is gone; filed at the top of {project}\n");
+    }
+    text.push_str(&render(&parent, title, &children, &committed));
     Ok(Opened {
         parent,
         children,
@@ -270,19 +288,20 @@ fn stale_hold_plan_line(id: &str, since: &str) -> Option<String> {
     ))
 }
 
-fn named_project(project: Option<&str>) -> String {
+/// The project named with `-p`, else the held issue's, so the plan is a
+/// child in its parent's project, else [`crate::default_project`].
+fn named_project(project: Option<&str>, held: Option<&str>) -> Result<String> {
     if let Some(name) = project.map(str::trim).filter(|name| !name.is_empty()) {
-        return name.to_string();
+        return Ok(name.to_string());
     }
-    if let Ok(said) = crate::run_captured("vissue", &["identity"]) {
-        if let Some(prefix) = said.stdout.lines().find_map(|line| {
-            let value = line.trim().strip_prefix("prefix=")?.trim();
-            (!value.is_empty()).then(|| value.to_string())
-        }) {
-            return prefix;
-        }
+    if let Some(name) = held.and_then(crate::issue_spot::project_of) {
+        return Ok(name.to_string());
     }
-    "Software".to_string()
+    crate::default_project(true).ok_or_else(|| {
+        anyhow::anyhow!(crate::no_project_refusal(
+            "ljos sitting --plan \"TITLE\" -p PROJECT -- ITEM"
+        ))
+    })
 }
 
 fn create(

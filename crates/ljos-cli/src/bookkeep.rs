@@ -234,7 +234,8 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
 }
 
 /// File `task` as one issue in the seat's tracker. The project is the last
-/// path component of `repo`, else `work`.
+/// path component of `repo`, unless that is the tracker's prefix or
+/// directory, else [`super::default_project`].
 fn file_task(task: &str, repo: Option<&str>) -> Result<String, String> {
     super::tracker_place::pin_root();
     super::tracker_place::aim_tracker()?;
@@ -248,9 +249,17 @@ fn file_task(task: &str, repo: Option<&str>) -> Result<String, String> {
         .and_then(|path| path.file_name())
         .and_then(|name| name.to_str())
         .map(str::trim)
-        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
-        .unwrap_or("work")
-        .to_string();
+        .filter(|name| {
+            !name.is_empty() && *name != "." && *name != ".." && !super::layout_segment(name)
+        })
+        .map(str::to_string)
+        .or_else(|| super::default_project(true))
+        .ok_or_else(|| {
+            format!(
+                "ljos_start: no project to file the task in, so pass `repo` or `issue`, or set project under [seats.{}] in the tracker's vissue.toml",
+                super::canonical_seat_name(&super::seat_name())
+            )
+        })?;
     let project = super::project_name(&project)?;
     let dir = layout.projects_dir().join(&project);
     std::fs::create_dir_all(&dir).map_err(|err| format!("ljos_start: {err}"))?;

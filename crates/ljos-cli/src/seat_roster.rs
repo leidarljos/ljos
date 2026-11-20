@@ -421,6 +421,23 @@ struct GrantRow {
     commit: String,
 }
 
+/// The `project` key of `seat`'s row in the tracker's `vissue.toml`: the
+/// project that seat's new tickets go in when nothing else names one.
+#[must_use]
+pub fn home_project(seat: &str) -> Option<String> {
+    let path = config_path()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc = toml::from_str::<toml::Value>(&text).ok()?;
+    let slug = crate::canonical_seat_name(seat);
+    let (_, row) = doc
+        .get("seats")?
+        .as_table()?
+        .iter()
+        .find(|(key, _)| crate::canonical_seat_name(key) == slug)?;
+    let name = row.get("project")?.as_str()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 fn grant_row(doc: &toml::Value, slug: &str) -> Option<GrantRow> {
     let table = doc.get("seats")?.as_table()?;
     let (_, row) = table
