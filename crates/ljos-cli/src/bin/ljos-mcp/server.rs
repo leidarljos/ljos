@@ -6336,10 +6336,28 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().await;
         // A parallel test points HOME at a temporary directory, which
         // suspends the guard. This check is about the command, so keep it on.
-        let _saved = RestoreEnv::new(&["LJOS_GUARD", "LJOS_OFF"]);
+        let _saved = RestoreEnv::new(&[
+            "LJOS_GUARD",
+            "LJOS_OFF",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_RUNTIME_DIR",
+            "PHRONESIS_STATE_DIR",
+        ]);
+        let home = tempfile::tempdir().expect("tempdir");
         unsafe {
             std::env::set_var("LJOS_GUARD", "on");
             std::env::remove_var("LJOS_OFF");
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
+            std::env::set_var("XDG_DATA_HOME", home.path().join(".local/share"));
+            std::env::set_var("XDG_STATE_HOME", home.path().join(".local/state"));
+            std::env::set_var("XDG_CACHE_HOME", home.path().join(".cache"));
+            std::env::set_var("XDG_RUNTIME_DIR", home.path().join("run"));
+            std::env::set_var("PHRONESIS_STATE_DIR", home.path().join("policyd"));
         }
         let server = LjosServer::at(std::env::temp_dir());
         let allow = server
@@ -6366,7 +6384,18 @@ mod tests {
     #[tokio::test]
     async fn guard_check_uses_the_passed_cwd() {
         let _env_lock = ENV_TEST_LOCK.lock().await;
-        let _saved = RestoreEnv::new(&["POLICYD_BIN", "LJOS_GUARD", "LJOS_OFF"]);
+        let _saved = RestoreEnv::new(&[
+            "POLICYD_BIN",
+            "LJOS_GUARD",
+            "LJOS_OFF",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_RUNTIME_DIR",
+            "PHRONESIS_STATE_DIR",
+        ]);
         let home = tempfile::tempdir().expect("tempdir");
         let danger = home.path().join("danger");
         std::fs::create_dir(&danger).expect("danger dir");
@@ -6389,6 +6418,13 @@ mod tests {
             std::env::set_var("POLICYD_BIN", &bin);
             std::env::set_var("LJOS_GUARD", "on");
             std::env::remove_var("LJOS_OFF");
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
+            std::env::set_var("XDG_DATA_HOME", home.path().join(".local/share"));
+            std::env::set_var("XDG_STATE_HOME", home.path().join(".local/state"));
+            std::env::set_var("XDG_CACHE_HOME", home.path().join(".cache"));
+            std::env::set_var("XDG_RUNTIME_DIR", home.path().join("run"));
+            std::env::set_var("PHRONESIS_STATE_DIR", home.path().join("policyd"));
         }
         let server = LjosServer::at(std::env::temp_dir());
         let plain = server
@@ -6421,7 +6457,18 @@ mod tests {
     #[tokio::test]
     async fn guard_check_expands_tilde_and_names_an_unresolved_cwd() {
         let _env_lock = ENV_TEST_LOCK.lock().await;
-        let _saved = RestoreEnv::new(&["POLICYD_BIN", "LJOS_GUARD", "LJOS_OFF", "HOME"]);
+        let _saved = RestoreEnv::new(&[
+            "POLICYD_BIN",
+            "LJOS_GUARD",
+            "LJOS_OFF",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_RUNTIME_DIR",
+            "PHRONESIS_STATE_DIR",
+        ]);
         let home = tempfile::tempdir().expect("tempdir");
         let danger = home.path().join("proj/danger");
         std::fs::create_dir_all(&danger).expect("danger dir");
@@ -6450,6 +6497,12 @@ mod tests {
             std::env::set_var("LJOS_GUARD", "on");
             std::env::remove_var("LJOS_OFF");
             std::env::set_var("HOME", home.path());
+            std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
+            std::env::set_var("XDG_DATA_HOME", home.path().join(".local/share"));
+            std::env::set_var("XDG_STATE_HOME", home.path().join(".local/state"));
+            std::env::set_var("XDG_CACHE_HOME", home.path().join(".cache"));
+            std::env::set_var("XDG_RUNTIME_DIR", home.path().join("run"));
+            std::env::set_var("PHRONESIS_STATE_DIR", home.path().join("policyd"));
         }
         let server = LjosServer::at(std::env::temp_dir());
         let warned = server
@@ -6497,6 +6550,11 @@ mod tests {
             "LJOS_GUARD",
             "LJOS_OFF",
             "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_RUNTIME_DIR",
             "PHRONESIS_STATE_DIR",
         ]);
         let bin = which::which("ljos-policyd")
@@ -6513,6 +6571,11 @@ mod tests {
             std::env::set_var("LJOS_GUARD", "on");
             std::env::remove_var("LJOS_OFF");
             std::env::set_var("HOME", home.path());
+            std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
+            std::env::set_var("XDG_DATA_HOME", home.path().join(".local/share"));
+            std::env::set_var("XDG_STATE_HOME", home.path().join(".local/state"));
+            std::env::set_var("XDG_CACHE_HOME", home.path().join(".cache"));
+            std::env::set_var("XDG_RUNTIME_DIR", home.path().join("run"));
             std::env::set_var("PHRONESIS_STATE_DIR", home.path().join("policyd"));
         }
         let server = LjosServer::at(std::env::temp_dir());
