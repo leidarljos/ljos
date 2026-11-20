@@ -543,10 +543,6 @@ const CHUNK_DROP: &str = "ljos_drop";
 /// into a snapshot instead of growing another segment.
 const MAX_CHUNKS: u32 = 64;
 
-/// Segments kept beside one snapshot. The next change past this folds them
-/// into a new snapshot. A normal sync does not fold before then.
-const SEGMENT_LIMIT: usize = 64;
-
 /// The key of a segment's first line. A segment holds the atoms added,
 /// changed or dropped since the snapshot, and the line names the host,
 /// the scope, the segment's number and the snapshot it applies over.
@@ -555,7 +551,7 @@ const SEG_HEADER: &str = "ljos_seg";
 
 thread_local! {
     /// Set for the `ljos sync --compact` call. A normal sync leaves it false,
-    /// so segments are not folded early.
+    /// so segments are never folded by a sync on its own.
     static SYNC_COMPACT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -1822,9 +1818,9 @@ fn remove_pieces(root: &Path, pieces: &[SealedPiece]) -> Result<()> {
 /// nothing. A legacy `<stem>.jsonl.age` is copied once into `snap-0` and
 /// removed. Later atoms go into one new segment. A sealed piece is not
 /// removed or sealed again by a sync: when one does not open here, the
-/// atoms after it are unknown and nothing is written. At [`SEGMENT_LIMIT`]
-/// segments, or when [`compact_for_this_call`] is held, the segments fold
-/// into one new snapshot and the folded files are removed in the same write.
+/// atoms after it are unknown and nothing is written. Only while
+/// [`compact_for_this_call`] is held do the segments fold into one new
+/// snapshot, and the folded files are removed in the same write.
 fn store_log(
     root: &Path,
     primary_scope: &str,
@@ -1900,7 +1896,7 @@ fn store_log(
             None => StoreOut::Unchanged,
         });
     }
-    if snap_seq.is_none() || compact || segs >= SEGMENT_LIMIT {
+    if snap_seq.is_none() || compact {
         return seal_snapshot(root, &stem, &plain, recipients, &pieces, changes.len());
     }
     let seq = pieces.iter().map(|piece| piece.seq).max().unwrap_or(0) + 1;
@@ -9789,12 +9785,11 @@ mod tests {
         assert_eq!(out, "");
     }
 
-    /// Sixty-five syncs that each add a note leave the base blob as it
-    /// was. The chunks fold as they go, so the log never holds more than
-    /// log2 of its base over one chunk header, and after each sync a peer
-    /// reads every atom.
+    /// Seventy syncs that each add a note leave the base blob as it was
+    /// and add one segment each, with no fold past 64. After each sync a
+    /// peer reads every atom. `--compact` folds them into one snapshot.
     #[test]
-    fn sixty_five_syncs_fold_chunks_over_one_base() {
+    fn seventy_syncs_add_seventy_segments_over_one_base() {
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9805,7 +9800,7 @@ mod tests {
         let mut atoms: Vec<Value> = (0..300).map(note).collect();
         fix.sync(&atoms);
         let base = fix.base_blob();
-        for n in 1..=SEGMENT_LIMIT {
+        for n in 1..=70 {
             atoms.push(note(300 + n));
             let said = fix.sync(&atoms);
             assert_eq!(
@@ -9820,23 +9815,21 @@ mod tests {
             let (view, out) = fix.peer_view();
             assert_eq!(view, lines(&atoms), "sync {n}: {out}");
         }
-        atoms.push(note(300 + SEGMENT_LIMIT + 1));
-        let said = fix.sync(&atoms);
-        assert_ne!(
-            fix.base_blob(),
-            base,
-            "the sync past {SEGMENT_LIMIT} segments did not fold: {said}"
-        );
+        let said = {
+            let _compact = compact_for_this_call();
+            fix.sync(&atoms)
+        };
+        assert_ne!(fix.base_blob(), base, "--compact did not fold: {said}");
         assert!(!fix.chunk(1).is_file(), "the fold left a segment: {said}");
         let (view, out) = fix.peer_view();
         assert_eq!(view, lines(&atoms), "{out}");
     }
 
-    /// A log an older ljos left at 64 one-note chunks, the most a reader
-    /// opens, takes the next note by folding its chunks rather than by a
-    /// whole seal, and a peer reads every atom.
+    /// A log left at 64 one-note segments takes the next note as a 65th
+    /// segment, with the snapshot and the 64 left as they are, and a peer
+    /// reads every atom.
     #[test]
-    fn a_log_at_sixty_four_chunks_folds_instead_of_sealing_whole() {
+    fn a_log_at_sixty_four_segments_takes_a_sixty_fifth() {
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9864,14 +9857,16 @@ mod tests {
         let (view, out) = fix.peer_view();
         assert_eq!(view, lines(&atoms), "{out}");
 
+        let first = std::fs::read(fix.chunk(1)).unwrap();
         atoms.push(note(400));
         let said = fix.sync(&atoms);
-        assert_ne!(
+        assert_eq!(
             fix.base_blob(),
             base,
-            "64 segments and one more note did not fold: {said}"
+            "64 segments and one more note folded: {said}"
         );
-        assert!(!fix.chunk(1).exists(), "the fold left a segment: {said}");
+        assert_eq!(std::fs::read(fix.chunk(1)).unwrap(), first, "{said}");
+        assert!(fix.chunk(MAX_CHUNKS + 1).is_file(), "{said}");
         let (view, out) = fix.peer_view();
         assert_eq!(view, lines(&atoms), "{out}");
     }

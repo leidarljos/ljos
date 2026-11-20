@@ -442,11 +442,10 @@ fn ten_one_atom_syncs_grow_the_tracker_by_less_than_one_log() {
     eprintln!(
         "measure: {MEASURED} one-atom syncs over a {whole} byte log grew the origin by {grown} bytes ({grew:?})"
     );
-    // Nine of these syncs append a segment. The tenth crosses 64 segments
-    // and folds them into one new snapshot, so the window holds one copy
-    // of the log, not one per sync.
+    // Each of these syncs appends a segment, the tenth past 64 included,
+    // so the window has ten segments and no copy of the log.
     assert!(
-        grown < whole.saturating_mul(2),
+        grown < whole,
         "{MEASURED} one-atom syncs grew the tracker by {grown} bytes, a whole log is {whole}: {grew:?}"
     );
 }
@@ -549,6 +548,9 @@ fn a_single_file_log_from_before_chunks_imports_every_atom() {
 
 /// Atoms in the log the append tests start from.
 const LOG_ATOMS: usize = 300;
+/// Syncs in [`seventy_syncs_of_two_atoms_seal_seventy_small_segments`],
+/// enough that the log passes 64 segments.
+const SYNCS: usize = 70;
 /// A segment of two `LINE` atoms seals to less than this, whatever the
 /// size of the log it is sealed over.
 const TWO_ATOM_SEGMENT: u64 = 4 * LINE as u64;
@@ -568,6 +570,39 @@ fn sealed_log() -> (World, Vec<Value>, u64) {
     let said = w.sync();
     assert!(said.contains("1 changed"), "{said}");
     (w, atoms, whole)
+}
+
+#[test]
+fn seventy_syncs_of_two_atoms_seal_seventy_small_segments() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, mut atoms, whole) = sealed_log();
+    let mut sealed = 0u64;
+    for k in 1..=SYNCS {
+        let before = w.pieces();
+        for _ in 0..2 {
+            let atom = lesson(atoms.len(), LINE);
+            w.add(atom.clone());
+            atoms.push(atom);
+        }
+        let said = w.sync();
+        let new = sealed_since(&w, &before, &w.pieces(), &format!("sync {k}: {said}"));
+        assert_eq!(new.len(), 1, "sync {k} wrote {new:?}: {said}");
+        let (path, bytes) = &new[0];
+        assert!(path.contains("/seg-"), "sync {k} wrote {path}: {said}");
+        assert!(
+            *bytes < TWO_ATOM_SEGMENT,
+            "sync {k} sealed {bytes} bytes for two atoms over a {whole} byte log: {said}"
+        );
+        sealed += bytes;
+    }
+    eprintln!("measure: {SYNCS} two-atom syncs over a {whole} byte snapshot sealed {sealed} bytes");
+    assert!(
+        sealed < SYNCS as u64 * TWO_ATOM_SEGMENT,
+        "{SYNCS} two-atom syncs sealed {sealed} bytes"
+    );
+    assert_eq!(w.import_as_peer(), texts(&atoms));
 }
 
 #[test]
