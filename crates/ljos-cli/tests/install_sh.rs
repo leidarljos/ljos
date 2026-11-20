@@ -243,7 +243,9 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
     let opted_out_path = path_line(&opted_out);
     assert!(note.contains(&opted_out_path), "{note}");
     assert!(
-        note.contains(&format!("Next: {opted_out_path} && ljos onboard")),
+        note.contains(&format!(
+            "Next:\n  bash, zsh, dash: {opted_out_path} && ljos onboard"
+        )),
         "{note}"
     );
     assert!(!note.contains("&& ljos doctor"), "{note}");
@@ -318,6 +320,17 @@ fn on_path(name: &str) -> Option<PathBuf> {
             .map(|dir| dir.join(name))
             .find(|p| p.is_file())
     })
+}
+
+fn installer_shell(name: &str) -> Option<PathBuf> {
+    let found = on_path(name);
+    if found.is_none() && std::env::var("LJOS_TEST_REQUIRE_TOOLS").as_deref() == Ok("1") {
+        panic!("{name} is required for installer shell tests");
+    }
+    if found.is_none() {
+        eprintln!("skipped installer shell test: {name} is absent");
+    }
+    found
 }
 
 /// A fresh machine: a home with no coding tool in it, a PATH of system
@@ -503,22 +516,25 @@ fn command_paths_with_spaces_are_shell_quoted() {
     );
     for (shell, args, prefix) in [
         (
-            "/usr/bin/bash",
+            "bash",
             &["--noprofile", "--norc", "-c"][..],
             "  bash (~/.bashrc): ",
         ),
-        ("/usr/bin/zsh", &["-f", "-c"][..], "  zsh (~/.zshrc): "),
+        ("zsh", &["-f", "-c"][..], "  zsh (~/.zshrc): "),
         (
-            "/usr/bin/fish",
-            &["-c"][..],
+            "fish",
+            &["--no-config", "-c"][..],
             "  fish (~/.config/fish/config.fish): ",
         ),
     ] {
+        let Some(shell_path) = installer_shell(shell) else {
+            continue;
+        };
         let line = text
             .lines()
             .find_map(|line| line.strip_prefix(prefix))
             .unwrap_or_else(|| panic!("{prefix} missing:\n{text}"));
-        let ran = Command::new(shell)
+        let ran = Command::new(&shell_path)
             .args(args)
             .arg(format!("{line}\nljos --version"))
             .env_clear()
@@ -528,7 +544,8 @@ fn command_paths_with_spaces_are_shell_quoted() {
             .unwrap();
         assert!(
             ran.status.success(),
-            "{shell} refused {line:?}\nstdout:\n{}\nstderr:\n{}",
+            "{} refused {line:?}\nstdout:\n{}\nstderr:\n{}",
+            shell_path.display(),
             String::from_utf8_lossy(&ran.stdout),
             String::from_utf8_lossy(&ran.stderr)
         );
@@ -569,62 +586,82 @@ fn printed_path_lines_preserve_shell_metacharacters() {
         (
             "space",
             plain_home.clone(),
-            dir.path().join("bin dir"),
-            true,
-        ),
-        (
-            "single quote",
-            plain_home.clone(),
-            dir.path().join("bin'quote"),
+            Some(dir.path().join("bin dir")),
             true,
         ),
         (
             "double quote",
             plain_home.clone(),
-            dir.path().join("bin\"quote"),
+            Some(dir.path().join("bin\"quote")),
             true,
         ),
         (
-            "dollar",
+            "command substitution",
             plain_home.clone(),
-            dir.path().join("bin$FOO"),
+            Some(dir.path().join("bin$(printf bad)")),
+            true,
+        ),
+        (
+            "backticks",
+            plain_home.clone(),
+            Some(dir.path().join("bin`printf bad`")),
+            true,
+        ),
+        (
+            "unicode",
+            plain_home.clone(),
+            Some(dir.path().join("bin-λ")),
+            true,
+        ),
+        (
+            "leading dash",
+            plain_home.clone(),
+            Some(dir.path().join("-bin")),
+            true,
+        ),
+        (
+            "glob characters",
+            plain_home.clone(),
+            Some(dir.path().join("bin[*?]")),
             true,
         ),
         (
             "backslash",
             plain_home.clone(),
-            dir.path().join("bin\\back"),
+            Some(dir.path().join("bin\\back\\")),
             true,
         ),
         (
-            "trailing backslash",
+            "apostrophe",
             plain_home.clone(),
-            dir.path().join("bin\\"),
+            Some(dir.path().join("bin'quote")),
             true,
         ),
         (
             "default dir",
             dir.path().join("home with a ' quote"),
-            PathBuf::new(),
+            None,
+            true,
+        ),
+        (
+            "colon",
+            plain_home.clone(),
+            Some(dir.path().join("bin:split")),
             false,
         ),
     ];
 
-    for (case, home, named_bin, pass_bin_dir) in cases {
-        let bin = if pass_bin_dir {
-            named_bin
-        } else {
-            home.join(".local/bin")
-        };
+    for (case, home, named_bin, allowed) in cases {
+        let bin = named_bin.clone().unwrap_or_else(|| home.join(".local/bin"));
         std::fs::create_dir_all(&home).unwrap();
         let mut install = Command::new("sh");
         install
             .arg(install_sh())
             .arg("--from-dir")
             .arg(&progs)
-            .args(["--no-embed", "--no-onboard", "--no-modify-path"]);
-        if pass_bin_dir {
-            install.arg("--bin-dir").arg(&bin);
+            .args(["--no-embed", "--no-modify-path"]);
+        if let Some(path) = &named_bin {
+            install.arg("--bin-dir").arg(path);
         }
         let out = install
             .env_clear()
@@ -633,48 +670,84 @@ fn printed_path_lines_preserve_shell_metacharacters() {
             .output()
             .unwrap();
         let text = said(&out);
+        if !allowed {
+            assert!(!out.status.success(), "{case}:\n{text}");
+            assert_eq!(
+                text, "install.sh: bin directory contains ':'\n",
+                "{case}:\n{text}"
+            );
+            continue;
+        }
         assert!(out.status.success(), "{case}:\n{text}");
 
-        for (shell, args, prefix) in [
+        for (shell, args, profile_prefix, family_prefix) in [
             (
                 "bash",
                 &["--noprofile", "--norc", "-c"][..],
                 "  bash (~/.bashrc): ",
+                "  bash, zsh, dash: ",
             ),
-            ("zsh", &["-f", "-c"][..], "  zsh (~/.zshrc): "),
+            (
+                "zsh",
+                &["-f", "-c"][..],
+                "  zsh (~/.zshrc): ",
+                "  bash, zsh, dash: ",
+            ),
             (
                 "fish",
                 &["--no-config", "-c"][..],
                 "  fish (~/.config/fish/config.fish): ",
+                "  fish: ",
+            ),
+            (
+                "dash",
+                &["-c"][..],
+                "  dash (~/.profile): ",
+                "  bash, zsh, dash: ",
             ),
         ] {
-            let Some(shell_path) = on_path(shell) else {
-                eprintln!("skipped {case}: {shell} is absent");
+            let Some(shell_path) = installer_shell(shell) else {
                 continue;
             };
-            let line = text
+            let profile = text
                 .lines()
-                .find_map(|line| line.strip_prefix(prefix))
-                .unwrap_or_else(|| panic!("{case}: {prefix} missing:\n{text}"));
-            let ran = Command::new(&shell_path)
-                .args(args)
-                .arg(format!("{line}\ncommand -v ljos"))
-                .env_clear()
-                .env("HOME", &home)
-                .env("PATH", "/usr/bin:/bin")
-                .output()
-                .unwrap();
-            assert!(
-                ran.status.success(),
-                "{case}: {shell} refused {line:?}\n{}",
-                said(&ran)
-            );
-            assert_eq!(
-                String::from_utf8_lossy(&ran.stdout).trim(),
-                bin.join("ljos").display().to_string(),
-                "{case}: {shell} ran {line:?}\n{}",
-                said(&ran)
-            );
+                .find_map(|line| line.strip_prefix(profile_prefix))
+                .unwrap_or_else(|| panic!("{case}: {profile_prefix} missing:\n{text}"));
+            let commands = std::iter::once(profile)
+                .chain(
+                    text.lines()
+                        .filter_map(|line| line.strip_prefix(family_prefix)),
+                )
+                .collect::<Vec<_>>();
+            for line in commands {
+                let sets_path = line.contains("export PATH=") || line.contains("fish_add_path");
+                let command = if sets_path {
+                    format!("{line}\ncommand -v ljos")
+                } else {
+                    line.to_string()
+                };
+                let ran = Command::new(&shell_path)
+                    .args(args)
+                    .arg(command)
+                    .env_clear()
+                    .env("HOME", &home)
+                    .env("PATH", "/usr/bin:/bin")
+                    .output()
+                    .unwrap();
+                assert!(
+                    ran.status.success(),
+                    "{case}: {shell} refused {line:?}\n{}",
+                    said(&ran)
+                );
+                if sets_path {
+                    assert_eq!(
+                        String::from_utf8_lossy(&ran.stdout).trim(),
+                        bin.join("ljos").display().to_string(),
+                        "{case}: {shell} ran {line:?}\n{}",
+                        said(&ran)
+                    );
+                }
+            }
         }
     }
 }
@@ -769,6 +842,35 @@ fn ordinary_command_hints_do_not_repeat_a_fish_row() {
         assert_eq!(rows.len(), 1, "{heading}\n{text}");
         assert!(rows[0].starts_with("  bash, zsh, dash:"), "{text}");
     }
+}
+
+#[test]
+fn required_installer_shells_are_not_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for shell in ["sh", "bash"] {
+        std::os::unix::fs::symlink(
+            on_path(shell).unwrap_or_else(|| panic!("{shell} is not on PATH")),
+            bin.join(shell),
+        )
+        .unwrap();
+    }
+
+    let out = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("printed_path_lines_preserve_shell_metacharacters")
+        .arg("--nocapture")
+        .env("LJOS_TEST_REQUIRE_TOOLS", "1")
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(
+        text.contains("zsh is required for installer shell tests"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -1602,7 +1704,9 @@ fn the_final_screen_keeps_optional_help_short() {
     assert!(!quiet_text.contains("Command guard:"), "{quiet_text}");
     let skipped_path = path_line(&skipped);
     assert!(
-        quiet_text.contains(&format!("Next: {skipped_path} && ljos onboard")),
+        quiet_text.contains(&format!(
+            "Next:\n  bash, zsh, dash: {skipped_path} && ljos onboard"
+        )),
         "{quiet_text}"
     );
 }
@@ -1651,7 +1755,9 @@ fn an_older_ljos_earlier_on_path_is_named() {
     let expected_path = path_line(&home);
     assert!(text.contains(&expected_path), "{text}");
     assert!(
-        text.contains(&format!("Next: {expected_path} && ljos onboard")),
+        text.contains(&format!(
+            "Next:\n  bash, zsh, dash: {expected_path} && ljos onboard"
+        )),
         "{text}"
     );
     assert!(!text.contains("&& ljos doctor"), "{text}");
@@ -1717,7 +1823,9 @@ fn the_next_line_names_onboard_until_a_coding_tool_is_installed() {
     let bare = install(&home, &progs, "/usr/bin:/bin", &["--no-modify-path"]);
     let expected_path = path_line(&home);
     assert!(
-        bare.contains(&format!("Next: {expected_path} && ljos onboard")),
+        bare.contains(&format!(
+            "Next:\n  bash, zsh, dash: {expected_path} && ljos onboard"
+        )),
         "{bare}"
     );
     assert!(!bare.contains("&& ljos doctor"), "{bare}");
@@ -1921,6 +2029,7 @@ fn bin_dir_off_path_names_each_shell_and_does_not_edit_profiles() {
     let text = install(&home, &progs, "/usr/bin:/bin", &[]);
     assert!(text.contains("bash (~/.bashrc):"), "{text}");
     assert!(text.contains("zsh (~/.zshrc):"), "{text}");
+    assert!(text.contains("dash (~/.profile):"), "{text}");
     assert!(
         text.contains("fish (~/.config/fish/config.fish):"),
         "{text}"
@@ -2850,7 +2959,9 @@ exit 0
     let expected_path = path_line(&home);
     assert!(text.contains(&expected_path), "{text}");
     assert!(
-        text.contains(&format!("Next: {expected_path} && ljos onboard")),
+        text.contains(&format!(
+            "Next:\n  bash, zsh, dash: {expected_path} && ljos onboard"
+        )),
         "{text}"
     );
     assert!(!text.contains("&& ljos doctor"), "{text}");
