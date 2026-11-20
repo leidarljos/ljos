@@ -5103,7 +5103,7 @@ pub(crate) fn fetch_for_inbox(commit: Option<&str>) -> Result<String> {
 fn sync_roots() -> Result<Vec<PathBuf>> {
     let listed = local().repos;
     Ok(if listed.is_empty() {
-        if crate::tracker_place::cwd_is_only_a_guess() {
+        if crate::tracker_place::no_tracker_to_write() {
             return Ok(Vec::new());
         }
         vec![tracker_root()?]

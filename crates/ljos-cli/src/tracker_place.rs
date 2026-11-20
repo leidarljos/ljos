@@ -603,18 +603,35 @@ pub fn pinned(value: &str) -> bool {
         .is_some_and(|root| root == Path::new(value))
 }
 
-/// Whether the only tracker a write could mean is the working directory
-/// taken as vissue's last guess. Nothing names a root, the directory has no
-/// `vissue.toml`, the seat configured none, and no prefix directory is there.
-/// A write from here would create `vissue.toml` in whatever the person
-/// happened to be standing in.
+/// Whether the root a roster or sync write would use is no tracker to write:
+/// the working directory taken as vissue's last guess, with no `vissue.toml`
+/// and no prefix directory in it, or the root [`pin_root`] named when that
+/// directory does not exist. A write there would create `vissue.toml` or a
+/// directory the person never asked for. A root the person named is theirs,
+/// whether or not it exists yet.
 #[must_use]
-pub fn cwd_is_only_a_guess() -> bool {
+pub fn no_tracker_to_write() -> bool {
     let Ok(here) = std::env::current_dir() else {
         return false;
     };
     let (root, guessed) = root_vissue_would_use(&here);
-    guessed && !prefix_at(&root).is_some_and(|prefix| root.join(prefix).is_dir())
+    if guessed {
+        return !prefix_at(&root).is_some_and(|prefix| root.join(prefix).is_dir());
+    }
+    pinned_and_missing(&root)
+}
+
+/// Whether `root` is the directory [`pin_root`] named on this process and
+/// that directory does not exist. Only the person's own `VISSUE_ROOT` may
+/// name a tracker that is not made yet.
+#[must_use]
+pub fn pinned_and_missing(root: &Path) -> bool {
+    !root.is_dir()
+        && PINNED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_deref()
+            .is_some_and(|pinned| pinned == root)
 }
 
 /// One line when this process has no tracker to write. It names the

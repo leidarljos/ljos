@@ -179,8 +179,9 @@ pub(crate) fn holds_a_copy() -> bool {
 /// not treated as the tracker.
 fn memory_home() -> PathBuf {
     if let Some(root) = std::env::var_os("VISSUE_ROOT") {
-        if !root.is_empty() {
-            return PathBuf::from(root).join(".ljos").join("memory");
+        let root = PathBuf::from(root);
+        if !root.as_os_str().is_empty() && !crate::tracker_place::pinned_and_missing(&root) {
+            return root.join(".ljos").join("memory");
         }
     }
     if let Ok(layout) = vissue_core::Layout::resolve(None, None) {

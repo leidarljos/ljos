@@ -485,7 +485,7 @@ fn seat_slug_of(name: &str) -> Result<String> {
 /// A roster write needs a tracker something named. The working directory
 /// alone is not one, and `vissue.toml` is not made there.
 fn refuse_guessed_tracker() -> Result<()> {
-    if crate::tracker_place::cwd_is_only_a_guess() {
+    if crate::tracker_place::no_tracker_to_write() {
         bail!("{}", crate::tracker_place::MISSING_TRACKER);
     }
     Ok(())
