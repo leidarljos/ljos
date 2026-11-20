@@ -135,6 +135,16 @@ SHADOW=0
 
 say() { printf '%s\n' "$*"; }
 
+posix_word() {
+  escaped=$(printf '%s' "$1" | sed "s/'/'\\\\''/g")
+  printf "'%s'" "$escaped"
+}
+
+fish_word() {
+  escaped=$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")
+  printf "'%s'" "$escaped"
+}
+
 # Put a program in place by rename. A copy over a program that is running
 # fails with "Text file busy"; a rename replaces the directory entry and
 # the running process keeps the old file until it exits.
@@ -226,6 +236,14 @@ fi
 if [ "$FROM_CHECKOUT" = 1 ] && [ "$CLOUD" = 1 ]; then
   die "pass --from-checkout or --cloud, not both"
 fi
+case $BIN_DIR in
+  /*) ;;
+  *) here=$(pwd -P); BIN_DIR=${here%/}/$BIN_DIR ;;
+esac
+case $BIN_DIR in
+  *'
+'*) die "bin directory contains a newline" ;;
+esac
 
 # The version REPO is pinned to, or nothing for the latest release.
 pinned() {
@@ -1137,11 +1155,9 @@ fi
 # the line once, under a marker a later install looks for. `cloud up`
 # writes its own line, so --cloud leaves the profiles to it.
 PROFILE_MARK='# Added by the ljos installer: its programs on PATH.'
-case $BIN_DIR in
-  "$HOME"/*) shown_dir="\$HOME/${BIN_DIR#"$HOME"/}" ;;
-  *) shown_dir=$BIN_DIR ;;
-esac
-PATH_LINE="export PATH=\"$shown_dir:\$PATH\""
+posix_dir=$(posix_word "$BIN_DIR")
+fish_dir=$(fish_word "$BIN_DIR")
+PATH_LINE="export PATH=$posix_dir:\$PATH"
 add_to_profiles() {
   added=
   for rc in .profile .bashrc .zshrc; do
@@ -1197,7 +1213,7 @@ shell_profiles() {
   say "$BIN_DIR is not on PATH. Add one line to the shell profile named here. This script does not edit that file."
   say "  bash (~/.bashrc): $PATH_LINE"
   say "  zsh (~/.zshrc): $PATH_LINE"
-  say "  fish (~/.config/fish/config.fish): fish_add_path $shown_dir"
+  say "  fish (~/.config/fish/config.fish): fish_add_path --path $fish_dir"
 }
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
@@ -1214,7 +1230,7 @@ case ":$PATH:" in
      fi
      say "  $PATH_LINE"
      if [ "$MODIFY_PATH" = 1 ] && [ "$CLOUD" = 0 ]; then
-       say "  fish (~/.config/fish/config.fish): fish_add_path $shown_dir"
+       say "  fish (~/.config/fish/config.fish): fish_add_path --path $fish_dir"
      fi
      PATH="$BIN_DIR:$PATH"; export PATH ;;
 esac
@@ -1316,7 +1332,8 @@ if [ -n "$root" ]; then
   say "memory and the command guard are off because the home is under ${root} (${home_real}); set HOME to a directory outside ${root}"
 fi
 if [ "$ONBOARD" = 1 ]; then
-  say "Command guard: run \`$BIN_DIR/ljos policy --help\`."
+  ljos_command=$(posix_word "$BIN_DIR/ljos")
+  say "Command guard: run \`$ljos_command policy --help\`."
 fi
 if [ "$CLOUD" = 1 ]; then
   if "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
@@ -1375,4 +1392,5 @@ elif [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; then
 else
   say "Done in $secs s. Next: \`$next_cmd\`."
 fi
-say "Shell completion: run \`$BIN_DIR/ljos completions --help\`."
+ljos_command=${ljos_command:-$(posix_word "$BIN_DIR/ljos")}
+say "Shell completion: run \`$ljos_command completions --help\`."
