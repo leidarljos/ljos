@@ -8772,10 +8772,11 @@ fn repaired_seat_hook_command(command: &str, wanted: &str) -> Option<String> {
         return Some(wanted.to_string());
     }
     let program = command.strip_suffix(" hook")?;
-    (program.starts_with('/')
-        && program.ends_with("/ljos")
-        && program.chars().any(char::is_whitespace))
-    .then(|| format!("{} hook", tools::sh_word(program)))
+    if !program.starts_with('/') || !program.ends_with("/ljos") {
+        return None;
+    }
+    let fixed = format!("{} hook", tools::sh_word(program));
+    (fixed != command).then_some(fixed)
 }
 
 /// The command the runner's hook runs.
@@ -57970,6 +57971,21 @@ mod tests {
                 again.detail.contains("carries the memory hook"),
                 "{runner}: {again:?}"
             );
+        }
+    }
+
+    #[test]
+    fn reonboard_quotes_shell_metacharacters_in_an_owned_hook_path() {
+        for program in [
+            "/opt/ljos$(echo)/bin/ljos",
+            "/opt/ljos`echo`/bin/ljos",
+            "/opt/ljos'quote/bin/ljos",
+            "/opt/ljos\"quote/bin/ljos",
+        ] {
+            let old = format!("{program} hook");
+            let fixed = repaired_seat_hook_command(&old, "ljos hook")
+                .unwrap_or_else(|| panic!("shell metacharacters stayed unquoted: {old}"));
+            assert_eq!(fixed, format!("{} hook", tools::sh_word(program)));
         }
     }
 
