@@ -4295,24 +4295,14 @@ fn queued_lesson_may_go(cmd: &Cmd) -> bool {
 /// Arguments for `ljos-mcp` when this process is `ljos mcp` and should
 /// serve. `None` for every other command, and for `ljos mcp --help`, which
 /// keeps the command page.
-fn mcp_serve_args() -> Option<Vec<std::ffi::OsString>> {
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    let mut index = 0;
+fn mcp_serve_args(raw: &[std::ffi::OsString]) -> Option<Vec<std::ffi::OsString>> {
+    let (_, args) = take_seat_flag(raw).ok()?;
+    let args = &args[1..];
+    let index = 0;
     while index < args.len() {
         let word = args[index].to_string_lossy();
         if word == "--" {
             return None;
-        }
-        if word == "--seat" {
-            index += 2;
-            continue;
-        }
-        if let Some(value) = word.strip_prefix("--seat=") {
-            if value.is_empty() {
-                return None;
-            }
-            index += 1;
-            continue;
         }
         if word.starts_with('-') {
             return None;
@@ -4333,22 +4323,10 @@ fn mcp_serve_args() -> Option<Vec<std::ffi::OsString>> {
 /// Pull `--seat NAME` off the command line. It names this process, and
 /// it wins over `LJOS_SEAT`. `log`, `memories` and `proposals` keep a
 /// `--seat` that comes after the command, because there it filters.
-fn take_seat_flag(args: &[std::ffi::OsString]) -> (Option<String>, Vec<std::ffi::OsString>) {
-    let mut command_at = None;
-    for (index, arg) in args.iter().enumerate().skip(1) {
-        if !arg.to_string_lossy().starts_with('-') {
-            command_at = Some(index);
-            break;
-        }
-    }
-    let command = command_at
-        .and_then(|index| args.get(index))
-        .map(|arg| arg.to_string_lossy().into_owned());
-    // These commands already use `--seat` for their own argument, after the command name.
-    let keep_later = matches!(
-        command.as_deref(),
-        Some("log" | "memories" | "proposals" | "mesh")
-    );
+fn take_seat_flag(
+    args: &[std::ffi::OsString],
+) -> Result<(Option<String>, Vec<std::ffi::OsString>), ()> {
+    let mut command = None;
     let mut seat = None;
     let mut kept = Vec::with_capacity(args.len());
     if let Some(first) = args.first() {
@@ -4357,44 +4335,41 @@ fn take_seat_flag(args: &[std::ffi::OsString]) -> (Option<String>, Vec<std::ffi:
     let mut index = 1;
     while index < args.len() {
         let arg = args[index].to_string_lossy();
-        let after = command_at.is_some_and(|at| index > at);
-        let steal = !(keep_later && after) && (arg == "--seat" || arg.starts_with("--seat="));
+        if arg == "--" {
+            kept.extend_from_slice(&args[index..]);
+            break;
+        }
+        let local = command
+            .as_deref()
+            .is_some_and(|name| matches!(name, "log" | "memories" | "proposals" | "mesh"));
+        let steal = !local && (arg == "--seat" || arg.starts_with("--seat="));
         if steal {
             if let Some(value) = arg.strip_prefix("--seat=") {
-                if !value.is_empty() {
-                    seat = Some(value.to_string());
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(());
                 }
-            } else if let Some(value) = args.get(index + 1) {
-                seat = Some(value.to_string_lossy().into_owned());
+                seat = Some(value.to_string());
+            } else {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(());
+                };
+                let value = value.to_string_lossy();
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(());
+                }
+                seat = Some(value.into_owned());
                 index += 1;
             }
             index += 1;
             continue;
         }
+        if command.is_none() && !arg.starts_with('-') {
+            command = Some(arg.into_owned());
+        }
         kept.push(args[index].clone());
         index += 1;
     }
-    (seat, kept)
-}
-
-fn global_seat_needs_value(args: &[std::ffi::OsString]) -> bool {
-    let mut index = 1;
-    while index < args.len() {
-        let arg = args[index].to_string_lossy();
-        if !arg.starts_with('-') {
-            return false;
-        }
-        if arg == "--seat" {
-            return args
-                .get(index + 1)
-                .is_none_or(|next| next.to_string_lossy().starts_with('-'));
-        }
-        if arg.starts_with("--seat=") {
-            return false;
-        }
-        index += 1;
-    }
-    false
+    Ok((seat, kept))
 }
 
 fn usize_with_negative_zero(value: &str) -> std::result::Result<usize, String> {
@@ -5428,10 +5403,11 @@ fn known_flag_token(token: &str, cmd: &clap::Command) -> bool {
 }
 
 fn run_command() -> Result<()> {
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().collect();
     // The tool server answers before the seat, the tracker or the pack is
     // read. Those can exit, block or write, and `initialize` needs none of
     // them. `--help` stays here so the command page is this binary's.
-    if let Some(args) = mcp_serve_args() {
+    if let Some(args) = mcp_serve_args(&raw) {
         let err = ljos_cli::exec_server(&args);
         eprintln!("ljos: {err:#}");
         std::process::exit(1);
@@ -5448,12 +5424,10 @@ fn run_command() -> Result<()> {
         print!("{}", opening_screen());
         return Ok(());
     }
-    let raw: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    if global_seat_needs_value(&raw) {
+    let (seat_flag, args) = take_seat_flag(&raw).unwrap_or_else(|()| {
         eprintln!("ljos: --seat needs a value");
         std::process::exit(USAGE_STATUS);
-    }
-    let (seat_flag, args) = take_seat_flag(&raw);
+    });
     ljos_cli::load_seat_env();
     ljos_cli::normalize_tracker_env();
     // A closed pipe ends the run quietly: `ljos learn | head` is not a panic.
