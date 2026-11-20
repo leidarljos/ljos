@@ -1795,12 +1795,8 @@ fn help_command(name: &str) -> String {
     }
 }
 
-fn busy_reading(shown: bool) -> String {
-    if shown {
-        ljos_cli::MEMORY_SEARCH_BUSY_LINE.to_string()
-    } else {
-        ljos_cli::MEMORY_SEARCH_BUSY_EMPTY_LINE.to_string()
-    }
+fn busy_reading() -> String {
+    ljos_cli::degraded::State::Busy.line().to_string()
 }
 
 /// The empty-store sentence. The remember command is the general one: the
@@ -2335,15 +2331,22 @@ impl LjosServer {
         } else {
             match search_ranked(&args.query, fetch) {
                 Ok(hits) => (hits, None),
-                Err(err) if ljos_cli::is_memory_starting(&err) => (
-                    ljos_cli::search_by_words(&args.query, fetch),
-                    Some(ljos_cli::MEMORY_STARTING_FALLBACK_LINE.to_string()),
-                ),
-                Err(err) if ljos_cli::is_reported_busy(&err) || search_can_wait(&err) => {
-                    busy_fallback = true;
-                    (ljos_cli::search_by_words(&args.query, fetch), None)
+                Err(err) => {
+                    // A writer that is not running keeps its own refusal: it
+                    // names the command that starts it.
+                    let state = ljos_cli::degraded::of_error(&err)
+                        .filter(|state| *state != ljos_cli::degraded::State::Down)
+                        .or_else(|| {
+                            search_can_wait(&err).then_some(ljos_cli::degraded::State::Busy)
+                        });
+                    match state {
+                        Some(state) => (
+                            ljos_cli::search_by_words(&args.query, fetch),
+                            Some(state.line().to_string()),
+                        ),
+                        None => return Err(refused(err)),
+                    }
                 }
-                Err(err) => return Err(refused(err)),
             }
         };
         let lexical = !ljos_cli::carries_cosine(&hits);
@@ -2379,7 +2382,7 @@ impl LjosServer {
         let mine = seat_name();
         let waiting = fault.is_some() || busy_fallback;
         let mut reading = if busy_fallback {
-            busy_reading(!hits.is_empty())
+            busy_reading()
         } else if let Some(line) = fault {
             line
         } else if emptied {

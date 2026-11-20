@@ -681,10 +681,12 @@ short pause that grows, for `LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset,
 when it is longer, and then the asking stops.
 A call that stays silent until its budget runs out is not tried again.
 An interactive command prints `pack busy, try again` and exits 75.
-When search still has no meaning rank it uses word search and prints
-`The memory pack was busy, so these rows are word matches; run the search again for ranked results.`
-When no words match, the line is `The memory pack was busy and no words matched.` and the command exits 1.
-A writer that is not running names `packset ensure`.
+When search still has no meaning rank it uses word search over the listing
+a hook last kept on this machine and prints one line on stderr:
+`` Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`. ``
+A writer that has not opened, or is not running, gets the same sentence with
+`starting` or `not running`. A recall and a sitting print it once.
+When no words match on a busy writer, the command exits 1.
 A tracker write does not spend that wait.
 A sitting prints that listing and its recall before the review sweep.
 The sweep runs outside the recall clock and finishes on the pack's own budget.

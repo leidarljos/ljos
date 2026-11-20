@@ -148,13 +148,10 @@ fn a_silent_pack_does_not_hold_a_search() {
         );
         assert_eq!(out.status.code(), Some(1), "{said}");
         assert!(
-            said.contains("The memory pack was busy and no words matched."),
+            said.contains("Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`."),
             "{said}"
         );
-        assert!(
-            !said.contains("The memory pack was busy, so these rows are word matches; run the search again for ranked results."),
-            "{said}"
-        );
+        assert_eq!(said.matches("ranked by words").count(), 1, "{said}");
         assert!(!said.contains("pack busy, try again"), "{said}");
         assert!(
             !said.contains("the pack search did not answer in time"),
