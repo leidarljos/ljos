@@ -703,3 +703,28 @@ fn notes_whose_tracker_exits_late_are_each_written_once() {
     }
     assert!(faults.is_empty(), "{}\n{on_a}", faults.join("\n"));
 }
+
+#[test]
+fn a_note_whose_id_is_a_sentence_is_refused_by_name() {
+    if !tools_ready() {
+        return;
+    }
+    let board = Board::new(3);
+    let session = [
+        ("LJOS_TRACKER_GIT", "off"),
+        ("SEAT_SESSION_ID", "az5k-one-sitting"),
+    ];
+    let claim = board.run("A", "eessi", &["claim", "Software-t002"], &session);
+    assert!(claim.ok(), "{}", claim.said());
+    let before = board.board_on("A");
+    let sentence = "the claim path rereads the file";
+    let ran = board.run("A", "eessi", &["note", sentence, "more words"], &session);
+    assert!(!ran.ok(), "{}", ran.said());
+    let stderr = String::from_utf8_lossy(&ran.out.stderr);
+    assert!(
+        stderr.contains(&format!("{sentence:?} is not a ticket id")),
+        "{}",
+        ran.said()
+    );
+    assert_eq!(board.board_on("A"), before, "nothing is noted");
+}

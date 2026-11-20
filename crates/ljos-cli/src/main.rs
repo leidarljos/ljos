@@ -3498,6 +3498,14 @@ fn note_target(words: &[String]) -> Result<(String, String, bool)> {
             first
         );
     }
+    // With text after it, the first argument is where the id goes. A
+    // sentence there is a mistake, not the start of a note on the hold.
+    if !rest.is_empty() && first.trim().contains(char::is_whitespace) {
+        bail!(
+            "note: {:?} is not a ticket id, so nothing was noted; run `ljos note ID TEXT`, or quote the whole note as one argument.",
+            first
+        );
+    }
     if minted_issue_id(first) {
         return explicit_note(first, rest);
     }

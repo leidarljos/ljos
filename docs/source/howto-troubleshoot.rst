@@ -307,6 +307,12 @@ When a ticket id is close to one in the tracker, ``show``, ``note`` and
 
    issue demo-kln not found, and the closest is demo-kiln, so run `ljos show demo-kiln`.
 
+A sentence where the id goes is refused by name, and nothing is noted:
+
+.. code:: text
+
+   note: "the claim path rereads the file" is not a ticket id, so nothing was noted; run `ljos note ID TEXT`, or quote the whole note as one argument.
+
 File without a project
 ======================
 
