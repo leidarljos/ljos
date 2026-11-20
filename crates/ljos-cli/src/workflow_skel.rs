@@ -1092,32 +1092,84 @@ fn define_locked(name: &str, text: &str, source: &str, proposal: Option<&str>) -
 
 fn store_deed(name: &str, version: i64, text: &str) -> Result<String> {
     ensure_deed_dir()?;
-    let tmp = std::env::temp_dir().join(format!(
-        "ljos-workflow-{name}-{version}-{}.org",
-        std::process::id()
-    ));
-    std::fs::write(&tmp, text).with_context(|| format!("workflow: write {}", tmp.display()))?;
+    let dir = std::env::temp_dir();
+    let (mut file, path) = exclusive_deed_temp(&dir, name, version)?;
+    std::io::Write::write_all(&mut file, text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("workflow: write {}", path.display()))?;
+    drop(file);
     let seat = crate::seat_name();
     let deed_name = format!("workflow-{name}-v{version}");
+    let path_s = path.display().to_string();
     let said = crate::run_captured(
         "deedar",
         &[
-            "create",
-            "file",
-            "--path",
-            &tmp.display().to_string(),
-            "--agent",
-            &seat,
-            "--name",
-            &deed_name,
+            "create", "file", "--path", &path_s, "--agent", &seat, "--name", &deed_name,
         ],
     );
-    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(&path);
     let said = said.with_context(|| format!("workflow: deedar did not store {name}"))?;
     accession_of(&said.stdout).ok_or_else(|| {
         anyhow::anyhow!(
             "workflow: deedar stored {name} and printed no deed id\n{}",
             said.stdout
+        )
+    })
+}
+
+/// Create a new file in `dir` with `O_EXCL` and `O_NOFOLLOW`.
+///
+/// The first name is the historical pid path. A symlink there makes `open`
+/// fail, and the next name is tried. The link target is not opened.
+fn exclusive_deed_temp(dir: &Path, name: &str, version: i64) -> Result<(std::fs::File, PathBuf)> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::FromRawFd;
+
+    let pid = std::process::id();
+    let mut names = vec![format!("ljos-workflow-{name}-{version}-{pid}.org")];
+    for n in 0..16 {
+        names.push(format!("ljos-workflow-{name}-{version}-{pid}-{n}.org"));
+    }
+    let mut last = None;
+    for file_name in names {
+        let path = dir.join(&file_name);
+        let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            bail!(
+                "workflow: temp path {} contains an interior NUL",
+                path.display()
+            );
+        };
+        // SAFETY: `c_path` is a NUL-terminated path. `O_EXCL` creates the
+        // name only when it is absent. `O_NOFOLLOW` fails when that name is
+        // a symlink instead of writing through it. The descriptor is owned
+        // by the `File` below.
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd >= 0 {
+            // SAFETY: `fd` was just opened and nothing else owns it.
+            let file = unsafe { std::fs::File::from_raw_fd(fd) };
+            return Ok((file, path));
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EEXIST | libc::ELOOP) => {
+                last = Some(err);
+            }
+            _ => {
+                return Err(err)
+                    .with_context(|| format!("workflow: create a temp file at {}", path.display()))
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("no temp name"))).with_context(|| {
+        format!(
+            "workflow: create a temp file in {} without following a symlink",
+            dir.display()
         )
     })
 }

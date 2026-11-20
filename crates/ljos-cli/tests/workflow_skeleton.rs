@@ -1684,6 +1684,43 @@ fn start_refuses_an_unreadable_lock_and_files_nothing() {
 }
 
 #[test]
+fn define_does_not_follow_a_symlink_at_the_deed_temp_path() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    let scratch = board.dir.path().join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let victim = board.dir.path().join("victim.txt");
+    std::fs::write(&victim, "PRECIOUS\n").unwrap();
+    let pid = std::process::id();
+    for n in 0..8192u32 {
+        let link = scratch.join(format!(
+            "ljos-workflow-release-1-{}.org",
+            pid.wrapping_add(n)
+        ));
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+    }
+    let out = board
+        .cmd_as("saddle", &["workflow", "define", path.to_str().unwrap()])
+        .env("TMPDIR", &scratch)
+        .output()
+        .unwrap();
+    let after = std::fs::read_to_string(&victim).unwrap();
+    assert_eq!(
+        after,
+        "PRECIOUS\n",
+        "deed temp write followed the symlink:\n{after}\n{}",
+        text(&out)
+    );
+    assert!(
+        out.status.success(),
+        "define failed after leaving the target:\n{}",
+        text(&out)
+    );
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("stored release version 1"), "{said}");
+}
+
+#[test]
 fn external_blocked_by_edges_appear_in_status_and_block_signoff() {
     let board = Board::new();
     let path = board.write_skel("release.org", SKEL);
