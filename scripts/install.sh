@@ -2,11 +2,12 @@
 # Install ljos from its release tarballs, check each tarball against the
 # SHA-256 published beside it and its GitHub build attestation, and run
 # `ljos onboard` for every coding runner found on this machine. With none
-# found, the tracker, the memory writer and the deed store are still set up.
+# found, the tracker and deed store are still set up. Outside a temporary
+# home, the memory writer is set up too. Under a temporary home, memory is off.
 #
 # One command for a new machine. It fetches the release assets, checks
 # each SHA-256, installs the encoder and its model, and sets up the tracker
-# and memory:
+# and deed store, plus memory outside a temporary home:
 #
 #   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
 #
@@ -534,6 +535,29 @@ fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ljos-install.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT INT TERM
+if ! mkdir -p "$HOME" 2>"$TMP/home.err"; then
+  die "could not create HOME $HOME. Check that its parent is writable and run \`sh install.sh\` again."
+fi
+home_real=$(CDPATH='' cd -- "$HOME" 2>/dev/null && pwd -P) ||
+  die "could not resolve HOME $HOME. Create it and run \`sh install.sh\` again."
+state_root=${XDG_STATE_HOME:-$HOME/.local/state}
+if ! mkdir -p "$state_root/ljos"; then
+  die "could not create state directory $state_root. Check that its parent is writable and run \`sh install.sh\` again."
+fi
+chmod 700 "$state_root/ljos" 2>/dev/null || true
+tmp_root=${TMPDIR:-/nonexistent}
+if [ -d "$tmp_root" ]; then
+  tmp_root=$(CDPATH='' cd -- "$tmp_root" 2>/dev/null && pwd -P) ||
+    die "could not resolve TMPDIR $TMPDIR. Create it and run \`sh install.sh\` again."
+fi
+temporary_root=
+case "${home_real}/" in
+  /tmp/*) temporary_root=/tmp ;;
+  /var/tmp/*) temporary_root=/var/tmp ;;
+  /private/tmp/*) temporary_root=/private/tmp ;;
+  /dev/shm/*) temporary_root=/dev/shm ;;
+  "${tmp_root%/}"/*) temporary_root=${tmp_root%/} ;;
+esac
 if ! mkdir -p "$BIN_DIR" 2>"$TMP/mkdir.err"; then
   why=$(head -n 1 "$TMP/mkdir.err" 2>/dev/null | tr -d '\r' || true)
   die "$BIN_DIR is not writable${why:+: $why}. Run \`sh install.sh --bin-dir DIR\` with a directory you can write."
@@ -1268,6 +1292,10 @@ antigravity cmd:agy
 windsurf dir:.codeium/windsurf
 cline dir:Documents/Cline"
 
+# A temporary HOME is a test sandbox to ljos: memory stays off there, and
+# this install does not leave a writer running.
+root=$temporary_root
+
 found_any=0
 if [ "$ONBOARD" = 1 ]; then
   say "Connecting the coding runners found here:"
@@ -1291,19 +1319,17 @@ if [ "$ONBOARD" = 1 ]; then
   done < "$TMP/runners"
   if [ "$found_any" = 0 ]; then
     say "  No coding tool is installed."
-    say "  Setting up the ticket tracker, memory writer, and deed store."
+    if [ -n "$root" ]; then
+      say "  Setting up the ticket tracker and deed store; memory is off in this temporary home."
+    else
+      say "  Setting up the ticket tracker, memory writer, and deed store."
+    fi
     if ! ljos onboard --harness all > "$TMP/onboard-seat" 2>&1; then
       say "  seat setup reported a problem:"
       sed 's/^/    /' "$TMP/onboard-seat"
     fi
   fi
 fi
-
-# The first doctor looks for this directory. Create it here so that
-# row does not warn on a machine that just installed.
-state_root=${XDG_STATE_HOME:-$HOME/.local/state}
-mkdir -p "$state_root/ljos"
-chmod 700 "$state_root/ljos" 2>/dev/null || true
 
 # The encoder fetches its model on first use. Fetch it now, while the
 # network is known to work, so the first search is not lexical.
@@ -1316,18 +1342,7 @@ if [ -x "$BIN_DIR/packset-embed" ]; then
   fi
 fi
 
-# A temporary HOME is a test sandbox to ljos: memory stays off there, and
-# this install does not leave a writer running. Say so in one line.
-tmp_root=${TMPDIR:-/nonexistent}
-home_real=$(cd "$HOME" && pwd -P)
-root=
-case "${home_real}/" in
-  /tmp/*) root=/tmp ;;
-  /var/tmp/*) root=/var/tmp ;;
-  /private/tmp/*) root=/private/tmp ;;
-  /dev/shm/*) root=/dev/shm ;;
-  "${tmp_root%/}"/*) root=${tmp_root%/} ;;
-esac
+# Say why the writer was not started.
 if [ -n "$root" ]; then
   say "memory and the command guard are off because the home is under ${root} (${home_real}); set HOME to a directory outside ${root}"
 fi

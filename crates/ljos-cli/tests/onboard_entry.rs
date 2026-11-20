@@ -1,7 +1,7 @@
 //! `ljos onboard` with no runner prints the MCP entry to paste, and that
 //! output has to parse as JSON as it stands.
 //!
-//! A pipe sets up the tracker, the memory writer and the deed store.
+//! A pipe under a temporary home sets up the tracker and deed store.
 //! The setup lines go to stderr. `ljos file` then files a ticket.
 
 ljos_test_boot::harness!();
@@ -114,7 +114,7 @@ fn the_bare_onboard_prints_json_alone() {
     assert!(command.ends_with("ljos-mcp"), "{text}");
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("The tracker, the memory writer and the deed store are set up."),
+        stderr.contains("The tracker and the deed store are set up."),
         "{text}"
     );
     assert!(
