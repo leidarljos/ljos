@@ -824,6 +824,107 @@ fn a_symlinked_tmpdir_keeps_temporary_home_memory_off() {
 }
 
 #[test]
+fn a_colon_in_a_path_entry_is_refused_before_installing() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    for (case, home, bin) in [
+        (
+            "bin directory",
+            dir.path().join("home"),
+            Some(dir.path().join("bin:split")),
+        ),
+        ("HOME", dir.path().join("home:split"), None),
+    ] {
+        std::fs::create_dir_all(&home).unwrap();
+        let mut install = Command::new("sh");
+        install
+            .arg(install_sh())
+            .arg("--from-dir")
+            .arg(&progs)
+            .args(["--no-embed", "--no-onboard", "--no-modify-path"]);
+        if let Some(path) = &bin {
+            install.arg("--bin-dir").arg(path);
+        }
+        let out = install
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        let text = said(&out);
+        assert!(!out.status.success(), "{case}:\n{text}");
+        let extra = if case == "HOME" {
+            ". Pass --bin-dir DIR to install outside HOME."
+        } else {
+            ""
+        };
+        assert_eq!(
+            text,
+            format!("install.sh: {case} contains ':'{extra}\n"),
+            "{case}:\n{text}"
+        );
+        let path = bin.unwrap_or_else(|| home.join(".local/bin"));
+        assert!(!path.exists(), "{case} was installed:\n{text}");
+    }
+}
+
+#[test]
+fn a_resolved_bin_dir_is_validated_before_installing() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    for (case, target_name, expected) in [
+        (
+            "colon",
+            "bin:split-target",
+            "install.sh: bin directory contains ':'\n",
+        ),
+        (
+            "newline",
+            "bin\nsplit-target",
+            "install.sh: bin directory contains a newline\n",
+        ),
+    ] {
+        let target = dir.path().join(target_name);
+        let link = dir.path().join(format!("safe-{case}"));
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let out = Command::new("sh")
+            .arg(install_sh())
+            .arg("--from-dir")
+            .arg(&progs)
+            .arg("--bin-dir")
+            .arg(&link)
+            .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        let text = said(&out);
+        assert!(!out.status.success(), "{case}:\n{text}");
+        assert_eq!(text, expected, "{case}:\n{text}");
+        for name in PROGRAMS {
+            assert!(
+                !target.join(name).exists(),
+                "{case}: {name} was installed:\n{text}"
+            );
+        }
+    }
+}
+
+#[test]
 fn an_empty_bin_dir_is_refused_before_installing() {
     let dir = tempfile::tempdir().unwrap();
     let progs = dir.path().join("progs");
@@ -853,6 +954,69 @@ fn an_empty_bin_dir_is_refused_before_installing() {
     for name in PROGRAMS {
         assert!(!work.join(name).exists(), "{name} was installed:\n{text}");
     }
+}
+
+#[test]
+fn a_blank_bin_dir_is_refused_before_installing() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(" ")
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .current_dir(&work)
+        .env_clear()
+        .env("HOME", dir.path().join("home"))
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert_eq!(text, "install.sh: bin directory is blank\n", "{text}");
+    assert!(!work.join(" ").exists(), "{text}");
+}
+
+#[test]
+fn a_relative_bin_dir_is_normalized_before_the_path_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let work = dir.path().join("work");
+    let bin = dir.path().join("onp");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg("../onp")
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .current_dir(&work)
+        .env_clear()
+        .env("HOME", dir.path().join("home"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(!text.contains("is not on PATH"), "{text}");
+    assert!(!text.contains("../onp"), "{text}");
+    assert!(bin.join("ljos").is_file(), "{text}");
 }
 
 /// With no coding tool on the machine, install.sh still runs `ljos onboard`

@@ -115,7 +115,13 @@
 # for this platform is built from that version's crate.
 set -eu
 
-BIN_DIR=${LJOS_BIN_DIR:-$HOME/.local/bin}
+if [ -n "${LJOS_BIN_DIR:-}" ]; then
+  BIN_DIR=$LJOS_BIN_DIR
+  BIN_DIR_FROM_HOME=0
+else
+  BIN_DIR=$HOME/.local/bin
+  BIN_DIR_FROM_HOME=1
+fi
 WITH_EMBED=1
 FROM_DIR=
 FROM_CHECKOUT=0
@@ -144,6 +150,20 @@ posix_word() {
 fish_word() {
   escaped=$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")
   printf "'%s'" "$escaped"
+}
+
+validate_path_entry() {
+  label=$1
+  case $2 in
+    '') die "$label is empty" ;;
+    *[![:space:]]*) ;;
+    *) die "$label is blank" ;;
+  esac
+  case $2 in
+    *'
+'*) die "$label contains a newline" ;;
+    *:*) die "$label contains ':'${3:-}" ;;
+  esac
 }
 
 # Put a program in place by rename. A copy over a program that is running
@@ -206,7 +226,7 @@ die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
   case $1 in
-    --bin-dir) BIN_DIR=$2; shift 2 ;;
+    --bin-dir) BIN_DIR=$2; BIN_DIR_FROM_HOME=0; shift 2 ;;
     --with-embed) WITH_EMBED=1; shift ;;
     --no-embed) WITH_EMBED=0; shift ;;
     --from-dir) FROM_DIR=$2; shift 2 ;;
@@ -237,14 +257,13 @@ fi
 if [ "$FROM_CHECKOUT" = 1 ] && [ "$CLOUD" = 1 ]; then
   die "pass --from-checkout or --cloud, not both"
 fi
-[ -n "$BIN_DIR" ] || die "bin directory is empty"
+if [ "$BIN_DIR_FROM_HOME" = 1 ]; then
+  validate_path_entry "HOME" "$HOME" ". Pass --bin-dir DIR to install outside HOME."
+fi
+validate_path_entry "bin directory" "$BIN_DIR"
 case $BIN_DIR in
   /*) ;;
   *) here=$(pwd -P); BIN_DIR=${here%/}/$BIN_DIR ;;
-esac
-case $BIN_DIR in
-  *'
-'*) die "bin directory contains a newline" ;;
 esac
 
 # The version REPO is pinned to, or nothing for the latest release.
@@ -563,6 +582,9 @@ if ! mkdir -p "$BIN_DIR" 2>"$TMP/mkdir.err"; then
   why=$(head -n 1 "$TMP/mkdir.err" 2>/dev/null | tr -d '\r' || true)
   die "$BIN_DIR is not writable${why:+: $why}. Run \`sh install.sh --bin-dir DIR\` with a directory you can write."
 fi
+BIN_DIR=$(CDPATH='' cd -- "$BIN_DIR" 2>/dev/null && pwd -P) ||
+  die "could not resolve bin directory $BIN_DIR. Run \`sh install.sh --bin-dir DIR\` with a directory you can write."
+validate_path_entry "bin directory" "$BIN_DIR"
 # A directory can exist and still refuse a new file. The probe is a
 # builtin inside a subshell, so a minimal PATH needs no touch, and
 # `set -e` does not stop the script before the message below.

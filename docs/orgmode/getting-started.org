@@ -51,10 +51,12 @@ The script names the cause and the command that fixes it.
 - A checksum does not match, or the download stops early. The script stops, deletes the partial file, and says to run =sh install.sh= again.
 - The install directory is not writable.
   The script names it and =sh install.sh --bin-dir DIR=.
-  An empty =--bin-dir= is refused before a program is installed.
+  An empty or blank =--bin-dir= is refused before a program is installed.
+  A colon or newline is refused because that directory becomes one =PATH= entry.
+  A relative directory is normalized before the script checks =PATH=.
 - The install directory is not on =PATH=.
   The script prints the line for bash (=~/.bashrc=), zsh (=~/.zshrc=) and fish (=~/.config/fish/config.fish=).
-  Each line uses the resolved absolute path and quotes it for that shell.
+  Each line uses the absolute install path and quotes it for that shell.
   The script does not edit those files.
   =--modify-path= writes the bash and zsh lines.
   The Next line puts that directory on PATH and names the following command.
