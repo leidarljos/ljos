@@ -27,11 +27,14 @@ A negative number on a numeric flag is read as that flag's value and then refuse
 That includes ``--anchor``, ``-n`` / ``--limit``, ``--rounds``, ``--timeout``, ``--designers``, ``--slack``, ``--beta``, ``--share``, ``--failures`` and every other numeric flag.
 It also covers ``--days`` on ``memories prune``, ``claims`` and ``release``, and ``--confidence`` on ``vote``, and the command exits 2 on every one.
 A span flag, ``--idle``, ``--older-than`` or ``--every``, that is negative or not a span also exits 2.
+A numeric ``-0`` is zero for signed and unsigned flags.
 A habit reading may be negative, and the number is stored.
 A flag given another flag of the same command as the next word is missing that value, and the line names the flag.
+A global ``--seat`` follows that rule and does not take a following flag as its value.
 A value joined to its flag with an equals sign is that value, even when the text looks like a flag.
-A flag's value may start with a hyphen. That includes a lesson, a body, a view and a title.
-Words of a query, a note or a message that start with a hyphen follow ``--``, and a flag of the command stays a flag.
+A flag's bound value may start with a hyphen. That includes a lesson, a body and a view.
+Positional text that starts with a hyphen, including a file title or finish lesson, follows ``--``. Without it the command refuses the text as a flag instead of printing help or acting.
+The same rule covers words of a query, a note or a message, and a flag of the command stays a flag.
 
 ``sitting ISSUE [--assignee NAME] [--cards DIR] [--playbook NAME] [--anyway] [--verbose] [--json]``
    Stores: all. Open a sitting: doctor, sync when the repository names a scope, cards, due, island, blockers, playbook, workflow when the issue carries one, panel when the issue is a decision, recall, timeline, reclaim, claim. The short form prints what needs action, what the seat remembers, and the claim. A degraded pack is one line, ``matched by words (encoder not installed)``. A pack that answers 503 or does not answer is ``These are word matches; the pack did not answer.``, and the sitting continues. That search waits at most fifteen seconds when the encoder is cold. Quiet claims are a count that points at ``ljos release --stale``. Claims untouched for longer than ``LJOS_STALE_DAYS`` (7) are one line, ``N claims untouched for 7+ days: ljos claims --stale``. ``--verbose`` prints every section, including the tracker and sync lines. A commit that landed is not printed, and neither is a push that landed or a sealed log. A refused commit, a refused push, or a push that was skipped is one sentence that names the command to run, and that sentence does not name a host directory or a segment file. ``--json`` prints ``text``, ``tracker_git`` and ``sync``. Reclaim hands back claims quiet longer than ``LJOS_LEASE_SECS`` (900; 0 is off) whose conversation is gone, and keeps one whose runner still runs. It stops at the first store down. The name defaults to this conversation's holder (``ljos seat``). ``--playbook`` copies a recipe before recall; absent, title-match else ``sit``. The name is a tracker ``playbook:`` note until finish or release. ``--cards`` is the directory of ``USER.md`` and ``MEMORY.md``; ``--dir`` is the same flag. Example: ``ljos sitting proj-1a2b``.

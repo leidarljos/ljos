@@ -870,6 +870,27 @@ fn a_negative_on_every_remaining_numeric_flag_names_the_value() {
         ),
         (
             &[
+                "persona",
+                "reviewer",
+                "--anchor",
+                "-0.5",
+                "--view",
+                "reads diffs",
+            ],
+            "persona: --anchor takes a number in [0, 1], not -0.5.",
+        ),
+        (
+            &[
+                "persona",
+                "reviewer",
+                "--anchor=-0.5",
+                "--view",
+                "reads diffs",
+            ],
+            "persona: --anchor takes a number in [0, 1], not -0.5.",
+        ),
+        (
+            &[
                 "supervise",
                 "worker",
                 "--harness",
@@ -979,6 +1000,61 @@ fn a_negative_on_every_remaining_numeric_flag_names_the_value() {
         "a habit reading was read as a flag:\n{said}"
     );
 }
+
+#[test]
+fn positional_flags_seat_values_and_negative_zero_are_unambiguous() {
+    let home = Home::new();
+    let cases: &[(&[&str], Option<i32>, &str)] = &[
+        (
+            &["file", "-hello", "-p", "demo"],
+            Some(2),
+            "pass `--` before text that starts with `-`",
+        ),
+        (
+            &["file", "-task", "-p", "demo"],
+            Some(2),
+            "pass `--` before text that starts with `-`",
+        ),
+        (
+            &["finish", "demo-kiln", "-hello"],
+            Some(2),
+            "pass `--` before text that starts with `-`",
+        ),
+        (
+            &["file", "--unknown-flag"],
+            Some(2),
+            "pass `--` before text that starts with `-`",
+        ),
+        (
+            &["--seat", "--json", "search", "kiln"],
+            Some(2),
+            "ljos: --seat needs a value",
+        ),
+        (&["search", "kiln", "--limit", "-0"], None, ""),
+        (&["conflicts", "--limit", "-0"], None, ""),
+        (
+            &["panel", "demo-kiln", "--designers", "-0", "--dry-run"],
+            None,
+            "",
+        ),
+    ];
+    for (args, status, want) in cases {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        if let Some(status) = status {
+            assert_eq!(out.status.code(), Some(*status), "{args:?}\n{said}");
+            assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+            assert!(one_line(&out.stderr).contains(want), "{args:?}\n{said}");
+        } else {
+            assert_ne!(out.status.code(), Some(2), "{args:?}\n{said}");
+            assert!(
+                !said.contains("takes a number from 0 up"),
+                "{args:?}\n{said}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_blank_rule_pattern_exits_1() {
     let home = Home::new();

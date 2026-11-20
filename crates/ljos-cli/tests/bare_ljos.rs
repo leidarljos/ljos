@@ -199,7 +199,7 @@ fn a_mistyped_lesson_flag_names_lesson_and_exits_2() {
     assert!(out.stdout.is_empty(), "{said}");
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "ljos: finish has no flag --lesons, and the closest is --lesson, so run `ljos finish --lesson`.\n"
+        "ljos: finish has no flag --lesons, and the closest is --lesson, so run `ljos finish --lesson`; pass `--` before text that starts with `-`.\n"
     );
 }
 
@@ -237,7 +237,7 @@ const TYPO_LINES: &[(&[&str], &str)] = &[
     ),
     (
         &["search", "--josn", "kiln"],
-        "ljos: search has no flag --josn, and the closest is --json, so run `ljos search --json kiln`.\n",
+        "ljos: search has no flag --josn, and the closest is --json, so run `ljos search --json kiln`; pass `--` before text that starts with `-`.\n",
     ),
     (
         &["find", "kiln"],
@@ -257,7 +257,7 @@ const TYPO_LINES: &[(&[&str], &str)] = &[
     ),
     (
         &["search", "-x"],
-        "ljos: search has no flag -x, so run `ljos search --help`.\n",
+        "ljos: search has no flag -x, so run `ljos search --help`; pass `--` before text that starts with `-`.\n",
     ),
     (
         &["completions"],
