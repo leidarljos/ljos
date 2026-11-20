@@ -45483,8 +45483,10 @@ fn sitting_memory_weight(issue: &str, atom: &Value, now: &str, seat: &str) -> Op
 /// Subject words for one sitting, built once and shared by every atom.
 struct SittingSubject {
     terms: Vec<String>,
-    /// Multi-part names from the title, such as `review_order`. A lesson
-    /// that contains one of these clears the rule.
+    /// Multi-part names from the title, such as `review_order`, and from
+    /// the body when one shares a piece with the project name, such as
+    /// `sha-2` on `sha-1`. A lesson that contains one of these clears the
+    /// rule.
     identifiers: Vec<String>,
 }
 
@@ -45652,11 +45654,58 @@ fn sitting_subject(issue: &str, ticket: &str) -> SittingSubject {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let title = ticket.lines().next().unwrap_or("");
+    let body = strip_project_tokens(&body, project);
+    let title = strip_project_tokens(ticket.lines().next().unwrap_or(""), project);
+    let mut identifiers = title_identifiers(&title);
+    let want = name_pieces(project);
+    for ident in title_identifiers(&body) {
+        if name_pieces(&ident).iter().any(|piece| want.contains(piece))
+            && !identifiers.contains(&ident)
+        {
+            identifiers.push(ident);
+        }
+    }
     SittingSubject {
         terms: sitting_subject_terms(&body, project),
-        identifiers: title_identifiers(title),
+        identifiers,
     }
+}
+
+/// The lowercase pieces of a name, split at `-`, `_` and a change of
+/// case. `oak-tree`, `OAK_TREE` and `OakTree` are all `oak`, `tree`.
+/// Short pieces and stop words stay, so `a-b` is `a`, `b`.
+fn name_pieces(name: &str) -> Vec<String> {
+    name.split(['-', '_'])
+        .filter(|piece| !piece.is_empty())
+        .flat_map(identifier_run_parts)
+        .collect()
+}
+
+/// `text` without the tokens whose [`name_pieces`] equal the project's.
+/// `sha-2` on project `sha-1` and `oak_2` on project `oak` stay.
+fn strip_project_tokens(text: &str, project: &str) -> String {
+    let want = name_pieces(project);
+    if want.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut token = String::new();
+    let flush = |token: &mut String, out: &mut String| {
+        if name_pieces(token) != want {
+            out.push_str(token);
+        }
+        token.clear();
+    };
+    for c in text.chars() {
+        if c.is_alphanumeric() || c == '-' || c == '_' {
+            token.push(c);
+        } else {
+            flush(&mut token, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut token, &mut out);
+    out
 }
 
 /// `terms` without the project name. A title such as `Fix the kiln draft`
@@ -45677,9 +45726,11 @@ fn drop_project_terms(terms: Vec<String>, project: &str) -> Vec<String> {
 
 /// `review_order` and `review-order` from a title. The parts are weak
 /// words, and the joined name is the term a lesson has to contain.
+/// A URL or a path is split at `/`, so `sha-2` in
+/// `https://example.com/sha-2/issues` is a name of its own.
 fn title_identifiers(title: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for raw in title.split_whitespace() {
+    for raw in title.split(|c: char| c.is_whitespace() || c == '/') {
         let token = raw.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-');
         if !multipart_name(token) {
             continue;
@@ -72607,6 +72658,224 @@ lesson, due yesterday, seat ada
                 "{title:?} kept {oil:?}"
             );
         }
+    }
+
+    /// A project name written as `oak-tree` or `oak_tree` in the title is
+    /// not an identifier, the same as `oak tree`. A title identifier with
+    /// another part still keeps the lesson that names it.
+    #[test]
+    fn a_hyphenated_project_name_in_the_title_is_not_an_identifier() {
+        let issue = "oak-tree-lk1e";
+        for (title, text) in [
+            ("Fix the oak-tree draft", "The oak-tree damper needs oil."),
+            ("Fix the oak_tree draft", "The oak_tree damper needs oil."),
+            ("Fix the oak tree draft", "The oak tree damper needs oil."),
+            ("Fix the OAK-TREE draft", "The oak-tree damper needs oil."),
+        ] {
+            assert_eq!(
+                subject_shows(issue, title, text),
+                (false, false),
+                "{title:?} kept {text:?}"
+            );
+        }
+        assert_eq!(
+            subject_shows(
+                issue,
+                "Fix the oak-tree draft",
+                "The draft pulls cold air in."
+            ),
+            (true, true),
+            "Fix the oak-tree draft dropped the draft lesson"
+        );
+        assert_eq!(
+            subject_shows(issue, "Fix oak_loader crash", "oak_loader must run weekly."),
+            (true, true),
+            "Fix oak_loader crash dropped the identifier lesson"
+        );
+    }
+
+    /// A title token is the project name only when its pieces, split at
+    /// `-`, `_` and a change of case and folded to lower case, equal the
+    /// project's pieces. Short pieces and stop words count. Every row is
+    /// checked before the test fails, so the message lists each miss.
+    #[test]
+    fn a_title_token_is_the_project_name_only_when_every_piece_matches() {
+        let rows = [
+            (
+                "sha-1-lk1e",
+                "Fix sha-2 crash",
+                "sha-2 must run weekly.",
+                true,
+            ),
+            (
+                "x-tree-lk1e",
+                "Fix a-tree crash",
+                "a-tree must run weekly.",
+                true,
+            ),
+            (
+                "oak-lk1e",
+                "Fix oak_2 crash",
+                "oak_2 must run weekly.",
+                true,
+            ),
+            (
+                "v2-api-lk1e",
+                "Fix v3-api crash",
+                "v3-api must run weekly.",
+                true,
+            ),
+            (
+                "for-oak-lk1e",
+                "Fix to-oak crash",
+                "to-oak must run weekly.",
+                true,
+            ),
+            (
+                "a-b-lk1e",
+                "Fix the a-b draft",
+                "The a-b damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix the OakTree draft",
+                "The OakTree damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix the Oak_Tree draft",
+                "The OakTree damper needs oil.",
+                false,
+            ),
+        ];
+        let misses: Vec<String> = rows
+            .iter()
+            .filter(|(issue, title, text, keep)| {
+                subject_shows(issue, title, text) != (*keep, *keep)
+            })
+            .map(|(issue, title, text, keep)| format!("{issue} {title:?} {text:?} keep={keep}"))
+            .collect();
+        assert!(misses.is_empty(), "wrong rows:\n{}", misses.join("\n"));
+    }
+
+    /// The piece rule applies to the issue's body as well as its title.
+    /// `sha-2` in the body on project `sha-1` keeps the lesson that names
+    /// it, and `a-b` in the body on project `a-b` does not.
+    #[test]
+    fn a_body_token_is_the_project_name_only_when_every_piece_matches() {
+        let now = "2026-11-20T12:00:00Z";
+        let rows = [
+            (
+                "sha-1-lk1e",
+                "sha-2 fails on start.",
+                "sha-2 must run weekly.",
+                true,
+            ),
+            (
+                "x-tree-lk1e",
+                "a-tree fails on start.",
+                "a-tree must run weekly.",
+                true,
+            ),
+            (
+                "oak-lk1e",
+                "oak_2 fails on start.",
+                "oak_2 must run weekly.",
+                true,
+            ),
+            (
+                "v2-api-lk1e",
+                "v3-api fails on start.",
+                "v3-api must run weekly.",
+                true,
+            ),
+            (
+                "for-oak-lk1e",
+                "to-oak fails on start.",
+                "to-oak must run weekly.",
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "See https://example.com/sha-2/x.",
+                "sha-2 must run weekly.",
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "sha-1 fails on start.",
+                "sha-1 must run weekly.",
+                false,
+            ),
+            (
+                "a-b-lk1e",
+                "The a-b draft is cold.",
+                "The a-b damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "The OakTree draft is cold.",
+                "The OakTree damper needs oil.",
+                false,
+            ),
+        ];
+        let misses: Vec<String> = rows
+            .iter()
+            .filter(|(issue, body, text, keep)| {
+                let project = super::sitting_project_name(issue);
+                let ticket = super::sitting_cue_parts("Fix the crash", body, &[], &project);
+                let atom = subject_lesson("row", text);
+                let atoms = std::slice::from_ref(&atom);
+                let (due, _) = super::sitting_due_text(issue, &ticket, atoms, now, "ada");
+                let rows = super::sitting_subject_rows(issue, &ticket, atoms, now, "ada");
+                (due.contains(text), !rows.is_empty()) != (*keep, *keep)
+            })
+            .map(|(issue, body, text, keep)| format!("{issue} {body:?} {text:?} keep={keep}"))
+            .collect();
+        assert!(misses.is_empty(), "wrong rows:\n{}", misses.join("\n"));
+    }
+
+    /// A URL or a path in the title is split at `/`, and each segment is
+    /// judged by the piece rule.
+    #[test]
+    fn a_url_segment_in_the_title_is_judged_by_its_pieces() {
+        let rows = [
+            (
+                "sha-1-lk1e",
+                "Fix https://example.com/sha-2/issues crash",
+                "sha-2 must run weekly.",
+                true,
+            ),
+            (
+                "oak-lk1e",
+                "Fix crates/oak_2/src crash",
+                "oak_2 must run weekly.",
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix https://example.com/sha-1/issues crash",
+                "sha-1 must run weekly.",
+                false,
+            ),
+            (
+                "a-b-lk1e",
+                "Fix crates/a-b/src draft",
+                "The a-b damper needs oil.",
+                false,
+            ),
+        ];
+        let misses: Vec<String> = rows
+            .iter()
+            .filter(|(issue, title, text, keep)| {
+                subject_shows(issue, title, text) != (*keep, *keep)
+            })
+            .map(|(issue, title, text, keep)| format!("{issue} {title:?} {text:?} keep={keep}"))
+            .collect();
+        assert!(misses.is_empty(), "wrong rows:\n{}", misses.join("\n"));
     }
 
     /// A tombstone is not a due card, a timeline row or a recall hit, even
