@@ -5097,9 +5097,15 @@ pub(crate) fn fetch_for_inbox(commit: Option<&str>) -> Result<String> {
     Ok(out)
 }
 
+/// The tracker checkouts a sync reads. With none listed and nothing naming
+/// a tracker, the working directory is only vissue's guess, and no checkout
+/// is one: `prepare_tracker` would write `.gitattributes` into it.
 fn sync_roots() -> Result<Vec<PathBuf>> {
     let listed = local().repos;
     Ok(if listed.is_empty() {
+        if crate::tracker_place::cwd_is_only_a_guess() {
+            return Ok(Vec::new());
+        }
         vec![tracker_root()?]
     } else {
         listed.iter().map(|r| expand(r)).collect()
@@ -5333,8 +5339,12 @@ fn adopt_legacy_in_repo(root: &Path, scope: &Scope, host: &str) -> Result<String
 }
 
 fn sync_repos(pull_import: bool, export_log: bool, asked: bool) -> Result<String> {
+    let roots = sync_roots()?;
+    if roots.is_empty() && asked {
+        bail!("{}", crate::tracker_place::MISSING_TRACKER);
+    }
     let mut out = String::new();
-    for root in sync_roots()? {
+    for root in roots {
         out.push_str(&sync_one(&root, pull_import, export_log, asked)?);
     }
     Ok(out)
