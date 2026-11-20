@@ -297,11 +297,15 @@ fn a_note_returns_when_the_tracker_does_not_answer() {
     assert_eq!(lines, ["tracker did not answer after 2 retries"], "{said}");
 }
 
-#[test]
-fn a_tracker_timeout_then_retry_writes_one_note() {
-    if tools::halt(tools::Tool::Vissue) {
-        return;
-    }
+struct NoteRetryCase {
+    name: &'static str,
+    old_note: Option<&'static str>,
+    first: &'static str,
+    want_calls: usize,
+    want_hello: usize,
+}
+
+fn note_retry(case: &NoteRetryCase, real: &Path) -> Result<(), String> {
     let dir = tempfile::tempdir().unwrap();
     let tracker = dir.path().join("tracker");
     let layout = vissue_core::Layout::new(&tracker, "Software");
@@ -317,16 +321,31 @@ fn a_tracker_timeout_then_retry_writes_one_note() {
     )
     .unwrap();
     let issue = issue.trim();
+    if let Some(old_note) = case.old_note {
+        let seeded = Command::new(real)
+            .args(["note", issue, "--", old_note])
+            .env("VISSUE_ROOT", &tracker)
+            .env("VISSUE_NO_ROUTE", "1")
+            .env("VISSUE_AGENT", "ada")
+            .output()
+            .unwrap();
+        assert!(
+            seeded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&seeded.stderr)
+        );
+    }
     let noted = dir.path().join("noted");
-    let real = sibling::require("vissue").unwrap_or_else(|line| panic!("{line}"));
     script(
         dir.path(),
         "vissue",
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = note ]; then\n  printf '%s\\n' \"$*\" >> '{}'\n  '{}' \"$@\"\n  code=$?\n  [ \"$(wc -l < '{}')\" != 1 ] || sleep 2\n  exit \"$code\"\nfi\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nif [ \"$1\" = note ]; then\n  printf '%s\\n' \"$*\" >> '{}'\n  n=$(wc -l < '{}')\n  case \"{}:$n\" in\n    before:1|third:1|third:2) sleep 2; exit 0 ;;\n  esac\n  '{}' \"$@\"\n  code=$?\n  case \"{}:$n\" in tie:1|third:3) sleep 2 ;; esac\n  exit \"$code\"\nfi\nexec '{}' \"$@\"\n",
             noted.display(),
+            noted.display(),
+            case.first,
             real.display(),
-            noted.display(),
+            case.first,
             real.display()
         ),
     );
@@ -356,15 +375,8 @@ fn a_tracker_timeout_then_retry_writes_one_note() {
         .unwrap();
     let took = started.elapsed();
     let said = text_of(&out);
-    assert!(out.status.success(), "{said}");
-    assert!(
-        took < Duration::from_secs(8),
-        "note retry exceeded budget: {took:?}\n{said}"
-    );
     let wrote = std::fs::read_to_string(&noted).unwrap_or_default();
     let notes: Vec<&str> = wrote.lines().collect();
-    assert_eq!(notes.len(), 1, "{wrote}");
-    assert_eq!(notes[0], format!("note {issue} -- hello"), "{wrote}");
     let doc =
         vissue_core::IssueDoc::parse_file("demo", &layout.project_issues_path("demo")).unwrap();
     let card = doc
@@ -372,11 +384,60 @@ fn a_tracker_timeout_then_retry_writes_one_note() {
         .iter()
         .find(|heading| heading.id == issue)
         .unwrap();
-    assert_eq!(
-        card.logbook
-            .iter()
-            .filter(|entry| entry.note.as_deref() == Some("hello"))
-            .count(),
-        1
-    );
+    let hello = card
+        .logbook
+        .iter()
+        .filter(|entry| entry.note.as_deref() == Some("hello"))
+        .count();
+    if !out.status.success()
+        || took >= Duration::from_secs(8)
+        || notes.len() != case.want_calls
+        || hello != case.want_hello
+    {
+        return Err(format!(
+            "{}: calls={} want={} hello={} want={} took={took:?}\n{wrote}{said}",
+            case.name,
+            notes.len(),
+            case.want_calls,
+            hello,
+            case.want_hello
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn note_retries_only_accept_a_new_matching_logbook_entry() {
+    if tools::halt(tools::Tool::Vissue) {
+        return;
+    }
+    let real = sibling::require("vissue").unwrap_or_else(|line| panic!("{line}"));
+    let cases = [
+        NoteRetryCase {
+            name: "old identical note and no first write",
+            old_note: Some("hello"),
+            first: "before",
+            want_calls: 2,
+            want_hello: 2,
+        },
+        NoteRetryCase {
+            name: "same-minute old note",
+            old_note: Some("older note"),
+            first: "tie",
+            want_calls: 1,
+            want_hello: 1,
+        },
+        NoteRetryCase {
+            name: "third attempt writes before timing out",
+            old_note: None,
+            first: "third",
+            want_calls: 3,
+            want_hello: 1,
+        },
+    ];
+    let failures: Vec<String> = cases
+        .iter()
+        .filter_map(|case| note_retry(case, &real).err())
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
