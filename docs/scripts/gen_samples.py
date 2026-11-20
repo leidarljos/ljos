@@ -1449,6 +1449,13 @@ def rewritten(doctor: str, help_text: str, agents: dict[str, str], tutorials: di
     return out
 
 
+def _assert_doctor_command_tails(text: str) -> None:
+    if ". so run" in text:
+        raise SystemExit(
+            "gen_samples: doctor row uses '. so run'; use ', so run ...'."
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="fail when a committed sample differs")
@@ -1470,6 +1477,8 @@ def main() -> int:
         "receive-empty": receive_sample(ljos),
     }
     files = rewritten(doctor, help_text, agent_samples(ljos), tutorials, walks)
+    for text in files.values():
+        _assert_doctor_command_tails(text)
     changed = [path for path, text in files.items() if text != path.read_text(encoding="utf-8")]
     if args.check:
         if changed:

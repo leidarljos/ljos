@@ -29,14 +29,54 @@ const CONFIG_TEXT: &str = "\
 /// The ending of a pack row whose one repair is `packset ensure`.
 const ENSURE_TAIL: &str = ", so run `packset ensure`.";
 
-/// When pack admission is shedding, the memory row is a warning. Name one
-/// command so plain-output checks and a loaded host both get a next step.
+/// How a pack `GET /stats` admission line appears in the doctor memory row.
+/// A shedding writer gets the same command tail as other doctor rows.
 #[must_use]
-pub(crate) fn pack_admission_doctor_hint(admission: &str) -> &'static str {
+pub(crate) fn pack_admission_in_doctor(admission: &str) -> String {
     if admission.contains("busy, retrying") {
-        ". so run `ljos doctor`"
+        format!("{admission}, so run `ljos doctor`.")
     } else {
-        ""
+        admission.to_string()
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::pack_admission_in_doctor;
+    use crate::{doctor_word, format_doctor, Habitat};
+
+    fn memory_row(admission: &str) -> Habitat {
+        let tail = format!(
+            "http://127.0.0.1:9 workspace seat; pack responded in 4ms; {}",
+            pack_admission_in_doctor(admission)
+        );
+        Habitat {
+            name: "pack",
+            state: tail,
+            ok: true,
+        }
+    }
+
+    #[test]
+    fn busy_admission_row_names_ljos_doctor() {
+        let row = memory_row("busy, retrying");
+        assert_eq!(doctor_word(&row), "warn");
+        let line = format_doctor(std::slice::from_ref(&row));
+        assert_eq!(
+            line.trim_end(),
+            "warn\tmemory\thttp://127.0.0.1:9 workspace seat; pack responded in 4ms; \
+             busy, retrying, so run `ljos doctor`."
+        );
+    }
+
+    #[test]
+    fn ok_admission_row_has_no_extra_tail() {
+        let row = memory_row("ok");
+        let line = format_doctor(std::slice::from_ref(&row));
+        assert_eq!(
+            line.trim_end(),
+            "ok\tmemory\thttp://127.0.0.1:9 workspace seat; pack responded in 4ms; ok"
+        );
     }
 }
 
