@@ -172,6 +172,34 @@ fn deed_label(issue: &str, name: &str, version: u32) -> String {
     format!("table {issue} {name} v{version}")
 }
 
+/// deedar's own slug for a name: lowercase letters and digits, with a run
+/// of space, `-` and `_` as one `-` and every other character dropped.
+fn fold(text: &str) -> String {
+    let mut slug = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if matches!(c, ' ' | '-' | '_') && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+/// The accession a table version is stored under, passed to deedar as
+/// `--id`. deedar's slug folds `Scores` into `scores` and `a.b` into `ab`,
+/// so a name its slug changes also carries a digest of the exact issue and
+/// name. A name the slug keeps has the id deedar would mint.
+fn deed_id(issue: &str, name: &str, version: u32) -> String {
+    let id = format!("deed-file-table-{}-{}-v{version}", fold(issue), fold(name));
+    if fold(issue) == issue && fold(name) == name {
+        id
+    } else {
+        let digest = sha256_hex(format!("{issue}\n{name}").as_bytes());
+        format!("{id}-x{}", &digest[..8])
+    }
+}
+
 /// `(name, version)` out of a deed named `table ISSUE NAME vN`.
 fn parse_label(issue: &str, label: &str) -> Option<(String, u32)> {
     let rest = label
@@ -262,11 +290,20 @@ pub fn add(issue: &str, file: &Path, name: Option<&str>) -> Result<Added> {
     }
     let version = latest.map_or(1, |v| v.version + 1);
     let label = deed_label(issue, &name, version);
+    let id = deed_id(issue, &name, version);
+    if let Ok(got) = crate::run_captured("deedar", &["get", &id]) {
+        let other = deed_name(&got.stdout);
+        if other != label {
+            bail!(
+                "table: {name} v{version} on {issue} would be stored as {id}, which {other:?} already uses; pass another `--name`"
+            );
+        }
+    }
     let path = file.display().to_string();
     let seat = crate::seat_name();
     let mut argv = vec![
-        "create", "file", "--name", &label, "--path", &path, "--media", "text/csv", "--agent",
-        &seat,
+        "create", "file", "--id", &id, "--name", &label, "--path", &path, "--media", "text/csv",
+        "--agent", &seat,
     ];
     if let Some(latest) = latest {
         argv.push("--supersedes");
@@ -448,6 +485,17 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(e, "table: t.csv line 3 has 1 columns; the header has 2");
+    }
+
+    #[test]
+    fn names_deedar_folds_together_get_their_own_ids() {
+        assert_eq!(deed_id("p-1", "scores", 2), "deed-file-table-p-1-scores-v2");
+        let ids: std::collections::BTreeSet<String> =
+            ["scores", "Scores", "a.b", "ab", "scores_v1", "scores-v1"]
+                .iter()
+                .map(|name| deed_id("p-1", name, 1))
+                .collect();
+        assert_eq!(ids.len(), 6, "{ids:?}");
     }
 
     #[test]

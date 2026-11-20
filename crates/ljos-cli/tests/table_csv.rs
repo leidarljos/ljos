@@ -161,3 +161,75 @@ fn the_mcp_tool_adds_lists_and_shows() {
     assert!(text.contains(&serde_json::json!(V1).to_string()), "{text}");
     assert_eq!(world.git(&["rev-list", "--count", "HEAD"]).trim(), "2");
 }
+
+#[test]
+fn names_deedar_would_fold_together_are_separate_tables() {
+    for (one, two) in [
+        ("Scores", "scores"),
+        ("a.b", "ab"),
+        ("scores_v1", "scores-v1"),
+    ] {
+        let world = World::new();
+        let first = world.write("first.csv", V1);
+        let second = world.write("second.csv", V2);
+        let added = world.ljos(&["table", ISSUE, "--add", &first, "--name", one]);
+        assert!(added.status.success(), "{one}: {}", said(&added));
+        let added = world.ljos(&["table", ISSUE, "--add", &second, "--name", two]);
+        assert!(
+            added.status.success(),
+            "{two} after {one}: {}",
+            said(&added)
+        );
+
+        let listed = world.ljos(&["table", ISSUE]);
+        let names: Vec<String> = stdout(&listed)
+            .lines()
+            .skip_while(|line| !line.starts_with("NAME"))
+            .skip(1)
+            .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+            .collect();
+        let mut want = vec![one.to_string(), two.to_string()];
+        want.sort();
+        assert_eq!(names, want, "{}", said(&listed));
+        for (name, bytes) in [(one, V1), (two, V2)] {
+            let shown = world.ljos(&["table", ISSUE, "--show", name]);
+            assert!(shown.status.success(), "{name}: {}", said(&shown));
+            assert_eq!(stdout(&shown), bytes, "{name}");
+        }
+    }
+}
+
+#[test]
+fn an_id_another_deed_uses_is_refused_by_name() {
+    let world = World::new();
+    let other = world.write("other.csv", V2);
+    let made = world
+        .command("deedar")
+        .args([
+            "create",
+            "file",
+            "--id",
+            "deed-file-table-demo-a1b2-scores-v1",
+            "--name",
+            "not a table",
+            "--path",
+            &other,
+            "--agent",
+            "alice",
+        ])
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{}", said(&made));
+    let before = world.commits();
+    let file = world.write("scores.csv", V1);
+    let added = world.ljos(&["table", ISSUE, "--add", &file]);
+    assert_eq!(added.status.code(), Some(1), "{}", said(&added));
+    assert!(
+        stderr(&added).contains(
+            "would be stored as deed-file-table-demo-a1b2-scores-v1, which \"not a table\" already uses"
+        ),
+        "{}",
+        said(&added)
+    );
+    assert_eq!(world.commits(), before);
+}
