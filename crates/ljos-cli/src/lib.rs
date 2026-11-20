@@ -12682,8 +12682,9 @@ fn writer_refusal(err: &anyhow::Error) -> bool {
 /// that only shares a word. The caller ranks and cuts.
 pub fn search_ranked(query: &str, limit: u32) -> Result<Vec<Hit>> {
     let _busy = pack_link::BusyRetry::enter();
-    wait_until_health_open()?;
-    answer_after_start(|| search_ranked_now(query, limit))
+    let started = std::time::Instant::now();
+    wait_until_health_open(started)?;
+    answer_after_start(started, || search_ranked_now(query, limit))
 }
 
 fn search_ranked_now(query: &str, limit: u32) -> Result<Vec<Hit>> {
@@ -15836,15 +15837,16 @@ fn sleep_start(started: std::time::Instant, pause: &mut std::time::Duration) -> 
 
 /// Wait until `/health` no longer says the pack is starting.
 /// A pack that is down, or already open, returns at once.
-/// The wait is [`search_warmup_wait`], and the call deadline still wins.
-fn wait_until_health_open() -> Result<()> {
+/// The wait is [`search_warmup_wait`] counted from `started`, and the call
+/// deadline still wins. [`answer_after_start`] takes the same `started`, so
+/// the two waits of one search share one budget.
+fn wait_until_health_open(started: std::time::Instant) -> Result<()> {
     if health_still_starting() != Some(true) {
         return Ok(());
     }
     if search_warmup_wait().is_zero() {
         return Err(memory_starting_err());
     }
-    let started = std::time::Instant::now();
     let mut pause = std::time::Duration::from_millis(50);
     loop {
         match health_still_starting() {
@@ -15859,10 +15861,13 @@ fn wait_until_health_open() -> Result<()> {
 }
 
 /// Retry `op` while the pack has not opened.
-/// The wait shares [`search_warmup_wait`] with [`wait_until_health_open`].
-fn answer_after_start<T>(mut op: impl FnMut() -> Result<T>) -> Result<T> {
+/// The wait shares [`search_warmup_wait`] with [`wait_until_health_open`]
+/// through `started`.
+fn answer_after_start<T>(
+    started: std::time::Instant,
+    mut op: impl FnMut() -> Result<T>,
+) -> Result<T> {
     let _ = search_call_left();
-    let started = std::time::Instant::now();
     let mut pause = std::time::Duration::from_millis(50);
     loop {
         match op() {
@@ -15895,8 +15900,9 @@ fn answer_after_start<T>(mut op: impl FnMut() -> Result<T>) -> Result<T> {
 /// that is not a busy writer or a deadline.
 pub fn search_hits(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
     let _busy = pack_link::BusyRetry::enter();
-    wait_until_health_open()?;
-    answer_after_start(|| search_hits_settled(query, limit))
+    let started = std::time::Instant::now();
+    wait_until_health_open(started)?;
+    answer_after_start(started, || search_hits_settled(query, limit))
 }
 
 fn search_hits_settled(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
@@ -24446,7 +24452,7 @@ pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) 
     // A pack that has not opened yet is waited out on the search warm-up
     // budget. The short post budget starts only after that, so a pack that
     // is already open and busy is asked again inside the busy bound.
-    answer_after_start(|| {
+    answer_after_start(std::time::Instant::now(), || {
         let _retry = pack_link::RememberRetry::enter();
         let _deadline = pack_link::CommandDeadline::enter(REMEMBER_BUDGET);
         let _clock = pack_link::PackClock::enter(REMEMBER_BUDGET);
@@ -47449,7 +47455,9 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
 }
 
 fn finish_lesson(issue: &str, text: &str) -> String {
-    let filed = answer_after_start(|| finish_lesson_post(issue, text));
+    let filed = answer_after_start(std::time::Instant::now(), || {
+        finish_lesson_post(issue, text)
+    });
     match filed {
         Ok(line) => line,
         // The ticket is already closed. Queue the lesson, as a busy pack
