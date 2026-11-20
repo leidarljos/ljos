@@ -372,3 +372,45 @@ fn a_pending_claim_retried_while_the_tracker_stalls_is_not_stamped_as_held() {
         ran.said()
     );
 }
+
+#[test]
+fn notes_whose_tracker_exits_late_are_each_written_once() {
+    if !tools_ready() {
+        return;
+    }
+    let board = Board::new(3);
+    let seats = ["eessi", "saddle", "bridle", "stirrup", "girth", "cinch"];
+    let children: Vec<(String, Child)> = seats
+        .iter()
+        .map(|seat| {
+            let text = format!("{seat} was here");
+            let child = board.spawn(
+                "A",
+                seat,
+                &["note", "Software-t002", &text],
+                &[
+                    ("SHIM_SLOW_EXIT", "3"),
+                    ("LJOS_TRACKER_LOCK_WAIT", "1"),
+                    ("LJOS_TRACKER_GIT", "commit"),
+                ],
+            );
+            (text, child)
+        })
+        .collect();
+    let mut notes = Vec::new();
+    let mut refused = Vec::new();
+    for (text, child) in children {
+        let out = child.wait_with_output().unwrap();
+        if out.status.success() {
+            notes.push(("Software-t002".to_string(), text));
+        } else {
+            refused.push(format!("{text}: {}", String::from_utf8_lossy(&out.stderr)));
+        }
+    }
+    let on_a = board.board_on("A");
+    let mut faults = board_faults(&on_a, &[], &notes);
+    for line in refused {
+        faults.push(format!("a note said it failed: {line}"));
+    }
+    assert!(faults.is_empty(), "{}\n{on_a}", faults.join("\n"));
+}

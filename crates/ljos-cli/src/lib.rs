@@ -54617,30 +54617,43 @@ fn tracker_retry_line(retries: usize) -> String {
     }
 }
 
-fn note_landed(issue: &str, text: &str) -> bool {
+/// The note text the way vissue writes it: whitespace folded to one space
+/// and double quotes turned to single ones.
+fn folded_note(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('"', "'")
+}
+
+/// Whether `issue` has a note reading `text` written in the minute `since`
+/// names or later. Other seats note the same issue meanwhile, so the
+/// newest note need not be this one.
+fn note_landed(issue: &str, text: &str, since: &str) -> bool {
     let Ok(card) = tracker_show_json(issue) else {
         return false;
     };
-    let latest = card["logbook"]
+    let want = folded_note(text);
+    card["logbook"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|entry| {
+        .any(|entry| {
+            let at = entry["timestamp"].as_str().unwrap_or("");
             entry["note"]
                 .as_str()
-                .map(|note| (entry["timestamp"].as_str().unwrap_or(""), note))
+                .is_some_and(|note| folded_note(note) == want)
+                && at >= since
         })
-        .max_by_key(|(ts, _)| ts.to_string());
-    latest.is_some_and(|(_, note)| note.trim() == text.trim())
 }
 
-fn tracker_note_already_written(args: &[impl AsRef<str>]) -> bool {
+fn tracker_note_already_written(args: &[impl AsRef<str>], since: &str) -> bool {
     if args.first().map(AsRef::as_ref) != Some("note") || args.len() < 3 {
         return false;
     }
     let issue = args.get(1).map(AsRef::as_ref).unwrap_or_default();
     let text = args.get(2).map(AsRef::as_ref).unwrap_or_default();
-    !issue.trim().is_empty() && !text.trim().is_empty() && note_landed(issue, text)
+    !issue.trim().is_empty() && !text.trim().is_empty() && note_landed(issue, text, since)
 }
 
 /// How long [`run_captured`] waits. A habitat that never exits used to
@@ -54964,6 +54977,7 @@ fn run_captured_within(
     let retryable = tracker_retryable_verb(bin, args);
     let retry_budget = tracker_retry_budget();
     let retry_start = std::time::Instant::now();
+    let since = vissue_core::model::LogEntry::now();
     let mut retries = 0usize;
     let words: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
     'attempt: loop {
@@ -55014,13 +55028,13 @@ fn run_captured_within(
                         tool_bound::mark_failed(line.clone());
                         return Err(CallTimedOut(line).into());
                     }
+                    if retryable && tracker_note_already_written(args, &since) {
+                        return Ok(Said {
+                            stdout: String::new(),
+                            stderr: String::new(),
+                        });
+                    }
                     if retryable && retries < 2 {
-                        if tracker_note_already_written(args) {
-                            return Ok(Said {
-                                stdout: String::new(),
-                                stderr: String::new(),
-                            });
-                        }
                         let backoff = std::time::Duration::from_millis(120 * (1u64 << retries));
                         if retry_start
                             .elapsed()
