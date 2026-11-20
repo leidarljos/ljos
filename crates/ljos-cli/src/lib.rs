@@ -9223,6 +9223,7 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
     let command = hook_command();
     let mut added = Vec::new();
     let mut opened: Vec<&str> = Vec::new();
+    let mut repaired: Vec<&str> = Vec::new();
     for (event, timeout) in CURSOR_HOOK_EVENTS {
         if claude_has_seat && !CURSOR_ONLY_EVENTS.contains(event) {
             continue;
@@ -9233,6 +9234,19 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
         let Some(entries) = entries.as_array_mut() else {
             continue;
         };
+        let mut repaired_here = false;
+        for entry in entries.iter_mut() {
+            if let Some(fixed) = entry["command"]
+                .as_str()
+                .and_then(|old| repaired_seat_hook_command(old, &command))
+            {
+                entry["command"] = fixed.into();
+                repaired_here = true;
+            }
+        }
+        if repaired_here {
+            repaired.push(*event);
+        }
         if let Some(seat) = entries.iter_mut().find(|e| is_seat_hook(e)) {
             // A `failClosed` an earlier onboard wrote makes the editor harness refuse
             // the call when the hook is missing or fails.
@@ -9247,7 +9261,7 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
         entries.push(serde_json::json!({"command": command, "timeout": timeout}));
         added.push(*event);
     }
-    if added.is_empty() && opened.is_empty() {
+    if added.is_empty() && opened.is_empty() && repaired.is_empty() {
         return Step {
             what,
             detail: format!("{} carries the seat's hook", file.display()),
@@ -9263,6 +9277,10 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
     if !opened.is_empty() {
         change.push(format!("drop failClosed on {}", opened.join(", ")));
         done.push(format!("dropped failClosed on {}", opened.join(", ")));
+    }
+    if !repaired.is_empty() {
+        change.push(format!("repair the command on {}", repaired.join(", ")));
+        done.push(format!("repaired the command on {}", repaired.join(", ")));
     }
     if dry {
         return Step {
@@ -76537,6 +76555,54 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         std::fs::create_dir_all(dropped_file.parent().unwrap()).unwrap();
         std::fs::write(&dropped_file, serde_json::to_string(&dropped).unwrap()).unwrap();
         assert!(!super::cursor_hooks_satisfy(&dropped_file, &claude));
+    }
+
+    #[test]
+    fn cursor_reonboard_repairs_an_expanding_hook_command_in_place() {
+        with_env_mutation(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("cursor/hooks.json");
+            let claude = dir.path().join("claude/settings.json");
+            let empty_path = dir.path().join("empty-bin");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(&empty_path).unwrap();
+            let saved = std::env::var_os("PATH");
+            unsafe { std::env::set_var("PATH", &empty_path) };
+            let program = "/opt/ljos$(echo)/bin/ljos";
+            std::fs::write(
+                &file,
+                serde_json::json!({
+                    "version": 1,
+                    "hooks": {
+                        "beforeShellExecution": [{
+                            "command": format!("{program} hook"),
+                            "timeout": 20
+                        }]
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+            let step = cursor_hook_step(&file, &claude, false);
+            assert!(step.detail.contains("repaired"), "{step:?}");
+            let value: Value =
+                serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            let entries = value["hooks"]["beforeShellExecution"]
+                .as_array()
+                .unwrap();
+            assert_eq!(entries.len(), 1, "{value}");
+            assert_eq!(
+                entries[0]["command"],
+                format!("{} hook", tools::sh_word(program))
+            );
+            unsafe {
+                match saved {
+                    Some(saved) => std::env::set_var("PATH", saved),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        });
     }
 
     /// A seat hook an earlier onboard wrote with `failClosed` loses it,
