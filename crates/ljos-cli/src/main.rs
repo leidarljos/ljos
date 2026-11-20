@@ -658,7 +658,8 @@ enum Cmd {
         /// Print a warning when a sentence is over 29 words. The memory is still stored.
         #[arg(long)]
         verbose: bool,
-        /// Print JSON. One claim is that object, with `id` at the top.
+        /// Print JSON. A stored or duplicate claim is that object, with `id` at the top.
+        /// A queued claim has `queued`, `kind`, `text` and `prose`, and no `id`.
         /// A split into several claims is one document with a `claims` array, `stored` and `queued`.
         /// The grade, the aim and the sentence that raised the grade are fields on each claim.
         /// A duplicate of a split is in that array. A later chunk that fails is listed under `failed`.

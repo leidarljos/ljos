@@ -52,7 +52,7 @@ When agents disagree, each casts a vote, and `ljos consensus` settles it.
 Search uses a local encoder when one is installed. A judge, an optional model that decides which lessons bear on a prompt, sees your text only when a person configures one.
 `ljos onboard --example` lists the runners, the coding agents ljos can register with, among them Claude Code, Codex and Cursor.
 
-- 10,520 tokens for the 22 core Model Context Protocol (MCP) tools, against 24,612 for all 57 ([measurements/mcp-size.txt](measurements/mcp-size.txt)). MCP is how an agent calls ljos as a tool.
+- 10,535 tokens for the 22 core Model Context Protocol (MCP) tools, against 24,627 for all 57 ([measurements/mcp-size.txt](measurements/mcp-size.txt)). MCP is how an agent calls ljos as a tool.
 - 139.1 ms warm prompt hook median on 10,000 live lessons, down from 196.3 ms, with the same output ([measurements/hook-latency.txt](measurements/hook-latency.txt), `prompt-hook.rows-10000.after`).
 - The duplicate check merged 0 of 186 near-topic lesson pairs and found 12 of 78 duplicate pairs ([measurements/lesson-duplicates.txt](measurements/lesson-duplicates.txt)).
 - packset, the program that stores and searches lessons, publishes a LongMemEval_S session retrieval run ([packset explanation](https://leidarljos.github.io/packset/explanation.html)). That page records the figures. This tree does not. The run scores retrieval, not answer accuracy.
@@ -254,7 +254,7 @@ tools, guard and memory first: `rule`, `prefer`, `remember`,
 `search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `show`, `ready`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`. `measurements/mcp-size.txt` records
-10,520 tokens for the core set against 24,612 for all fifty-seven.
+10,535 tokens for the core set against 24,627 for all fifty-seven.
 `LJOS_MCP_TOOLS=all` lists every tool.
 
 ```json
