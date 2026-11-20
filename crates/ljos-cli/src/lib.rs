@@ -13976,12 +13976,32 @@ fn runner_record_holders(chain: &[(u32, String)]) -> Vec<String> {
 ///
 /// # Errors
 ///
-/// The name is empty, or a slash is left after the repeated segment is
-/// removed.
+/// The name is empty, is a dot path (`.` or `..`, or a name that folds to
+/// one under NFKC such as U+2024 or two U+FF0E), or a slash is left after
+/// the repeated segment is removed.
 pub fn project_name(raw: &str) -> Result<String, String> {
+    use unicode_normalization::UnicodeNormalization as _;
     let raw = raw.trim();
     if raw.is_empty() {
         return Err("project: the name is empty".to_string());
+    }
+    let dots = |seg: &str| {
+        let folded: String = seg.nfkc().collect();
+        folded == "." || folded == ".."
+    };
+    let refuse = || {
+        let right = raw
+            .rsplit(['/', '\\'])
+            .find(|seg| !seg.is_empty() && !dots(seg))
+            .unwrap_or("NAME");
+        Err(format!("project: pass -p {right}, not -p {raw}"))
+    };
+    let folded: String = raw.nfkc().collect();
+    if folded
+        .split(['/', '\\'])
+        .any(|seg| seg == "." || seg == "..")
+    {
+        return refuse();
     }
     if !raw.contains('/') && !raw.contains('\\') {
         return Ok(raw.to_string());
@@ -14001,12 +14021,8 @@ pub fn project_name(raw: &str) -> Result<String, String> {
         rest = tail;
     }
     rest = rest.trim_matches(['/', '\\']);
-    if rest.is_empty() || rest.contains('/') || rest.contains('\\') || rest == "." || rest == ".." {
-        let right = raw
-            .rsplit(['/', '\\'])
-            .find(|seg| !seg.is_empty() && *seg != "." && *seg != "..")
-            .unwrap_or("NAME");
-        return Err(format!("project: pass -p {right}, not -p {raw}"));
+    if rest.is_empty() || rest.contains('/') || rest.contains('\\') {
+        return refuse();
     }
     Ok(rest.to_string())
 }
@@ -60144,6 +60160,23 @@ mod tests {
             std::env::remove_var("VISSUE_PREFIX");
         }
         assert_eq!(project_name("hle-mm").unwrap(), "hle-mm");
+        for dots in [
+            ".",
+            "..",
+            "./",
+            "a/..",
+            "\u{2024}",
+            "\u{ff0e}\u{ff0e}",
+            "\u{fe52}",
+        ] {
+            let err = project_name(dots).unwrap_err();
+            assert!(err.starts_with("project: pass -p "), "{dots:?}: {err}");
+            assert!(!err.contains('\n'), "{dots:?}: {err}");
+        }
+        assert_eq!(
+            project_name("\u{ff0e}\u{ff0e}").unwrap_err(),
+            "project: pass -p NAME, not -p \u{ff0e}\u{ff0e}"
+        );
         assert_eq!(project_name("Software/hle-mm").unwrap(), "hle-mm");
         assert_eq!(project_name("tracker/Software/hle-mm").unwrap(), "hle-mm");
         let err = project_name("foo/bar").unwrap_err();
