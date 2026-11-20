@@ -151,7 +151,12 @@ pub fn render_skeleton(skel: &Skeleton) -> Result<String> {
     if !hits.is_empty() {
         bail!("workflow: public render refused: {}", hits.join("; "));
     }
-    Ok(render_org(skel))
+    let page = render_org(skel);
+    let owned = rendered_babel_hits(&page);
+    if !owned.is_empty() {
+        bail!("workflow: public render refused: {}", owned.join("; "));
+    }
+    Ok(page)
 }
 
 /// Validate `path` and store it as a deed when the bytes or the version changed.
@@ -1610,40 +1615,36 @@ fn render_org(skel: &Skeleton) -> String {
         }
         out.push('\n');
     }
-    out.push_str("#+begin_src dot\n");
-    out.push_str("digraph workflow {\n");
-    out.push_str("  rankdir=LR;\n");
-    for key in &order {
-        let Some(step) = skel.steps.iter().find(|s| s.key == *key) else {
-            continue;
-        };
-        out.push_str(&format!(
-            "  \"{}\" [label=\"{}\"];\n",
-            dot_escape(&step.key),
-            dot_escape(&step.title)
-        ));
-    }
+    out.push_str("#+begin_example\n");
     for key in &order {
         let Some(step) = skel.steps.iter().find(|s| s.key == *key) else {
             continue;
         };
         for dep in &step.depends {
-            out.push_str(&format!(
-                "  \"{}\" -> \"{}\";\n",
-                dot_escape(dep),
-                dot_escape(&step.key)
-            ));
+            out.push_str(dep);
+            out.push_str(" -> ");
+            out.push_str(&step.key);
+            out.push('\n');
         }
     }
-    out.push_str("}\n");
-    out.push_str("#+end_src\n");
+    out.push_str("#+end_example\n");
     out
 }
 
-fn dot_escape(text: &str) -> String {
-    text.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', " ")
+fn rendered_babel_hits(page: &str) -> Vec<String> {
+    let mut hits = Vec::new();
+    for (idx, line) in page.lines().enumerate() {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("#+begin_src")
+            || lower.contains("src_")
+            || lower.contains("#+call")
+            || lower.contains("#+include")
+            || lower.contains(":results")
+        {
+            hits.push(format!("line {} contains Org structure", idx + 1));
+        }
+    }
+    hits
 }
 
 fn fill_text(
@@ -2381,11 +2382,12 @@ Options: ship, hold
         let twice = render_skeleton(&parsed).unwrap();
         assert_eq!(once, twice);
         assert!(once.contains("#+title: Release"), "{once}");
-        assert!(once.contains("#+begin_src dot"), "{once}");
+        assert!(!once.to_ascii_lowercase().contains("#+begin_src"), "{once}");
+        assert!(once.contains("#+begin_example"), "{once}");
         assert!(
             once.find("* Write the changelog").unwrap() < once.find("* Bump the version").unwrap()
         );
-        assert!(once.contains("\"changelog\" -> \"version\""), "{once}");
+        assert!(once.contains("changelog -> version"), "{once}");
         assert!(once.contains("Keep this prose byte for byte."), "{once}");
         let order = topo(&parsed).unwrap();
         assert_eq!(order, ["changelog", "version", "signoff"]);

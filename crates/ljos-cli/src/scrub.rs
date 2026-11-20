@@ -79,10 +79,13 @@ pub fn scan_body(text: &str, first_line: usize) -> Vec<String> {
 }
 
 fn scan_with(text: &str, seats: &[String], skip_generated: bool, first_line: usize) -> Vec<String> {
+    let bodies: Vec<&str> = text
+        .split_inclusive('\n')
+        .map(|line| line.strip_suffix('\n').unwrap_or(line))
+        .collect();
     let mut hits = Vec::new();
-    for (idx, line) in text.split_inclusive('\n').enumerate() {
+    for (idx, body) in bodies.iter().enumerate() {
         let line_no = first_line + idx;
-        let body = line.strip_suffix('\n').unwrap_or(line);
         if invisible_hit(body) {
             hits.push(format!("line {line_no} contains invisible character"));
         }
@@ -117,7 +120,79 @@ fn scan_with(text: &str, seats: &[String], skip_generated: bool, first_line: usi
             }
         }
     }
+    for idx in 0..bodies.len().saturating_sub(1) {
+        let left = bodies[idx];
+        let right = bodies[idx + 1];
+        if skip_generated && (is_generated_line(left) || is_generated_line(right)) {
+            continue;
+        }
+        let line_no = first_line + idx;
+        for kind in cross_line_kinds(left, right) {
+            let label = kind.label();
+            let already = hits.iter().any(|hit| {
+                hit == &format!("line {line_no} contains {label}")
+                    || hit == &format!("line {} contains {label}", line_no + 1)
+            });
+            if !already {
+                hits.push(format!("line {line_no} contains {label}"));
+            }
+        }
+    }
     hits
+}
+
+/// A secret or mailbox split by a newline. Each line is whitespace-folded,
+/// then the pair is joined with no separator and with one space. A hit counts
+/// only when the match crosses the join and neither line has that class alone.
+fn cross_line_kinds(left: &str, right: &str) -> Vec<HitKind> {
+    let left = fold_space(&normalize_line(left));
+    let right = fold_space(&normalize_line(right));
+    if left.is_empty() || right.is_empty() {
+        return Vec::new();
+    }
+    let mut kinds = Vec::new();
+    let break_at = left.chars().count();
+    for (joined, gap) in [
+        (format!("{left}{right}"), 0usize),
+        (format!("{left} {right}"), 1),
+    ] {
+        let chars: Vec<char> = joined.chars().collect();
+        for (start, end, kind) in secret_email_spans(&chars) {
+            // `gap` is 1 when a space was inserted. The match has to include
+            // a character from each line, not only that space.
+            let crosses = start < break_at && end > break_at + gap;
+            if crosses && !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+    }
+    kinds.retain(|kind| !line_has_kind(&left, *kind) && !line_has_kind(&right, *kind));
+    kinds
+}
+
+fn fold_space(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn line_has_kind(normalized_folded: &str, kind: HitKind) -> bool {
+    let chars: Vec<char> = normalized_folded.chars().collect();
+    secret_email_spans(&chars).iter().any(|span| span.2 == kind)
+}
+
+fn secret_email_spans(chars: &[char]) -> Vec<(usize, usize, HitKind)> {
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some((end, kind)) = match_token(chars, i, &[]) {
+            if matches!(kind, HitKind::Secret | HitKind::Email) {
+                spans.push((i, end, kind));
+                i = end.max(i + 1);
+                continue;
+            }
+        }
+        i = skip_run(chars, i);
+    }
+    spans
 }
 
 fn skip_run(chars: &[char], i: usize) -> usize {

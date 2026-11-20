@@ -88,25 +88,13 @@ Options: ship, hold
 
 Sign off {{version}} when the deed and the votes agree.
 
-#+begin_src dot
-digraph workflow {
-  rankdir=LR;
-  "changelog" [label="Write the changelog"];
-  "version" [label="Bump the version"];
-  "tests" [label="Tests and CI green"];
-  "docs" [label="Build the docs"];
-  "tag" [label="Tag the release"];
-  "artifacts" [label="Release artifacts"];
-  "packaging" [label="Downstream packaging notice"];
-  "review" [label="Review the release"];
-  "signoff" [label="Sign off the release"];
-  "changelog" -> "version";
-  "version" -> "tests";
-  "tests" -> "docs";
-  "docs" -> "tag";
-  "tag" -> "artifacts";
-  "artifacts" -> "packaging";
-  "packaging" -> "review";
-  "review" -> "signoff";
-}
-#+end_src
+#+begin_example
+changelog -> version
+version -> tests
+tests -> docs
+docs -> tag
+tag -> artifacts
+artifacts -> packaging
+packaging -> review
+review -> signoff
+#+end_example

@@ -519,6 +519,71 @@ fn revise_stores_the_next_version_after_the_proposal_settles() {
 }
 
 #[test]
+fn render_refuses_a_secret_split_across_lines() {
+    let board = Board::new();
+    let skel = SKEL.replace("Notes for {{version}}.", "gh\np_1234567890abcdef1234");
+    let path = board.write_skel("split-secret.org", &skel);
+    let out = board.dir.path().join("split-secret-public.org");
+    let err = board.fail(&[
+        "workflow",
+        "render",
+        "split-secret",
+        "--file",
+        path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(!out.exists(), "render wrote a page:\n{err}");
+    assert!(err.contains("secret"), "{err}");
+    assert!(err.contains("line "), "{err}");
+}
+
+#[test]
+fn render_refuses_an_email_split_across_lines() {
+    let board = Board::new();
+    let skel = SKEL.replace("Notes for {{version}}.", "ada (at)\nexample.com");
+    let path = board.write_skel("split-mail.org", &skel);
+    let out = board.dir.path().join("split-mail-public.org");
+    let err = board.fail(&[
+        "workflow",
+        "render",
+        "split-mail",
+        "--file",
+        path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(!out.exists(), "render wrote a page:\n{err}");
+    assert!(err.contains("email"), "{err}");
+    assert!(err.contains("line "), "{err}");
+}
+
+#[test]
+fn render_emits_no_babel_source_block() {
+    let board = Board::new();
+    let path = board.write_skel("plain.org", SKEL);
+    let out = board.dir.path().join("plain-public.org");
+    board.ok(&[
+        "workflow",
+        "render",
+        "plain",
+        "--file",
+        path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    let page = std::fs::read_to_string(&out).unwrap();
+    let lower = page.to_ascii_lowercase();
+    assert!(!lower.contains("#+begin_src"), "{page}");
+    assert!(!lower.contains("src_"), "{page}");
+    assert!(!lower.contains("#+call"), "{page}");
+    assert!(!lower.contains("#+include"), "{page}");
+    assert!(!lower.contains(":results"), "{page}");
+    assert!(page.contains("#+begin_example"), "{page}");
+    assert!(page.contains("changelog -> version"), "{page}");
+}
+
+#[test]
 fn render_is_deterministic_and_check_rejects_a_drift() {
     let board = Board::new();
     let src = example();
@@ -535,7 +600,12 @@ fn render_is_deterministic_and_check_rejects_a_drift() {
     let second = std::fs::read_to_string(&out).unwrap();
     assert_eq!(first, second);
     assert!(first.contains("#+title: Release"), "{first}");
-    assert!(first.contains("#+begin_src dot"), "{first}");
+    assert!(
+        !first.to_ascii_lowercase().contains("#+begin_src"),
+        "{first}"
+    );
+    assert!(first.contains("#+begin_example"), "{first}");
+    assert!(first.contains("changelog -> version"), "{first}");
     assert!(first.contains("{{version}}"), "{first}");
     assert!(
         first.find("* Write the changelog").unwrap() < first.find("* Tag the release").unwrap()
