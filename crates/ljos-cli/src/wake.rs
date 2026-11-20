@@ -327,6 +327,14 @@ pub fn set_command(seat: &str, command: &str, timeout: Option<u64>) -> Result<St
     if command.is_empty() {
         bail!("wake: empty command");
     }
+    if let Some(timeout) = timeout {
+        if i64::try_from(timeout).is_err() {
+            bail!(
+                "wake: --timeout takes a number no larger than {}, not {timeout}.",
+                i64::MAX
+            );
+        }
+    }
     let warned = warning(command).map_err(|why| anyhow::anyhow!("wake: {why}"))?;
     let next = Wake {
         command: Some(command.to_string()),

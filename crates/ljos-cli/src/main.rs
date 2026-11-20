@@ -6872,6 +6872,14 @@ fn run_command() -> Result<()> {
             issue,
             interrupt,
         } => {
+            if let Some(value) = timeout {
+                if i64::try_from(value).is_err() {
+                    refuse_range(format!(
+                        "wake: --timeout takes a number no larger than {}, not {value}.",
+                        i64::MAX
+                    ));
+                }
+            }
             let seat = seat.unwrap_or_else(ljos_cli::seat_name);
             let said = if let Some(command) = command {
                 ljos_cli::wake::set_command(&seat, &command, timeout)?
