@@ -2900,46 +2900,22 @@ fn recall_words_sentence(args: &[String]) -> String {
     let split = args.iter().position(|arg| arg == "--");
     let before = command_words_rest(&args[..split.unwrap_or(args.len())]);
     let after = split.map_or(&[][..], |at| &args[at + 1..]);
-    let words: Vec<&str> = before
-        .iter()
-        .skip(1)
-        .chain(after)
-        .map(String::as_str)
-        .collect();
-    match words.first() {
+    let first = before.iter().skip(1).chain(after).next();
+    match first {
         Some(first) if !first.starts_with('-') && looks_like_ticket_id(first) => {
-            format!("ljos: recall takes one ticket id, so run `ljos recall {first}`.")
+            "ljos: recall takes one ticket id, so run `ljos recall <id>`.".to_string()
         }
-        _ => {
-            let search = recall_search_command(&words.join(" "));
-            if search.contains('`') {
-                format!("ljos: recall takes one ticket id, so run {search} to look up words.")
-            } else {
-                format!("ljos: recall takes one ticket id, so run `{search}` to look up words.")
-            }
-        }
+        _ => "ljos: recall takes one ticket id, so run `ljos search \"<words>\"` to look up words."
+            .to_string(),
     }
 }
 
 /// The three verbs for a lessons word, each as a line that runs.
 ///
-/// Words typed straight after it are the query: `ljos lessons kiln` is
-/// `ljos search kiln`. A flag ends them.
-fn lessons_sentence(typed: &str, args: &[String]) -> String {
-    let after: Vec<&String> = args
-        .iter()
-        .skip_while(|arg| arg.as_str() != typed)
-        .skip(1)
-        .take_while(|arg| !arg.starts_with('-'))
-        .collect();
-    let search = if after.is_empty() {
-        "ljos search \"lexical default\"".to_string()
-    } else {
-        let words: Vec<&str> = after.iter().map(|word| word.as_str()).collect();
-        recall_search_command(&words.join(" "))
-    };
+/// The words after it are not repeated, since they may be private.
+fn lessons_sentence(typed: &str) -> String {
     format!(
-        "ljos: no command {typed}. To find lessons run `{search}`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`."
+        "ljos: no command {typed}. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`."
     )
 }
 
@@ -3038,7 +3014,7 @@ fn command_sentence(typed: &str, args: &[String]) -> String {
         return line;
     }
     if here.at.is_empty() && lessons_topic(typed) {
-        return lessons_sentence(typed, args);
+        return lessons_sentence(typed);
     }
     let picked = if here.at.is_empty() {
         root_synonym(typed).map(str::to_string)
@@ -3048,8 +3024,9 @@ fn command_sentence(typed: &str, args: &[String]) -> String {
     let picked = picked.or_else(|| pick_verb(typed, &here.commands));
     match picked {
         Some(name) => {
-            let rewritten = rewrite_arg(args, typed, &name);
-            format!("ljos: no command {typed}, and the closest is {name}, so run `{rewritten}`.")
+            let rewritten = rewrite_arg(args, typed, &name, &here.at);
+            let word = shown_word(typed).map_or(String::new(), |word| format!(" {word}"));
+            format!("ljos: no command{word}, and the closest is {name}, so run `{rewritten}`.")
         }
         None => {
             let help = if here.at.is_empty() {
@@ -3057,7 +3034,7 @@ fn command_sentence(typed: &str, args: &[String]) -> String {
             } else {
                 format!("ljos {} --help", here.at.join(" "))
             };
-            format!("ljos: no command {typed}, so run `{help}`.")
+            format!("ljos: that is not a command, so run `{help}`.")
         }
     }
 }
@@ -3065,7 +3042,7 @@ fn command_sentence(typed: &str, args: &[String]) -> String {
 fn flag_sentence(typed: &str, args: &[String]) -> String {
     let path = command_words(args, typed);
     let here = words_at(&path);
-    let bare = typed.trim_start_matches('-');
+    let bare = flag_name(typed).trim_start_matches('-').to_string();
     let names = flag_names(&here.flags);
     let where_ = if here.at.is_empty() {
         "ljos".to_string()
@@ -3085,12 +3062,13 @@ fn flag_sentence(typed: &str, args: &[String]) -> String {
             );
         }
     }
-    match closest(bare, &names) {
+    let shown = flag_shown(typed);
+    match closest(&bare, &names) {
         Some(name) => {
             let flag = flag_text(typed, name, &here.flags);
-            let rewritten = rewrite_arg(args, typed, flag);
+            let rewritten = rewrite_arg(args, typed, flag, &here.at);
             format!(
-                "ljos: {where_} has no flag {typed}, and the closest is {flag}, so run `{rewritten}`."
+                "ljos: {where_} has no flag {shown}, and the closest is {flag}, so run `{rewritten}`."
             )
         }
         None => {
@@ -3099,7 +3077,7 @@ fn flag_sentence(typed: &str, args: &[String]) -> String {
             } else {
                 format!("ljos {} --help", here.at.join(" "))
             };
-            format!("ljos: {where_} has no flag {typed}, so run `{help}`.")
+            format!("ljos: {where_} has no flag {shown}, so run `{help}`.")
         }
     }
 }
@@ -3130,12 +3108,13 @@ fn value_sentence(err: &clap::Error, args: &[String]) -> Option<String> {
         .or_else(|| closest(&typed, &options).map(str::to_string));
     let line = match picked {
         Some(name) => {
-            let rewritten = rewrite_arg(args, &typed, &name);
-            format!("ljos: no shell {typed}, and the closest is {name}, so run `{rewritten}`.")
+            let rewritten = rewrite_arg(args, &typed, &name, &path);
+            let word = shown_word(&typed).map_or(String::new(), |word| format!(" {word}"));
+            format!("ljos: no shell{word}, and the closest is {name}, so run `{rewritten}`.")
         }
         None => {
-            let rewritten = rewrite_arg(args, &typed, "bash");
-            format!("ljos: no shell {typed}, so run `{rewritten}`.")
+            let rewritten = rewrite_arg(args, &typed, "bash", &path);
+            format!("ljos: that is not a shell, so run `{rewritten}`.")
         }
     };
     Some(line)
@@ -3143,7 +3122,7 @@ fn value_sentence(err: &clap::Error, args: &[String]) -> Option<String> {
 
 fn bad_value(err: &clap::Error, args: &[String]) -> Option<String> {
     use clap::error::ContextKind;
-    let value = context_one(err, ContextKind::InvalidValue)?;
+    context_one(err, ContextKind::InvalidValue)?;
     let flag = context_one(err, ContextKind::InvalidArg).unwrap_or_default();
     let flag = flag.split_whitespace().next().unwrap_or(flag.as_str());
     let flag = if flag.is_empty() {
@@ -3156,7 +3135,7 @@ fn bad_value(err: &clap::Error, args: &[String]) -> Option<String> {
     let cmd = command_path_head(args);
     let help = help_of(&cmd);
     Some(format!(
-        "{cmd}: {flag} does not accept {value}. The values it takes are in `{help}`."
+        "{cmd}: {flag} does not accept that value. The values it takes are in `{help}`."
     ))
 }
 
@@ -3261,7 +3240,20 @@ fn missing_shell(args: &[String]) -> Option<String> {
         return None;
     }
     let mut line = vec!["ljos".to_string()];
-    line.extend(args.iter().map(|arg| shell_word(arg)));
+    for arg in args {
+        if arg == "completions" {
+            line.push(arg.clone());
+        } else if arg.starts_with('-') {
+            let name = flag_shown(arg);
+            line.push(if arg.contains('=') {
+                format!("{name}=<value>")
+            } else {
+                name
+            });
+        } else {
+            push_value(&mut line);
+        }
+    }
     line.push("bash".to_string());
     Some(format!(
         "ljos: completions needs a shell, so run `{}`.",
@@ -3593,21 +3585,93 @@ fn command_words_until(args: &[String], stop: Option<&str>) -> Vec<String> {
     words
 }
 
-fn rewrite_arg(args: &[String], from: &str, to: &str) -> String {
+/// The command with `from` swapped for `to`. Every other word the person
+/// typed is kept only when it is a command word or a flag name. A value
+/// stays out of the line, since it may be private.
+fn rewrite_arg(args: &[String], from: &str, to: &str, known: &[String]) -> String {
     let mut words = vec!["ljos".to_string()];
     let mut replaced = false;
+    let mut literal = false;
     for arg in args {
-        if !replaced && arg == from {
-            words.push(shell_word(to));
+        let same = arg == from || (from.starts_with('-') && flag_name(arg) == from);
+        if !replaced && same {
+            let value = arg.starts_with('-') && arg.contains('=');
+            words.push(shell_word(to) + if value { "=<value>" } else { "" });
             replaced = true;
-        } else {
+        } else if literal {
+            push_value(&mut words);
+        } else if arg == "--" {
+            literal = true;
+            words.push(arg.clone());
+        } else if arg.starts_with('-') {
+            let name = flag_shown(arg);
+            let value = arg.contains('=');
+            words.push(if value {
+                format!("{name}=<value>")
+            } else {
+                name
+            });
+        } else if known.contains(arg) || arg == to {
             words.push(shell_word(arg));
+        } else {
+            push_value(&mut words);
         }
     }
     if !replaced {
         words.push(shell_word(to));
     }
     words.join(" ")
+}
+
+fn push_value(words: &mut Vec<String>) {
+    if words.last().map(String::as_str) != Some("<value>") {
+        words.push("<value>".to_string());
+    }
+}
+
+/// A word of the person's that is safe to repeat: letters only, short, and
+/// nothing the public-text screen refuses. A value is never one.
+fn shown_word(word: &str) -> Option<&str> {
+    let plain = !word.is_empty()
+        && word.len() <= 24
+        && word
+            .chars()
+            .all(|ch| ch.is_ascii_alphabetic() || matches!(ch, '-' | '_'));
+    (plain && !ljos_cli::public_text::refuses(word, &ljos_cli::public_text::Screen::default()))
+        .then_some(word)
+}
+
+/// The flag without any `=value` or glued short value.
+fn flag_name(typed: &str) -> &str {
+    let name = typed.split('=').next().unwrap_or(typed);
+    if name.starts_with("--") {
+        name
+    } else if name.starts_with('-') {
+        let end = name
+            .char_indices()
+            .nth(2)
+            .map_or(name.len(), |(index, _)| index);
+        &name[..end]
+    } else {
+        name
+    }
+}
+
+/// A flag name to repeat. The name only, never its value.
+fn flag_shown(typed: &str) -> String {
+    let name = flag_name(typed);
+    let body = name.trim_start_matches('-');
+    let plain = !body.is_empty()
+        && body.len() <= 32
+        && body
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'));
+    let clean = !ljos_cli::public_text::refuses(body, &ljos_cli::public_text::Screen::default());
+    if plain && clean {
+        name.to_string()
+    } else {
+        "<flag>".to_string()
+    }
 }
 
 fn shell_word(word: &str) -> String {
@@ -3767,13 +3831,11 @@ fn block_usage_line(cmd: &Cmd) -> Option<String> {
     }
     let word = also.iter().find(|word| !vissue_id(word))?;
     if ticket_like(word) {
-        return Some(format!(
-            "block: {word} looks like a ticket id, so run `ljos block ISSUE --on {word}`."
-        ));
+        return Some(
+            "block: that looks like a ticket id, so run `ljos block ISSUE --on ID`.".to_string(),
+        );
     }
-    Some(format!(
-        "ljos: no command {word}, so run `ljos block --help`."
-    ))
+    Some("ljos: that is not a command, so run `ljos block --help`.".to_string())
 }
 
 /// `ljos sitting TITLE` without `--plan`, when TITLE is not a ticket id.
@@ -3794,11 +3856,10 @@ fn sitting_plan_line(cmd: &Cmd) -> Option<String> {
     if issue.is_empty() || vissue_id(issue) {
         return None;
     }
-    let shown = issue.replace('`', "'");
-    let quoted = format!("\"{}\"", shown.replace('\\', "\\\\").replace('"', "\\\""));
-    Some(format!(
-        "ljos: {shown} is not a ticket id, so run `ljos sitting --plan {quoted} -- \"measure the files\"`."
-    ))
+    Some(
+        "ljos: that is not a ticket id, so run `ljos sitting --plan \"<title>\" -- \"measure the files\"`."
+            .to_string(),
+    )
 }
 
 /// An empty or whitespace id on `note` or `finish`.
@@ -3893,32 +3954,6 @@ fn looks_like_ticket_id(raw: &str) -> bool {
         }) && !suffix.is_empty();
     }
     ticket_like(trimmed)
-}
-
-fn recall_search_command(text: &str) -> String {
-    let arg = if text
-        .chars()
-        .any(|ch| ch.is_control() || matches!(ch, '"' | '\\' | '$' | '`' | '!'))
-    {
-        if text.chars().any(char::is_control) {
-            let escaped = text
-                .replace('\\', "\\\\")
-                .replace('\'', "\\'")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r")
-                .replace('\t', "\\t");
-            format!("$'{escaped}'")
-        } else {
-            format!("'{}'", text.replace('\'', "'\\''"))
-        }
-    } else {
-        format!("\"{text}\"")
-    };
-    if text.starts_with('-') {
-        format!("ljos search -- {arg}")
-    } else {
-        format!("ljos search {arg}")
-    }
 }
 
 /// A node named on the command line. A blank one is an error at once,
@@ -4282,7 +4317,7 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
             std::process::exit(USAGE_STATUS);
         }
         if current.get_name() == "ljos" && lessons_topic(name) {
-            ljos_cli::say!("{}", lessons_sentence(name, &[]));
+            ljos_cli::say!("{}", lessons_sentence(name));
             std::process::exit(USAGE_STATUS);
         }
         let verb: Vec<String> = topic[..i].to_vec();
@@ -4299,14 +4334,15 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
         let picked = picked.or_else(|| pick_verb(name, &names));
         let line = match picked {
             Some(real) => {
-                let mut fixed: Vec<&str> = topic.iter().map(String::as_str).collect();
-                fixed[i] = &real;
+                let mut fixed: Vec<&str> = topic[..i].iter().map(String::as_str).collect();
+                fixed.push(&real);
+                let word = shown_word(name).map_or(String::new(), |word| format!(" {word}"));
                 format!(
-                    "ljos: no command {name}, and the closest is {real}, so run `ljos help {}`.",
+                    "ljos: no command{word}, and the closest is {real}, so run `ljos help {}`.",
                     fixed.join(" ")
                 )
             }
-            None => format!("ljos: no command {name}, so run `ljos help`."),
+            None => "ljos: that is not a command, so run `ljos help`.".to_string(),
         };
         ljos_cli::say!("{line}");
         std::process::exit(USAGE_STATUS);
@@ -6980,14 +7016,9 @@ fn run_command() -> Result<()> {
                 std::process::exit(USAGE_STATUS);
             }
             if !looks_like_ticket_id(trimmed) {
-                let search_cmd = recall_search_command(trimmed);
-                if search_cmd.contains('`') {
-                    ljos_cli::say!("recall: that text is not a ticket id, so run {search_cmd}.");
-                } else {
-                    let shown =
-                        format!("\"{}\"", trimmed.replace('\\', "\\\\").replace('"', "\\\""));
-                    ljos_cli::say!("recall: {shown} is not a ticket id, so run `{search_cmd}`.");
-                }
+                ljos_cli::say!(
+                    "recall: that text is not a ticket id, so run `ljos search \"<words>\"`."
+                );
                 std::process::exit(USAGE_STATUS);
             }
             stop_ticket(&issue);
@@ -8680,12 +8711,8 @@ mod usage_hint {
         for word in ["learn", "search", "remember", "lessen"] {
             assert!(!lessons_topic(word), "{word}");
         }
-        let args: Vec<String> = ["lessons", "kiln", "-n", "3"]
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        let line = lessons_sentence("lessons", &args);
-        assert!(line.contains("`ljos search \"kiln\"`"), "{line}");
+        let line = lessons_sentence("lessons");
+        assert!(line.contains("`ljos search \"<words>\"`"), "{line}");
         assert!(line.contains("`ljos remember "), "{line}");
         assert!(line.contains("`ljos proposals`"), "{line}");
     }
