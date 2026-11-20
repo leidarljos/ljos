@@ -63062,10 +63062,7 @@ mod tests {
         assert_eq!(truths.len(), MIN_NAMED_OUTCOMES);
 
         let whole = serde_json::json!({"discount": {"a": 1.0, "b": 1.0}, "named": 6, "independent_voters": 2.0});
-        assert!(
-            discount_from(&whole).is_none(),
-            "every voter kept its whole weight"
-        );
+        assert!(discount_from(&whole).is_none(), "no pair passed the gate");
         let shared = serde_json::json!({"discount": {"a": 0.5, "b": 0.5, "c": 1.0}, "named": 6, "independent_voters": 2.0});
         let (discount, line) = discount_from(&shared).unwrap();
         assert_eq!(discount["a"], 0.5);
