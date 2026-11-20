@@ -60,6 +60,15 @@ impl Home {
         std::fs::write(self.root.join("tracker/Software/demo/issues.org"), body).unwrap();
     }
 
+    fn script(&self, name: &str, body: &str) -> PathBuf {
+        let bin = self.root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let path = bin.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
     fn run(&self, args: &[&str], extra: &[(&str, &str)]) -> Output {
         let home = self.root.join("home");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
@@ -979,16 +988,16 @@ fn a_blank_rule_pattern_exits_1() {
     );
     let said = text(&out);
     assert_eq!(out.status.code(), Some(1), "{said}");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("label rule-input-warning:"), "{said}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("label rule-input-warning:"), "{said}");
     assert!(
-        stdout.contains("a pattern over the command line is required"),
+        stderr.contains("a pattern over the command line is required"),
         "{said}"
     );
-    assert!(out.stderr.is_empty(), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
 }
 #[test]
-fn no_write_send_and_options_refusals_exit_1_on_stdout() {
+fn no_write_send_and_options_refusals_exit_1_on_stderr() {
     let home = Home::new();
     for (args, label) in [
         (&["send", "bob", ""][..], "label message-input-warning:"),
@@ -1001,11 +1010,301 @@ fn no_write_send_and_options_refusals_exit_1_on_stdout() {
         let said = text(&out);
         assert_eq!(out.status.code(), Some(1), "{args:?}\n{said}");
         assert!(
-            String::from_utf8_lossy(&out.stdout).contains(label),
+            String::from_utf8_lossy(&out.stderr).contains(label),
             "{args:?}\n{said}"
         );
-        assert!(out.stderr.is_empty(), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
     }
+}
+
+#[test]
+fn policy_refusals_use_stderr_and_leave_stdout_empty() {
+    if tools::halt(tools::Tool::Packsetd) || tools::halt(tools::Tool::Vissue) {
+        return;
+    }
+    let pack = ljos_test_boot::Packsetd::open();
+    let long_message = "x".repeat(16_001);
+    let cases = vec![
+        (vec!["send", "bob", ""], "message-input-warning"),
+        (vec!["send", "bob", "   "], "message-input-warning"),
+        (
+            vec!["send", "bob", long_message.as_str()],
+            "message-input-warning",
+        ),
+        (vec!["send", "alice", "hello"], "routing-warning"),
+        (vec!["options", "demo-kiln", ""], "panel-incomplete"),
+        (vec!["options", "demo-kiln", "only"], "panel-incomplete"),
+        (
+            vec!["rule", " ", "--why", "the command is named"],
+            "rule-input-warning",
+        ),
+        (
+            vec!["rule", "git status", "--why", ""],
+            "rule-input-warning",
+        ),
+        (
+            vec!["rule", "git status", "--verdict", "maybe", "--why", "test"],
+            "rule-input-warning",
+        ),
+        (
+            vec!["rule", "git push*", "--why", "name the branch"],
+            "rule-input-warning",
+        ),
+        (vec!["playbook", "demo-kiln", ""], "playbook-warning"),
+        (
+            vec!["playbook", "demo-kiln", "not-a-playbook"],
+            "playbook-warning",
+        ),
+        (
+            vec!["persona", "", "--view", "reads diffs"],
+            "persona-owner-warning",
+        ),
+        (
+            vec!["persona", "reviewer", "--view", ""],
+            "persona-owner-warning",
+        ),
+        (
+            vec!["persona", "missing", "--retire"],
+            "persona-owner-warning",
+        ),
+        (
+            vec![
+                "memories",
+                "review",
+                "--edit",
+                "deadbeef",
+                "--text",
+                "replacement",
+            ],
+            "review-input-warning",
+        ),
+        (
+            vec!["accept", "deadbeef", "--quote", "yes", "--via", "alice"],
+            "approval-unverified",
+        ),
+        (
+            vec![
+                "accept",
+                "deadbeef",
+                "--quote",
+                "yes",
+                "--at",
+                "2026-11-20T00:00:00Z",
+            ],
+            "approval-unverified",
+        ),
+        (
+            vec![
+                "accept",
+                "deadbeef",
+                "--quote",
+                "yes",
+                "--at",
+                "2026-11-20T00:00:00Z",
+                "--via",
+                "alice",
+            ],
+            "approval-unverified",
+        ),
+        (
+            vec![
+                "seat",
+                "grant",
+                "bob",
+                "close=own",
+                "--quote",
+                "",
+                "--at",
+                "2026-11-20T00:00:00Z",
+                "--via",
+                "alice",
+            ],
+            "grant-unverified",
+        ),
+        (
+            vec![
+                "seat",
+                "grant",
+                "bob",
+                "close=own",
+                "--quote",
+                "yes, grant it",
+                "--at",
+                "not-a-time",
+                "--via",
+                "alice",
+            ],
+            "grant-unverified",
+        ),
+        (
+            vec![
+                "seat",
+                "grant",
+                "alice",
+                "close=own",
+                "--quote",
+                "yes, grant it",
+                "--at",
+                "2026-11-20T00:00:00Z",
+                "--via",
+                "alice",
+            ],
+            "grant-unverified",
+        ),
+        (vec!["graded", "deadbeef"], "review-not-shown"),
+        (
+            vec!["claim", "demo-kiln", "--assignee", "bob"],
+            "assignee-mismatch",
+        ),
+    ];
+    for (args, label) in cases {
+        let home = Home::new();
+        let out = home.run(
+            &args,
+            &[("LJOS_SEAT", "alice"), ("PACKSET_URL", pack.url())],
+        );
+        let said = text(&out);
+        assert!(!out.status.success(), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(&format!("label {label}:")),
+            "{args:?}\n{said}"
+        );
+    }
+
+    let path = std::env::var("PATH").unwrap();
+    for (args, label, seat) in [
+        (
+            &["block", "demo-kiln", "--on", "demo-kiln"][..],
+            "graph-cycle",
+            Some("alice"),
+        ),
+        (&["reopen", "demo-kiln"], "reopen-warning", Some("alice")),
+        (
+            &["claim", "demo-kiln", "--assignee", "example-host-sand-sub"],
+            "seat-unresolved",
+            Some("alice"),
+        ),
+    ] {
+        let home = Home::new();
+        let mut env = vec![("PACKSET_URL", pack.url()), ("PATH", path.as_str())];
+        if let Some(seat) = seat {
+            env.push(("LJOS_SEAT", seat));
+        }
+        let out = home.run(args, &env);
+        let said = text(&out);
+        assert!(!out.status.success(), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(&format!("label {label}:")),
+            "{args:?}\n{said}"
+        );
+    }
+
+    let home = Home::new();
+    std::fs::write(
+        home.root.join("tracker/vissue.toml"),
+        "prefix = \"Software\"\nseats = [\"alice\"]\n",
+    )
+    .unwrap();
+    let out = home.run(
+        &["claim", "demo-kiln"],
+        &[
+            ("LJOS_SEAT", "stranger"),
+            ("PACKSET_URL", pack.url()),
+            ("PATH", path.as_str()),
+        ],
+    );
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("label seat-unlisted:"),
+        "{said}"
+    );
+
+    let home = Home::new();
+    let bin = home.script("claimdag", "#!/bin/sh\nprintf '[]\\n'\n");
+    let stub_path = format!("{}:{path}", bin.display());
+    let out = home.run(
+        &["claim"],
+        &[
+            ("LJOS_SEAT", "alice"),
+            ("PACKSET_URL", pack.url()),
+            ("PATH", &stub_path),
+        ],
+    );
+    let said = text(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).starts_with("label claim-conflict:"),
+        "{said}"
+    );
+
+    let home = Home::new();
+    let tracker = home.root.join("tracker");
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.name", "test"],
+        &["config", "user.email", "test@example.invalid"],
+        &["config", "commit.gpgsign", "false"],
+        &["add", "."],
+        &["commit", "-q", "-m", "seed"],
+    ] {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&tracker)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", text(&out));
+    }
+    let common = [("PACKSET_URL", pack.url()), ("PATH", path.as_str())];
+    for seat in ["alice", "bob"] {
+        let added = home.run(
+            &["seat", "add", seat],
+            &[common[0], common[1], ("LJOS_SEAT", "alice")],
+        );
+        assert!(added.status.success(), "{seat}: {}", text(&added));
+    }
+    let granted = home.run(
+        &[
+            "seat",
+            "grant",
+            "bob",
+            "close=demo-kiln",
+            "--quote",
+            "yes, bob may close it",
+            "--at",
+            "2026-11-20T00:00:00Z",
+            "--via",
+            "alice",
+        ],
+        &[common[0], common[1], ("LJOS_SEAT", "alice")],
+    );
+    assert!(granted.status.success(), "{}", text(&granted));
+    let issue_path = tracker.join("Software/demo/issues.org");
+    let mut issues = std::fs::read_to_string(&issue_path).unwrap();
+    issues.push_str(
+        "\n* TODO [#C] Cool the kiln\n:PROPERTIES:\n:ID: demo-cool\n:PARENT: demo-kiln\n:END:\n",
+    );
+    home.write_issues(&issues);
+    let claimed = home.run(
+        &["claim", "demo-kiln"],
+        &[common[0], common[1], ("LJOS_SEAT", "bob")],
+    );
+    assert!(claimed.status.success(), "{}", text(&claimed));
+    let out = home.run(
+        &["finish", "demo-kiln", "--close"],
+        &[common[0], common[1], ("LJOS_SEAT", "bob")],
+    );
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).starts_with("label children-open:"),
+        "{said}"
+    );
 }
 
 #[test]

@@ -458,7 +458,7 @@ fn a_missing_seat_name_names_seat_add_and_exits_2() {
     let out = home.run(&["note", "the glaze crawled"], &[("LJOS_SEAT", "stranger")]);
     let said = text(&out);
     assert_eq!(out.status.code(), Some(2), "{said}");
-    let line = one_line(&out.stdout);
+    let line = one_line(&out.stderr);
     assert!(
         line.contains("label seat-unlisted: no seat named stranger in "),
         "{line}"
@@ -469,7 +469,7 @@ fn a_missing_seat_name_names_seat_add_and_exits_2() {
         ),
         "{line}"
     );
-    assert!(out.stderr.is_empty(), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
 }
 
 /// The review clock names the next review as `remember` does, in local

@@ -224,15 +224,13 @@ fn a_missing_memory_id_names_the_list_and_search() {
         "Leave the kiln cold.",
     ]);
     assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
     assert!(
-        stdout.contains("no memory starts with abcd1234abcd"),
-        "{stdout}"
+        stderr.contains("no memory starts with abcd1234abcd")
+            && stderr.contains("`ljos memories list --all --user`"),
+        "{stderr}"
     );
-    assert!(
-        stdout.contains("`ljos memories list --all --user`"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("`ljos search`"), "{stdout}");
+    assert!(stderr.contains("`ljos search`"), "{stderr}");
 }
 
 #[test]

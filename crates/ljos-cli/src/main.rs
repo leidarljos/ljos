@@ -3851,16 +3851,12 @@ fn main() {
         let args: Vec<String> = std::env::args().skip(1).collect();
         ljos_cli::memory_port::record_memory_error(&args, &format!("{e:#}"));
         if let Some(label) = ljos_cli::policy_label::as_policy(e) {
-            if label.label == "close-unverified" {
-                eprintln!("{}", label.detail);
-            } else {
-                println!("label {}: {}", label.label, label.detail);
-            }
+            eprintln!("label {}: {}", label.label, label.detail);
             // A seat that was not resolved or is not on the roster, and
             // an unseen mail recipient, are failed commands. 2 is the
             // status a bad invocation already uses, so a script that
-            // checks the status sees the failure. Other labels are notes
-            // and still exit 0.
+            // checks the status sees the failure. A label's stored status
+            // decides whether every other policy result failed.
             if matches!(
                 label.label,
                 "seat-unresolved" | "seat-unlisted" | "recipient-unseen"
