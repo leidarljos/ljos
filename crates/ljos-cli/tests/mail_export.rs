@@ -2,6 +2,11 @@
 //! line, the exact message bytes, and `H` = sha256 of those bytes.
 
 ljos_test_boot::harness!();
+
+#[path = "common/hold_env.rs"]
+mod hold_env;
+use hold_env::HoldEnv;
+
 use chrono::{Duration, TimeZone as _, Utc};
 use ljos_cli::mailbox::config::MailConfig;
 use ljos_cli::mailbox::export::{Approval, Draft};
@@ -38,57 +43,6 @@ fn config() -> &'static MailConfig {
             (dir, config)
         })
         .1
-}
-
-struct HoldEnv {
-    _guard: std::sync::MutexGuard<'static, ()>,
-    _dir: tempfile::TempDir,
-    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
-}
-
-impl HoldEnv {
-    fn isolated() -> Self {
-        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path();
-        let vars = [
-            ("HOME", p.to_path_buf()),
-            ("XDG_CONFIG_HOME", p.join(".config")),
-            ("XDG_DATA_HOME", p.join(".local/share")),
-            ("XDG_STATE_HOME", p.join(".local/state")),
-            ("XDG_CACHE_HOME", p.join(".cache")),
-            ("XDG_RUNTIME_DIR", p.join("run")),
-            ("VISSUE_ROOT", p.join("tracker")),
-        ];
-        let mut saved = Vec::with_capacity(vars.len());
-        for (k, v) in &vars {
-            saved.push((*k, std::env::var_os(k)));
-            #[allow(unused_unsafe)]
-            unsafe {
-                std::env::set_var(k, v);
-            }
-        }
-        Self {
-            _guard: guard,
-            _dir: dir,
-            saved,
-        }
-    }
-}
-
-impl Drop for HoldEnv {
-    fn drop(&mut self) {
-        for (k, prev) in &self.saved {
-            #[allow(unused_unsafe)]
-            unsafe {
-                match prev {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
-    }
 }
 
 fn export_with(

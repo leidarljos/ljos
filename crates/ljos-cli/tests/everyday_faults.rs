@@ -8,6 +8,10 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/hold_env.rs"]
+mod hold_env;
+use hold_env::HoldEnv;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -570,54 +574,6 @@ fn a_half_written_note_queue_names_finish() {
     );
     assert!(joined.contains("is damaged:"), "{said}");
     assert!(joined.contains("so run `ljos finish`."), "{said}");
-}
-
-struct HoldEnv {
-    _guard: std::sync::MutexGuard<'static, ()>,
-    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
-}
-
-impl HoldEnv {
-    fn in_home(root: &std::path::Path) -> Self {
-        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
-        let home = root.join("home");
-        let vars = [
-            ("HOME", home.clone()),
-            ("XDG_CONFIG_HOME", home.join(".config")),
-            ("XDG_DATA_HOME", home.join(".local/share")),
-            ("XDG_STATE_HOME", home.join(".local/state")),
-            ("XDG_CACHE_HOME", home.join(".cache")),
-            ("XDG_RUNTIME_DIR", root.join("run")),
-            ("VISSUE_ROOT", root.join("tracker")),
-        ];
-        let mut saved = Vec::with_capacity(vars.len());
-        for (k, v) in &vars {
-            saved.push((*k, std::env::var_os(k)));
-            #[allow(unused_unsafe)]
-            unsafe {
-                std::env::set_var(k, v);
-            }
-        }
-        Self {
-            _guard: guard,
-            saved,
-        }
-    }
-}
-
-impl Drop for HoldEnv {
-    fn drop(&mut self) {
-        for (k, prev) in &self.saved {
-            #[allow(unused_unsafe)]
-            unsafe {
-                match prev {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
-    }
 }
 
 /// A close with no login terminal stays refused. The line is one sentence
