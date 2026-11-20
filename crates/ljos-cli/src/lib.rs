@@ -23331,6 +23331,9 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
             add_entities(&mut atom, [format!("project:{project}")]);
         }
     }
+    if kind == "preference" || kind == "rule" {
+        add_entities(&mut atom, active_policy_entities());
+    }
     atom
 }
 
@@ -23448,6 +23451,92 @@ fn lesson_project_entity() -> Option<String> {
         cell.set(current);
         out
     })
+}
+
+thread_local! {
+    static POLICY_SCOPE: std::cell::RefCell<Option<PolicyScope>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[derive(Clone, Debug, Default)]
+struct PolicyScope {
+    project: Option<String>,
+    tags: Vec<String>,
+}
+
+/// Restores the previous project and tag scope when dropped.
+pub struct PolicyScopeGuard {
+    previous: Option<PolicyScope>,
+}
+
+impl Drop for PolicyScopeGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        POLICY_SCOPE.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// The project and tags recorded on preferences and rules written while
+/// this value is alive.
+pub struct PolicyHold {
+    _guard: PolicyScopeGuard,
+}
+
+/// Record `project` and `tags` on preferences and rules written before the
+/// returned value drops. An explicit project must be one the tracker knows.
+/// An empty tag is refused. A tag given with no project records the
+/// checkout's project when one resolves. With neither, nothing is recorded,
+/// so a preference or rule written without these flags is unchanged.
+///
+/// # Errors
+///
+/// A tag is empty, or an explicit project is not on the tracker.
+pub fn policy_hold(
+    command: &str,
+    project: Option<String>,
+    tags: Vec<String>,
+) -> Result<PolicyHold> {
+    if tags.iter().any(|tag| tag.trim().is_empty()) {
+        bail!("{command}: --tag needs a name");
+    }
+    let scope = if project.is_none() && tags.is_empty() {
+        None
+    } else {
+        let project = match project {
+            Some(name) => Some(require_known_project(&name)?),
+            None => seat_tracker_project(),
+        };
+        Some(PolicyScope { project, tags })
+    };
+    let previous = POLICY_SCOPE.with(|slot| slot.replace(scope));
+    Ok(PolicyHold {
+        _guard: PolicyScopeGuard { previous },
+    })
+}
+
+pub(crate) fn active_policy_entities() -> Vec<String> {
+    POLICY_SCOPE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|scope| policy_entity_list(scope.project.as_deref(), &scope.tags))
+            .unwrap_or_default()
+    })
+}
+
+/// `project:` and `tag:` entities for a preference or a rule.
+#[must_use]
+pub fn policy_entity_list(project: Option<&str>, tags: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(project) = project.map(str::trim).filter(|name| !name.is_empty()) {
+        out.push(format!("project:{project}"));
+    }
+    for tag in tags {
+        let tag = tag.trim();
+        if !tag.is_empty() {
+            out.push(format!("tag:{tag}"));
+        }
+    }
+    out
 }
 
 static VALIDITY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());

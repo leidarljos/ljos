@@ -17,7 +17,7 @@ use std::time::Duration;
 
 const FINANCE_TICKET: &str = "finance-6mrw";
 const GARDEN_TICKET: &str = "garden-6mrw";
-const VERBS: &str = "The verbs that take -p are calibrate, claims, file, list, ready, remember, search and sitting.";
+const VERBS: &str = "The verbs that take -p are calibrate, claims, file, list, prefer, ready, remember, rule, search and sitting.";
 
 struct Seat {
     root: PathBuf,
@@ -73,6 +73,14 @@ impl Seat {
     }
 
     fn run_with_url(&self, args: &[&str], url: &str) -> Output {
+        self.launch(args, url, &[])
+    }
+
+    fn run_in_project(&self, args: &[&str], project: &str) -> Output {
+        self.launch(args, &self.url, &[("LJOS_PROJECT", project)])
+    }
+
+    fn launch(&self, args: &[&str], url: &str, extra: &[(&str, &str)]) -> Output {
         let home = self.root.join("home");
         #[expect(
             clippy::disallowed_methods,
@@ -103,6 +111,7 @@ impl Seat {
             .env("NO_COLOR", "1")
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
+            .envs(extra.iter().copied())
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")));
@@ -421,6 +430,118 @@ fn remember_records_the_project_on_the_lesson() {
         !posts[1].contains("project:"),
         "a lesson with no -p gained a project tag:\n{}",
         posts[1]
+    );
+}
+
+fn user_rules(seat: &Seat) -> String {
+    std::fs::read_to_string(seat.root.join("home/.config/ljos/user-rules.json")).unwrap_or_default()
+}
+
+#[test]
+fn prefer_and_rule_record_a_project_and_tags_only_when_asked() {
+    let seat = Seat::open();
+    for args in [
+        &["prefer", "Keep the kiln door shut."][..],
+        &[
+            "rule",
+            "cargo publish *",
+            "--verdict",
+            "ask",
+            "--why",
+            "Ask first.",
+        ][..],
+    ] {
+        let out = seat.run_in_project(args, "garden");
+        assert!(out.status.success(), "{args:?}\n{}", said(&out));
+    }
+    {
+        let posts = seat.posts.lock().unwrap();
+        assert_eq!(posts.len(), 2, "{posts:?}");
+        for body in posts.iter() {
+            assert!(
+                !body.contains("project:") && !body.contains("tag:"),
+                "a preference or rule with no flag gained a scope:\n{body}"
+            );
+        }
+    }
+    let user = seat.run_in_project(
+        &[
+            "prefer",
+            "--user",
+            "--why",
+            "The bench asked for it",
+            "Write the kiln notes in the lab book.",
+        ],
+        "garden",
+    );
+    assert!(user.status.success(), "{}", said(&user));
+    assert!(
+        !user_rules(&seat).contains("project:"),
+        "a user rule with no flag gained a project:\n{}",
+        user_rules(&seat)
+    );
+
+    let scoped = seat.run(&[
+        "prefer",
+        "-p",
+        "Finance",
+        "--tag",
+        "release",
+        "Keep the kiln door open.",
+    ]);
+    assert!(scoped.status.success(), "{}", said(&scoped));
+    let ruled = seat.run(&[
+        "rule",
+        "cargo test *",
+        "--verdict",
+        "ask",
+        "--why",
+        "Run the suite first.",
+        "--project",
+        "garden",
+        "--tag",
+        "ci",
+    ]);
+    assert!(ruled.status.success(), "{}", said(&ruled));
+    let posts = seat.posts.lock().unwrap();
+    assert_eq!(posts.len(), 4, "{posts:?}");
+    assert!(
+        posts[2].contains("project:finance") && posts[2].contains("tag:release"),
+        "{}",
+        posts[2]
+    );
+    assert!(
+        posts[3].contains("project:garden") && posts[3].contains("tag:ci"),
+        "{}",
+        posts[3]
+    );
+    drop(posts);
+
+    let user = seat.run(&[
+        "prefer",
+        "--user",
+        "-p",
+        "finance",
+        "--tag",
+        "release",
+        "--why",
+        "The bench asked for it",
+        "Write the kiln logs in the lab book.",
+    ]);
+    assert!(user.status.success(), "{}", said(&user));
+    let rules = user_rules(&seat);
+    assert!(
+        rules.contains("project:finance") && rules.contains("tag:release"),
+        "{rules}"
+    );
+    let unknown = seat.run(&["prefer", "-p", "boats", "Keep the kiln door shut."]);
+    assert_eq!(unknown.status.code(), Some(1), "{}", said(&unknown));
+    let empty = seat.run(&["prefer", "--tag", " ", "Keep the kiln door shut."]);
+    assert_eq!(empty.status.code(), Some(1), "{}", said(&empty));
+    assert!(
+        String::from_utf8_lossy(&empty.stderr).contains("prefer: --tag needs a name"),
+        "{}",
+        said(&empty)
     );
 }
 

@@ -728,6 +728,12 @@ enum Cmd {
         /// unverified. Pass with `--review`.
         #[arg(long, value_name = "ID", requires = "review")]
         keep: Option<String>,
+        /// Record this project on the preference. With `--tag` and no project, the checkout's project is recorded when one resolves. With neither flag nothing is recorded.
+        #[arg(short = 'p', long, value_name = "PROJECT")]
+        project: Option<String>,
+        /// Record this tag on the preference. Repeatable.
+        #[arg(long, value_name = "TAG")]
+        tag: Vec<String>,
     },
     /// Write this seat's memories to a file. The same as `ljos memory export`.
     ///
@@ -2049,6 +2055,12 @@ enum Cmd {
         /// Write the rule into the user config, shared by every seat, instead of this seat's memories.
         #[arg(long)]
         user: bool,
+        /// Record this project on the rule. With `--tag` and no project, the checkout's project is recorded when one resolves. With neither flag nothing is recorded.
+        #[arg(short = 'p', long, value_name = "PROJECT")]
+        project: Option<String>,
+        /// Record this tag on the rule. Repeatable.
+        #[arg(long, value_name = "TAG")]
+        tag: Vec<String>,
     },
     /// List the command guard's rules: verdict, pattern and reason, one a line.
     ///
@@ -5463,6 +5475,8 @@ fn run_command() -> Result<()> {
             sync,
             review,
             keep,
+            project,
+            tag,
         } => {
             // A person-side prefer records the user-rule cutoff. Under a
             // runner it does not, so a hook cannot decide which old rows
@@ -5481,6 +5495,8 @@ fn run_command() -> Result<()> {
                     || !deny_name.is_empty()
                     || !deny_reply_to.is_empty()
                     || !deny_reply_name.is_empty()
+                    || project.is_some()
+                    || !tag.is_empty()
                 {
                     bail!(
                         "prefer: --user --review lists older user rules and takes none of the other flags"
@@ -5507,6 +5523,8 @@ fn run_command() -> Result<()> {
                     || !deny_name.is_empty()
                     || !deny_reply_to.is_empty()
                     || !deny_reply_name.is_empty()
+                    || project.is_some()
+                    || !tag.is_empty()
                 {
                     bail!(
                         "prefer: --review lists older preferences and takes none of the other flags"
@@ -5532,6 +5550,8 @@ fn run_command() -> Result<()> {
                         || !deny_name.is_empty()
                         || !deny_reply_to.is_empty()
                         || !deny_reply_name.is_empty()
+                        || project.is_some()
+                        || !tag.is_empty()
                     {
                         bail!("prefer: --sync pulls and pushes user rules, and takes none of the other flags");
                     }
@@ -5548,13 +5568,15 @@ fn run_command() -> Result<()> {
                     bail!("prefer: a user rule is this user's, not one persona's. Drop --as");
                 }
                 if let Some(id) = forget {
-                    if !text.is_empty() || promote.is_some() {
-                        bail!("prefer: --forget takes the id, not the words or --promote");
+                    if !text.is_empty() || promote.is_some() || project.is_some() || !tag.is_empty()
+                    {
+                        bail!("prefer: --forget takes the id, not the words, --promote, --project or --tag");
                     }
                     let rule = ljos_cli::user_rules::forget(&id)?;
                     ljos_cli::tell!("{}", ljos_cli::user_rules::ack(&rule));
                     return Ok(());
                 }
+                let _hold = ljos_cli::policy_hold("prefer", project, tag)?;
                 let why = why.as_deref().unwrap_or("");
                 let mention = ljos_cli::user_rules::People {
                     handles: deny_mention,
@@ -5595,6 +5617,7 @@ fn run_command() -> Result<()> {
                     "prefer: --why, --promote, --forget, --sync and the mention flags write a user rule. Pass --user"
                 );
             }
+            let _hold = ljos_cli::policy_hold("prefer", project, tag)?;
             let text = join(&text);
             if text.trim().is_empty() {
                 ljos_cli::say!("prefer: the text is empty, so run `ljos prefer \"TEXT\"`.");
@@ -7367,7 +7390,10 @@ fn run_command() -> Result<()> {
             why,
             json,
             user,
+            project,
+            tag,
         } => {
+            let _hold = ljos_cli::policy_hold("rule", project, tag)?;
             if user {
                 let basis = if verdict == "allow" {
                     ljos_cli::allow_basis()?
