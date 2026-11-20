@@ -1639,7 +1639,26 @@ fn write_plain_hash(root: &Path, stem: &str, plain: &str) -> Result<()> {
 /// chunks when no snapshot has been written, otherwise the newest snapshot
 /// and the segments after it, in sequence order. A segment that does not
 /// open ends the read. The same last-line-wins rule as [`read_chunks`].
+///
+/// A view that took a kept plaintext is used only when it hashes to the
+/// `plain.sha256` beside the log. Otherwise, and when there is no hash,
+/// the log is read again with age past every kept plaintext, so a kept
+/// file that was changed or is stale never decides what the log carries.
 fn read_log_view(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Result<LogView> {
+    let hits = OPENED_HITS.with(std::cell::Cell::get);
+    let view = read_log_view_once(root, log_rel, host, scope_name)?;
+    if OPENED_HITS.with(std::cell::Cell::get) == hits {
+        return Ok(view);
+    }
+    let plain = log_header(host, scope_name) + &view.body;
+    if view.stopped.is_none() && plaintext_matches(root, &log_stem_dir(log_rel), &plain) {
+        return Ok(view);
+    }
+    let _fresh = BypassOpened::start();
+    read_log_view_once(root, log_rel, host, scope_name)
+}
+
+fn read_log_view_once(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Result<LogView> {
     let stem = log_stem_dir(log_rel);
     let pieces = sealed_pieces(root, &stem);
     let identities = identities_for_open(scope_name);
@@ -3517,18 +3536,29 @@ fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<Stri
     // is kept as an empty mark; an error is not kept. Only an import
     // keeps one: the doctor's other reads leave the state as they found
     // it, and a mark that cannot be read is opened again.
+    // A kept mark may not match what the ciphertext carries: a reader
+    // counts the marks it took, and [`read_log_view`] checks a view that
+    // took one to the log's plaintext hash and reads it again with age,
+    // past every mark, when they differ. That read replaces the marks.
     let rel = opened_mark_rel(bytes, identities);
-    match read_beneath(&state_base(), &rel) {
-        Ok(Some(kept)) if kept.is_empty() => return Ok(None),
-        Ok(Some(kept)) => {
-            if let Ok(text) = String::from_utf8(kept) {
-                return Ok(Some(text));
+    let fresh = OPENED_BYPASS.with(std::cell::Cell::get);
+    if !fresh {
+        match read_beneath(&state_base(), &rel) {
+            Ok(Some(kept)) if kept.is_empty() => {
+                OPENED_HITS.with(|hits| hits.set(hits.get() + 1));
+                return Ok(None);
             }
+            Ok(Some(kept)) => {
+                if let Ok(text) = String::from_utf8(kept) {
+                    OPENED_HITS.with(|hits| hits.set(hits.get() + 1));
+                    return Ok(Some(text));
+                }
+            }
+            Ok(None) | Err(_) => {}
         }
-        Ok(None) | Err(_) => {}
     }
     let opened = open_sealed_bytes_with_age(bytes, identities)?;
-    if KEEP_OPENED.with(std::cell::Cell::get) {
+    if fresh || KEEP_OPENED.with(std::cell::Cell::get) {
         let body: &[u8] = opened.as_deref().map_or(&[], str::as_bytes);
         let _ = write_private_beneath(&state_base(), &rel, body);
     }
@@ -3539,6 +3569,29 @@ thread_local! {
     /// Whether this thread is inside a write of the sync state, where
     /// [`open_sealed_bytes`] may keep what age gave.
     static KEEP_OPENED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+thread_local! {
+    /// Marks [`open_sealed_bytes`] answered from on this thread.
+    static OPENED_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Set while [`open_sealed_bytes`] runs age past every mark.
+    static OPENED_BYPASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes [`open_sealed_bytes`] run age past every kept mark while the
+/// holder lives, on this thread, and keep what age gave.
+struct BypassOpened(bool);
+
+impl BypassOpened {
+    fn start() -> Self {
+        Self(OPENED_BYPASS.with(|fresh| fresh.replace(true)))
+    }
+}
+
+impl Drop for BypassOpened {
+    fn drop(&mut self) {
+        OPENED_BYPASS.with(|fresh| fresh.set(self.0));
+    }
 }
 
 /// Lets [`open_sealed_bytes`] keep what age gave while the holder lives,

@@ -889,3 +889,71 @@ fn the_kept_plaintexts_are_this_users_alone_and_not_committed() {
     assert!(!tracked.contains("opened"), "{tracked}");
     assert_eq!(git(&w.repo, &["status", "--porcelain"]), "", "{said}");
 }
+
+impl World {
+    /// Rewrite each kept plaintext whose first line starts with `first`.
+    fn tamper_kept(&self, first: &str, edit: impl Fn(&str) -> String) -> usize {
+        let mut changed = 0;
+        for entry in std::fs::read_dir(self.opened_dir()).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            if text.starts_with(first) {
+                std::fs::write(&path, edit(&text)).unwrap();
+                changed += 1;
+            }
+        }
+        changed
+    }
+}
+
+#[test]
+fn a_kept_plaintext_that_names_an_atom_the_log_lacks_does_not_hide_it() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, mut atoms, _) = sealed_log();
+    let ghost = lesson(atoms.len(), LINE);
+    let line = format!("{ghost}\n");
+    assert_eq!(
+        w.tamper_kept("{\"ljos_seg\"", |text| format!("{text}{line}")),
+        1
+    );
+    w.add(ghost.clone());
+    atoms.push(ghost);
+    let said = w.sync();
+    w.forget_opened();
+    let again = w.sync();
+    let taken = w.import_as_peer();
+    assert_eq!(taken.len(), atoms.len(), "{said}{again}");
+    assert_eq!(taken, texts(&atoms), "{said}{again}");
+}
+
+#[test]
+fn a_stale_kept_plaintext_does_not_hide_a_dropped_atom() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, mut atoms, _) = sealed_log();
+    let gone = atoms.remove(0);
+    let id = format!("\"id\":\"{}\"", gone["id"].as_str().unwrap());
+    assert_eq!(
+        w.tamper_kept("{\"ljos_log\"", |text| text
+            .lines()
+            .filter(|line| !line.contains(&id))
+            .map(|line| format!("{line}\n"))
+            .collect()),
+        1
+    );
+    w.pack
+        .atoms
+        .lock()
+        .unwrap()
+        .retain(|atom| atom["id"] != gone["id"]);
+    let said = w.sync();
+    w.forget_opened();
+    let again = w.sync();
+    let taken = w.import_as_peer();
+    let still_there = taken.contains(gone["text"].as_str().unwrap());
+    assert!(!still_there, "{said}{again}");
+    assert_eq!(taken, texts(&atoms), "{said}{again}");
+}
