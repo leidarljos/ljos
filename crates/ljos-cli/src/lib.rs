@@ -75806,6 +75806,38 @@ lesson, due yesterday, seat ada
         }
     }
 
+    struct HoldPersonHome {
+        _env: HoldEnv,
+        _own: crate::proc_tree::HoldOwnHome,
+        _dir: tempfile::TempDir,
+    }
+
+    impl HoldPersonHome {
+        fn new() -> Self {
+            let dir = tempfile::Builder::new()
+                .prefix("ljos-person-home-")
+                .tempdir_in(crate::proc_tree::test_non_temp_root())
+                .unwrap();
+            let home = dir.path().join("u");
+            std::fs::create_dir_all(home.join(".config/ljos")).unwrap();
+            let own = crate::proc_tree::HoldOwnHome::set(&home);
+            let env = HoldEnv::set(&[
+                ("HOME", home.to_str().unwrap()),
+                ("XDG_CONFIG_HOME", home.join(".config").to_str().unwrap()),
+                ("XDG_DATA_HOME", home.join(".local/share").to_str().unwrap()),
+                (
+                    "XDG_STATE_HOME",
+                    home.join(".local/state").to_str().unwrap(),
+                ),
+            ]);
+            Self {
+                _env: env,
+                _own: own,
+                _dir: dir,
+            }
+        }
+    }
+
     /// A runner that could rewrite the person key could choose the
     /// passphrase, and one that could clear the failure count could guess
     /// without a lockout. A write to either, or into their directory, runs
@@ -75814,6 +75846,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn a_write_to_the_person_key_or_its_failure_count_runs_with_its_warning() {
         let _g = env_guard();
+        let _person_home = HoldPersonHome::new();
         let dir = person_key::key_dir().expect("a passwd home");
         let key = dir.join("person-key");
         let fails = dir.join("person-key.failures");
@@ -75927,6 +75960,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn a_tree_above_the_person_key_runs_with_its_warning() {
         let _g = env_guard();
+        let _person_home = HoldPersonHome::new();
         let data = tempfile::tempdir().unwrap();
         let _env = HoldEnv::set(&[
             ("XDG_DATA_HOME", data.path().to_str().unwrap()),
@@ -76049,6 +76083,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn code_that_removes_a_tree_above_the_person_key_runs_with_its_warning() {
         let _g = env_guard();
+        let _person_home = HoldPersonHome::new();
         let data = tempfile::tempdir().unwrap();
         let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
         let dir = person_key::key_dir().expect("a passwd home");
@@ -76102,6 +76137,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn an_aliased_move_says_it_moves_the_tree_above_the_person_key() {
         let _g = env_guard();
+        let _person_home = HoldPersonHome::new();
         let data = tempfile::tempdir().unwrap();
         let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
         let dir = person_key::key_dir().expect("a passwd home");
@@ -76198,6 +76234,11 @@ lesson, due yesterday, seat ada
 
     /// [`assert_uprooted_yet_named`] while the environment lock is held.
     fn assert_uprooted_yet_named_locked(rule: &str, lines: &[String]) {
+        let _person_home = HoldPersonHome::new();
+        assert_uprooted_yet_named_with_home(rule, lines);
+    }
+
+    fn assert_uprooted_yet_named_with_home(rule: &str, lines: &[String]) {
         std::fs::create_dir_all(person_key::key_dir().expect("a passwd home")).unwrap();
         for line in lines {
             assert!(
@@ -76253,24 +76294,31 @@ lesson, due yesterday, seat ada
     /// word counts by its file name, as the key's own files do.
     #[test]
     fn a_tilde_user_path_uproots_above_the_person_key() {
+        let _g = env_guard();
+        let _person_home = HoldPersonHome::new();
         let home = person_key::key_dir()
             .and_then(|d| d.parent()?.parent().map(Path::to_path_buf))
             .expect("a passwd home");
         let user = home.file_name().unwrap().to_string_lossy().into_owned();
-        assert_uprooted(&[
-            format!("rm -rf ~{user}"),
-            format!("rm -rf ~{user}/"),
-            format!("rm -rf ~{user}/.config"),
-            format!("rm -rf ~{user}/.config/ljos"),
-            format!("mv ~{user}/.config /tmp/x"),
-            format!("find ~{user} -delete"),
-        ]);
+        assert_uprooted_yet_named_with_home(
+            "uproots-person-key",
+            &[
+                format!("rm -rf ~{user}"),
+                format!("rm -rf ~{user}/"),
+                format!("rm -rf ~{user}/.config"),
+                format!("rm -rf ~{user}/.config/ljos"),
+                format!("mv ~{user}/.config /tmp/x"),
+                format!("find ~{user} -delete"),
+            ],
+        );
     }
 
     /// A glob that matches a symlink to the home reaches the home, though
     /// the pattern as written names another directory.
     #[test]
     fn a_glob_over_a_symlink_uproots_above_the_person_key() {
+        let _g = env_guard();
+        let _person_home = HoldPersonHome::new();
         let home = person_key::key_dir()
             .and_then(|d| d.parent()?.parent().map(Path::to_path_buf))
             .expect("a passwd home");
@@ -76278,14 +76326,20 @@ lesson, due yesterday, seat ada
         std::fs::create_dir(links.path().join("d")).unwrap();
         std::os::unix::fs::symlink(&home, links.path().join("d").join("h")).unwrap();
         let l = links.path().display();
-        assert_uprooted(&[
-            format!("rm -rf {l}/d/h*"),
-            format!("rm -rf {l}/d/?/"),
-            format!("rm -rf {l}/*/h"),
-            format!("mv {l}/d/* /tmp/x"),
-            format!("find {l}/d/h* -delete"),
-        ]);
-        assert_uprooted_yet_named("changes-person-key", &[format!("rm -rf {l}/d/[h]/.config")]);
+        assert_uprooted_yet_named_with_home(
+            "uproots-person-key",
+            &[
+                format!("rm -rf {l}/d/h*"),
+                format!("rm -rf {l}/d/?/"),
+                format!("rm -rf {l}/*/h"),
+                format!("mv {l}/d/* /tmp/x"),
+                format!("find {l}/d/h* -delete"),
+            ],
+        );
+        assert_uprooted_yet_named_with_home(
+            "changes-person-key",
+            &[format!("rm -rf {l}/d/[h]/.config")],
+        );
     }
 
     /// `du` never writes, with any flags or a glob. `wc`, `stat`, `ls`,
@@ -76295,6 +76349,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn read_only_tools_over_globs_are_not_refused() {
         let _g = env_guard();
+        let _person_home = HoldPersonHome::new();
         let key = person_key::key_dir().expect("a passwd home");
         std::fs::create_dir_all(&key).unwrap();
         let links = tempfile::tempdir().unwrap();
@@ -76396,6 +76451,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn removing_a_tree_beside_the_person_key_still_passes() {
         let _g = env_guard();
+        let _person_home = HoldPersonHome::new();
         std::fs::create_dir_all(person_key::key_dir().expect("a passwd home")).unwrap();
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project.path().join("build")).unwrap();
@@ -76448,6 +76504,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn every_route_to_the_person_key_directory_names_its_rule() {
         let _g = env_guard();
+        let _person_home = HoldPersonHome::new();
         let dir = person_key::key_dir().expect("a passwd home");
         std::fs::create_dir_all(&dir).unwrap();
         let config = dir.parent().unwrap().to_path_buf();
@@ -76531,19 +76588,19 @@ lesson, due yesterday, seat ada
     #[test]
     fn a_change_to_the_kept_prompt_or_its_directory_runs_with_its_warning() {
         let _g = env_guard();
-        let prev = std::env::var_os("XDG_RUNTIME_DIR");
-        // SAFETY: under env_guard, and restored below.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000") };
+        let rt = tempfile::tempdir().unwrap();
+        let r = rt.path().display();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", rt.path().to_str().unwrap())]);
         assert_runs_naming(
             "changes-kept-prompt",
             &[
-                "mv /tmp/p /run/user/1000/ljos/latest-prompt".into(),
+                format!("mv /tmp/p {r}/ljos/latest-prompt"),
                 "ln -sf /tmp/p $XDG_RUNTIME_DIR/ljos/latest-prompt.bind".into(),
                 "touch -r /tmp/p ${XDG_RUNTIME_DIR}/ljos/latest-prompt".into(),
-                "mv /run/user/1000/ljos /run/user/1000/ljos.old".into(),
+                format!("mv {r}/ljos {r}/ljos.old"),
                 "rm -rf $XDG_RUNTIME_DIR/ljos/".into(),
                 "ln -s /tmp/fake ${XDG_RUNTIME_DIR}/ljos".into(),
-                "cd /run/user/1000/ljos && printf plant > latest-prompt".into(),
+                format!("cd {r}/ljos && printf plant > latest-prompt"),
                 "cp /tmp/bind ./latest-prompt.bind".into(),
                 "cp /tmp/p $XDG_RUNTIME_DIR/ljos/latest-pr*".into(),
             ],
@@ -76551,31 +76608,27 @@ lesson, due yesterday, seat ada
         let data = tempfile::tempdir().unwrap();
         let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
         assert_eq!(
-            seat_note("mv /tmp/p /run/user/1000/ljos/latest-prompt"),
-            Ok(kept_said("/run/user/1000/ljos/latest-prompt"))
+            seat_note(&format!("mv /tmp/p {r}/ljos/latest-prompt")),
+            Ok(kept_said(&format!("{r}/ljos/latest-prompt")))
         );
         for line in [
-            "cat /run/user/1000/ljos/latest-prompt",
-            "ls $XDG_RUNTIME_DIR/ljos",
-            "cargo test -p ljos latest_prompt",
-            "git -C /home/u/src/ljos status",
+            format!("cat {r}/ljos/latest-prompt"),
+            "ls $XDG_RUNTIME_DIR/ljos".into(),
+            "cargo test -p ljos latest_prompt".into(),
+            "git -C /home/u/src/ljos status".into(),
         ] {
-            assert!(seat_guard(line).is_none(), "refused: {line}");
+            assert!(seat_guard(&line).is_none(), "refused: {line}");
         }
-        let mcp = hook_call(
-            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__write_file","tool_input":{"path":"/run/user/1000/ljos/latest-prompt","content":"it's the person's words"}}"#,
+        let mcp_payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__write_file","tool_input":{{"path":"{r}/ljos/latest-prompt","content":"it's the person's words"}}}}"#
         );
+        let mcp = hook_call(&mcp_payload);
         assert_runs_naming("changes-kept-prompt", std::slice::from_ref(&mcp.cue));
-        let read = hook_call(
-            r#"{"hook_event_name":"PreToolUse","tool_name":"Grep","tool_input":{"path":"/run/user/1000/ljos","pattern":"x"}}"#,
+        let read_payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Grep","tool_input":{{"path":"{r}/ljos","pattern":"x"}}}}"#
         );
+        let read = hook_call(&read_payload);
         assert!(seat_guard(&read.cue).is_none(), "refused: {}", read.cue);
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
-                None => std::env::remove_var("XDG_RUNTIME_DIR"),
-            }
-        }
     }
 
     /// The kept prompt's directory is the one the path names once it is
@@ -76630,24 +76683,34 @@ lesson, due yesterday, seat ada
     #[test]
     fn interpreter_code_that_names_the_kept_prompt_runs_with_its_warning() {
         let _g = env_guard();
-        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        let rt = tempfile::tempdir().unwrap();
+        let r = rt.path().display();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", rt.path().to_str().unwrap())]);
         let environ =
             r#"python3 -c 'import os; open(os.environ["XDG_RUNTIME_DIR"]+"/ljos/p","w")'"#;
         assert_runs_naming(
             "changes-kept-prompt",
             &[
-                r#"python3 -c "open('/run/user/1000/ljos/latest-prompt','w').write('x')""#,
-                environ,
-                r#"perl -e 'open F, ">", "$ENV{XDG_RUNTIME_DIR}/ljos/latest-prompt.bind"'"#,
-                r#"node -e "require('fs').writeFileSync(process.env.XDG_RUNTIME_DIR+'/ljos/x','')""#,
-                r#"ruby -e 'File.write(ENV["XDG_RUNTIME_DIR"] + "/ljos/latest-prompt", "x")'"#,
-                r#"awk 'BEGIN { print "x" > "/run/user/1000/ljos/latest-prompt" }'"#,
-                "python3 - <<'EOF'\nimport os\nos.rename('/tmp/p', '/run/user/1000/ljos/latest-prompt')\nEOF",
-                "git apply <<'EOF'\n--- /dev/null\n+++ b/run/user/1000/ljos/latest-prompt\n@@ -0,0 +1 @@\n+x\nEOF",
-                "patch -p0 <<'EOF'\n--- a\n+++ /run/user/1000/ljos/latest-prompt.bind\nEOF",
-                r#"printf 'import os\nos.remove("/run/user/1000/ljos/latest-prompt")' | python3"#,
-            ]
-            .map(String::from),
+                format!(r#"python3 -c "open('{r}/ljos/latest-prompt','w').write('x')""#),
+                environ.to_string(),
+                r#"perl -e 'open F, ">", "$ENV{XDG_RUNTIME_DIR}/ljos/latest-prompt.bind"'"#
+                    .to_string(),
+                r#"node -e "require('fs').writeFileSync(process.env.XDG_RUNTIME_DIR+'/ljos/x','')""#
+                    .to_string(),
+                r#"ruby -e 'File.write(ENV["XDG_RUNTIME_DIR"] + "/ljos/latest-prompt", "x")'"#
+                    .to_string(),
+                format!(r#"awk 'BEGIN {{ print "x" > "{r}/ljos/latest-prompt" }}'"#),
+                format!(
+                    "python3 - <<'EOF'\nimport os\nos.rename('/tmp/p', '{r}/ljos/latest-prompt')\nEOF"
+                ),
+                format!(
+                    "git apply <<'EOF'\n--- /dev/null\n+++ b{r}/ljos/latest-prompt\n@@ -0,0 +1 @@\n+x\nEOF"
+                ),
+                format!("patch -p0 <<'EOF'\n--- a\n+++ {r}/ljos/latest-prompt.bind\nEOF"),
+                format!(
+                    r#"printf 'import os\nos.remove("{r}/ljos/latest-prompt")' | python3"#
+                ),
+            ],
         );
         let data = tempfile::tempdir().unwrap();
         let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.path().to_str().unwrap())]);
@@ -76679,35 +76742,63 @@ lesson, due yesterday, seat ada
     #[test]
     fn a_file_tool_aimed_at_the_kept_prompt_by_any_key_runs_with_its_warning() {
         let _g = env_guard();
-        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        let rt = tempfile::tempdir().unwrap();
+        let r = rt.path().display();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", rt.path().to_str().unwrap())]);
         let mut cues = Vec::new();
         for payload in [
-            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__move_file","tool_input":{"source":"/tmp/p","destination":"/run/user/1000/ljos/latest-prompt"}}"#,
-            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__write","tool_input":{"target":"/run/user/1000/ljos/latest-prompt.bind","text":"x"}}"#,
-            r#"{"hook_event_name":"PreToolUse","tool_name":"edit","tool_input":{"filePath":"/run/user/1000/ljos/latest-prompt","oldString":"a","newString":"b"}}"#,
-            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__write","tool_input":{"path":"/run/user/1000/ljos/latest-prompt","text":"x"}}"#,
-            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__symlink","tool_input":{"link":"/run/user/1000/ljos","to":"/tmp/fake"}}"#,
-            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__apply","tool_input":{"changes":[{"file":"/run/user/1000/ljos/latest-prompt","text":"x"}]}}"#,
-            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__move_file","tool_input":{"source":"/tmp/p","destination":"/run/user/1000/ljos/x/../latest-prompt"}}"#,
-            r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/notes","content":"x","also":"/run/user/1000/ljos/latest-prompt"}}"#,
-            r#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"preToolUse","tool_name":"mcp_fs_write","tool_input":"{\"dest\":\"/run/user/1000/ljos/latest-prompt\"}"}"#,
+            format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__move_file","tool_input":{{"source":"/tmp/p","destination":"{r}/ljos/latest-prompt"}}}}"#
+            ),
+            format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__write","tool_input":{{"target":"{r}/ljos/latest-prompt.bind","text":"x"}}}}"#
+            ),
+            format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"edit","tool_input":{{"filePath":"{r}/ljos/latest-prompt","oldString":"a","newString":"b"}}}}"#
+            ),
+            format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__write","tool_input":{{"path":"{r}/ljos/latest-prompt","text":"x"}}}}"#
+            ),
+            format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__symlink","tool_input":{{"link":"{r}/ljos","to":"/tmp/fake"}}}}"#
+            ),
+            format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__apply","tool_input":{{"changes":[{{"file":"{r}/ljos/latest-prompt","text":"x"}}]}}}}"#
+            ),
+            format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__move_file","tool_input":{{"source":"/tmp/p","destination":"{r}/ljos/x/../latest-prompt"}}}}"#
+            ),
+            format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{{"file_path":"/tmp/notes","content":"x","also":"{r}/ljos/latest-prompt"}}}}"#
+            ),
+            format!(
+                r#"{{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"preToolUse","tool_name":"mcp_fs_write","tool_input":"{{\"dest\":\"{r}/ljos/latest-prompt\"}}"}}"#
+            ),
         ] {
-            cues.push(hook_call(payload).cue);
+            cues.push(hook_call(&payload).cue);
         }
-        let agy = hook_call_as(
-            r#"{"toolCall":{"name":"move_file","args":{"Source":"/tmp/p","Destination":"/run/user/1000/ljos/latest-prompt"}},"conversationId":"c"}"#,
-            Some("PreToolUse"),
+        let agy_payload = format!(
+            r#"{{"toolCall":{{"name":"move_file","args":{{"Source":"/tmp/p","Destination":"{r}/ljos/latest-prompt"}}}},"conversationId":"c"}}"#
         );
+        let agy = hook_call_as(&agy_payload, Some("PreToolUse"));
         cues.push(agy.cue);
         assert_runs_naming("changes-kept-prompt", &cues);
         for payload in [
-            r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/run/user/1000/ljos/latest-prompt"}}"#,
-            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__read_text_file","tool_input":{"path":"/run/user/1000/ljos/latest-prompt"}}"#,
-            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__search_files","tool_input":{"path":"/run/user/1000/ljos","pattern":"x"}}"#,
-            r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/notes","content":"the prompt lives in /run/user/1000/ljos/latest-prompt"}}"#,
-            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__move_file","tool_input":{"source":"/tmp/a","destination":"/tmp/b"}}"#,
+            format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{{"file_path":"{r}/ljos/latest-prompt"}}}}"#
+            ),
+            format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__read_text_file","tool_input":{{"path":"{r}/ljos/latest-prompt"}}}}"#
+            ),
+            format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__search_files","tool_input":{{"path":"{r}/ljos","pattern":"x"}}}}"#
+            ),
+            format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{{"file_path":"/tmp/notes","content":"the prompt lives in {r}/ljos/latest-prompt"}}}}"#
+            ),
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__move_file","tool_input":{"source":"/tmp/a","destination":"/tmp/b"}}"#.to_string(),
         ] {
-            let call = hook_call(payload);
+            let call = hook_call(&payload);
             assert_eq!(
                 seat_note(&call.cue).ok().as_deref(),
                 Some(""),
@@ -76751,7 +76842,13 @@ lesson, due yesterday, seat ada
     #[test]
     fn a_tool_call_running_ljos_hook_is_denied() {
         let _g = env_guard();
-        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        let rt = tempfile::tempdir().unwrap();
+        let r = rt.path().display();
+        let data = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", rt.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", data.path().to_str().unwrap()),
+        ]);
         for line in [
             "ljos hook < plant.json",
             "printf '%s' \"$payload\" | ljos hook",
@@ -76765,8 +76862,9 @@ lesson, due yesterday, seat ada
             let rule = seat_guard(line).unwrap_or_else(|| panic!("allowed: {line}"));
             assert!(rule.reason.contains("ljos hook"), "{line}: {}", rule.reason);
         }
+        let cat_prompt = format!("cat {r}/ljos/latest-prompt");
         for line in [
-            "cat /run/user/1000/ljos/latest-prompt",
+            cat_prompt.as_str(),
             "ljos status",
             "ljos recall hook",
             "ljos doctor",
@@ -76783,7 +76881,12 @@ lesson, due yesterday, seat ada
     #[test]
     fn the_bare_kept_prompt_name_is_named_only_to_writers() {
         let _g = env_guard();
-        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        let rt = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", rt.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", data.path().to_str().unwrap()),
+        ]);
         for line in [
             "git grep latest-prompt",
             "git log -S latest-prompt",
@@ -78711,6 +78814,21 @@ lesson, due yesterday, seat ada
         }
         let _g = env_guard();
         let (root, _home, _env) = policyd_tree("policyd-program");
+        let _own = crate::proc_tree::HoldOwnHome::set(_home.path());
+        let _xdg = HoldEnv::set(&[
+            (
+                "XDG_CONFIG_HOME",
+                _home.path().join(".config").to_str().unwrap(),
+            ),
+            (
+                "XDG_DATA_HOME",
+                _home.path().join(".local/share").to_str().unwrap(),
+            ),
+            (
+                "XDG_STATE_HOME",
+                _home.path().join(".local/state").to_str().unwrap(),
+            ),
+        ]);
         let at = Some(root.path());
         std::fs::write(root.path().join("env"), "MODE=test\n").unwrap();
         let line = "set -a && . ./env && set +a && python3 - <<'EOF'\n\
@@ -81108,30 +81226,33 @@ lesson, due yesterday, seat ada
     #[test]
     fn a_loop_over_sitting_records_reads_them_unless_its_body_writes() {
         let _g = env_guard();
-        // The lines name the uid 1000 runtime directory, as the sibling
-        // tests do; the guard knows only the runtime directories of the
-        // process, so a runner under another uid has to be told.
-        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        let rt = tempfile::tempdir().unwrap();
+        let r = rt.path().display();
+        let data = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", rt.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", data.path().to_str().unwrap()),
+        ]);
         for line in [
-            "for f in /run/user/1000/ljos/hold-* ; do [ -f \"$f\" ] && grep -l vdjv \"$f\"; done",
-            "ls -t \"/run/user/1000/ljos\" | head -8; for f in $(ls -t /run/user/1000/ljos/hold-* | head -4); do echo \"== $f\"; cat \"$f\"; done",
-            "d=$(ls -d /run/user/1000/ljos* 2>/dev/null | head -3); echo \"$d\"; for f in /run/user/1000/ljos/hold-* ; do [ -f \"$f\" ] && grep -l vdjv \"$f\"; done 2>/dev/null | head; grep -rl vdjv /run/user/1000/ljos 2>/dev/null | head -3",
-            "d=\"$(ls -d /run/user/1000/ljos)\"; echo \"$d\"",
+            format!("for f in {r}/ljos/hold-* ; do [ -f \"$f\" ] && grep -l vdjv \"$f\"; done"),
+            format!("ls -t \"{r}/ljos\" | head -8; for f in $(ls -t {r}/ljos/hold-* | head -4); do echo \"== $f\"; cat \"$f\"; done"),
+            format!("d=$(ls -d {r}/ljos* 2>/dev/null | head -3); echo \"$d\"; for f in {r}/ljos/hold-* ; do [ -f \"$f\" ] && grep -l vdjv \"$f\"; done 2>/dev/null | head; grep -rl vdjv {r}/ljos 2>/dev/null | head -3"),
+            format!("d=\"$(ls -d {r}/ljos)\"; echo \"$d\""),
         ] {
-            assert!(!writes_hold_record(line, None), "{line}");
-            assert_eq!(seat_note(line).ok().as_deref(), Some(""), "{line}");
+            assert!(!writes_hold_record(&line, None), "{line}");
+            assert_eq!(seat_note(&line).ok().as_deref(), Some(""), "{line}");
         }
         let writes = [
-            "for f in /run/user/1000/ljos/hold-*; do rm \"$f\"; done",
-            "for f in /run/user/1000/ljos/hold-*; do echo x > \"${f}\"; done",
-            "for f in $(ls /run/user/1000/ljos/hold-*); do cp /tmp/x \"$f\"; done",
-            "d=$(ls /tmp); cp /tmp/x /run/user/1000/ljos/hold-1",
-            "rm -f $(ls -d /run/user/1000/ljos/hold-*)",
+            format!("for f in {r}/ljos/hold-*; do rm \"$f\"; done"),
+            format!("for f in {r}/ljos/hold-*; do echo x > \"${{f}}\"; done"),
+            format!("for f in $(ls {r}/ljos/hold-*); do cp /tmp/x \"$f\"; done"),
+            format!("d=$(ls /tmp); cp /tmp/x {r}/ljos/hold-1"),
+            format!("rm -f $(ls -d {r}/ljos/hold-*)"),
         ];
-        for line in writes {
+        for line in &writes {
             assert!(writes_hold_record(line, None), "{line}");
         }
-        assert_runs_naming("changes-kept-prompt", &writes.map(String::from));
+        assert_runs_naming("changes-kept-prompt", &writes);
     }
 
     /// prefixes come off with their flags and the values those flags take,

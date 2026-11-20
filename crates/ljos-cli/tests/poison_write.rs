@@ -113,7 +113,7 @@ fn serve(atoms: Arc<Mutex<Vec<serde_json::Value>>>, asks: bool) -> String {
 struct Seat {
     home: tempfile::TempDir,
     run: tempfile::TempDir,
-    installed: tempfile::TempDir,
+    installed: runner::RunnerDir,
     url: String,
     atoms: Arc<Mutex<Vec<serde_json::Value>>>,
     asks: bool,
@@ -241,6 +241,7 @@ impl Seat {
         if self.asks {
             cmd.env("PACKSET_TOKEN", TOKEN);
         }
+        self.installed.env(cmd);
     }
 }
 

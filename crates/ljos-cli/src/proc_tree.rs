@@ -722,10 +722,42 @@ fn hook_name(component: &str) -> Option<&'static str> {
         .map(|(_, runner)| *runner)
 }
 
+#[cfg(test)]
+static TEST_OWN_HOME: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) struct HoldOwnHome(Option<std::path::PathBuf>);
+
+#[cfg(test)]
+impl HoldOwnHome {
+    pub(crate) fn set(path: &std::path::Path) -> Self {
+        crate::require_env_lock();
+        let mut guard = TEST_OWN_HOME.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = guard.replace(path.to_path_buf());
+        Self(prev)
+    }
+}
+
+#[cfg(test)]
+impl Drop for HoldOwnHome {
+    fn drop(&mut self) {
+        let mut guard = TEST_OWN_HOME.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = self.0.take();
+    }
+}
+
 /// The home this user's passwd entry names. A tool call sets `HOME` for
 /// whatever it starts, but cannot change this.
 #[must_use]
 pub fn own_home() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = TEST_OWN_HOME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return Some(home);
+    }
     use std::os::unix::ffi::OsStrExt as _;
     let mut buf = vec![0u8; 1024];
     loop {
@@ -2075,6 +2107,21 @@ pub fn prompt_not_person_label(why: &str) -> String {
 }
 
 #[cfg(test)]
+pub(crate) fn test_non_temp_root() -> std::path::PathBuf {
+    let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-roots");
+    if !crate::bookkeep::path_is_temp(Some(&target)) {
+        std::fs::create_dir_all(&target).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
+        }
+        return std::fs::canonicalize(&target).unwrap_or(target);
+    }
+    own_home().expect("this user's passwd entry names a home")
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2186,7 +2233,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-roots-")
-            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .tempdir_in(test_non_temp_root())
             .unwrap();
         let home = base.path().join("u");
         let person = Person::new(&SystemAccounts);
@@ -2239,7 +2286,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-above-")
-            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .tempdir_in(test_non_temp_root())
             .unwrap();
         let home = base.path().join("u");
         let store = PathBuf::from(NIX_STORE);
@@ -2307,7 +2354,7 @@ mod tests {
         use std::os::unix::fs::MetadataExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-swap-")
-            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .tempdir_in(test_non_temp_root())
             .unwrap();
         let home = std::fs::canonicalize(base.path()).unwrap().join("u");
         let person = Person::new(&SystemAccounts);
@@ -2346,7 +2393,7 @@ mod tests {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         let base = tempfile::Builder::new()
             .prefix(".ljos-exe-")
-            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .tempdir_in(test_non_temp_root())
             .unwrap();
         let home = base.path().join("u");
         let bin = home.join(".local/bin");
@@ -2372,7 +2419,7 @@ mod tests {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         let base = tempfile::Builder::new()
             .prefix(".ljos-runtime-")
-            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .tempdir_in(test_non_temp_root())
             .unwrap();
         let home = base.path().join("u");
         let away = tempfile::tempdir().unwrap();
@@ -2434,7 +2481,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-store-")
-            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .tempdir_in(test_non_temp_root())
             .unwrap();
         let store = base.path().join("store");
         let bin = store.join("0c9yapqd0b8y4mj5xj7mrpmhy3l5ykh8-claude-code-2.0.1/bin");
@@ -2573,7 +2620,7 @@ mod tests {
 
         let base = tempfile::Builder::new()
             .prefix(".ljos-group-")
-            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .tempdir_in(test_non_temp_root())
             .unwrap();
         let home = base.path().join("u");
         let bin = home.join(".local/bin");

@@ -182,6 +182,7 @@ fn prompt_through(home: &Home, hook: &str, session: &str, prompt: &str) -> Strin
     let mut cmd = Command::new(&runner);
     cmd.args(["-c", "\"$@\"; exit $?", "claude", "/bin/sh", "-c", hook]);
     home.env(&mut cmd, home.dir.path());
+    installed.env(&mut cmd);
     let said = run(cmd, Some(&payload));
     assert!(said.status.success(), "{hook}: {}", text(&said));
     // A hook with nothing to say prints nothing.
