@@ -154,6 +154,9 @@ The printed row is:
 ..
    # proseguard:on
 
+A claim the tracker did not answer for is not a claim, whether its wait ran out or a tool call's bound stopped ``vissue`` with ``vissue timed out``.
+``ljos claim`` exits 1 and names ``ljos claim ID`` again, and a claim a note retries stays pending until the tracker records it.
+
 A missing habitat binary
 ========================
 

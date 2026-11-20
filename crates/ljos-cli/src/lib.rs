@@ -40788,7 +40788,15 @@ fn stamp_tracker_claim(node: &str, assignee: &str, force: bool) -> Result<Said> 
 }
 
 fn stamp_tracker(node: &str, assignee: &str) -> Result<Option<String>> {
-    if run_captured("vissue", &["show", node, "--json"]).is_err() {
+    // A node the tracker does not know is not an issue. A tracker that did
+    // not answer may well know it, so that is no claim at all.
+    if let Err(e) = run_captured("vissue", &["show", node, "--json"]) {
+        let text = format!("{e:#}");
+        if capture_timed_out(&e) {
+            bail!(
+                "claim: the claim graph took {node} but the tracker did not answer, so {node} was not recorded under {assignee}; run `ljos claim {node}` again ({text})"
+            );
+        }
         return Ok(None);
     }
     let claimed = match stamp_tracker_claim(node, assignee, false) {
@@ -54684,9 +54692,22 @@ pub fn run_captured_as(
     Ok(said)
 }
 
+/// A child [`run_captured_within`] stopped at its deadline, or did not
+/// start because the tool budget was already spent. Whatever the child was
+/// asked may or may not have happened, so it is not a refusal.
+#[derive(Debug)]
+pub(crate) struct CallTimedOut(String);
+
+impl std::fmt::Display for CallTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CallTimedOut {}
+
 fn capture_timed_out(err: &anyhow::Error) -> bool {
-    let text = err.to_string();
-    call_deadline::stalled(&text) || text.contains(" timed out")
+    err.chain().any(|cause| cause.is::<CallTimedOut>())
 }
 
 /// Run `cmd` and stop it if it is still going after `deadline`.
@@ -54904,7 +54925,7 @@ fn run_captured_within(
     if tool_bound::armed() {
         tool_bound::note(bin);
         if let Some(line) = tool_bound::failure() {
-            bail!(line);
+            return Err(CallTimedOut(line).into());
         }
     }
     let cap = call_deadline::timeout();
@@ -54991,7 +55012,7 @@ fn run_captured_within(
                     if tool_bound::armed() {
                         let line = format!("{bin} timed out");
                         tool_bound::mark_failed(line.clone());
-                        bail!(line);
+                        return Err(CallTimedOut(line).into());
                     }
                     if retryable && retries < 2 {
                         if tracker_note_already_written(args) {
@@ -55030,7 +55051,7 @@ fn run_captured_within(
                     if capped {
                         call_deadline::stop(&line);
                     }
-                    bail!(line);
+                    return Err(CallTimedOut(line).into());
                 }
                 Ok(None) => {
                     call_deadline::note_waiting(&waited, started, &mut noted);
@@ -85365,6 +85386,38 @@ lesson, due yesterday, seat ada
             !calls.contains("claim"),
             "asked to claim a non-issue: {calls}"
         );
+    }
+
+    /// A tool call's bound stops a slow `vissue show` with `vissue timed
+    /// out`, which says nothing of an answer. It is still no answer.
+    #[test]
+    fn a_bounded_show_that_times_out_is_no_answer() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_guard();
+        tool_bound::disarm();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("calls.log");
+        let fake = dir.path().join("vissue");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\n[ \"$1\" = show ] && exec sleep 30\necho claimed\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bound = tool_bound::arm(std::time::Duration::from_millis(400));
+        let said = with_fake_on_path(dir.path(), || stamp_tracker("proj-1a2b", "alice"));
+        drop(bound);
+        let err = said.expect_err("a show the bound stopped is not a node the tracker lacks");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("vissue timed out") && text.contains("did not answer"),
+            "{text}"
+        );
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(!calls.contains("claim"), "{calls}");
     }
 
     #[test]
