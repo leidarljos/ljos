@@ -450,12 +450,41 @@ fn a_busy_remember_retries_then_says_nothing_was_stored() {
     assert!(!queued.contains("kiln dries slowly"), "{queued}");
 }
 
+/// A port on 127.0.0.1 that refuses connections and that no other socket
+/// takes while the returned socket is open: it is bound and never listens.
+fn refused_port() -> (std::os::fd::OwnedFd, u16) {
+    use std::os::fd::FromRawFd as _;
+    let len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    // SAFETY: the socket is owned by the `OwnedFd` from here on, and both
+    // calls get a `sockaddr_in` of the length they are told.
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+        assert!(fd >= 0, "socket: {}", std::io::Error::last_os_error());
+        let socket = std::os::fd::OwnedFd::from_raw_fd(fd);
+        let mut addr: libc::sockaddr_in = std::mem::zeroed();
+        #[cfg(target_os = "macos")]
+        {
+            addr.sin_len = len as u8;
+        }
+        addr.sin_family = libc::AF_INET as libc::sa_family_t;
+        addr.sin_addr.s_addr = u32::from(std::net::Ipv4Addr::LOCALHOST).to_be();
+        let at = std::ptr::addr_of_mut!(addr).cast::<libc::sockaddr>();
+        assert_eq!(
+            libc::bind(fd, at, len),
+            0,
+            "bind: {}",
+            std::io::Error::last_os_error()
+        );
+        let mut got = len;
+        assert_eq!(libc::getsockname(fd, at, &mut got), 0);
+        (socket, u16::from_be(addr.sin_port))
+    }
+}
+
 #[test]
 fn a_refused_pack_search_is_one_line_and_exits_75() {
     let world = World::new();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    let (_closed, port) = refused_port();
     let url = format!("http://127.0.0.1:{port}");
     let out = world.ljos(
         &["search", "glaze"],
