@@ -431,14 +431,24 @@ fn canonical_existing_prefix(path: &Path) -> PathBuf {
     loop {
         if let Ok(mut real) = std::fs::canonicalize(&cur) {
             for name in missing.iter().rev() {
-                real.push(name);
+                if name == "." {
+                    continue;
+                }
+                if name == ".." {
+                    real.pop();
+                } else {
+                    real.push(name);
+                }
             }
             return real;
         }
-        let Some(name) = cur.file_name().map(|name| name.to_os_string()) else {
-            return path.to_path_buf();
+        let seg = match cur.components().next_back() {
+            Some(std::path::Component::Normal(name)) => name.to_os_string(),
+            Some(std::path::Component::ParentDir) => std::ffi::OsString::from(".."),
+            Some(std::path::Component::CurDir) => std::ffi::OsString::from("."),
+            _ => return path.to_path_buf(),
         };
-        missing.push(name);
+        missing.push(seg);
         if !cur.pop() {
             return path.to_path_buf();
         }
@@ -458,20 +468,45 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+fn per_session_tmpdir(raw: &std::ffi::OsStr, passwd_home: Option<&Path>) -> Option<PathBuf> {
+    if raw.is_empty() {
+        return None;
+    }
+    let candidate = Path::new(raw);
+    if !candidate.is_absolute() {
+        return None;
+    }
+    let resolved = canonical_existing_prefix(candidate);
+    if resolved.components().count() < 3 {
+        return None;
+    }
+    if let Some(pw) = passwd_home {
+        let pw = canonical_existing_prefix(pw);
+        if pw.starts_with(&resolved) {
+            return None;
+        }
+    }
+    Some(resolved)
+}
+
 pub(crate) fn temp_roots() -> Vec<PathBuf> {
     #[cfg(test)]
     if let Some(roots) = TEST_TEMP_ROOTS.with(|r| r.borrow().clone()) {
         return roots;
     }
     let mut roots = vec![
+        #[cfg(not(unix))]
         std::env::temp_dir(),
         PathBuf::from("/tmp"),
         PathBuf::from("/var/tmp"),
         PathBuf::from("/private/tmp"),
         PathBuf::from("/dev/shm"),
     ];
-    if let Some(tmp) = std::env::var_os("TMPDIR").filter(|t| !t.is_empty()) {
-        roots.push(PathBuf::from(tmp));
+    if let Some(tmp) = std::env::var_os("TMPDIR")
+        .as_deref()
+        .and_then(|t| per_session_tmpdir(t, crate::proc_tree::own_home().as_deref()))
+    {
+        roots.push(tmp);
     }
     roots
         .into_iter()
@@ -631,5 +666,67 @@ mod temp_path_tests {
         let reason = guard_off_reason().unwrap();
         assert!(!reason.contains('\n'), "{reason:?}");
         assert!(reason.contains("\\nrun-this"), "{reason}");
+    }
+
+    #[test]
+    fn tmpdir_temp_home_classification_table() {
+        let _env = crate::test_env_lock();
+        let _own = crate::proc_tree::HoldOwnHome::set(Path::new("/home/person"));
+        let cases: &[(&str, Option<&str>, bool)] = &[
+            ("/home/person", Some("/home"), false),
+            ("/home/person", Some("/home/person"), false),
+            ("/home/person/work", Some("/home/person"), false),
+            ("/home/person", Some("/tmp/x"), false),
+            ("/tmp/x/u", Some("/tmp/x"), true),
+            ("/home/person", Some("/var/folders/ab/cdef1234/T/x"), false),
+            (
+                "/var/folders/ab/cdef1234/T/x/u",
+                Some("/var/folders/ab/cdef1234/T/x"),
+                true,
+            ),
+            ("/home/person", Some("/tmp"), false),
+            ("/home/person", None, false),
+            ("/home/person/work", Some("."), false),
+            ("/home/person/work", Some("work"), false),
+        ];
+        for &(home, tmpdir, expected) in cases {
+            crate::with_env_mutation(|| unsafe {
+                std::env::set_var("HOME", home);
+                match tmpdir {
+                    Some(val) => std::env::set_var("TMPDIR", val),
+                    None => std::env::remove_var("TMPDIR"),
+                }
+            });
+            assert_eq!(
+                temp_home().is_some(),
+                expected,
+                "HOME={home:?} TMPDIR={tmpdir:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_existing_prefix_resolves_dot_and_parent_in_missing_tail() {
+        let _env = crate::test_env_lock();
+        let _own = crate::proc_tree::HoldOwnHome::set(Path::new("/home/person"));
+        let tmp = std::fs::canonicalize("/tmp").unwrap_or_else(|_| PathBuf::from("/tmp"));
+        let collapsed = canonical_existing_prefix(Path::new("/tmp/missing-ljos-a/./b/../c"));
+        assert_eq!(collapsed, tmp.join("missing-ljos-a/c"));
+        assert!(
+            !path_is_temp(Some(Path::new("/tmp/missing-ljos-a/../../etc/passwd"))),
+            "missing tail with .. escaping /tmp must not count as temp"
+        );
+        assert!(
+            path_is_temp(Some(Path::new("/tmp/missing-ljos-a/./sub"))),
+            "missing tail with . inside /tmp must stay temp"
+        );
+        assert!(
+            per_session_tmpdir(
+                std::ffi::OsStr::new("/tmp/missing-ljos-a/../.."),
+                Some(Path::new("/home/person"))
+            )
+            .is_none(),
+            "TMPDIR collapsing to / via .. must be rejected"
+        );
     }
 }

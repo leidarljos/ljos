@@ -11,12 +11,14 @@ use std::process::Command;
 pub struct RunnerDir {
     _root: tempfile::TempDir,
     passwd_home: PathBuf,
+    #[allow(dead_code)]
     bin_dir: PathBuf,
     #[cfg(target_os = "linux")]
     preload: PathBuf,
 }
 
 impl RunnerDir {
+    #[allow(dead_code)]
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.bin_dir
@@ -208,6 +210,7 @@ pub fn install_dir() -> RunnerDir {
 /// Copy `/bin/sh` to `path` unless it is there, and wait until it runs.
 /// A test thread that forked while the copy was open holds it for writing
 /// until that child execs, and an exec meanwhile fails as text file busy.
+#[allow(dead_code)]
 pub fn runner_at(path: &Path) {
     if path.exists() {
         return;

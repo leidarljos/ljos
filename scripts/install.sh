@@ -1302,15 +1302,83 @@ fi
 
 # A temporary HOME is a test sandbox to ljos: memory stays off there, and
 # this install does not leave a writer running. Say so in one line.
-tmp_root=${TMPDIR:-/nonexistent}
-home_real=$(cd "$HOME" && pwd -P)
+resolve_path() {
+  rp_in=$1
+  [ -n "$rp_in" ] || return 0
+  rp_out=$(cd -P -- "$rp_in" 2>/dev/null && pwd -P || printf '')
+  if [ -z "$rp_out" ]; then
+    case $rp_in in
+      /*) rp_cur=$rp_in ;;
+      *) rp_cur=$PWD/$rp_in ;;
+    esac
+    rp_tail=
+    while [ ! -d "$rp_cur" ] && [ -n "$rp_cur" ] && [ "$rp_cur" != / ]; do
+      rp_base=${rp_cur##*/}
+      rp_cur=${rp_cur%/*}
+      [ -n "$rp_cur" ] || rp_cur=/
+      rp_tail=$rp_base${rp_tail:+/$rp_tail}
+    done
+    rp_out=$(cd -P -- "$rp_cur" 2>/dev/null && pwd -P || printf '%s' "$rp_cur")
+    rp_ifs=$IFS
+    IFS=/
+    set -f
+    # shellcheck disable=SC2086
+    for rp_seg in $rp_tail; do
+      case $rp_seg in
+        ""|".") ;;
+        "..")
+          case $rp_out in
+            /|/*/*) rp_out=${rp_out%/*}; [ -n "$rp_out" ] || rp_out=/ ;;
+            /*) rp_out=/ ;;
+          esac
+          ;;
+        *) rp_out=${rp_out%/}/$rp_seg ;;
+      esac
+    done
+    set +f
+    IFS=$rp_ifs
+  fi
+  while [ "${rp_out%/}" != "$rp_out" ] && [ -n "${rp_out%/}" ]; do rp_out=${rp_out%/}; done
+  printf '%s' "$rp_out"
+}
+home_real=$(resolve_path "$HOME")
 root=
 case "${home_real}/" in
   /tmp/*) root=/tmp ;;
   /var/tmp/*) root=/var/tmp ;;
   /private/tmp/*) root=/private/tmp ;;
   /dev/shm/*) root=/dev/shm ;;
-  "${tmp_root%/}"/*) root=${tmp_root%/} ;;
+  *)
+    case ${TMPDIR-} in
+      /*)
+        t=$(resolve_path "$TMPDIR")
+        pw_home=
+        if command -v getent >/dev/null 2>&1 && command -v id >/dev/null 2>&1; then
+          pw=$(getent passwd "$(id -u)" 2>/dev/null || true)
+          rest=$pw
+          i=0
+          while [ "$i" -lt 5 ]; do
+            rest=${rest#*:}
+            i=$((i + 1))
+          done
+          pw_home=${rest%%:*}
+        fi
+        pw_real=$(resolve_path "$pw_home")
+        case $t in
+          /*/*)
+            case ${pw_real-} in
+              "$t"|"$t"/*) ;;
+              *)
+                case "${home_real}/" in
+                  "$t"/*) root=$t ;;
+                esac
+                ;;
+            esac
+            ;;
+        esac
+        ;;
+    esac
+    ;;
 esac
 if [ -n "$root" ]; then
   say "memory and the command guard are off because the home is under ${root} (${home_real}); set HOME to a directory outside ${root}"
