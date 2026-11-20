@@ -76,6 +76,18 @@ impl Pty {
         cmd.stdin(Self::stdio_dup(fd));
     }
 
+    /// Set terminal size so TIOCGWINSZ in the child sees these dimensions.
+    pub fn set_winsize(&self, cols: u16, rows: u16) {
+        // SAFETY: ioctl writes the provided winsize to the open pty master.
+        unsafe {
+            let mut ws: libc::winsize = std::mem::zeroed();
+            ws.ws_col = cols;
+            ws.ws_row = rows;
+            let rc = libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws);
+            assert_eq!(rc, 0, "TIOCSWINSZ: {}", std::io::Error::last_os_error());
+        }
+    }
+
     /// A copy of `fd` owned by a `Stdio`. The original stays open.
     fn stdio_dup(fd: i32) -> Stdio {
         // SAFETY: `fd` is open. `dup` returns a new descriptor, which

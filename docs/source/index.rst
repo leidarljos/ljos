@@ -94,7 +94,9 @@ First commands
      id a6ae2751, next review 2026-11-12 21:40 +00:00
    saved as a standing lesson; run `ljos search "QUERY"` to read it
    $ ljos search "lexical default"
-   matched by words (encoder not installed), so read https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`.
+   matched by words (encoder not installed), so read
+   https://leidarljos.github.io/ljos/getting-started.html#install or run
+   `ljos doctor`.
    shown 1 of 1.
    The first row is the closest match.
 

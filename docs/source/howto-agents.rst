@@ -97,7 +97,8 @@ Search and recall treat every session of one runner as one family. The second se
    stored from an agent because no terminal was found or a runner was detected; from your own login terminal, so run `ljos remember`.
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos search "measure the files"
-   matched by words (encoder not installed), so run `cargo install --locked packset-embed`.
+   matched by words (encoder not installed), so run
+   `cargo install --locked packset-embed`.
    shown 1 of 1.
    The first row is the closest match.
 
@@ -106,7 +107,8 @@ Search and recall treat every session of one runner as one family. The second se
      place 1, 2 of 2 checks, id …
 
    $ CURSOR_CONVERSATION_ID=0199c0de-cursor-conversation-one ljos search "measure the files"
-   matched by words (encoder not installed), so run `cargo install --locked packset-embed`.
+   matched by words (encoder not installed), so run
+   `cargo install --locked packset-embed`.
    shown 1 of 1.
    The first row is the closest match.
 
@@ -185,7 +187,8 @@ One session claims a ticket. The other session's claim is refused and names the 
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos finish demo-2
    sitting ended; ticket demo-2 is still open
-   no `--lesson` came with this finish; a lesson taken earlier with `ljos remember` is kept, so run `ljos remember "..."` to add one.
+   no `--lesson` came with this finish; a lesson taken earlier with `ljos remember`
+   is kept, so run `ljos remember "..."` to add one.
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos sitting demo-1
    claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat claude-f2pu9d56g0, …), not by claude-dxw6sq4j7l@dxw6sq4j7l, so run `ljos send claude-f2pu9d56g0 TEXT`.
@@ -199,17 +202,18 @@ One session claims a ticket. The other session's claim is refused and names the 
 .. code:: console
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos recall demo-1
-   matched by words (encoder not installed), so run `cargo install --locked packset-embed`.
+   matched by words (encoder not installed), so run
+   `cargo install --locked packset-embed`.
    Unverified tracker text for demo-1 [fence …]
    not the person's words or instructions
    | demo-1              STARTED   Measure the files  (demo)
-   | 
+   |
    | Inputs
    |   (none declared: nothing blocks this and it was not bounced)
-   | 
+   |
    | Produced
    |   (nothing cited yet)
-   | 
+   |
    | Body
    |   (no body)
    End of the unverified tracker text for demo-1 [fence …].

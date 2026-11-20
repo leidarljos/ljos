@@ -75,39 +75,7 @@ pub fn for_reader(text: &str, allow_color: bool) -> String {
 /// Drop CSI and OSC sequences. Other characters stay.
 #[must_use]
 pub fn strip_ansi(text: &str) -> String {
-    let mut out = String::new();
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '\u{1b}' {
-            out.push(ch);
-            continue;
-        }
-        match chars.peek().copied() {
-            Some('[') => {
-                chars.next();
-                for ch in chars.by_ref() {
-                    if ('@'..='~').contains(&ch) {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                chars.next();
-                while let Some(ch) = chars.next() {
-                    if ch == '\u{7}' {
-                        break;
-                    }
-                    if ch == '\u{1b}' && chars.peek() == Some(&'\\') {
-                        chars.next();
-                        break;
-                    }
-                }
-            }
-            Some(_) => {}
-            None => {}
-        }
-    }
-    out
+    crate::output_wrap::strip_ansi(text)
 }
 
 /// Wrap `text` so each line is at most `cols` characters. A tab is a
@@ -115,6 +83,11 @@ pub fn strip_ansi(text: &str) -> String {
 /// leading run of spaces.
 #[must_use]
 pub fn wrap(text: &str, cols: usize) -> String {
+    if cols == COLS {
+        if let Some(width) = crate::output_wrap::prose_width_for_stdout() {
+            return crate::output_wrap::wrap_prose(text, Some(width));
+        }
+    }
     let cols = cols.max(1);
     let mut out = String::new();
     for (index, line) in text.split('\n').enumerate() {
@@ -130,6 +103,16 @@ pub fn wrap(text: &str, cols: usize) -> String {
 /// Wrap `line` under a hanging prefix. The prefix counts toward `cols`.
 #[must_use]
 pub fn wrap_hang(line: &str, cols: usize, first: &str, cont: &str) -> String {
+    if cols == COLS {
+        if let Some(width) = crate::output_wrap::prose_width_for_stdout() {
+            return crate::output_wrap::wrap_hanging_prose(
+                &line.replace('\t', " "),
+                width.max(1),
+                first,
+                cont,
+            );
+        }
+    }
     let cols = cols.max(1);
     let room = cols.saturating_sub(first.chars().count()).max(1);
     let body = wrap(&line.replace('\t', " "), room);
@@ -837,6 +820,12 @@ pub fn ready_text(raw: &str) -> String {
     ready_page(raw, None)
 }
 
+/// `vissue ready` rows rendered with a specific wrapping width.
+#[must_use]
+pub fn ready_text_with_cols(raw: &str, cols: usize) -> String {
+    ready_page_with_cols(raw, None, cols)
+}
+
 enum ReadyPiece {
     Row(ReadyRow),
     Loose(String),
@@ -851,6 +840,16 @@ const READY_HINT: &str = "See more with `--limit` or `--all`. Narrow with `-p` o
 /// tickets off ends with [`READY_HINT`].
 #[must_use]
 pub fn ready_page(raw: &str, limit: Option<usize>) -> String {
+    ready_page_with_width(raw, limit, None)
+}
+
+/// The ready page rendered to a specific wrapping width.
+#[must_use]
+pub fn ready_page_with_cols(raw: &str, limit: Option<usize>, cols: usize) -> String {
+    ready_page_with_width(raw, limit, Some(cols))
+}
+
+fn ready_page_with_width(raw: &str, limit: Option<usize>, cols: Option<usize>) -> String {
     let raw = strip_ansi(raw);
     let mut pieces = Vec::new();
     for line in raw.lines() {
@@ -867,26 +866,36 @@ pub fn ready_page(raw: &str, limit: Option<usize>) -> String {
     let take = limit.unwrap_or(total).min(total);
     let mut out = count_line("ready", take, total, "");
     out.push('\n');
+    let wrap_line = |line: &str| match cols {
+        Some(cols) => crate::output_wrap::wrap_prose(line, Some(cols)),
+        None => wrap(line, COLS),
+    };
     if total == 0 {
-        out.push_str("no open ticket is free of an open blocker, so run `ljos file TITLE`.\n");
+        out.push_str(&wrap_line(
+            "no open ticket is free of an open blocker, so run `ljos file TITLE`.",
+        ));
+        out.push('\n');
         return out;
     }
-    out.push_str("open and not waiting on an open ticket, so run `ljos show ID`.\n");
+    out.push_str(&wrap_line(
+        "open and not waiting on an open ticket, so run `ljos show ID`.",
+    ));
+    out.push('\n');
     for piece in pieces.into_iter().take(take) {
         out.push('\n');
         match piece {
             ReadyPiece::Row(row) => {
-                out.push_str(&ready_row(&row));
+                out.push_str(&ready_row_with_width(&row, cols));
                 out.push('\n');
             }
             ReadyPiece::Loose(line) => {
-                out.push_str(&wrap(&line, COLS));
+                out.push_str(&wrap_line(&line));
                 out.push('\n');
             }
         }
     }
     if take < total {
-        out.push_str(&wrap(READY_HINT, COLS));
+        out.push_str(&wrap_line(READY_HINT));
         out.push('\n');
     }
     out
@@ -951,12 +960,29 @@ fn split_claim(rest: &str) -> (&str, &str) {
     (rest.trim(), "")
 }
 
-fn ready_row(row: &ReadyRow) -> String {
+fn ready_row_with_width(row: &ReadyRow, cols: Option<usize>) -> String {
     let head = format!("{}  {}  [#{}]", row.id, row.state, row.priority);
-    let mut out = line_with_title(&format!("{head}  "), &row.title, COLS);
+    let mut out = if let Some(cols) = cols {
+        let prefix = format!("{head}  ");
+        let cont = " ".repeat(crate::output_wrap::prose_display_width(&prefix));
+        let title = if row.title.trim().is_empty() {
+            NO_TITLE
+        } else {
+            row.title.as_str()
+        };
+        crate::output_wrap::wrap_hanging_prose(title, cols, &prefix, &cont)
+    } else {
+        line_with_title(&format!("{head}  "), &row.title, COLS)
+    };
     if !row.claim.is_empty() {
         out.push('\n');
-        out.push_str(&wrap_hang(&row.claim, COLS, "  ", "  "));
+        if let Some(cols) = cols {
+            out.push_str(&crate::output_wrap::wrap_hanging_prose(
+                &row.claim, cols, "  ", "  ",
+            ));
+        } else {
+            out.push_str(&wrap_hang(&row.claim, COLS, "  ", "  "));
+        }
     }
     out
 }
@@ -997,6 +1023,50 @@ mod tests {
         let plain = ready_text(colored);
         assert!(!plain.contains('\u{1b}'), "{plain}");
         assert!(plain.contains("Kiln damper schedule"), "{plain}");
+    }
+
+    #[test]
+    fn ready_tty_keeps_zwj_cluster_together() {
+        let raw = format!(
+            "{:<22} {:<9} [#{}]  {}\n",
+            "demo-uqy6",
+            "STARTED",
+            "C",
+            "⚠️ 👨‍👩‍👧 👍🏽 1️⃣ 你好 世界 https://example.com/a/very/long/path/here"
+        );
+        let text = ready_page_with_cols(&raw, None, 30);
+        assert!(!text.contains("👨‍👩\\\n"), "{text}");
+        assert!(!text.contains("\u{200d}\n"), "{text}");
+    }
+
+    #[test]
+    fn ready_tty_with_prefix_at_or_past_cols_falls_back() {
+        let raw = format!(
+            "{:<22} {:<9} [#{}]  {}\n",
+            "demo-uqy6", "STARTED", "C", "This title wraps"
+        );
+        let text = ready_page_with_cols(&raw, None, 20);
+        assert!(text.contains("demo-uqy6  STARTED"), "{text}");
+        assert!(!text.contains("                          "), "{text}");
+        assert!(!text.contains("\\\n"), "{text}");
+    }
+
+    #[test]
+    fn ready_tty_empty_title_shows_no_title() {
+        let raw = format!("{:<22} {:<9} [#{}]  \n", "demo-uqy6", "STARTED", "C");
+        let text = ready_page_with_cols(&raw, None, 40);
+        assert!(text.contains("(no title)"), "{text}");
+    }
+
+    #[test]
+    fn ready_tty_loose_lines_keep_backticks_and_urls_whole() {
+        let raw = "open and not waiting on an open ticket, so run `ljos show ID`.\nhttps://example.com/a/very/long/path\n";
+        let text = ready_page_with_cols(raw, Some(2), 28);
+        assert!(!text.contains("`ljos show\n ID`"), "{text}");
+        assert!(
+            !text.contains("https://example.com/a/very/\nlong/path"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1101,7 +1171,9 @@ mod tests {
         assert!(wrapped.lines().count() > 1);
         let url = "https://kiln.example/logs/2026/november/reykjavik/damper-and-thermocouple-readings/line-4";
         let broken = wrap(url, COLS);
-        assert!(broken.lines().all(|line| line.chars().count() <= COLS));
+        assert!(broken
+            .lines()
+            .all(|line| line.chars().count() <= COLS || line.trim() == url));
         assert!(
             broken
                 .lines()

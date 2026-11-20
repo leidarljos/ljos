@@ -269,10 +269,8 @@ fn memories_cmd(cmd: MemCmd) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&shown)?);
             } else {
-                print!(
-                    "{}",
-                    ljos_cli::scan::for_reader(&mem::list_page(&shown), human_color())
-                );
+                let page = ljos_cli::scan::for_reader(&mem::list_page(&shown), human_color());
+                print!("{}", human_prose(&page));
             }
         }
         MemCmd::Review {
@@ -2666,15 +2664,18 @@ fn print_ready(args: ReadyArgs) -> Result<()> {
         all,
     } = args;
     if mine {
-        print!("{}", ljos_cli::plan::ready_mine(project.as_deref())?);
+        let page = ljos_cli::plan::ready_mine(project.as_deref())?;
+        if json {
+            print!("{page}");
+        } else {
+            print!("{}", human_prose(&page));
+        }
     } else {
-        print!(
-            "{}",
-            ljos_cli::scan::for_reader(
-                &ljos_cli::ready_view(project.as_deref(), json, limit, all)?,
-                human_color()
-            )
+        let page = ljos_cli::scan::for_reader(
+            &ljos_cli::ready_view(project.as_deref(), json, limit, all)?,
+            human_color(),
         );
+        print!("{page}");
     }
     Ok(())
 }
@@ -3719,6 +3720,13 @@ fn named_node(raw: &str) -> Result<String, String> {
 /// Color on a terminal, unless `NO_COLOR` is set. A pipe stays plain.
 fn human_color() -> bool {
     ljos_cli::scan::color_allowed(std::io::stdout().is_terminal())
+}
+
+/// Human-facing prose wrapped to terminal width when known.
+///
+/// Wrapping is for TTY output only. Non-TTY output stays byte-stable.
+fn human_prose(text: &str) -> String {
+    ljos_cli::output_wrap::wrap_prose(text, ljos_cli::output_wrap::prose_width_for_stdout())
 }
 
 /// `--verbose`, or `LJOS_DEBUG`, prints the tracker and sync lines.
@@ -5573,10 +5581,8 @@ fn run_command() -> Result<()> {
             if json {
                 print!("{}", ljos_cli::hubs_json(&body));
             } else {
-                print!(
-                    "{}",
-                    ljos_cli::scan::for_reader(&format_hubs(&body), human_color())
-                );
+                let page = ljos_cli::scan::for_reader(&format_hubs(&body), human_color());
+                print!("{}", human_prose(&page));
             }
         }
         Cmd::Conflicts { limit } => print!("{}", conflicts(limit)?),
@@ -5593,10 +5599,8 @@ fn run_command() -> Result<()> {
             if json {
                 print!("{}", ljos_cli::island_json(&body));
             } else {
-                print!(
-                    "{}",
-                    ljos_cli::scan::for_reader(&format_island(&body), human_color())
-                );
+                let page = ljos_cli::scan::for_reader(&format_island(&body), human_color());
+                print!("{}", human_prose(&page));
             }
         }
         Cmd::Search {
@@ -5965,22 +5969,32 @@ fn run_command() -> Result<()> {
                 let rank =
                     ljos_cli::search_rank_for_person(&ljos_cli::search_rank_line(&ranking, &hits));
                 if !rank.is_empty() {
-                    eprint!("{rank}");
+                    eprint!(
+                        "{}",
+                        ljos_cli::output_wrap::wrap_prose(
+                            &rank,
+                            ljos_cli::output_wrap::prose_width_for_stderr(),
+                        )
+                    );
                 }
             } else {
                 let rank =
                     ljos_cli::search_rank_for_person(&ljos_cli::search_rank_line(&ranking, &hits));
                 if !rank.is_empty() {
-                    eprint!("{rank}");
-                }
-                if floor_emptied {
-                    print!(
+                    eprint!(
                         "{}",
-                        ljos_cli::scan::for_reader(
-                            &ljos_cli::scan::no_relevant_page(&asked),
-                            human_color()
+                        ljos_cli::output_wrap::wrap_prose(
+                            &rank,
+                            ljos_cli::output_wrap::prose_width_for_stderr(),
                         )
                     );
+                }
+                if floor_emptied {
+                    let page = ljos_cli::scan::for_reader(
+                        &ljos_cli::scan::no_relevant_page(&asked),
+                        human_color(),
+                    );
+                    print!("{}", human_prose(&page));
                 } else if let Some(line) = close_line {
                     let mut page = ljos_cli::scan::wrap(&line, ljos_cli::scan::COLS);
                     if !page.ends_with('\n') {
@@ -5988,32 +6002,28 @@ fn run_command() -> Result<()> {
                     }
                     print!("{}", ljos_cli::scan::for_reader(&page, human_color()));
                 } else if empty_store {
-                    print!(
-                        "{}",
-                        ljos_cli::scan::for_reader(
-                            &ljos_cli::scan::empty_store_page(&asked),
-                            human_color()
-                        )
+                    let page = ljos_cli::scan::for_reader(
+                        &ljos_cli::scan::empty_store_page(&asked),
+                        human_color(),
                     );
+                    print!("{}", human_prose(&page));
                 } else if hits.is_empty() && unrelated {
-                    print!("{}", ljos_cli::NOTHING_RELEVANT);
+                    print!("{}", human_prose(ljos_cli::NOTHING_RELEVANT));
                 } else {
-                    print!(
-                        "{}",
-                        ljos_cli::without_raw_rows(&ljos_cli::scan::for_reader(
-                            &ljos_cli::format_search_stored_with_flags(
-                                &hits,
-                                matched,
-                                capped,
-                                explain,
-                                &asked,
-                                ranking.mode != "lexical",
-                                &id_space,
-                                &rerun_flags,
-                            ),
-                            human_color()
-                        ))
-                    );
+                    let page = ljos_cli::without_raw_rows(&ljos_cli::scan::for_reader(
+                        &ljos_cli::format_search_stored_with_flags(
+                            &hits,
+                            matched,
+                            capped,
+                            explain,
+                            &asked,
+                            ranking.mode != "lexical",
+                            &id_space,
+                            &rerun_flags,
+                        ),
+                        human_color(),
+                    ));
+                    print!("{}", human_prose(&page));
                 }
             }
             if busy_miss {
@@ -6507,7 +6517,8 @@ fn run_command() -> Result<()> {
             if json {
                 print!("{said}");
             } else {
-                print!("{}", ljos_cli::scan::for_reader(&said, human_color()));
+                let page = ljos_cli::scan::for_reader(&said, human_color());
+                print!("{}", human_prose(&page));
             }
         }
         Cmd::Ready(args) | Cmd::List(args) => print_ready(args)?,
@@ -6623,13 +6634,18 @@ fn run_command() -> Result<()> {
                     } else {
                         ljos_cli::ranking_line(ranking)
                     };
-                    eprint!("{}", ljos_cli::search_rank_for_person(&line));
+                    eprint!(
+                        "{}",
+                        ljos_cli::output_wrap::wrap_prose(
+                            &ljos_cli::search_rank_for_person(&line),
+                            ljos_cli::output_wrap::prose_width_for_stderr(),
+                        )
+                    );
                 }
                 let page = format!("{}{memories}{code}", said.stdout);
-                print!(
-                    "{}",
-                    ljos_cli::without_raw_rows(&ljos_cli::scan::for_reader(&page, human_color()))
-                );
+                let page =
+                    ljos_cli::without_raw_rows(&ljos_cli::scan::for_reader(&page, human_color()));
+                print!("{}", human_prose(&page));
             }
         }
         Cmd::Reap { idle, apply } => {
@@ -6793,10 +6809,8 @@ fn run_command() -> Result<()> {
             if json {
                 print!("{}", ljos_cli::timeline_json(&issue, limit)?);
             } else {
-                print!(
-                    "{}",
-                    ljos_cli::scan::for_reader(&timeline(&issue, limit)?, human_color())
-                );
+                let page = ljos_cli::scan::for_reader(&timeline(&issue, limit)?, human_color());
+                print!("{}", human_prose(&page));
             }
         }
         Cmd::Panel {
@@ -7431,7 +7445,7 @@ fn run_command() -> Result<()> {
                     continue;
                 }
                 match ljos_cli::settle_in_words(&said.stdout, &anchors) {
-                    Some(words) => print!("{words}"),
+                    Some(words) => print!("{}", human_prose(&words)),
                     None => print!("{}", said.stdout),
                 }
             }
@@ -7445,7 +7459,7 @@ fn run_command() -> Result<()> {
                 let said = run_captured(step.bin, &step.args)?;
                 let voters = ljos_cli::voters_of(&ballots);
                 match ljos_cli::standing_in_words(&said.stdout, &voters) {
-                    Some(words) => print!("{words}"),
+                    Some(words) => print!("{}", human_prose(&words)),
                     None => print!("{}", said.stdout),
                 }
             }
@@ -7474,12 +7488,14 @@ fn run_command() -> Result<()> {
             // prints in one document.
             let rows = ljos_cli::doctor_stream(move |row| {
                 if all || ljos_cli::doctor_shows_in_short(row) {
-                    print!("{}", format_doctor(std::slice::from_ref(row)));
+                    let row_text = format_doctor(std::slice::from_ref(row));
+                    print!("{}", human_prose(&row_text));
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
             });
             if !all {
-                print!("{}", ljos_cli::doctor_summary(&rows));
+                let summary = ljos_cli::doctor_summary(&rows);
+                print!("{}", human_prose(&summary));
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             }
             if !healthy(&rows) {
@@ -7640,10 +7656,8 @@ fn run_command() -> Result<()> {
             } else if json {
                 print!("{}", ljos_cli::due_json(all)?);
             } else {
-                print!(
-                    "{}",
-                    ljos_cli::scan::for_reader(&due_report(all)?, human_color())
-                );
+                let page = ljos_cli::scan::for_reader(&due_report(all)?, human_color());
+                print!("{}", human_prose(&page));
             }
         }
         Cmd::JudgeScore => {
@@ -7883,7 +7897,12 @@ fn run_command() -> Result<()> {
             )
             .map_err(ticket_error)?;
             warn_other_sitting(&issue, quiet, inferred, true);
-            print!("{}", render_write(&said, git_detail(verbose), json, None));
+            let shown = render_write(&said, git_detail(verbose), json, None);
+            if json {
+                print!("{shown}");
+            } else {
+                print!("{}", human_prose(&shown));
+            }
         }
         Cmd::Reopen { issue } => {
             print!("{}", reopen(&issue)?);
