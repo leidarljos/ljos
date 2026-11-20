@@ -1262,6 +1262,15 @@ shell_profiles() {
   say "  zsh (~/.zshrc): $PATH_LINE"
   say "  fish (~/.config/fish/config.fish): fish_add_path --path $fish_dir"
 }
+shell_command_lines() {
+  command_posix=$(posix_word "$BIN_DIR/ljos")
+  command_fish=$(fish_word "$BIN_DIR/ljos")
+  say "$1:"
+  say "  bash, zsh, dash: $command_posix $2"
+  if [ "$command_fish" != "$command_posix" ]; then
+    say "  fish: $command_fish $2"
+  fi
+}
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) if [ "$MODIFY_PATH" = 1 ] && [ "$CLOUD" = 0 ]; then
@@ -1370,8 +1379,7 @@ if [ -n "$root" ]; then
   say "memory and the command guard are off because the home is under ${root} (${home_real}); set HOME to a directory outside ${root}"
 fi
 if [ "$ONBOARD" = 1 ]; then
-  ljos_command=$(posix_word "$BIN_DIR/ljos")
-  say "Command guard: run \`$ljos_command policy --help\`."
+  shell_command_lines "Command guard" "policy --help"
 fi
 if [ "$CLOUD" = 1 ]; then
   if "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
@@ -1430,5 +1438,4 @@ elif [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; then
 else
   say "Done in $secs s. Next: \`$next_cmd\`."
 fi
-ljos_command=${ljos_command:-$(posix_word "$BIN_DIR/ljos")}
-say "Shell completion: run \`$ljos_command completions --help\`."
+shell_command_lines "Shell completion" "completions --help"

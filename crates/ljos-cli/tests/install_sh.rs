@@ -200,7 +200,7 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
     let bin = home.join(".local/bin");
     assert!(
         first.contains(&format!(
-            "Shell completion: run `{} completions --help`.",
+            "Shell completion:\n  bash, zsh, dash: {} completions --help",
             posix_word(&bin.join("ljos"))
         )),
         "{first}"
@@ -489,14 +489,14 @@ fn command_paths_with_spaces_are_shell_quoted() {
     let binary = home.join(".local/bin/ljos");
     assert!(
         text.contains(&format!(
-            "Command guard: run `'{}' policy --help`.",
+            "Command guard:\n  bash, zsh, dash: '{}' policy --help",
             binary.display()
         )),
         "{text}"
     );
     assert!(
         text.contains(&format!(
-            "Shell completion: run `'{}' completions --help`.",
+            "Shell completion:\n  bash, zsh, dash: '{}' completions --help",
             binary.display()
         )),
         "{text}"
@@ -676,6 +676,98 @@ fn printed_path_lines_preserve_shell_metacharacters() {
                 said(&ran)
             );
         }
+    }
+}
+
+#[test]
+fn fish_command_hints_preserve_quotes_and_backslashes() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+    let fish = on_path("fish").expect("fish is required for installer shell tests");
+
+    for (case, bin) in [
+        ("apostrophe", dir.path().join("bin'quote")),
+        ("backslash", dir.path().join("bin\\back\\")),
+    ] {
+        let out = Command::new("sh")
+            .arg(install_sh())
+            .arg("--from-dir")
+            .arg(&progs)
+            .arg("--bin-dir")
+            .arg(&bin)
+            .args(["--no-embed", "--no-modify-path"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        let text = said(&out);
+        assert!(out.status.success(), "{case}:\n{text}");
+
+        for heading in ["Command guard:", "Shell completion:"] {
+            let line = text
+                .lines()
+                .skip_while(|line| *line != heading)
+                .skip(1)
+                .find_map(|line| line.strip_prefix("  fish: "))
+                .unwrap_or_else(|| panic!("{case}: {heading} fish line missing:\n{text}"));
+            let ran = Command::new(&fish)
+                .args(["--no-config", "-c", line])
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", "/usr/bin:/bin")
+                .output()
+                .unwrap();
+            assert!(
+                ran.status.success(),
+                "{case}: fish refused {line:?}\n{}",
+                said(&ran)
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_command_hints_do_not_repeat_a_fish_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("home");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(&bin)
+        .args(["--no-embed", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    for heading in ["Command guard:", "Shell completion:"] {
+        let rows = text
+            .lines()
+            .skip_while(|line| *line != heading)
+            .skip(1)
+            .take_while(|line| line.starts_with("  "))
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1, "{heading}\n{text}");
+        assert!(rows[0].starts_with("  bash, zsh, dash:"), "{text}");
     }
 }
 
@@ -1109,14 +1201,14 @@ fn install_with_no_coding_tool_leaves_a_seat_a_sitting_opens_on() {
     let bin = machine.bin();
     assert!(
         installed.contains(&format!(
-            "Command guard: run `{} policy --help`.",
+            "Command guard:\n  bash, zsh, dash: {} policy --help",
             posix_word(&bin.join("ljos"))
         )),
         "{installed}"
     );
     assert!(
         installed.contains(&format!(
-            "Shell completion: run `{} completions --help`.",
+            "Shell completion:\n  bash, zsh, dash: {} completions --help",
             posix_word(&bin.join("ljos"))
         )),
         "{installed}"
@@ -1472,14 +1564,14 @@ fn the_final_screen_keeps_optional_help_short() {
     let bin = home.join(".local/bin");
     assert!(
         text.contains(&format!(
-            "Command guard: run `{} policy --help`.",
+            "Command guard:\n  bash, zsh, dash: {} policy --help",
             posix_word(&bin.join("ljos"))
         )),
         "{text}"
     );
     assert!(
         text.contains(&format!(
-            "Shell completion: run `{} completions --help`.",
+            "Shell completion:\n  bash, zsh, dash: {} completions --help",
             posix_word(&bin.join("ljos"))
         )),
         "{text}"
