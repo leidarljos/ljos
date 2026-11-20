@@ -58,10 +58,14 @@ impl Home {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_with(args, None)
+    }
+
+    fn run_with(&self, args: &[&str], columns: Option<&str>) -> Output {
         let home = self.root.join("home");
         let path = format!("{}:/usr/bin:/bin", home.join(".local/bin").display());
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
-            .args(args)
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        cmd.args(args)
             .current_dir(self.root.join("work"))
             .env_clear()
             .env("PATH", path)
@@ -84,8 +88,11 @@ impl Home {
             .env("NO_COLOR", "1")
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
-            .stdin(std::process::Stdio::null())
-            .output()
+            .stdin(std::process::Stdio::null());
+        if let Some(cols) = columns {
+            cmd.env("COLUMNS", cols);
+        }
+        cmd.output()
             .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")))
     }
 }
@@ -606,6 +613,55 @@ fn listing_commands_match_the_saved_pages() {
                 text.contains("ljos graded ID") && text.contains("ljos forget ID"),
                 "due output missing graded/forget hint:\n{text}"
             );
+        }
+    }
+}
+
+#[test]
+fn non_tty_pages_match_saved_base_bytes_under_columns_variants() {
+    let columns = [None, Some("60"), Some("0"), Some("garbage"), Some("999999")];
+    let sequence: [(&str, &[&str]); 16] = [
+        ("search-kiln", &["search", "kiln"][..]),
+        ("search-glaze", &["search", "glaze", "-n", "3"][..]),
+        ("search-none", &["search", "zzzznotaword"][..]),
+        ("search-icelandic", &["search", "Reykjavík"][..]),
+        ("memories-list", &["memories", "list", "--all"][..]),
+        ("search-other-seat", &["search", "thermocouple"][..]),
+        ("show-kiln", &["show", "demo-kiln"][..]),
+        ("show-tile", &["show", "demo-tile"][..]),
+        ("ready", &["ready"][..]),
+        ("due", &["due"][..]),
+        ("timeline", &["timeline", "demo-kiln"][..]),
+        ("hubs", &["hubs", "-n", "4"][..]),
+        ("island", &["island", "kiln"][..]),
+        ("recall", &["recall", "demo-kiln"][..]),
+        ("search-json", &["search", "thermocouple", "--json"][..]),
+        ("recall-json", &["recall", "demo-kiln", "--json"][..]),
+    ];
+    let targets = [
+        "search-kiln",
+        "memories-list",
+        "ready",
+        "show-kiln",
+        "timeline",
+        "recall",
+        "recall-json",
+    ];
+    for name in targets {
+        let upto = sequence
+            .iter()
+            .position(|(n, _)| *n == name)
+            .expect("target command missing from sequence");
+        let want = std::fs::read_to_string(format!("{SNAP_DIR}/{name}.txt")).unwrap();
+        for cols in columns {
+            let home = Home::open(atoms());
+            let mut out = None;
+            for (_, args) in sequence.iter().take(upto + 1) {
+                out = Some(home.run_with(args, cols));
+            }
+            let out = out.expect("target output missing");
+            let got = page(&out, &home.root);
+            assert_eq!(got, want, "name={name} columns={cols:?}");
         }
     }
 }

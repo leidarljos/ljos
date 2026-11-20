@@ -54,6 +54,7 @@ pub mod mesh_lane;
 pub mod note_queue;
 pub mod note_retire;
 pub mod offboard;
+pub mod output_wrap;
 pub mod pack_copy;
 pub mod pack_link;
 pub mod panel_cloud;
@@ -37107,6 +37108,12 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     }
 }
 
+/// Words used as doctor row labels.
+#[must_use]
+pub fn is_doctor_word(word: &str) -> bool {
+    matches!(word, "ok" | "info" | "warn" | "fail" | "no" | "warming")
+}
+
 /// `1 unpushed` and `12 unpushed` count. `0 unpushed` does not.
 fn names_unpushed(state: &str) -> bool {
     state.split(';').any(|part| {
@@ -45038,10 +45045,12 @@ pub fn ready_view(
         });
         return Ok(format!("{}\n", serde_json::to_string_pretty(&doc)?));
     }
-    Ok(scan::ready_page(
-        &ready_lines(&rows, &recs, claim_age::now_here()),
-        page,
-    ))
+    let raw = ready_lines(&rows, &recs, claim_age::now_here());
+    if let Some(cols) = output_wrap::prose_width_for_stdout() {
+        Ok(scan::ready_page_with_cols(&raw, page, cols))
+    } else {
+        Ok(scan::ready_page(&raw, page))
+    }
 }
 
 /// This seat's claims, then free tickets, then another seat's claims.
@@ -81748,6 +81757,34 @@ lesson, due yesterday, seat ada
             "a wrap line is the rest of the hash:\n{text}"
         );
         assert!(text.contains("the codec is one file"), "{text}");
+    }
+
+    #[test]
+    fn a_timeline_note_off_tty_keeps_legacy_spacing_and_cjk_breaks() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("Software/sample");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: sample issues\n#+VISSUE: 1\n#+CATEGORY: sample\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#B] Keep note wraps stable\n:PROPERTIES:\n:ID:         sample-f3nc\n:CREATED:    [2026-09-20 Sat]\n:END:\n:LOGBOOK:\n- Note: \"hello  world\" [2026-09-21 Sun 10:00]\n- Note: \"你 好 世 界 你 好 世 界 你 好 世 界 你 好 世 界 你 好\" [2026-09-21 Sun 10:01]\n:END:\n",
+        )
+        .unwrap();
+        let _bins = super::set_path(super::path_without(&["vissue", "deedar"]));
+        let _roots = HoldEnv::set(&[
+            ("ISSUE_ROOT", dir.path().to_str().unwrap()),
+            ("VISSUE_ROOT", dir.path().to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("PACKSET_URL", "http://127.0.0.1:9"),
+        ]);
+        let text = timeline("sample-f3nc", 12).expect("timeline");
+        assert!(text.contains("hello world"), "{text}");
+        assert!(!text.contains("hello  world"), "{text}");
+        assert!(
+            text.lines()
+                .all(|line| !line.trim_start().starts_with("| 世")),
+            "{text}"
+        );
     }
 
     fn dangling_hash(line: &str) -> bool {

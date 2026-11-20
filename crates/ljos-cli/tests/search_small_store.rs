@@ -149,3 +149,21 @@ fn four_lessons_drop_a_word_in_every_row() {
         "the single-word rows should not be printed:\n{stdout}"
     );
 }
+
+#[test]
+fn no_close_matches_page_keeps_base_non_tty_wrap() {
+    let texts: Vec<String> = (0..4)
+        .map(|i| format!("A wax seal keeps jar number {i} shut."))
+        .collect();
+    let url = pack(lessons(&texts));
+    let query = "seal hinge latch gasket thermocouple calibration";
+    let (ok, stdout, stderr) = search(&url, query);
+    assert!(ok, "{stdout}{stderr}");
+    let line = stdout.trim_end_matches('\n');
+    let mut expected = ljos_cli::scan::wrap(line, ljos_cli::scan::COLS);
+    if !expected.ends_with('\n') {
+        expected.push('\n');
+    }
+    assert!(stdout.contains("No close matches for"), "{stdout}{stderr}");
+    assert_eq!(stdout, expected, "{stdout}{stderr}");
+}
