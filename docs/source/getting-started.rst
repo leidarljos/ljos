@@ -262,7 +262,9 @@ A plan files one parent and its checklist in a single tracker commit, claims the
    $ LJOS_SEAT=alice ljos ready --mine
    next: day-ef56  pick a default
 
-``ljos ready`` without ``--mine`` prints the first 20 open tickets, headed ``ready  shown X of Y``, and ends a short page with a hint naming ``--limit``, ``--all``, ``-p`` and ``--mine``. This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last. ``--all`` prints every ticket, and ``--limit N`` prints N.
+``ljos ready`` without ``--mine`` prints the first 20 open tickets, headed ``ready  shown X of Y``, and ends a short page with a hint naming ``--limit``, ``--all``, ``-p`` and ``--mine``, even when every ticket fits.
+This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last.
+``--all`` prints every ticket, and ``--limit N`` prints N.
 
 ``ljos list`` and ``ljos ls`` are the same command. They take the same flags, including ``-p PROJECT``, and print the same page.
 
