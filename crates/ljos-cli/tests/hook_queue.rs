@@ -203,6 +203,9 @@ fn feed(mut cmd: Command, payload: &str) -> std::process::Child {
     child
 }
 
+/// The child, and its largest `RssAnon` in KB. The kernel keeps no peak for
+/// anonymous memory, so this is the largest value seen at one sample per
+/// millisecond.
 fn feed_measured(
     mut cmd: Command,
     payload: &str,
@@ -220,7 +223,7 @@ fn feed_measured(
         let mut peak = 0;
         while let Ok(status) = std::fs::read_to_string(&path) {
             if let Some(kb) = status.lines().find_map(|line| {
-                line.strip_prefix("VmHWM:")
+                line.strip_prefix("RssAnon:")
                     .and_then(|value| value.split_whitespace().next())
                     .and_then(|value| value.parse::<u64>().ok())
             }) {
@@ -333,7 +336,7 @@ fn wait_for(path: &Path) {
 /// end to end; how many run at once is the server's slot count, which
 /// follows the box's cores.
 #[test]
-fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
+fn twenty_calls_at_once_each_answer_inside_200_ms_and_9_mb_anonymous() {
     if !Path::new("/proc/self/status").is_file() {
         eprintln!("skipped: /proc/self/status is not available");
         return;
@@ -377,7 +380,7 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
     }
     let report: Vec<String> = rows
         .iter()
-        .map(|(i, took, kb)| format!("call {i}: {} ms, {kb} KB", took.as_millis()))
+        .map(|(i, took, kb)| format!("call {i}: {} ms, {kb} KB anonymous", took.as_millis()))
         .collect();
     eprintln!("{}", report.join("\n"));
     for (i, took, kb) in &rows {
@@ -386,10 +389,11 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
             "call {i} took {took:?}, past the admission budget:\n{}",
             report.join("\n")
         );
-        // The runner's allocator sits a little over 30 MB. Five percent
-        // is still the hook, not a growth.
-        let room = 30 * 1024 + (30 * 1024) / 20;
-        assert!(*kb < room, "call {i} peaked at {kb} KB");
+        // Anonymous memory only: file-backed text pages in a debug build
+        // follow code layout and fault-around, not what the hook allocates.
+        // Four times the hook's 2.1 MB, rounded up to a whole MB.
+        let room = 9 * 1024;
+        assert!(*kb < room, "call {i} peaked at {kb} KB anonymous");
     }
     let times = std::fs::read_to_string(hab.run.join("ljos/hook-times.log")).unwrap();
     let mut answered = 0;
