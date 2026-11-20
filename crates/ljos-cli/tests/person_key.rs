@@ -77,7 +77,7 @@ fn a_mark_on_a_terminal_may_not_set_or_clear_the_key() {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()),
         );
-        let out = pty::wait_output(child, 30);
+        let out = term.wait_output(child, 30);
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{verb}: {err}");
         assert!(err.contains("CURSOR_AGENT"), "{verb}: {err}");
