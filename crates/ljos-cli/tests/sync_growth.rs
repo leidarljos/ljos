@@ -1395,3 +1395,44 @@ fn a_reseal_over_an_unopened_snapshot_keeps_what_a_readable_log_would() {
         }
     }
 }
+
+#[test]
+fn a_compaction_folds_past_a_damaged_snapshot_a_newer_one_covers() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    for committed in [false, true] {
+        let (w, atoms, _) = sealed_log();
+        let snap = w.snapshot_rel();
+        w.flip_last_byte(&snap);
+        if committed {
+            git(&w.repo, &["commit", "-q", "-am", "a damaged snapshot"]);
+            git(&w.repo, &["push", "-q"]);
+        }
+        w.forget_opened();
+        let said = w.sync();
+        assert!(said.contains("sealed whole into"), "{said}");
+
+        let out = w.ljos(&["sync", "--compact"]);
+        let said = format!(
+            "{said}{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "committed {committed}: {said}");
+        let left: Vec<String> = w
+            .pieces()
+            .into_keys()
+            .filter(|path| !path.ends_with("/plain.sha256"))
+            .collect();
+        assert_eq!(left.len(), 1, "committed {committed}, {left:?}: {said}");
+        assert!(left[0].contains("/snap-"), "{left:?}: {said}");
+        assert!(!w.repo.join(&snap).exists(), "{said}");
+        assert_eq!(git(&w.repo, &["status", "--porcelain"]), "", "{said}");
+        assert_eq!(
+            w.import_as_peer(),
+            texts(&atoms),
+            "committed {committed}: {said}"
+        );
+    }
+}

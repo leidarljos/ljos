@@ -2078,14 +2078,11 @@ fn store_log(
     }
     let migrated = migrate_legacy(root, &log_rel)?;
     let view = read_log_view(root, &log_rel, &host, scope_name)?;
-    if compact {
-        if let Some(why) = view
-            .stopped
-            .clone()
-            .or_else(|| unopened_piece(root, &stem, scope_name))
-        {
-            bail!("{}", compact_refused_line(scope_name, &why));
-        }
+    // The view is the newest snapshot and every segment after it, and
+    // that snapshot covers every older piece. A compaction folds from it
+    // and removes them all, so it needs the view whole and nothing else.
+    if let (true, Some(why)) = (compact, &view.stopped) {
+        bail!("{}", compact_refused_line(scope_name, why));
     }
     if let Some(why) = &view.stopped {
         if !opens_here(&identities_for_open(scope_name), recipients) {
@@ -2166,34 +2163,10 @@ fn store_log(
     })
 }
 
-/// The first snapshot or segment of the log at `stem` that does not open
-/// here in full. A compaction removes every piece, so it reads each one,
-/// not only those after the newest snapshot.
-fn unopened_piece(root: &Path, stem: &str, scope_name: &str) -> Option<String> {
-    let identities = identities_for_open(scope_name);
-    for piece in sealed_pieces(root, stem) {
-        let Ok(Some(bytes)) = read_beneath(root, &piece.rel) else {
-            return Some(format!("{} could not be read", piece.rel));
-        };
-        match open_sealed_bytes(&bytes, &identities) {
-            Ok(Some(_)) => {}
-            Ok(None) => return Some(format!("{} is not sealed to this machine", piece.rel)),
-            Err(err) => {
-                return Some(format!(
-                    "{} did not open ({})",
-                    piece.rel,
-                    err.to_string().replace('\n', " ")
-                ));
-            }
-        }
-    }
-    None
-}
-
 /// Why `ljos sync --compact` removed nothing from `scope_name`'s log.
 fn compact_refused_line(scope_name: &str, why: &str) -> String {
     format!(
-        "sync: --compact refused: {why}, and a compaction removes every snapshot and segment of the {scope_name} log, so none was removed; when this machine's key is not a recipient, add the key `ljos sync --key` prints to .ljos/sync.toml"
+        "sync: --compact refused: {why}, and no newer snapshot of the {scope_name} log that opens on this machine covers it, so no snapshot or segment was removed; when this machine's key is not a recipient, add the key `ljos sync --key` prints to .ljos/sync.toml"
     )
 }
 
