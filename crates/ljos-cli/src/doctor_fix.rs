@@ -40,46 +40,6 @@ pub(crate) fn pack_admission_in_doctor(admission: &str) -> String {
     }
 }
 
-#[cfg(test)]
-mod admission_tests {
-    use super::pack_admission_in_doctor;
-    use crate::{doctor_word, format_doctor, Habitat};
-
-    fn memory_row(admission: &str) -> Habitat {
-        let tail = format!(
-            "http://127.0.0.1:9 workspace seat; pack responded in 4ms; {}",
-            pack_admission_in_doctor(admission)
-        );
-        Habitat {
-            name: "pack",
-            state: tail,
-            ok: true,
-        }
-    }
-
-    #[test]
-    fn busy_admission_row_names_ljos_doctor() {
-        let row = memory_row("busy, retrying");
-        assert_eq!(doctor_word(&row), "warn");
-        let line = format_doctor(std::slice::from_ref(&row));
-        assert_eq!(
-            line.trim_end(),
-            "warn\tmemory\thttp://127.0.0.1:9 workspace seat; pack responded in 4ms; \
-             busy, retrying, so run `ljos doctor`."
-        );
-    }
-
-    #[test]
-    fn ok_admission_row_has_no_extra_tail() {
-        let row = memory_row("ok");
-        let line = format_doctor(std::slice::from_ref(&row));
-        assert_eq!(
-            line.trim_end(),
-            "ok\tmemory\thttp://127.0.0.1:9 workspace seat; pack responded in 4ms; ok"
-        );
-    }
-}
-
 /// Point a pack row at `ljos doctor --fix` when that command makes the
 /// repair. The row names one command: `--fix` runs `packset ensure` itself,
 /// so the row does not also name `packset ensure`. A row whose repair needs

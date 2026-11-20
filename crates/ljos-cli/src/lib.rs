@@ -82970,6 +82970,23 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     }
 
     #[test]
+    fn ok_pack_admission_row_has_no_extra_tail() {
+        let state = format!(
+            "http://127.0.0.1:9 workspace seat; pack responded in 4ms; {}",
+            crate::doctor_fix::pack_admission_in_doctor("ok")
+        );
+        let row = Habitat {
+            name: "pack",
+            state,
+            ok: true,
+        };
+        assert_eq!(
+            format_doctor(std::slice::from_ref(&row)).trim_end(),
+            "ok\tmemory\thttp://127.0.0.1:9 workspace seat; pack responded in 4ms; ok"
+        );
+    }
+
+    #[test]
     fn remember_posts_v1_atoms() {
         let _env = env_guard();
         unsafe {
