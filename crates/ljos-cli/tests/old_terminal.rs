@@ -1,9 +1,8 @@
-//! Terminal writes from v0.17 through v0.29, and a lesson a runner held.
+//! Terminal writes from v0.17 through v0.29, and lessons a runner held.
 //!
 //! Those releases left no `source.seat`. Harness and session are the login
-//! user, via is `ljos`, and there is no turn. A preference and a lesson of
-//! that shape are stamped `person`. A lesson whose session names a runner
-//! stays unverified.
+//! user, via is `ljos`, and there is no turn. The current binary does not
+//! stamp `source.basis` `person` on those atoms.
 //!
 //! Packset is seeded from `fixtures/old_terminal/legacy_atoms.json`. See
 //! `fixtures/old_terminal/README.md` for how each payload was derived.
@@ -38,9 +37,6 @@ struct HeldLesson {
     harness: String,
     session: String,
 }
-
-const RUNNER_LESSON: &str = "The lint job must pass before a merge.";
-const AGENT_LESSON: &str = "The deploy window closes at four on Friday.";
 
 struct Seat {
     home: tempfile::TempDir,
@@ -82,7 +78,7 @@ impl Seat {
 
     fn doctor(&self, bin: &str, workspace: &str) -> Output {
         stage_doctor_bins(self.home.path());
-        self.command(bin, &["doctor"])
+        self.command(bin, &["doctor", "--all"])
             .env("PACKSET_WORKSPACE", workspace)
             .env("PATH", doctor_path(self.home.path()))
             .output()
@@ -168,6 +164,41 @@ fn basis(atom: &Value) -> Option<&str> {
         .filter(|b| !b.is_empty())
 }
 
+fn assert_not_person_stored(atom: &Value, label: &str) {
+    assert!(
+        !ljos_cli::person_stored(atom),
+        "{label} must stay unverified without source.basis person: {atom}"
+    );
+}
+
+fn assert_doctor_preferences(stdout: &str, state: &str) {
+    assert!(
+        stdout.contains(&format!("preferences\t{state}")),
+        "doctor must report preferences\t{state}\n{stdout}"
+    );
+}
+
+fn assert_legacy_preference_search(stdout: &str, preference: &Value, needle: &str) {
+    let pack_id = preference
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("preference has no id: {preference}"));
+    let search_id = ljos_cli::search_hit_id("preference", Some(pack_id), &[pack_id])
+        .unwrap_or_else(|| panic!("search id for {pack_id}"));
+    assert!(
+        stdout.contains(needle),
+        "search must show the preference text\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&search_id),
+        "search must name the pack id {search_id}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("preference, from an agent, not checked"),
+        "legacy preference must stay unverified in search\n{stdout}"
+    );
+}
+
 fn post_atom(url: &str, body: Value) {
     let resp = ureq::post(&format!("{url}/v1/atoms"))
         .send_json(body)
@@ -229,10 +260,10 @@ fn assert_terminal_shape(atom: &Value) {
     assert!(!source["session"].as_str().unwrap_or("").contains('@'));
 }
 
-/// v0.17 through v0.29 terminal writes stay as those releases stored them.
-/// The current binary leaves them unverified and does not promote them.
+/// v0.17–v0.29 terminal writes stay unverified; doctor reports one preference
+/// per workspace and does not promote them.
 #[test]
-fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
+fn legacy_terminal_atoms_stay_unverified_through_doctor() {
     if !ljos_cli::tool_installed("packsetd") {
         eprintln!("skipped: packsetd is not installed");
         return;
@@ -271,6 +302,8 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
             "v{} lesson was promoted",
             row.version
         );
+        assert_not_person_stored(preference, "legacy preference");
+        assert_not_person_stored(remembered, "legacy lesson");
 
         let doctor = seat.doctor(new, &row.workspace);
         assert!(
@@ -279,6 +312,31 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
             row.version,
             text_of(&doctor)
         );
+        let said = String::from_utf8_lossy(&doctor.stdout);
+        assert_doctor_preferences(&said, "0 of 1 preference enforced by a rule");
+
+        let after = atoms(daemon.url(), &row.workspace);
+        let preference = by_text(&after, &format!("{} notes", row.version));
+        let remembered = by_text(&after, &format!("{} staging", row.version));
+        assert!(basis(preference).is_none(), "doctor promoted preference");
+        assert!(basis(remembered).is_none(), "doctor promoted lesson");
+        assert_not_person_stored(preference, "legacy preference after doctor");
+        assert_not_person_stored(remembered, "legacy lesson after doctor");
+
+        let needle = &format!("{} notes", row.version);
+        let search = seat
+            .command(new, &["search", needle])
+            .env("PACKSET_WORKSPACE", &row.workspace)
+            .output()
+            .unwrap();
+        let search_out = String::from_utf8_lossy(&search.stdout);
+        assert!(
+            search.status.success(),
+            "legacy preference must be searchable\n{}",
+            text_of(&search)
+        );
+        assert_legacy_preference_search(&search_out, preference, needle);
+        assert_not_person_stored(preference, "legacy preference for search");
     }
 
     post_held(daemon.url(), &data.held_workspace, &data.runner_lesson);
@@ -299,19 +357,34 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
     let doctor = seat.doctor(new, &data.held_workspace);
     assert!(
         doctor.status.success(),
-        "a held lesson must not fail the doctor\n{}",
+        "held lessons must not fail the doctor\n{}",
         text_of(&doctor)
     );
-    assert!(
-        !String::from_utf8_lossy(&doctor.stdout).contains("1 older lesson awaits review"),
-        "{}",
-        text_of(&doctor)
-    );
+    let said = String::from_utf8_lossy(&doctor.stdout);
+    assert_doctor_preferences(&said, "no preferences stored");
 
     let after = atoms(daemon.url(), &data.held_workspace);
     assert!(basis(by_text(&after, "lint job")).is_none());
     assert_eq!(by_text(&after, "deploy window")["origin"], "agent-derived");
     assert_ne!(basis(by_text(&after, "deploy window")), Some("person"));
-    assert_eq!(data.runner_lesson.text, RUNNER_LESSON);
-    assert_eq!(data.agent_lesson.text, AGENT_LESSON);
+}
+
+/// Invariants the integration test above relies on; broken if `person_basis`
+/// or `preferences_of` is relaxed.
+#[test]
+fn legacy_fixture_shape_is_not_person_stored() {
+    let preference = serde_json::json!({
+        "id": "legacy-pref",
+        "origin": "user-declared",
+        "kind": "preference",
+        "text": "v0.21.0 notes",
+        "source": { "harness": "person", "session": "person", "via": "ljos" },
+    });
+    assert!(!ljos_cli::person_stored(&preference));
+    let prefs = ljos_cli::preferences_of(&[preference]);
+    let (enforced, could, total) = ljos_cli::preferences_enforced(&prefs, &[]);
+    assert_eq!(
+        ljos_cli::preferences_line(enforced, could, total),
+        "0 of 1 preference enforced by a rule"
+    );
 }
