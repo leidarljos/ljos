@@ -476,6 +476,16 @@ fn command_paths_with_spaces_are_shell_quoted() {
         .unwrap();
     let text = said(&out);
     assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains(
+            "Setting up the ticket tracker and deed store; memory is off in this temporary home."
+        ),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Setting up the ticket tracker, memory writer, and deed store."),
+        "{text}"
+    );
     let binary = home.join(".local/bin/ljos");
     assert!(
         text.contains(&format!(
@@ -698,6 +708,119 @@ fn a_newline_in_bin_dir_is_refused_before_installing() {
         "{text}"
     );
     assert!(!bin.exists(), "{text}");
+}
+
+#[test]
+fn a_missing_home_is_created_before_it_is_resolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("missing-home");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(&bin)
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(home.join(".local/state/ljos").is_dir(), "{text}");
+    assert!(bin.join("ljos").is_file(), "{text}");
+}
+
+#[test]
+fn a_bad_home_is_refused_before_programs_are_copied() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home_parent = dir.path().join("not-a-directory");
+    let home = home_parent.join("home");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::write(&home_parent, "file").unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(&bin)
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert_eq!(
+        text,
+        format!(
+            "install.sh: could not create HOME {}. Check that its parent is writable and run `sh install.sh` again.\n",
+            home.display()
+        ),
+        "{text}"
+    );
+    for name in PROGRAMS {
+        assert!(!bin.join(name).exists(), "{name} was copied:\n{text}");
+    }
+}
+
+#[test]
+fn a_symlinked_tmpdir_keeps_temporary_home_memory_off() {
+    let target_parent = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
+    std::fs::create_dir_all(&target_parent).unwrap();
+    let target = tempfile::tempdir_in(target_parent).unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let tmp_link = links.path().join("tmp-link");
+    std::os::unix::fs::symlink(target.path(), &tmp_link).unwrap();
+    let home = tmp_link.join("home");
+    let progs = target.path().join("progs");
+    let bin = target.path().join("bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(&bin)
+        .args(["--no-embed", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("TMPDIR", &tmp_link)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains(
+            "Setting up the ticket tracker and deed store; memory is off in this temporary home."
+        ),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Setting up the ticket tracker, memory writer, and deed store."),
+        "{text}"
+    );
 }
 
 /// With no coding tool on the machine, install.sh still runs `ljos onboard`

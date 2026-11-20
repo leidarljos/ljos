@@ -210,8 +210,11 @@ traced to the words that allowed it. A person at a terminal closes with no grant
 A shell-only agent has no MCP client and no hook. ``ljos onboard`` for such a runner writes the skill
 and an env file. Source the file, and ``LJOS_SEAT`` is the name.
 
-Nothing else needs a variable. ``ljos onboard`` makes the deed store and the tracker, and starts the
-pack writer. ``ljos offboard`` removes what onboard wrote.
+Nothing else needs a variable.
+``ljos onboard`` makes the deed store and the tracker.
+Outside a temporary home, it also starts the pack writer.
+Under a temporary home, memory is off.
+``ljos offboard`` removes what onboard wrote.
 
 What happened
 =============

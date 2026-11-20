@@ -27,6 +27,21 @@ fn said(out: &Output) -> String {
     )
 }
 
+#[test]
+fn install_docs_distinguish_temporary_home_memory() {
+    for rel in [
+        "scripts/install.sh",
+        "docs/orgmode/getting-started.org",
+        "docs/source/getting-started.rst",
+    ] {
+        let text = page(rel);
+        assert!(
+            text.contains("Under a temporary home, memory is off."),
+            "{rel} does not name the temporary-home result"
+        );
+    }
+}
+
 #[cfg(unix)]
 fn script(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;

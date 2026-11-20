@@ -63,8 +63,14 @@ The script names the cause and the command that fixes it.
 - =--version VER= or =--pin REPO=VER= for a release that does not exist says so, names the releases page, and the command =sh install.sh --version VER= or =sh install.sh --pin REPO=VER=. A version the script itself names, when that release is not published and Rust is not installed, installs the latest release of that program and says so. With Rust installed, it builds that version from source.
 - A running =ljos-mcp= keeps the previous binary. Restart the assistant, or =kill= the pid the script prints, then run =ljos doctor=.
 
-=ljos onboard= with no coding tool installed says so. It still sets up the ticket tracker, the memory writer, and the deed store, and the line names those three and =ljos doctor= as the next command. The deed row names its directory and says it is for signed records of finished work. Install an agent, then run =ljos onboard=. =ljos onboard --example= lists the tools.
-A pipe sets up the same three, with the Model Context Protocol (MCP) entry as the only text on stdout and the setup lines on stderr.
+=ljos onboard= with no coding tool installed says so.
+It still sets up the ticket tracker and deed store.
+Outside a temporary home, it also sets up the memory writer; under a temporary home, memory is off.
+The line names that setup and =ljos doctor= as the next command.
+The deed row names its directory and says it is for signed records of finished work.
+Install an agent, then run =ljos onboard=.
+=ljos onboard --example= lists the tools.
+A pipe follows the same temporary-home rule, with the Model Context Protocol (MCP) entry as the only text on stdout and the setup lines on stderr.
 
 =ljos offboard= after a hand edit that it cannot undo names the file and leaves the ljos entry. Edit that file, delete the ljos entry, and run =ljos offboard= again.
 
@@ -80,8 +86,10 @@ It builds from source with =cargo= where a platform has no release.
 =--no-embed= leaves out the encoder. Search then matches words, and a search prints =matched by words (encoder not installed)= and names the install command =ljos doctor= names when that command is a cargo one. When it would be a download run through a shell, the line points at the install page, https://leidarljos.github.io/ljos/getting-started.html#install, and at =ljos doctor= instead. An MCP server names that install step on its first such search and leaves it off later searches.
 
 Read the script before you run it. It is =scripts/install.sh= in this repository.
-It runs =ljos onboard= for each coding runner it finds. With none found, it still sets up
-the ticket tracker, the memory writer and the deed store.
+It runs =ljos onboard= for each coding runner it finds.
+With none found, it still sets up the ticket tracker and deed store.
+Outside a temporary home, it also sets up the memory writer.
+Under a temporary home, memory is off.
 
 The tracker commits each change, so git needs an identity:
 
@@ -123,8 +131,10 @@ Its ticket row names the new tracker directory and the configuration file it wro
 Its memory row says the writer started without printing its local address.
 =ljos onboard --example= lists the runners ljos knows.
 
-Nothing else needs a variable set. =ljos onboard= makes a deed store, a tracker and a
-config file for =vissue=, and it starts the memory writer.
+Nothing else needs a variable set.
+=ljos onboard= makes a deed store, a tracker and a config file for =vissue=.
+Outside a temporary home, it also starts the memory writer.
+Under a temporary home, memory is off.
 
 The runner runs a hook only after you trust it. Trust each ljos hook in the runner.
 Trust it again after an upgrade rewrites one.

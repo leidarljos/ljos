@@ -207,7 +207,16 @@ A word that is not a command names the verb it was reaching for as a line that r
 ``protocol [--full]``
    Stores: none. Print how work on one ticket is meant to run. ``--full`` prints every store and refusal.
 ``onboard [--harness NAME] [--skills DIR] [--dry-run] [--example]``
-   Stores: runner. With no ``--harness``, ljos onboards every runner it finds, at a terminal or in a pipe. A pipe prints the one ``mcpServers`` entry on stdout and the setup lines on stderr. The tracker, the memory writer and the deed store are set up either way. The Model Context Protocol (MCP) is the tool server the runner starts. Onboard in json form prints that entry at a terminal too. With a runner named in ``~/.config/ljos/harnesses.toml``, register ``ljos-mcp`` with it, install the protocol as its skill, and write the personas into its ``agents`` directory; a shell runner (``shell = true``, ``example-host``, or ``shell``) writes the skill and an env file and registers no server and no hook; changed runner files and their previous bytes are recorded for ``offboard``. A step that does not land exits 1. Example: ``ljos onboard``.
+   Stores: runner.
+   With no ``--harness``, ljos onboards every runner it finds, at a terminal or in a pipe.
+   A pipe prints the one ``mcpServers`` entry on stdout and the setup lines on stderr.
+   The tracker and deed store are set up either way.
+   Outside a temporary home, the memory writer is set up too; under a temporary home, memory is off.
+   The Model Context Protocol (MCP) is the tool server the runner starts.
+   Onboard in json form prints that entry at a terminal too.
+   With a runner named in ``~/.config/ljos/harnesses.toml``, register ``ljos-mcp`` with it, install the protocol as its skill, and write the personas into its ``agents`` directory; a shell runner (``shell = true``, ``example-host``, or ``shell``) writes the skill and an env file and registers no server and no hook; changed runner files and their previous bytes are recorded for ``offboard``.
+   A step that does not land exits 1.
+   Example: ``ljos onboard``.
 ``offboard [--runner NAME] [--dry-run]``
    Stores: runner. Restore runner files changed by ``onboard`` and remove files created only for ljos; ``--runner`` (alias ``--harness``, the same name ``ljos onboard`` uses) limits removal to one runner; ``--dry-run`` reports without writing; later edits are preserved; an older installation without a manifest is removed by its ljos markers. A file edited after onboarding, when the ljos entry cannot be taken out, is left in place. The line names the file and says to delete the ljos entry and run ``ljos offboard`` again. A step that does not land exits 1.
 ``uninstall [--dry-run] [--keep-programs] [--all] [--purge] [--no-stub] [--bin-dir DIR]``
