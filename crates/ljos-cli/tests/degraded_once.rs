@@ -240,6 +240,15 @@ fn seat() -> Seat {
 }
 
 fn run(seat: &Seat, url: &str, command: Command_) -> (Output, Duration) {
+    run_with(seat, url, command, &[])
+}
+
+fn run_with(
+    seat: &Seat,
+    url: &str,
+    command: Command_,
+    extra: &[(&str, &str)],
+) -> (Output, Duration) {
     let dir = seat.root.path();
     let home = seat.home();
     let path = format!("{}:/usr/bin:/bin", dir.display());
@@ -249,8 +258,8 @@ fn run(seat: &Seat, url: &str, command: Command_) -> (Output, Duration) {
         Command_::Sitting => vec!["sitting", seat.issue.as_str()],
     };
     let started = Instant::now();
-    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
-        .args(args)
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    cmd.args(args)
         .current_dir(dir)
         .env_clear()
         .env("PATH", path)
@@ -275,9 +284,11 @@ fn run(seat: &Seat, url: &str, command: Command_) -> (Output, Duration) {
         .env("PACKSET_URL", url)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .unwrap();
+        .stderr(Stdio::piped());
+    for (key, value) in extra {
+        cmd.env(key, value);
+    }
+    let out = cmd.output().unwrap();
     (out, started.elapsed())
 }
 
@@ -356,3 +367,24 @@ cell!(sitting_answering, Writer::Answering, Command_::Sitting);
 cell!(sitting_starting, Writer::Starting, Command_::Sitting);
 cell!(sitting_busy, Writer::Busy, Command_::Sitting);
 cell!(sitting_down, Writer::Down, Command_::Sitting);
+
+#[test]
+fn a_recall_stays_inside_one_call_deadline() {
+    let seat = seat();
+    let url = serve(Writer::Starting);
+    let (out, took) = run_with(
+        &seat,
+        &url,
+        Command_::Recall,
+        &[("LJOS_CALL_TIMEOUT", "2"), ("LJOS_SEARCH_WARMUP_WAIT", "8")],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let said = format!(
+        "took {took:?} status {:?}\nstdout:\n{stdout}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{said}");
+    assert!(stdout.contains(LOCAL_HIT), "{said}");
+    assert!(took < Duration::from_millis(3000), "{said}");
+}

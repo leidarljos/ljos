@@ -5667,6 +5667,7 @@ fn run_command() -> Result<()> {
             // that accepts and stays silent spends one request, not one per
             // later read.
             let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
+            let _call = ljos_cli::SearchCall::enter();
             let dated_ahead = as_of.is_some();
             let budget = if !dated_ahead && !rerank {
                 ljos_cli::search_budget()
