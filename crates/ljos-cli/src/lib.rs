@@ -55882,9 +55882,9 @@ pub(crate) fn path_without(bins: &[&str]) -> std::ffi::OsString {
 pub(crate) struct EnvLock {
     _guard: std::sync::MutexGuard<'static, ()>,
     snapshot: Vec<(std::ffi::OsString, std::ffi::OsString)>,
-    runtime: tempfile::TempDir,
-    _home: tempfile::TempDir,
-    _git_config: tempfile::NamedTempFile,
+    runtime: Option<tempfile::TempDir>,
+    _home: Option<tempfile::TempDir>,
+    _git_config: Option<tempfile::NamedTempFile>,
 }
 
 #[cfg(test)]
@@ -55904,7 +55904,7 @@ impl Drop for EnvLock {
             for key in added {
                 unsafe { std::env::remove_var(key) };
             }
-            let _ = self.runtime.path();
+            let _ = self.runtime.as_ref().map(tempfile::TempDir::path);
         });
     }
 }
@@ -56181,12 +56181,35 @@ pub(crate) fn require_env_lock() {
     );
 }
 
+#[cfg(test)]
+fn env_mutex() -> &'static std::sync::Mutex<()> {
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &ENV
+}
+
+/// Take the process environment lock and snapshot variables without creating
+/// a private home under `test_non_temp_root`.
+#[cfg(test)]
+pub(crate) fn test_env_lock_without_home() -> EnvLock {
+    let guard = env_mutex()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ENV_LOCK_HELD.with(|held| held.set(true));
+    let snapshot: Vec<_> = std::env::vars_os().collect();
+    EnvLock {
+        _guard: guard,
+        snapshot,
+        runtime: None,
+        _home: None,
+        _git_config: None,
+    }
+}
+
 /// The lock every test that changes the process environment takes.
 /// Bookkeeping tests live in another module and take the same one.
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> EnvLock {
-    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = ENV
+    let guard = env_mutex()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     ENV_LOCK_HELD.with(|held| held.set(true));
@@ -56234,9 +56257,9 @@ pub(crate) fn test_env_lock() -> EnvLock {
     EnvLock {
         _guard: guard,
         snapshot,
-        runtime,
-        _home: home_root,
-        _git_config: git_config,
+        runtime: Some(runtime),
+        _home: Some(home_root),
+        _git_config: Some(git_config),
     }
 }
 

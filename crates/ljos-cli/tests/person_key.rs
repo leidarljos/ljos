@@ -152,3 +152,50 @@ fn status_never_prints_the_hash() {
     assert!(said.starts_with("person-key: "), "{said}");
     assert!(!said.contains("$argon2"), "{said}");
 }
+
+#[test]
+fn runner_non_temp_homes_root_never_falls_back_to_passwd_home() {
+    if std::env::var_os("LJOS_TEST_RUNNER_ROOT_CHILD").is_none() {
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runner_non_temp_homes_root_never_falls_back_to_passwd_home",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env("LJOS_TEST_RUNNER_ROOT_CHILD", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "child test failed:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
+
+    let temp_target = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("CARGO_TARGET_DIR", temp_target.path());
+    }
+    let mut bad_homes = vec![std::path::PathBuf::from("/tmp/sandbox")];
+    if let Some(pw) = ljos_cli::proc_tree::own_home() {
+        if let Some(parent) = pw.parent() {
+            bad_homes.push(parent.to_path_buf());
+        }
+        bad_homes.push(pw);
+    }
+    for bad in bad_homes {
+        unsafe {
+            std::env::set_var("HOME", &bad);
+        }
+        let caught = std::panic::catch_unwind(runner::non_temp_homes_root);
+        assert!(
+            caught.is_err(),
+            "runner::non_temp_homes_root fell back instead of failing loudly for HOME={}: {caught:?}",
+            bad.display()
+        );
+    }
+}

@@ -40,16 +40,54 @@ impl RunnerDir {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn non_temp_homes_root() -> PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
-    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-homes");
-    if !ljos_cli::bookkeep::path_is_temp(Some(&target)) {
-        std::fs::create_dir_all(&target).unwrap();
-        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[allow(dead_code)]
+pub fn non_temp_homes_root() -> PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+        .join("test-homes");
+    if !ljos_cli::bookkeep::path_is_temp(Some(&target)) && std::fs::create_dir_all(&target).is_ok()
+    {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
+        }
         return std::fs::canonicalize(&target).unwrap_or(target);
     }
-    ljos_cli::proc_tree::own_home().expect("this user's passwd entry names a home")
+    if let Some(home) = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+    {
+        let canon_home = std::fs::canonicalize(&home).unwrap_or(home);
+        let canon_pw =
+            ljos_cli::proc_tree::own_home().map(|pw| std::fs::canonicalize(&pw).unwrap_or(pw));
+        let touches_pw = canon_pw
+            .as_ref()
+            .is_some_and(|pw| canon_home == *pw || pw.starts_with(&canon_home));
+        if !touches_pw && !ljos_cli::bookkeep::path_is_temp(Some(&canon_home)) {
+            let root = canon_home.join(".ljos-test-homes");
+            if std::fs::create_dir_all(&root).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755));
+                }
+                return std::fs::canonicalize(&root).unwrap_or(root);
+            }
+        }
+    }
+    panic!(
+        "cannot place non-temp runner homes without touching real passwd home: target {} and HOME {:?} are temporary, missing, or equal to the passwd home",
+        target.display(),
+        std::env::var_os("HOME")
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -57,18 +95,13 @@ fn passwd_preload_so() -> PathBuf {
     use std::sync::OnceLock;
     static SO: OnceLock<PathBuf> = OnceLock::new();
     SO.get_or_init(|| {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-preload");
+        let dir = std::env::var_os("CARGO_TARGET_DIR")
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+            .join("test-preload");
         std::fs::create_dir_all(&dir).unwrap();
-        let so = dir.join("libtest_passwd.so");
-        if so.is_file() {
-            return so;
-        }
-        let pid = std::process::id();
-        let src = dir.join(format!("test_passwd-{pid}.c"));
-        let tmp = dir.join(format!("libtest_passwd-{pid}.so.tmp"));
-        std::fs::write(
-            &src,
-            r#"#define _GNU_SOURCE
+        let code = r#"#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
 #include <pwd.h>
@@ -138,8 +171,20 @@ int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct p
     pwd->pw_dir = buf + used;
     return 0;
 }
-"#,
-        )
+"#;
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for b in code.as_bytes() {
+            hash ^= u64::from(*b);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        let so = dir.join(format!("libtest_passwd-{hash:016x}.so"));
+        if so.is_file() {
+            return so;
+        }
+        let pid = std::process::id();
+        let src = dir.join(format!("test_passwd-{pid}.c"));
+        let tmp = dir.join(format!("libtest_passwd-{pid}.so.tmp"));
+        std::fs::write(&src, code)
         .unwrap();
         let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
         let out = Command::new(cc)
@@ -163,47 +208,36 @@ int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct p
 }
 
 /// Create a temporary runner directory under `~/.local/bin` of an isolated
-/// passwd home (outside `/tmp` on Linux) and remove it on drop.
+/// non-temp home (without touching the real passwd home) and remove it on drop.
 pub fn install_dir() -> RunnerDir {
-    #[cfg(target_os = "linux")]
+    let _guard = env_lock();
+    let root = tempfile::Builder::new()
+        .prefix("ljos-home-")
+        .tempdir_in(non_temp_homes_root())
+        .unwrap();
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let root = tempfile::Builder::new()
-            .prefix("ljos-home-")
-            .tempdir_in(non_temp_homes_root())
-            .unwrap();
         let _ = std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755));
-        let passwd_home = root.path().join("u");
-        let local = passwd_home.join(".local");
-        let bin = local.join("bin");
-        let bin_dir = bin.join(format!(".ljos-runner-{}", std::process::id()));
-        std::fs::create_dir_all(&bin_dir).unwrap();
+    }
+    let passwd_home = root.path().join("u");
+    let local = passwd_home.join(".local");
+    let bin = local.join("bin");
+    let bin_dir = bin.join(format!(".ljos-runner-{}", std::process::id()));
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
         for dir in [&passwd_home, &local, &bin, &bin_dir] {
             let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
         }
-        RunnerDir {
-            _root: root,
-            passwd_home,
-            bin_dir,
-            preload: passwd_preload_so(),
-        }
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let passwd_home =
-            ljos_cli::proc_tree::own_home().expect("this user's passwd entry names a home");
-        let bin = passwd_home.join(".local/bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let root = tempfile::Builder::new()
-            .prefix(".ljos-runner-")
-            .tempdir_in(&bin)
-            .unwrap();
-        let bin_dir = root.path().to_path_buf();
-        RunnerDir {
-            _root: root,
-            passwd_home,
-            bin_dir,
-        }
+    RunnerDir {
+        _root: root,
+        passwd_home,
+        bin_dir,
+        #[cfg(target_os = "linux")]
+        preload: passwd_preload_so(),
     }
 }
 
