@@ -677,8 +677,9 @@ impl LogView {
 /// A chunk counts whole or not at all. One that does not open, names
 /// another host, scope, base or number, or holds a line that is neither
 /// an atom nor a drop ends the read, and the view is the base with the
-/// chunks before it. Export writes nothing over a view that ended early,
-/// as what is new since the unread piece cannot be told. With no chunk applied the body
+/// chunks before it. Export does not diff against a view that ended
+/// early, as what is new since the unread piece cannot be told. With no
+/// chunk applied the body
 /// is `base_body` as sealed, byte for byte.
 fn read_chunks(
     base_body: &str,
@@ -1480,6 +1481,7 @@ fn export_named_scope(
             format!("sync: migrated {count} {scope_name} atoms into {rel}\n")
         }
         StoreOut::Unread { why } => unread_line(scope_name, &why),
+        StoreOut::Resealed { rel, why } => resealed_line(scope_name, &why, &rel, &recipients_said),
         StoreOut::Wrote { rel, changes } => {
             if changes == 0 {
                 format!("sync: exported {count} {scope_name} atoms to {rel}, {recipients_said}\n")
@@ -1503,16 +1505,30 @@ enum StoreOut {
         rel: String,
         changes: usize,
     },
-    /// A piece of this machine's log did not open here, so what is new
-    /// since it cannot be told. Nothing was written or removed.
+    /// A piece of this machine's log did not open here, and this machine
+    /// is not a recipient, so what is new since it cannot be told and a
+    /// new seal would not open either. Nothing was written or removed.
     Unread {
+        why: String,
+    },
+    /// A piece of this machine's log did not open here, so the atoms were
+    /// sealed whole into the new snapshot `rel`, which does. The pieces
+    /// before it are left in place.
+    Resealed {
+        rel: String,
         why: String,
     },
 }
 
 fn unread_line(scope_name: &str, why: &str) -> String {
     format!(
-        "sync: warning: {why}, so this machine's {scope_name} log was left as it is; when this machine's key is not a recipient, add the key `ljos sync --key` prints to .ljos/sync.toml\n"
+        "sync: warning: {why}, and this machine's key is not a recipient of the {scope_name} log, so its new atoms wait; add the key `ljos sync --key` prints to .ljos/sync.toml\n"
+    )
+}
+
+fn resealed_line(scope_name: &str, why: &str, rel: &str, recipients_said: &str) -> String {
+    format!(
+        "sync: warning: {why}, so this machine's {scope_name} atoms were sealed whole into {rel}, {recipients_said}\n"
     )
 }
 
@@ -1853,16 +1869,21 @@ fn atom_changes(
 /// identities is a recipient: a file it could not open stays unopened.
 fn keep_sealed(sealed: &[u8], plain: &str, scope_name: &str, recipients: &[String]) {
     let identities = identities_for_open(scope_name);
-    let opens = identities.iter().any(|identity| {
-        identity_recipient(identity).is_ok_and(|key| recipients.iter().any(|r| r.trim() == key))
-    });
-    if opens {
+    if opens_here(&identities, recipients) {
         let _ = write_private_beneath(
             &state_base(),
             &opened_mark_rel(sealed, &identities),
             plain.as_bytes(),
         );
     }
+}
+
+/// Whether one of `identities` is among `recipients`, so a file sealed
+/// to them opens on this machine.
+fn opens_here(identities: &[PathBuf], recipients: &[String]) -> bool {
+    identities.iter().any(|identity| {
+        identity_recipient(identity).is_ok_and(|key| recipients.iter().any(|r| r.trim() == key))
+    })
 }
 
 fn seal_or_missing(plain: &str, recipients: &[String]) -> Result<Option<Vec<u8>>> {
@@ -1884,8 +1905,10 @@ fn remove_pieces(root: &Path, pieces: &[SealedPiece]) -> Result<()> {
 /// again. The plaintext hash beside the log decides. A match writes
 /// nothing. A legacy `<stem>.jsonl.age` is copied once into `snap-0` and
 /// removed. Later atoms go into one new segment. A sealed piece is not
-/// removed or sealed again by a sync: when one does not open here, the
-/// atoms after it are unknown and nothing is written. Only while
+/// removed or sealed again by a sync. When one does not open here, the
+/// atoms are sealed whole into a new snapshot once, and the pieces before
+/// it stay; when this machine is not a recipient, nothing is written.
+/// Only while
 /// [`compact_for_this_call`] is held do the segments fold into one new
 /// snapshot, and the folded files are removed in the same write.
 fn store_log(
@@ -1936,7 +1959,18 @@ fn store_log(
         }
     }
     if let Some(why) = &view.stopped {
-        return Ok(StoreOut::Unread { why: why.clone() });
+        if !opens_here(&identities_for_open(scope_name), recipients) {
+            return Ok(StoreOut::Unread { why: why.clone() });
+        }
+        let pieces = sealed_pieces(root, &stem);
+        let out = seal_snapshot(root, &stem, scope_name, &plain, recipients, &pieces, false)?;
+        return Ok(match out {
+            StoreOut::Wrote { rel, .. } => StoreOut::Resealed {
+                rel,
+                why: why.clone(),
+            },
+            other => other,
+        });
     }
     let (Some(had), Some(has)) = (lines_by_id(&view.body), lines_by_id(body)) else {
         return seal_snapshot(
@@ -1946,7 +1980,7 @@ fn store_log(
             &plain,
             recipients,
             &sealed_pieces(root, &stem),
-            0,
+            true,
         );
     };
     let changes = atom_changes(&had, &has);
@@ -1965,15 +1999,14 @@ fn store_log(
         });
     }
     if snap_seq.is_none() || compact {
-        return seal_snapshot(
-            root,
-            &stem,
-            scope_name,
-            &plain,
-            recipients,
-            &pieces,
-            changes.len(),
-        );
+        let out = seal_snapshot(root, &stem, scope_name, &plain, recipients, &pieces, true)?;
+        return Ok(match out {
+            StoreOut::Wrote { rel, .. } => StoreOut::Wrote {
+                rel,
+                changes: changes.len(),
+            },
+            other => other,
+        });
     }
     let seq = pieces.iter().map(|piece| piece.seq).max().unwrap_or(0) + 1;
     let over = snap_seq.unwrap_or(0);
@@ -2045,7 +2078,7 @@ fn seal_snapshot(
     plain: &str,
     recipients: &[String],
     pieces: &[SealedPiece],
-    changes: usize,
+    remove: bool,
 ) -> Result<StoreOut> {
     let seq = pieces
         .iter()
@@ -2060,10 +2093,12 @@ fn seal_snapshot(
     let rel = snap_file_rel(stem, seq);
     write_beneath(root, &rel, &sealed)?;
     keep_sealed(&sealed, plain, scope_name, recipients);
-    remove_pieces(root, pieces)?;
+    if remove {
+        remove_pieces(root, pieces)?;
+    }
     write_plain_hash(root, stem, plain)?;
     remember_digest(root, &format!("{stem}.jsonl.age"), plain, recipients)?;
-    Ok(StoreOut::Wrote { rel, changes })
+    Ok(StoreOut::Wrote { rel, changes: 0 })
 }
 
 /// Snapshot sequence, segment count and sealed bytes of this machine's log,
@@ -2249,6 +2284,14 @@ fn seal_ticket_scope(
         if recipients.len() == 1 { "" } else { "s" }
     );
     let view = read_log_view(root, &log_rel, &host, scope_name)?;
+    if let Some(why) = &view.stopped {
+        return Ok((
+            format!(
+                "sync: {issue}: warning: {why}; the atoms stay in the pack, and `ljos sync` seals the {scope_name} log\n"
+            ),
+            false,
+        ));
+    }
     let desired = if view.body.is_empty() {
         ticket
     } else {
@@ -2288,6 +2331,10 @@ fn seal_ticket_scope(
             matches!(stored, StoreOut::Migrated { .. }),
         ),
         StoreOut::Unread { why } => (unread_line(scope_name, &why), false),
+        StoreOut::Resealed { rel, why } => (
+            resealed_line(scope_name, &why, &rel, &recipients_said),
+            true,
+        ),
         StoreOut::Wrote { rel, changes } => {
             let n = if changes == 0 { has.len() } else { changes };
             (
@@ -9863,10 +9910,10 @@ mod tests {
 
     /// A chunk cut short after it was written, as by a torn write or a
     /// checkout that stopped, never reaches the view: a peer reads the base
-    /// and the chunks before it. The next export leaves the cut file and
-    /// writes nothing, and `--compact` seals the log whole.
+    /// and the chunks before it. The next export with a new atom leaves the
+    /// cut file in place and seals the log whole into a new snapshot.
     #[test]
-    fn a_cut_chunk_is_left_unread_and_left_as_it_is() {
+    fn a_cut_chunk_is_left_unread_and_sealed_over() {
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9902,20 +9949,14 @@ mod tests {
         );
         atoms.push(note(204));
         let said = fix.sync(&atoms);
-        assert!(said.contains("was left as it is"), "{said}");
+        assert!(said.contains("sealed whole into"), "{said}");
+        assert!(said.contains("/snap-"), "{said}");
         assert_eq!(
             std::fs::read(&cut).unwrap(),
             &bytes[..bytes.len() / 2],
             "{said}"
         );
-        assert!(!fix.chunk(3).exists(), "{said}");
-        assert_eq!(fix.base_blob(), base);
-
-        let said = {
-            let _compact = compact_for_this_call();
-            fix.sync(&atoms)
-        };
-        assert!(said.contains("/snap-"), "{said}");
+        assert_ne!(fix.base_blob(), base, "{said}");
         let (view, out) = fix.peer_view();
         assert_eq!(
             view,

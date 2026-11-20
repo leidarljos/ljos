@@ -319,11 +319,13 @@ impl World {
     }
 
     /// The texts another machine with this key takes from this machine's
-    /// log, read from every piece at the origin's head.
+    /// log, read from every piece at the origin's head. The pack lists
+    /// nothing during the import and its atoms again after.
     fn import_as_peer(&self) -> BTreeSet<String> {
-        self.pack.atoms.lock().unwrap().clear();
+        let listed = std::mem::take(&mut *self.pack.atoms.lock().unwrap());
         self.pack.posted.lock().unwrap().clear();
         let out = self.ljos_as("peer", &["sync", "--import"]);
+        *self.pack.atoms.lock().unwrap() = listed;
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -606,13 +608,12 @@ fn seventy_syncs_of_two_atoms_seal_seventy_small_segments() {
 }
 
 #[test]
-fn a_log_this_machine_cannot_open_is_left_as_it_is() {
+fn a_log_this_machine_cannot_open_is_sealed_whole_once() {
     if tools::halt(tools::Tool::AgeKeygen) {
         return;
     }
     let (w, mut atoms, whole) = sealed_log();
     let before = w.pieces();
-    let head = w.head();
     w.forget_opened();
     w.fail_opens(true);
     for _ in 0..2 {
@@ -621,26 +622,24 @@ fn a_log_this_machine_cannot_open_is_left_as_it_is() {
         atoms.push(atom);
     }
     let said = w.sync();
-    let after = w.pieces();
-    let new: Vec<(String, u64)> = after
-        .iter()
-        .filter(|(path, oid)| before.get(*path) != Some(oid))
-        .map(|(path, oid)| (path.clone(), w.blob_size(oid)))
-        .collect();
-    assert_eq!(
-        after, before,
-        "a sync that could not open its {whole} byte log wrote {new:?}: {said}"
-    );
-    assert_eq!(w.head(), head, "{said}");
-    assert_eq!(git(&w.repo, &["status", "--porcelain"]), "", "{said}");
+    let new = sealed_since(&w, &before, &w.pieces(), &said);
+    assert_eq!(new.len(), 1, "over a {whole} byte log, {new:?}: {said}");
+    assert!(new[0].0.contains("/snap-"), "{new:?}: {said}");
     assert!(said.contains("warning"), "{said}");
+    assert_eq!(git(&w.repo, &["status", "--porcelain"]), "", "{said}");
 
-    w.fail_opens(false);
+    let before = w.pieces();
+    for _ in 0..2 {
+        let atom = lesson(atoms.len(), LINE);
+        w.add(atom.clone());
+        atoms.push(atom);
+    }
     let said = w.sync();
     let new = sealed_since(&w, &before, &w.pieces(), &said);
     assert_eq!(new.len(), 1, "{new:?}: {said}");
     assert!(new[0].0.contains("/seg-"), "{new:?}: {said}");
     assert!(new[0].1 < TWO_ATOM_SEGMENT, "{new:?}: {said}");
+    w.fail_opens(false);
     assert_eq!(w.import_as_peer(), texts(&atoms));
 }
 
@@ -956,4 +955,56 @@ fn a_stale_kept_plaintext_does_not_hide_a_dropped_atom() {
     let still_there = taken.contains(gone["text"].as_str().unwrap());
     assert!(!still_there, "{said}{again}");
     assert_eq!(taken, texts(&atoms), "{said}{again}");
+}
+
+impl World {
+    /// Seal this tracker's scope to `recipients` from the next sync on.
+    fn recipients(&self, recipients: &[&str]) {
+        let list: Vec<String> = recipients.iter().map(|r| format!("\"{r}\"")).collect();
+        std::fs::write(
+            self.repo.join(".ljos/sync.toml"),
+            format!("name = \"probe\"\nrecipients = [{}]\n", list.join(", ")),
+        )
+        .unwrap();
+        git(&self.repo, &["commit", "-q", "-am", "recipients"]);
+        git(&self.repo, &["push", "-q"]);
+    }
+}
+
+#[test]
+fn a_waiting_atom_goes_out_once_this_machine_is_a_recipient_again() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, mut atoms, _) = sealed_log();
+    let other = keygen(&w.home.join("other.key"));
+    w.recipients(&[&other]);
+    for _ in 0..2 {
+        let atom = lesson(atoms.len(), LINE);
+        w.add(atom.clone());
+        atoms.push(atom);
+        w.sync();
+    }
+    let waiting = w.sync();
+    assert!(waiting.contains("is not a recipient"), "{waiting}");
+
+    let public = w.public.clone();
+    w.recipients(&[&public, &other]);
+    let before = w.pieces();
+    let said = w.sync();
+    let new = sealed_since(&w, &before, &w.pieces(), &said);
+    assert_eq!(new.len(), 1, "{new:?}: {waiting}{said}");
+    assert!(new[0].0.contains("/snap-"), "{new:?}: {said}");
+    assert_eq!(w.import_as_peer(), texts(&atoms), "{waiting}{said}");
+
+    let before = w.pieces();
+    let atom = lesson(atoms.len(), LINE);
+    w.add(atom.clone());
+    atoms.push(atom);
+    let said = w.sync();
+    let new = sealed_since(&w, &before, &w.pieces(), &said);
+    assert_eq!(new.len(), 1, "{new:?}: {said}");
+    assert!(new[0].0.contains("/seg-"), "{new:?}: {said}");
+    assert!(new[0].1 < TWO_ATOM_SEGMENT, "{new:?}: {said}");
+    assert_eq!(w.import_as_peer(), texts(&atoms), "{said}");
 }
