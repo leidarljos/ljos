@@ -261,3 +261,82 @@ fn a_csv_header_named_twice_is_refused_and_nothing_is_filed() {
     assert_eq!(tracked(&world), files);
     assert_eq!(world.commits(), before);
 }
+
+/// A hold record for alice that this test process, the parent of `ljos`,
+/// matches.
+fn hold(world: &World, issue: &str) {
+    let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
+    let runtime = world.dir().join("run/ljos");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::write(
+        runtime.join("hold-alice"),
+        format!(
+            "alice\nalice\n{}\n{}\n2026-11-03T00:00:00Z\n{issue}\n-\n",
+            std::process::id(),
+            comm.trim()
+        ),
+    )
+    .unwrap();
+}
+
+fn held_ljos(world: &World, args: &[&str]) -> std::process::Output {
+    world
+        .command(env!("CARGO_BIN_EXE_ljos"))
+        .env("LJOS_HOLD", "alice")
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn rows_with_no_parent_go_under_the_held_issue_as_ljos_file_does() {
+    let world = World::new();
+    other_project(&world);
+    hold(&world, ISSUE);
+    let rows = world.write(
+        "rows.jsonl",
+        "{\"title\": \"Held child\"}\n{\"title\": \"Own parent\", \"parent\": \"other-c3d4\"}\n",
+    );
+
+    let single = held_ljos(&world, &["file", "Single child"]);
+    assert!(single.status.success(), "{}", said(&single));
+    let filed = held_ljos(&world, &["file", "--from", &rows]);
+    assert!(filed.status.success(), "{}", said(&filed));
+    let ids: Vec<String> = stdout(&filed).lines().map(str::to_string).collect();
+    assert!(
+        ids[0].starts_with("demo-") && ids[1].starts_with("other-"),
+        "{ids:?}"
+    );
+    assert!(
+        stderr(&filed).contains(&format!(
+            "filed under {ISSUE} in demo, the issue this conversation holds"
+        )),
+        "{}",
+        said(&filed)
+    );
+    let demo = std::fs::read_to_string(world.tracker().join("Software/demo/issues.org")).unwrap();
+    assert_eq!(
+        demo.matches(&format!(":PARENT:     {ISSUE}")).count(),
+        2,
+        "the single child and the held row: {demo}"
+    );
+
+    let top = world.write("top.jsonl", "{\"title\": \"At the top\"}\n");
+    let filed = held_ljos(&world, &["file", "--from", &top, "--top", "-p", "demo"]);
+    assert!(filed.status.success(), "{}", said(&filed));
+    let id = stdout(&filed).trim().to_string();
+    let demo = std::fs::read_to_string(world.tracker().join("Software/demo/issues.org")).unwrap();
+    let block = &demo[demo.find(&format!(":ID:         {id}")).unwrap()..];
+    let block = &block[..block.find(":END:").unwrap()];
+    assert!(!block.contains(":PARENT:"), "{demo}");
+
+    let elsewhere = world.write("elsewhere.jsonl", "{\"title\": \"Tool bug\"}\n");
+    let filed = held_ljos(&world, &["file", "--from", &elsewhere, "-p", "other"]);
+    assert!(filed.status.success(), "{}", said(&filed));
+    assert!(stdout(&filed).starts_with("other-"), "{}", said(&filed));
+    assert!(
+        stderr(&filed).contains(&format!("filed at the top of other, not under {ISSUE}")),
+        "{}",
+        said(&filed)
+    );
+}

@@ -273,9 +273,11 @@ pub struct Placed {
 
 /// Where each row goes, by the rules a single `ljos file` follows: a row
 /// with a parent, its own or `--parent`, is filed in that parent's project,
-/// whatever `-p` names; one without is filed in `-p`, else the checkout's
-/// project, else `LJOS_PROJECT`. `--top` keeps a row with no parent at
-/// the top of its project. The second value is each distinct line
+/// whatever `-p` names; one without is a child of `held`, the held issue,
+/// unless `-p` or the checkout names another project,
+/// and is otherwise filed in `-p`, else the checkout's project, else
+/// `LJOS_PROJECT`. `--top` keeps a row with no parent at the top of its
+/// project. The second value is each distinct line
 /// [`crate::file_placement`] printed about a placement.
 ///
 /// # Errors
@@ -285,7 +287,9 @@ pub fn place_rows(
     rows: &[Row],
     defaults: &Defaults,
     top: bool,
+    held: Option<String>,
 ) -> Result<(Vec<Placed>, Vec<String>)> {
+    let no_hold = held.is_none();
     let mut placed = Vec::with_capacity(rows.len());
     let mut notes: Vec<String> = Vec::new();
     for (at, row) in rows.iter().enumerate() {
@@ -294,14 +298,14 @@ pub fn place_rows(
         let named_parent = parent.is_some();
         let top_row = top && !named_parent;
         let (parent, project, note) =
-            crate::file_placement(top_row, parent, defaults.project.clone(), None);
+            crate::file_placement(top_row, parent, defaults.project.clone(), held.clone());
         if project.is_none() && parent.is_none() {
             if let Some(note) = note.as_deref().filter(|n| n.starts_with("project: ")) {
                 bail!("file --from: row {line}: {}", note.trim_end());
             }
         }
         let project = project.or_else(|| {
-            if top_row || named_parent || defaults.project.is_some() {
+            if !no_hold || top_row || named_parent || defaults.project.is_some() {
                 return None;
             }
             std::env::var("LJOS_PROJECT")

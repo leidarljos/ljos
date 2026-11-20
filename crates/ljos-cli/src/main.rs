@@ -3521,6 +3521,44 @@ fn show_error(err: anyhow::Error) -> anyhow::Error {
     ticket_error(err)
 }
 
+/// The held issue, as the parent `ljos file` uses.
+struct FileHold {
+    held: Option<String>,
+    /// A hold the tracker does not have. It was cleared.
+    dropped: Option<String>,
+    /// A hold recorded for another tracker. It is kept for that tracker.
+    other_tracker: Option<String>,
+}
+
+/// The hold, resolved before any line says a ticket was filed. A hold the
+/// tracker does not have is cleared, and an alias becomes the id on disk,
+/// so the parent vissue is asked for exists. `skip` is a parent the seat
+/// chose, or `--top`.
+fn file_hold(skip: bool) -> Result<FileHold> {
+    let mut hold = FileHold {
+        held: if skip { None } else { ljos_cli::held_issue() },
+        dropped: None,
+        other_tracker: None,
+    };
+    if let Some(id) = hold.held.clone() {
+        if ljos_cli::hold_names_other_tracker(&id) {
+            hold.held = None;
+            hold.other_tracker = Some(id);
+        }
+    }
+    if let Some(id) = hold.held.clone() {
+        match ljos_cli::resolve_held_parent(&id)? {
+            Some(canonical) => hold.held = Some(canonical),
+            None => {
+                ljos_cli::clear_hold_for(&id);
+                hold.held = None;
+                hold.dropped = Some(id);
+            }
+        }
+    }
+    Ok(hold)
+}
+
 /// Print a ticket lookup failure and exit 1.
 fn stop_ticket(id: &str) {
     if let Some(line) = ljos_cli::ticket_refusal(id) {
@@ -6285,7 +6323,24 @@ fn run_command() -> Result<()> {
                     tags,
                     priority,
                 };
-                let (placed, notes) = ljos_cli::bulk_file::place_rows(&rows, &defaults, top)?;
+                // A row with no parent of its own is placed as `ljos file`
+                // places one, under the held issue.
+                let skip =
+                    top || defaults.parent.is_some() || rows.iter().all(|row| row.parent.is_some());
+                let hold = file_hold(skip)?;
+                let (placed, mut notes) =
+                    ljos_cli::bulk_file::place_rows(&rows, &defaults, top, hold.held)?;
+                if let Some(id) = hold.dropped {
+                    notes.insert(
+                        0,
+                        format!("held issue {id} is gone; rows with no parent are filed at the top of their project\n"),
+                    );
+                } else if let Some(id) = hold.other_tracker {
+                    notes.insert(
+                        0,
+                        format!("held issue {id} is on another tracker; rows with no parent are filed at the top of their project\n"),
+                    );
+                }
                 let filed = ljos_cli::bulk_file::file_rows(&placed, &defaults)?;
                 ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
                 for id in &filed.ids {
@@ -6320,36 +6375,11 @@ fn run_command() -> Result<()> {
             let named_project = project.is_some();
             // `--top` and `--parent` are a parent the seat chose. Only the
             // plain command asks what this conversation holds.
-            let mut held = if top || named_parent {
-                None
-            } else {
-                ljos_cli::held_issue()
-            };
-            // A sitting recorded for another tracker is not this ticket's
-            // parent. The record stays, so that tracker still has it.
-            let mut other_tracker = None;
-            if let Some(id) = held.clone() {
-                if ljos_cli::hold_names_other_tracker(&id) {
-                    held = None;
-                    other_tracker = Some(id);
-                }
-            }
-            // Resolve before any line that says the ticket was filed. A
-            // hold the tracker does not have is cleared and the ticket
-            // goes to the top of the project. An alias becomes the id
-            // on disk, so the parent vissue is asked for exists.
-            let mut dropped = None;
-            if let Some(id) = held.clone() {
-                match ljos_cli::resolve_held_parent(&id) {
-                    Ok(Some(canonical)) => held = Some(canonical),
-                    Ok(None) => {
-                        ljos_cli::clear_hold_for(&id);
-                        held = None;
-                        dropped = Some(id);
-                    }
-                    Err(err) => return Err(err),
-                }
-            }
+            let FileHold {
+                held,
+                dropped,
+                other_tracker,
+            } = file_hold(top || named_parent)?;
             let no_hold = held.is_none();
             let (parent, mut project, passed_over) =
                 ljos_cli::file_placement(top, parent, project, held);
