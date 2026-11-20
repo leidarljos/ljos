@@ -30,7 +30,10 @@ A pack that answers 503, or 429, or a JSON =code= of =busy=, =queue_full=,
 seconds (2 when unset, =0= does not wait). The wait follows =Retry-After=
 or a JSON =retry_ms=. Words in the body are not that signal. When the pack
 stays busy, =ljos remember= stores nothing, says to run it again, and
-exits 1. A pack that is not answering still queues the lesson in
+exits 1. A loopback =EAGAIN=, =EWOULDBLOCK=, or =ConnectionRefused= before
+any request byte leaves for the wire retries within a shared two-second
+per-call budget; once write bytes leave for the wire, an IO failure is
+never resent, and a pack that still does not answer queues the lesson in
 =~/.local/state/ljos/note-queue.jsonl=. The next =ljos search= or
 =ljos sitting= sends it under the same deadline as =ljos remember=, and
 says the lesson is safe and will be sent automatically. A refusal on

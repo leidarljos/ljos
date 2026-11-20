@@ -260,7 +260,10 @@ fn repair_pack() -> Option<String> {
     // The automatic start refuses a temporary home. `--fix` is the person
     // asking, so this runs the same `packset ensure` that start uses.
     match crate::run_captured("packset", &["ensure"]) {
-        Ok(_) => Some("fixed pack: ran `packset ensure`".into()),
+        Ok(_) => {
+            crate::pack_link::clear_pack_quiet();
+            Some("fixed pack: ran `packset ensure`".into())
+        }
         Err(err) => {
             let why = err.to_string();
             let why = why.lines().next().unwrap_or("packset ensure failed");
