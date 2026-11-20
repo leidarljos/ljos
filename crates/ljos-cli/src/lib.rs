@@ -17217,6 +17217,7 @@ fn other_home_writer_line(base: &str) -> Option<String> {
         let facts = DownFacts {
             url_off: false,
             url_set: false,
+            port_set: false,
             asked: host.to_string(),
             asked_port: Some(port),
             packset: true,
@@ -20740,6 +20741,7 @@ struct SeenWriter {
 struct DownFacts {
     url_off: bool,
     url_set: bool,
+    port_set: bool,
     asked: String,
     asked_port: Option<u16>,
     packset: bool,
@@ -20795,11 +20797,16 @@ fn memory_off_temp_line(home: &Path) -> String {
 }
 
 /// That line when this process's `HOME` is a sandbox and no writer address
-/// was named. A named `PACKSET_URL`, including `off`, keeps its own line.
+/// was named. A named `PACKSET_URL`, `PACKSET_PORT` or `LJOS_MEM_PORT`
+/// keeps its own line.
 pub fn sandbox_memory_off() -> Option<String> {
     if std::env::var("PACKSET_URL")
         .ok()
         .is_some_and(|url| !url.trim().is_empty())
+        || std::env::var("PACKSET_PORT")
+            .ok()
+            .or_else(|| std::env::var("LJOS_MEM_PORT").ok())
+            .is_some_and(|port| !port.trim().is_empty())
     {
         return None;
     }
@@ -20813,14 +20820,16 @@ fn down_facts() -> DownFacts {
         .unwrap_or_default();
     let url_off = url == "off";
     let url_set = !url.is_empty() && !url_off;
+    let port_raw = std::env::var("PACKSET_PORT")
+        .ok()
+        .or_else(|| std::env::var("LJOS_MEM_PORT").ok())
+        .map(|raw| raw.trim().to_string())
+        .unwrap_or_default();
+    let port_set = !port_raw.is_empty();
     let asked = if url_set {
         url.trim_end_matches('/').to_string()
     } else {
-        let port = std::env::var("PACKSET_PORT")
-            .ok()
-            .or_else(|| std::env::var("LJOS_MEM_PORT").ok())
-            .and_then(|raw| raw.trim().parse::<u16>().ok())
-            .unwrap_or(PACK_DEFAULT_PORT);
+        let port = port_raw.parse::<u16>().ok().unwrap_or(PACK_DEFAULT_PORT);
         format!("127.0.0.1:{port}")
     };
     let asked_port = asked
@@ -20833,20 +20842,23 @@ fn down_facts() -> DownFacts {
         .filter(|path| !path.is_empty())
         .unwrap_or_else(|| pack_home_under(&our_home));
     let packset = on_path("packset");
+    let temp = bookkeep::temp_home();
+    let probe_writers = packset && !url_off && (url_set || port_set || temp.is_none());
     DownFacts {
         url_off,
         url_set,
+        port_set,
         asked,
         asked_port,
         packset,
-        writers: if packset && !url_off {
+        writers: if probe_writers {
             seen_writers(asked_port, &our_home, &our_pack)
         } else {
             Vec::new()
         },
         our_home,
         our_pack,
-        temp: bookkeep::temp_home(),
+        temp,
     }
 }
 
@@ -20865,6 +20877,11 @@ fn render_down(facts: &DownFacts) -> String {
     if facts.url_off {
         return "PACKSET_URL=off: this seat has no pack on purpose".to_string();
     }
+    if !facts.url_set && !facts.port_set {
+        if let Some(home) = &facts.temp {
+            return memory_off_temp_line(home);
+        }
+    }
     if !facts.packset {
         return "no pack writer is answering and packset is not on PATH, so run `cargo install --locked packset`.".to_string();
     }
@@ -20882,9 +20899,6 @@ fn render_down(facts: &DownFacts) -> String {
             "the pack writer at {} is not answering, so run `packset ensure`.",
             facts.asked
         );
-    }
-    if let Some(home) = &facts.temp {
-        return memory_off_temp_line(home);
     }
     format!(
         "no pack writer is answering on {}, so run `packset ensure`.",
@@ -22487,6 +22501,9 @@ fn seed_words(text: &str, words: Vec<String>, acronyms: &[String]) {
 
 pub fn pack() -> Result<PacksetClient> {
     load_seat_env();
+    if let Some(line) = sandbox_memory_off() {
+        bail!("{line}");
+    }
     scope_pack_port()?;
     let workspace = std::env::var("PACKSET_WORKSPACE")
         .ok()
@@ -73330,6 +73347,7 @@ lesson, due yesterday, seat ada
         let base = super::DownFacts {
             url_off: false,
             url_set: false,
+            port_set: false,
             asked: "127.0.0.1:8761".into(),
             asked_port: Some(8761),
             packset: true,
@@ -73417,6 +73435,7 @@ lesson, due yesterday, seat ada
         let mut base = super::DownFacts {
             url_off: false,
             url_set: false,
+            port_set: false,
             asked: "127.0.0.1:8761".into(),
             asked_port: Some(8761),
             packset: true,
@@ -73458,6 +73477,7 @@ lesson, due yesterday, seat ada
         let mut facts = super::DownFacts {
             url_off: false,
             url_set: false,
+            port_set: false,
             asked: "127.0.0.1:8761".into(),
             asked_port: Some(8761),
             packset: true,
@@ -73498,6 +73518,57 @@ lesson, due yesterday, seat ada
         assert!(
             summary.contains("ljos is not ready") && summary.contains("memory"),
             "{summary}"
+        );
+    }
+
+    #[test]
+    fn a_temp_home_with_a_foreign_writer_still_reports_memory_off() {
+        let _g = env_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[
+            ("HOME", tmp.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", tmp.path().join("cfg").to_str().unwrap()),
+            ("PACKSET_URL", ""),
+            ("PACKSET_PORT", ""),
+            ("LJOS_MEM_PORT", ""),
+        ]);
+        let mut facts = super::DownFacts {
+            url_off: false,
+            url_set: false,
+            port_set: false,
+            asked: "127.0.0.1:8761".into(),
+            asked_port: Some(8761),
+            packset: false,
+            our_home: tmp.path().display().to_string(),
+            our_pack: tmp
+                .path()
+                .join(".local/share/packset")
+                .display()
+                .to_string(),
+            writers: vec![super::SeenWriter {
+                ports: vec![8761],
+                home: "/home/other".into(),
+                pack_home: "/home/other/.local/share/packset".into(),
+                token: String::new(),
+            }],
+            temp: Some(tmp.path().to_path_buf()),
+        };
+        let line = super::render_down(&facts);
+        assert!(
+            line.contains("memory and the command guard are off")
+                && !line.contains("packset is not on PATH")
+                && !line.contains("/home/other"),
+            "{line}"
+        );
+        facts.port_set = true;
+        assert!(super::render_down(&facts).contains("packset is not on PATH"));
+        let err = super::pack()
+            .err()
+            .expect("temp home pack() refuses")
+            .to_string();
+        assert!(
+            err.contains("memory and the command guard are off"),
+            "{err}"
         );
     }
 
