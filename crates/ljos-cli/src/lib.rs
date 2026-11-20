@@ -45654,7 +45654,7 @@ fn sitting_subject(issue: &str, ticket: &str) -> SittingSubject {
     };
     let title = ticket.lines().next().unwrap_or("");
     SittingSubject {
-        terms: drop_project_terms(sitting_subject_terms(&body), project),
+        terms: sitting_subject_terms(&body, project),
         identifiers: title_identifiers(title),
     }
 }
@@ -45719,8 +45719,10 @@ fn sitting_project_name(issue: &str) -> String {
 /// no kiln. `release`, `docs` and `record` stay, the same words lesson
 /// search keeps. When the issue's text and history have no strong word,
 /// the older list is the subject, so a lesson that repeats that text stays.
-fn sitting_subject_terms(ticket: &str) -> Vec<String> {
-    let terms = sitting_terms(ticket);
+/// The project name is taken out first: `Review the kiln` on `kiln` has
+/// no strong word, so `review` is its subject.
+fn sitting_subject_terms(ticket: &str, project: &str) -> Vec<String> {
+    let terms = drop_project_terms(sitting_terms(ticket), project);
     let kept: Vec<String> = terms
         .iter()
         .filter(|term| !word_rank::term_is_weak(term))
@@ -72067,7 +72069,7 @@ playbook: sit
     #[test]
     fn a_sitting_keeps_a_short_title_and_drops_a_faded_note() {
         let now = "2026-11-20T12:00:00Z";
-        let terms = super::sitting_subject_terms("Kiln damper\nljos");
+        let terms = super::sitting_subject_terms("Kiln damper\nljos", "");
         assert!(
             !terms.iter().any(|word| word == "ljo" || word == "ljos"),
             "the project name stayed in the subject words: {terms:?}"
@@ -72508,8 +72510,9 @@ lesson, due yesterday, seat ada
         );
     }
 
-    /// The project name still counts when the title itself says it.
-    /// `Fix the kiln draft` and `The kiln damper needs oil.` share `kiln`.
+    /// The project name does not count even when the title says it.
+    /// `Fix the kiln draft` and `The kiln damper needs oil.` share only
+    /// `kiln`, so the oil lesson stays out and a draft lesson stays in.
     #[test]
     fn a_project_name_in_the_title_is_not_a_subject_word() {
         let now = "2026-11-20T12:00:00Z";
@@ -72549,6 +72552,61 @@ lesson, due yesterday, seat ada
             kept.contains(draft),
             "due dropped a lesson that shares the title's other word:\n{kept}"
         );
+    }
+
+    fn subject_lesson(id: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "kind": "lesson",
+            "text": text,
+            "ts": "2026-11-18T12:00:00Z",
+            "due_at": "2026-11-19T12:00:00Z",
+            "origin": "user-declared",
+            "source": {"seat": "ada", "basis": "person"},
+            "entities": ["seat:ada"],
+        })
+    }
+
+    /// Whether the due list and the timeline for `title` on `issue` each
+    /// show `text`.
+    fn subject_shows(issue: &str, title: &str, text: &str) -> (bool, bool) {
+        let now = "2026-11-20T12:00:00Z";
+        let atom = subject_lesson("row", text);
+        let ticket = super::sitting_ticket_text(issue, title);
+        let (due, _) =
+            super::sitting_due_text(issue, &ticket, std::slice::from_ref(&atom), now, "ada");
+        let timeline = super::related_memory_events(issue, title, std::slice::from_ref(&atom))
+            .into_iter()
+            .any(|event| event.text.contains(text));
+        (due.contains(text), timeline)
+    }
+
+    /// The project name comes out before weak words are judged.
+    /// `Review the kiln` on `kiln` keeps `review` as its subject, the same
+    /// as `Review` on `demo`.
+    #[test]
+    fn a_weak_title_beside_the_project_name_keeps_its_weak_words() {
+        let weekly = "Review lessons weekly.";
+        let oil = "The kiln damper needs oil.";
+        for (issue, title) in [("kiln-lk1e", "Review the kiln"), ("demo-lk1e", "Review")] {
+            assert_eq!(
+                subject_shows(issue, title, weekly),
+                (true, true),
+                "{issue} {title:?} dropped {weekly:?}"
+            );
+        }
+        assert_eq!(
+            subject_shows("kiln-lk1e", "Review the kiln", oil),
+            (false, false),
+            "Review the kiln kept {oil:?}"
+        );
+        for title in ["kiln", "Kiln", "Fix the kilns"] {
+            assert_eq!(
+                subject_shows("kiln-lk1e", title, oil),
+                (false, false),
+                "{title:?} kept {oil:?}"
+            );
+        }
     }
 
     /// A tombstone is not a due card, a timeline row or a recall hit, even
