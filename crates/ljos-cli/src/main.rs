@@ -150,6 +150,9 @@ enum MemCmd {
         /// Replacement text for `--edit`, or the text of the merged memory for `--merge`.
         #[arg(long)]
         text: Option<String>,
+        /// Mark this lesson or preference public, so `ljos handbook` may export it. The text is written again with its project and tags. Repeatable. A runner cannot.
+        #[arg(long, value_name = "ID")]
+        public: Vec<String>,
     },
     /// Browse, filter by seat or date, and prune memories in a terminal viewer.
     ///
@@ -283,16 +286,23 @@ fn memories_cmd(cmd: MemCmd) -> Result<()> {
             edit,
             merge,
             text,
+            public,
         } => {
             let all = mem::list(&mem::live_atoms()?, &mem::reviews(), &everything);
-            let scripted =
-                !keep.is_empty() || !drop_ids.is_empty() || edit.is_some() || !merge.is_empty();
+            let scripted = !keep.is_empty()
+                || !drop_ids.is_empty()
+                || edit.is_some()
+                || !merge.is_empty()
+                || !public.is_empty();
             if scripted {
                 for id in &keep {
                     print!("{}", mem::keep(id, &all)?);
                 }
                 for id in &drop_ids {
                     print!("{}", mem::drop_memory(id, &all)?);
+                }
+                for id in &public {
+                    print!("{}", mem::mark_public(id, &all)?);
                 }
                 if let Some(id) = edit {
                     let text = text
@@ -659,6 +669,11 @@ enum Cmd {
         /// An unknown name exits 1 and names the projects.
         #[arg(short = 'p', long, value_name = "PROJECT")]
         project: Option<String>,
+        /// Mark this lesson public, so `ljos handbook` may export it. The default is private.
+        /// It records the project, from `-p` or the checkout, and exits 1 when none resolves.
+        /// A pack that does not take it is not queued: run it again.
+        #[arg(long)]
+        public: bool,
     },
     /// Save one standing preference for how work should be done.
     ///
@@ -725,6 +740,9 @@ enum Cmd {
         /// Record this tag on the preference. Repeatable.
         #[arg(long, value_name = "TAG")]
         tag: Vec<String>,
+        /// Mark this preference public, so `ljos handbook` may export it. The default is private. It records the project, from `-p` or the checkout.
+        #[arg(long)]
+        public: bool,
     },
     /// Write this seat's memories to a file. The same as `ljos memory export`.
     ///
@@ -1979,6 +1997,9 @@ enum Cmd {
         /// Record this tag on the rule. Repeatable.
         #[arg(long, value_name = "TAG")]
         tag: Vec<String>,
+        /// Mark this rule public, so `ljos handbook` may export it. The default is private. It records the project, from `-p` or the checkout.
+        #[arg(long)]
+        public: bool,
     },
     /// List the command guard's rules: verdict, pattern and reason, one a line.
     ///
@@ -5126,8 +5147,10 @@ fn run_command() -> Result<()> {
             valid_to,
             json,
             project,
+            public,
         } => {
             ljos_cli::config_diag::emit();
+            ljos_cli::refuse_public_under_a_runner("remember", public)?;
             if transient && standing {
                 eprintln!("remember: pass --transient or --standing, not both.");
                 std::process::exit(USAGE_STATUS);
@@ -5147,9 +5170,14 @@ fn run_command() -> Result<()> {
             }
             let project = match project {
                 Some(name) => Some(ljos_cli::require_known_project(&name)?),
+                None if public => Some(
+                    ljos_cli::seat_tracker_project()
+                        .context("remember: --public needs a project, so pass -p")?,
+                ),
                 None => None,
             };
             let _remember_project = ljos_cli::RememberProject::set(project);
+            let _remember_public = ljos_cli::RememberPublic::set(public);
             if let Err(err) = ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref()) {
                 eprintln!("{err}");
                 std::process::exit(USAGE_STATUS);
@@ -5256,7 +5284,9 @@ fn run_command() -> Result<()> {
             keep,
             project,
             tag,
+            public,
         } => {
+            ljos_cli::refuse_public_under_a_runner("prefer", public)?;
             // A person-side prefer records the user-rule cutoff. Under a
             // runner it does not, so a hook cannot decide which old rows
             // are new.
@@ -5276,6 +5306,7 @@ fn run_command() -> Result<()> {
                     || !deny_reply_name.is_empty()
                     || project.is_some()
                     || !tag.is_empty()
+                    || public
                 {
                     bail!(
                         "prefer: --user --review lists older user rules and takes none of the other flags"
@@ -5304,6 +5335,7 @@ fn run_command() -> Result<()> {
                     || !deny_reply_name.is_empty()
                     || project.is_some()
                     || !tag.is_empty()
+                    || public
                 {
                     bail!(
                         "prefer: --review lists older preferences and takes none of the other flags"
@@ -5331,6 +5363,7 @@ fn run_command() -> Result<()> {
                         || !deny_reply_name.is_empty()
                         || project.is_some()
                         || !tag.is_empty()
+                        || public
                     {
                         bail!("prefer: --sync pulls and pushes user rules, and takes none of the other flags");
                     }
@@ -5347,15 +5380,19 @@ fn run_command() -> Result<()> {
                     bail!("prefer: a user rule is this user's, not one persona's. Drop --as");
                 }
                 if let Some(id) = forget {
-                    if !text.is_empty() || promote.is_some() || project.is_some() || !tag.is_empty()
+                    if !text.is_empty()
+                        || promote.is_some()
+                        || project.is_some()
+                        || !tag.is_empty()
+                        || public
                     {
-                        bail!("prefer: --forget takes the id, not the words, --promote, --project or --tag");
+                        bail!("prefer: --forget takes the id, not the words, --promote, --project, --tag or --public");
                     }
                     let rule = ljos_cli::user_rules::forget(&id)?;
                     println!("{}", ljos_cli::user_rules::ack(&rule));
                     return Ok(());
                 }
-                let _hold = ljos_cli::policy_hold("prefer", project, tag)?;
+                let _hold = ljos_cli::policy_hold("prefer", project, tag, public)?;
                 let why = why.as_deref().unwrap_or("");
                 let mention = ljos_cli::user_rules::People {
                     handles: deny_mention,
@@ -5396,7 +5433,7 @@ fn run_command() -> Result<()> {
                     "prefer: --why, --promote, --forget, --sync and the mention flags write a user rule. Pass --user"
                 );
             }
-            let _hold = ljos_cli::policy_hold("prefer", project, tag)?;
+            let _hold = ljos_cli::policy_hold("prefer", project, tag, public)?;
             let text = join(&text);
             if text.trim().is_empty() {
                 eprintln!("prefer: the text is empty, so run `ljos prefer \"TEXT\"`.");
@@ -7154,8 +7191,9 @@ fn run_command() -> Result<()> {
             user,
             project,
             tag,
+            public,
         } => {
-            let _hold = ljos_cli::policy_hold("rule", project, tag)?;
+            let _hold = ljos_cli::policy_hold("rule", project, tag, public)?;
             if user {
                 let basis = if verdict == "allow" {
                     ljos_cli::allow_basis()?
