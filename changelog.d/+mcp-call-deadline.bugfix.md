@@ -1,0 +1,1 @@
+An `ljos mcp` server that had been up longer than `LJOS_CALL_TIMEOUT` gave a new search, recall, remember or finish call no room to wait for a starting pack. Each call now gets its own deadline, counted from where the call begins, and one recall shares one deadline across its reads.

@@ -23,6 +23,8 @@ pub mod bookkeep;
 pub mod bulk_file;
 pub mod call_deadline;
 mod private_file;
+pub mod search_call;
+pub use search_call::SearchCall;
 pub mod capture;
 mod claim_age;
 pub mod cloud;
@@ -12683,6 +12685,7 @@ fn writer_refusal(err: &anyhow::Error) -> bool {
 /// [`DENSE_ALONE_AT`], is marked so a later sort keeps it ahead of a row
 /// that only shares a word. The caller ranks and cuts.
 pub fn search_ranked(query: &str, limit: u32) -> Result<Vec<Hit>> {
+    let _call = SearchCall::enter();
     let _busy = pack_link::BusyRetry::enter();
     let started = std::time::Instant::now();
     wait_until_health_open(started)?;
@@ -15767,7 +15770,7 @@ fn start_budget_left(started: std::time::Instant) -> std::time::Duration {
     if budget.is_zero() {
         return std::time::Duration::ZERO;
     }
-    let room = search_call_left().saturating_sub(WARMUP_SEARCH_RESERVE);
+    let room = search_call::left().saturating_sub(WARMUP_SEARCH_RESERVE);
     warmup_left(started, budget).min(room)
 }
 
@@ -15816,7 +15819,7 @@ fn answer_after_start<T>(
     started: std::time::Instant,
     mut op: impl FnMut() -> Result<T>,
 ) -> Result<T> {
-    let _ = search_call_left();
+    let _ = search_call::left();
     let mut pause = std::time::Duration::from_millis(50);
     loop {
         match op() {
@@ -15848,6 +15851,7 @@ fn answer_after_start<T>(
 /// The pack refused the connection, or the search failed for a reason
 /// that is not a busy writer or a deadline.
 pub fn search_hits(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
+    let _call = SearchCall::enter();
     let _busy = pack_link::BusyRetry::enter();
     let started = std::time::Instant::now();
     wait_until_health_open(started)?;
@@ -15856,7 +15860,7 @@ pub fn search_hits(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
 
 fn search_hits_settled(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
     SEARCH_WAITED_MS.with(|cell| cell.set(0));
-    let _ = search_call_left();
+    let _ = search_call::left();
     if read_encoder_status().as_ref().is_some_and(encoder_cold) {
         return search_after_warmup(query, limit);
     }
@@ -15918,27 +15922,8 @@ fn search_after_warmup(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
 const WARMUP_SEARCH_RESERVE: std::time::Duration = std::time::Duration::from_millis(400);
 
 thread_local! {
-    /// When this search's call deadline runs out. Armed on the first
-    /// search of the process, which is one command.
-    static SEARCH_CALL_DEADLINE: std::cell::Cell<Option<std::time::Instant>> =
-        const { std::cell::Cell::new(None) };
     /// Milliseconds the warm-up poll spent. `0` when that poll did not run.
     static SEARCH_WAITED_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// Time left on this search's call deadline.
-/// The first call arms it from [`call_deadline::timeout`].
-fn search_call_left() -> std::time::Duration {
-    let deadline = SEARCH_CALL_DEADLINE.with(|cell| {
-        if let Some(deadline) = cell.get() {
-            deadline
-        } else {
-            let deadline = std::time::Instant::now() + call_deadline::timeout();
-            cell.set(Some(deadline));
-            deadline
-        }
-    });
-    deadline.saturating_duration_since(std::time::Instant::now())
 }
 
 fn note_search_waited(waited: std::time::Duration) {
@@ -15965,7 +15950,7 @@ fn warmup_bound(status: Option<&Value>) -> Option<std::time::Duration> {
     if remaining.is_zero() || remaining > budget {
         return None;
     }
-    let room = search_call_left().saturating_sub(WARMUP_SEARCH_RESERVE);
+    let room = search_call::left().saturating_sub(WARMUP_SEARCH_RESERVE);
     let bound = remaining.min(budget).min(room);
     if bound.is_zero() {
         None
@@ -15977,7 +15962,7 @@ fn warmup_bound(status: Option<&Value>) -> Option<std::time::Duration> {
 /// Time the warm-up poll may still sleep.
 fn warmup_left(started: std::time::Instant, bound: std::time::Duration) -> std::time::Duration {
     let mut left = bound.saturating_sub(started.elapsed());
-    let call = search_call_left().saturating_sub(WARMUP_SEARCH_RESERVE);
+    let call = search_call::left().saturating_sub(WARMUP_SEARCH_RESERVE);
     left = left.min(call);
     if let Some(clock) = pack_link::clock_left() {
         left = left.min(clock.saturating_sub(WARMUP_SEARCH_RESERVE));
@@ -20418,7 +20403,7 @@ pub fn search_busy_wait() -> std::time::Duration {
 /// keeps [`SEARCH_PACK_BUDGET`].
 #[must_use]
 pub fn search_budget() -> std::time::Duration {
-    let _ = search_call_left();
+    let _ = search_call::left();
     let status = read_encoder_status();
     let budget = if status.as_ref().is_some_and(encoder_cold) {
         let cold = search_wait()
@@ -20428,7 +20413,7 @@ pub fn search_budget() -> std::time::Duration {
             Some(bound) => {
                 let span = bound.saturating_add(SEARCH_PACK_BUDGET);
                 let budget = cold.max(span);
-                let left = search_call_left();
+                let left = search_call::left();
                 budget.min(left).max(std::time::Duration::from_millis(1))
             }
             None => cold,
@@ -20438,7 +20423,7 @@ pub fn search_budget() -> std::time::Duration {
     };
     if health_still_starting() == Some(true) {
         let span = search_warmup_wait().saturating_add(SEARCH_PACK_BUDGET);
-        let left = search_call_left();
+        let left = search_call::left();
         return budget
             .max(span)
             .min(left)
@@ -24529,6 +24514,7 @@ fn remember_should_queue(err: &anyhow::Error) -> bool {
 ///
 /// The pack stayed busy, refused the text, or packs are turned off.
 pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) -> Result<Value> {
+    let _call = SearchCall::enter();
     // A pack that has not opened yet is waited out on the search warm-up
     // budget. The short post budget starts only after that, so a pack that
     // is already open and busy is asked again inside the busy bound.
@@ -42854,6 +42840,7 @@ pub fn recall_for_command(issue: &str) -> Result<String> {
 /// the doctor starts it, and the line says so only when the start did not
 /// bring it up.
 pub fn recall_memories(issue: &str) -> Result<String> {
+    let _call = SearchCall::enter();
     let _deadline = pack_link::CommandDeadline::enter(pack_cmd_budget());
     let _clock = arm_cmd_pack();
     let _listing = ListingMemo::enter();
@@ -42864,6 +42851,7 @@ pub fn recall_memories(issue: &str) -> Result<String> {
 /// a working note cannot come back as a fact on the next prompt. A pack
 /// that runs out of time adds nothing, so the hook stays quiet.
 pub(crate) fn recall_memories_for_prompt(issue: &str) -> String {
+    let _call = SearchCall::enter();
     let _deadline = pack_link::CommandDeadline::enter(pack_cmd_budget());
     let _clock = arm_cmd_pack();
     match recall_memories_with(issue, false) {
@@ -42992,6 +42980,7 @@ fn listed_word_hits(
 }
 
 fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
+    let _call = SearchCall::enter();
     let issue = issue.trim();
     if let Some(listing) = sitting_listing() {
         if !listing.ok {
@@ -47572,6 +47561,7 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
 }
 
 fn finish_lesson(issue: &str, text: &str) -> String {
+    let _call = SearchCall::enter();
     let filed = answer_after_start(std::time::Instant::now(), || {
         finish_lesson_post(issue, text)
     });
@@ -57374,6 +57364,57 @@ mod tests {
         assert!(
             text.contains("reads the registry token from the CI"),
             "{text}"
+        );
+    }
+
+    /// Everything a recall reads sits inside one call deadline: a search
+    /// the recall makes nests in the recall's guard, so a recall is not given
+    /// a new deadline for each cue.
+    #[test]
+    fn a_recall_takes_one_call_deadline_for_all_its_reads() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("Software/sample");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: sample issues\n#+VISSUE: 1\n#+CATEGORY: sample\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#B] Rotate the npm registry token\n:PROPERTIES:\n:ID:         sample-k2p2\n:CREATED:    [2026-09-20 Sat]\n:END:\n",
+        )
+        .unwrap();
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/atoms") {
+                return (200, r#"{"atoms":[]}"#.to_string());
+            }
+            if first.contains("/v1/search") {
+                return (200, r#"{"hits":[]}"#.to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let _bins = super::set_path(super::path_without(&["vissue"]));
+        let _roots = HoldEnv::set(&[
+            ("ISSUE_ROOT", dir.path().to_str().unwrap()),
+            ("VISSUE_ROOT", dir.path().to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+        ]);
+        super::search_call::forget_deepest();
+        let _ = recall_memories("sample-k2p2").unwrap();
+        assert!(
+            super::search_call::deepest() >= 2,
+            "a search in the recall took a deadline of its own"
+        );
+        super::search_call::forget_deepest();
+        let _ = recall_memories_for_prompt("sample-k2p2");
+        assert!(
+            super::search_call::deepest() >= 2,
+            "a search in the prompt recall took a deadline of its own"
+        );
+        super::search_call::forget_deepest();
+        let _ = recall_memories_with("sample-k2p2", true);
+        assert!(
+            super::search_call::deepest() >= 2,
+            "a search in a sitting's recall took a deadline of its own"
         );
     }
 
