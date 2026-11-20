@@ -1798,6 +1798,24 @@ fn atom_changes(
     changes
 }
 
+/// Keep `plain` as what `sealed` opens to here, the way an import keeps
+/// what age gave, so this machine's next export reads its own log without
+/// running `age -d` on every piece. Only when one of this machine's
+/// identities is a recipient: a file it could not open stays unopened.
+fn keep_sealed(sealed: &[u8], plain: &str, scope_name: &str, recipients: &[String]) {
+    let identities = identities_for_open(scope_name);
+    let opens = identities.iter().any(|identity| {
+        identity_recipient(identity).is_ok_and(|key| recipients.iter().any(|r| r.trim() == key))
+    });
+    if opens {
+        let _ = write_beneath(
+            &state_base(),
+            &opened_mark_rel(sealed, &identities),
+            plain.as_bytes(),
+        );
+    }
+}
+
 fn seal_or_missing(plain: &str, recipients: &[String]) -> Result<Option<Vec<u8>>> {
     match seal_bytes(plain, recipients) {
         Ok(sealed) => Ok(Some(sealed)),
@@ -1875,6 +1893,7 @@ fn store_log(
         return seal_snapshot(
             root,
             &stem,
+            scope_name,
             &plain,
             recipients,
             &sealed_pieces(root, &stem),
@@ -1897,7 +1916,15 @@ fn store_log(
         });
     }
     if snap_seq.is_none() || compact {
-        return seal_snapshot(root, &stem, &plain, recipients, &pieces, changes.len());
+        return seal_snapshot(
+            root,
+            &stem,
+            scope_name,
+            &plain,
+            recipients,
+            &pieces,
+            changes.len(),
+        );
     }
     let seq = pieces.iter().map(|piece| piece.seq).max().unwrap_or(0) + 1;
     let over = snap_seq.unwrap_or(0);
@@ -1914,6 +1941,7 @@ fn store_log(
     };
     let rel = seg_file_rel(&stem, seq, &hash8_of(segment.as_bytes()));
     write_beneath(root, &rel, &sealed)?;
+    keep_sealed(&sealed, &segment, scope_name, recipients);
     write_plain_hash(root, &stem, &plain)?;
     remember_digest(root, &log_rel, &plain, recipients)?;
     Ok(StoreOut::Wrote {
@@ -1964,6 +1992,7 @@ fn remember_digest(root: &Path, log_rel: &str, plain: &str, recipients: &[String
 fn seal_snapshot(
     root: &Path,
     stem: &str,
+    scope_name: &str,
     plain: &str,
     recipients: &[String],
     pieces: &[SealedPiece],
@@ -1981,6 +2010,7 @@ fn seal_snapshot(
     };
     let rel = snap_file_rel(stem, seq);
     write_beneath(root, &rel, &sealed)?;
+    keep_sealed(&sealed, plain, scope_name, recipients);
     remove_pieces(root, pieces)?;
     write_plain_hash(root, stem, plain)?;
     remember_digest(root, &format!("{stem}.jsonl.age"), plain, recipients)?;

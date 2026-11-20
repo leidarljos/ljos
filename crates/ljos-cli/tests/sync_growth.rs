@@ -682,3 +682,25 @@ fn a_compaction_over_a_log_this_machine_cannot_open_removes_nothing() {
     let last = atoms[LOG_ATOMS]["text"].as_str().unwrap();
     assert!(taken.contains(last), "{said}");
 }
+
+#[test]
+fn a_sync_seals_new_atoms_without_opening_its_own_log() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, mut atoms, whole) = sealed_log();
+    let before = w.pieces();
+    w.fail_opens(true);
+    for _ in 0..2 {
+        let atom = lesson(atoms.len(), LINE);
+        w.add(atom.clone());
+        atoms.push(atom);
+    }
+    let said = w.sync();
+    let new = sealed_since(&w, &before, &w.pieces(), &said);
+    assert_eq!(new.len(), 1, "over a {whole} byte log, {new:?}: {said}");
+    assert!(new[0].0.contains("/seg-"), "{new:?}: {said}");
+    assert!(new[0].1 < TWO_ATOM_SEGMENT, "{new:?}: {said}");
+    w.fail_opens(false);
+    assert_eq!(w.import_as_peer(), texts(&atoms));
+}
