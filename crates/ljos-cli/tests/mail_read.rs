@@ -200,10 +200,36 @@ fn a_notmuch_config_others_could_change_is_refused() {
 }
 
 /// A reader whose notmuch is `script`, a shell script.
+///
+/// Write via a short-lived `cat` and rename into place so no write fd
+/// stays open in this process for a parallel test's `fork` to inherit
+/// and trigger `ETXTBSY` on exec.
 fn fake(dir: &tempfile::TempDir, script: &str) -> Reader {
+    use std::io::Write as _;
     let bin = dir.path().join("notmuch");
-    std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let tmp = dir
+        .path()
+        .join(format!(".notmuch.{}.new", std::process::id()));
+    let body = format!("#!/bin/sh\n{script}\n");
+    let mut child = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("/bin/cat > \"$1\" && /bin/chmod 755 \"$1\"")
+        .arg("fake-notmuch")
+        .arg(&tmp)
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn fake notmuch writer: {e}"));
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin.write_all(body.as_bytes()).unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "fake notmuch writer failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::rename(&tmp, &bin).unwrap();
     std::fs::write(dir.path().join("notmuch-config"), "").unwrap();
     Reader::new(&MailConfig {
         notmuch: Some(bin),
