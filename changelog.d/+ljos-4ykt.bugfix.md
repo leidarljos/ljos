@@ -1,1 +1,1 @@
-Tighten identity-gate coverage for `noreply@github.com` committers, keep terminal tests on drained PTY output, and seed `old_terminal` from documented legacy atom fixtures instead of posting with the current binary.
+Tighten identity-gate coverage for `noreply@github.com` committers, keep terminal tests on drained PTY output, seed `old_terminal` from documented legacy atom fixtures, assert legacy atoms stay unverified through `ljos doctor`, and name `ljos doctor` on a busy pack admission row.
