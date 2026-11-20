@@ -54386,33 +54386,49 @@ fn tracker_retry_line(retries: usize) -> String {
     }
 }
 
-fn note_landed(issue: &str, text: &str) -> bool {
-    let Ok(card) = tracker_show_json(issue) else {
-        return false;
-    };
-    let latest = card["logbook"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            entry["note"]
-                .as_str()
-                .map(|note| (entry["timestamp"].as_str().unwrap_or(""), note))
-        })
-        .max_by_key(|(ts, _)| ts.to_string());
-    latest.is_some_and(|(_, note)| note.trim() == text.trim())
+#[derive(Debug)]
+struct NoteBefore {
+    issue: String,
+    text: String,
+    count: usize,
+    first: Option<serde_json::Value>,
 }
 
-fn tracker_note_already_written(args: &[impl AsRef<str>]) -> bool {
+fn tracker_note_before(args: &[impl AsRef<str>]) -> Option<NoteBefore> {
     if args.first().map(AsRef::as_ref) != Some("note") || args.len() < 3 {
-        return false;
+        return None;
     }
     let issue = args.get(1).map(AsRef::as_ref).unwrap_or_default();
     let mut text = args.get(2).map(AsRef::as_ref).unwrap_or_default();
     if text == "--" {
         text = args.get(3).map(AsRef::as_ref).unwrap_or_default();
     }
-    !issue.trim().is_empty() && !text.trim().is_empty() && note_landed(issue, text)
+    if issue.trim().is_empty() || text.trim().is_empty() {
+        return None;
+    }
+    let card = tracker_show_json(issue).ok()?;
+    let logbook = card["logbook"].as_array()?;
+    Some(NoteBefore {
+        issue: issue.to_string(),
+        text: text.to_string(),
+        count: logbook.len(),
+        first: logbook.first().cloned(),
+    })
+}
+
+fn tracker_note_landed(before: &NoteBefore) -> bool {
+    let Ok(card) = tracker_show_json(&before.issue) else {
+        return false;
+    };
+    let Some(logbook) = card["logbook"].as_array() else {
+        return false;
+    };
+    logbook.len() == before.count + 1
+        && logbook
+            .first()
+            .and_then(|entry| entry["note"].as_str())
+            .is_some_and(|note| note.trim() == before.text.trim())
+        && logbook.get(1) == before.first.as_ref()
 }
 
 /// How long [`run_captured`] waits. A habitat that never exits used to
@@ -54726,6 +54742,7 @@ fn run_captured_within(
     let mut retries = 0usize;
     let words: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
     'attempt: loop {
+        let note_before = tracker_note_before(args);
         let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -54773,23 +54790,25 @@ fn run_captured_within(
                         tool_bound::mark_failed(line.clone());
                         bail!(line);
                     }
-                    if retryable && retries < 2 {
-                        if tracker_note_already_written(args) {
+                    if retryable {
+                        if note_before.as_ref().is_some_and(tracker_note_landed) {
                             return Ok(Said {
                                 stdout: String::new(),
                                 stderr: String::new(),
                             });
                         }
-                        let backoff = std::time::Duration::from_millis(120 * (1u64 << retries));
-                        if retry_start
-                            .elapsed()
-                            .saturating_add(backoff)
-                            .saturating_add(deadline)
-                            <= retry_budget
-                        {
-                            retries += 1;
-                            std::thread::sleep(backoff);
-                            continue 'attempt;
+                        if retries < 2 {
+                            let backoff = std::time::Duration::from_millis(120 * (1u64 << retries));
+                            if retry_start
+                                .elapsed()
+                                .saturating_add(backoff)
+                                .saturating_add(deadline)
+                                <= retry_budget
+                            {
+                                retries += 1;
+                                std::thread::sleep(backoff);
+                                continue 'attempt;
+                            }
                         }
                     }
                     let line = if retries > 0 && retryable {
