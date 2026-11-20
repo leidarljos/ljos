@@ -1097,45 +1097,12 @@ pub fn excerpt_of(prompt: &str) -> String {
     cut
 }
 
-/// A word that may be a credential: a `key=`/`token:` style assignment, a
-/// known key prefix, or a long run of mixed letters and digits.
+/// A word that may be a credential. The matcher is
+/// `public_text::secret_word`, which an export runs on every line. The
+/// excerpt also redacts a bare `key=` marker and a run of letters and digits
+/// that dashes cut up, which an export reads as prose.
 fn secret_shaped(word: &str) -> bool {
-    let lower = word.to_ascii_lowercase();
-    if [
-        "key=",
-        "token=",
-        "secret=",
-        "password=",
-        "passwd=",
-        "key:",
-        "token:",
-        "secret:",
-        "password:",
-    ]
-    .iter()
-    .any(|p| lower.contains(p))
-    {
-        return true;
-    }
-    if [
-        "sk-",
-        "ghp_",
-        "gho_",
-        "github_pat_",
-        "xox",
-        "akia",
-        "glpat-",
-    ]
-    .iter()
-    .any(|p| lower.starts_with(p))
-    {
-        return true;
-    }
-    let core: String = word.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-    core.len() >= 24
-        && core.chars().any(|c| c.is_ascii_digit())
-        && core.chars().any(|c| c.is_ascii_alphabetic())
-        && !word.contains('/')
+    crate::public_text::secret_word(word)
 }
 
 #[cfg(test)]
@@ -1420,5 +1387,163 @@ mod tests {
         ] {
             assert!(quotes(prompt, cut), "refused from {prompt:?}");
         }
+    }
+
+    /// What the excerpt refused before the matcher was shared with the
+    /// public-text screen, kept here as it was written.
+    fn before_the_merge(word: &str) -> bool {
+        let lower = word.to_ascii_lowercase();
+        if [
+            "key=",
+            "token=",
+            "secret=",
+            "password=",
+            "passwd=",
+            "key:",
+            "token:",
+            "secret:",
+            "password:",
+        ]
+        .iter()
+        .any(|p| lower.contains(p))
+        {
+            return true;
+        }
+        // Token prefixes are split with concat! so a secret scanner on the
+        // repository does not read this list as a leaked token.
+        if [
+            concat!("s", "k-"),
+            concat!("gh", "p_"),
+            concat!("gh", "o_"),
+            concat!("github", "_pat_"),
+            concat!("xo", "x"),
+            "akia",
+            concat!("gl", "pat-"),
+        ]
+        .iter()
+        .any(|p| lower.starts_with(p))
+        {
+            return true;
+        }
+        let core: String = word.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        core.len() >= 24
+            && core.chars().any(|c| c.is_ascii_digit())
+            && core.chars().any(|c| c.is_ascii_alphabetic())
+            && !word.contains('/')
+    }
+
+    #[test]
+    fn the_shared_matcher_refuses_every_word_the_excerpt_refused_before() {
+        let heads = ["", "my", "api_", "X-", "(", "\"", "AWS_SECRET_"];
+        let marks = [
+            "key=",
+            "token=",
+            "secret=",
+            "password=",
+            "passwd=",
+            "key:",
+            "token:",
+            "secret:",
+            "password:",
+            "KEY=",
+            "Token:",
+            "PASSWORD=",
+        ];
+        let tails = [
+            "",
+            "x",
+            "abc",
+            "abc123",
+            "hunter2",
+            "\"p\"",
+            "a1b2c3d4e5f6a7b8c9d0e1f2",
+        ];
+        let prefixes = [
+            concat!("s", "k-"),
+            concat!("gh", "p_"),
+            concat!("gh", "o_"),
+            concat!("github", "_pat_"),
+            concat!("xo", "x"),
+            "akia",
+            concat!("gl", "pat-"),
+            "SK-",
+            "GHP_",
+            concat!("AK", "IA"),
+        ];
+        let long = [
+            "a1".repeat(12),
+            "a1".repeat(20),
+            "Zz9".repeat(9),
+            "abcdefghijklmnopqrstuvwxyz".to_string(),
+            "0123456789012345678901234".to_string(),
+            "abcdefghij0123456789klmno".to_string(),
+            "dir/abcdefghij0123456789klmno".to_string(),
+            "abc-def-ghi-jkl-mno-pqr-0123".to_string(),
+        ];
+        let mut words: Vec<String> = Vec::new();
+        for head in heads {
+            for mark in marks {
+                for tail in tails {
+                    words.push(format!("{head}{mark}{tail}"));
+                }
+            }
+        }
+        for prefix in prefixes {
+            for tail in tails
+                .iter()
+                .map(|t| t.to_string())
+                .chain(long.iter().cloned())
+            {
+                words.push(format!("{prefix}{tail}"));
+            }
+        }
+        words.extend(long.iter().cloned());
+        for text in SAVES.iter().chain(SAVES_NOTHING) {
+            words.extend(text.split_whitespace().map(str::to_string));
+        }
+        let refused_before: Vec<&String> = words.iter().filter(|w| before_the_merge(w)).collect();
+        assert!(
+            refused_before.len() > 200,
+            "the corpus refused only {} words before",
+            refused_before.len()
+        );
+        let let_through: Vec<&&String> = refused_before
+            .iter()
+            .filter(|w| !secret_shaped(w))
+            .collect();
+        assert!(let_through.is_empty(), "now allowed: {let_through:?}");
+        // An export reads a marker with nothing after it, and a word cut
+        // into short runs, as prose. Every other word the excerpt redacts
+        // is refused by the export too.
+        let exported: Vec<&&String> = refused_before
+            .iter()
+            .filter(|w| {
+                let lower = w.to_ascii_lowercase();
+                let valued = marks.iter().any(|mark| {
+                    lower
+                        .match_indices(&mark.to_ascii_lowercase())
+                        .any(|(at, _)| {
+                            lower[at + mark.len()..]
+                                .chars()
+                                .any(|c| c.is_ascii_alphanumeric())
+                        })
+                });
+                let prefixed = prefixes
+                    .iter()
+                    .any(|prefix| lower.starts_with(&prefix.to_ascii_lowercase()));
+                let unbroken = w.split(|c: char| !c.is_ascii_alphanumeric()).any(|run| {
+                    run.len() >= 24
+                        && !(run.len() >= 32 && run.chars().all(|c| c.is_ascii_hexdigit()))
+                        && run.chars().any(|c| c.is_ascii_digit())
+                        && run.chars().any(|c| c.is_ascii_alphabetic())
+                });
+                valued || prefixed || unbroken
+            })
+            .filter(|w| !crate::public_text::refuses(w, &crate::public_text::Screen::default()))
+            .collect();
+        assert!(
+            exported.is_empty(),
+            "redacted in an excerpt but exported: {exported:?}"
+        );
     }
 }

@@ -1,0 +1,3 @@
+Add `ljos handbook` to write the lessons, preferences, rules, tickets and workflows marked public as one Org document. Nothing unmarked is exported. A marked item that reads as private stops the export. `ljos handbook` then names the item and the kind of match, and writes nothing.
+Refuse a capital `Cursor`, and credential phrasing such as `the password is hunter`, `the pin is 4921`, `curl -u user:pass` and `sshpass -p`, in the public-text screen.
+The screen reads an address that follows a letter and a dot, as in `e.g.10.0.0.1`. A private quad inside a longer dotted run is refused, as in `1.10.0.0.5`, and only a public quad written in decimal is spared as a version, as in `v1.10.0.0`.
