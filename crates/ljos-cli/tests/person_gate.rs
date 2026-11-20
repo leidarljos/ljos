@@ -164,7 +164,7 @@ fn run_hook(cmd: &mut Command, stdin: &str) -> (Output, String) {
         .unwrap()
         .write_all(stdin.as_bytes())
         .unwrap();
-    let out = pty::wait_output(child, 30);
+    let out = term.wait_output(child, 30);
     (out, term.shown())
 }
 
@@ -258,7 +258,22 @@ fn piped_stdin_without_a_terminal_cannot_answer() {
         .unwrap()
         .write_all(case.push.as_bytes())
         .unwrap();
-    let out = pty::wait_output(child, 60);
+    let pid = child.id();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&done);
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // SAFETY: a signal to a child this test started.
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    });
+    let out = child.wait_with_output().unwrap();
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
     let err = labelled(&out);
     assert!(!err.contains(PROMPT), "{err}");
 }
@@ -315,7 +330,7 @@ fn an_interrupt_at_the_prompt_restores_echo() {
         .unwrap()
         .write_all(case.push.as_bytes())
         .unwrap();
-    let out = pty::wait_output(child, 30);
+    let out = term.wait_output(child, 30);
     labelled(&out);
     assert!(term.echo_on(), "echo was turned off: {}", term.shown());
     assert!(!term.shown().contains(PROMPT), "{}", term.shown());

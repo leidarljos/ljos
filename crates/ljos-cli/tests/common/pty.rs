@@ -224,8 +224,7 @@ impl Pty {
 }
 
 /// Wait for `child` to exit, killing it after `secs` seconds.
-#[allow(dead_code)]
-pub fn wait_output(child: Child, secs: u64) -> std::process::Output {
+fn wait_output(child: Child, secs: u64) -> std::process::Output {
     let pid = child.id();
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = Arc::clone(&done);
