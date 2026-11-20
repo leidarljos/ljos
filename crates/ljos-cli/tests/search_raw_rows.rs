@@ -468,6 +468,7 @@ fn search_on_a_terminal_prints_the_page_and_no_raw_rows() {
     term.attach_output(&mut cmd);
     let child = term.spawn(&mut cmd);
     let out = term.wait_output(child, 30);
+    term.finish_reading();
     let shown = term.shown();
     assert!(out.status.success(), "{shown}\n{}", text(&out));
     assert_clean("terminal", &shown, "");
@@ -498,6 +499,7 @@ fn search_on_a_terminal_with_encoder_prints_the_page_and_no_raw_rows() {
     term.attach_output(&mut cmd);
     let child = term.spawn(&mut cmd);
     let out = term.wait_output(child, 30);
+    term.finish_reading();
     let shown = term.shown();
     assert!(out.status.success(), "{shown}\n{}", text(&out));
     assert_clean("terminal with encoder", &shown, "");
