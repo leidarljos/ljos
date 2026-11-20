@@ -76,6 +76,12 @@ GIT_COMMITTER_NAME="GitHub" \
   git commit --allow-empty -q -m "Merge pull request #9 from leidarljos/fix"
 "$gate" "$base..HEAD"
 
+git checkout -q -b webflow-wrong-committer-name "$base"
+GIT_COMMITTER_NAME="Someone" \
+  GIT_COMMITTER_EMAIL="noreply@github.com" \
+  git commit --allow-empty -q -m "Merge pull request #11 from leidarljos/fix"
+must_fail "noreply github committer without exact GitHub name" "$gate" "$base..HEAD"
+
 git checkout -q -b webflow-foreign-author "$base"
 GIT_AUTHOR_NAME="Ada Lovelace" \
   GIT_AUTHOR_EMAIL="ada@example.com" \
