@@ -131,6 +131,8 @@ struct World {
     pack: Pack,
     /// A directory put ahead of `PATH` with an `age` in it that runs the
     /// real one, and refuses to decrypt while `age.fail` is beside it.
+    /// While `age.kill` is beside it, the next decrypt removes that file
+    /// and kills the `ljos` that ran it with SIGKILL.
     shim: PathBuf,
 }
 
@@ -149,7 +151,7 @@ fn age_shim(dir: &Path) -> PathBuf {
     std::fs::write(
         &age,
         format!(
-            "#!/bin/sh\ncase \" $* \" in *\" -d \"*) if [ -e \"$0.fail\" ]; then echo 'age: error: no identity matched any of the recipients' >&2; exit 1; fi;; esac\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\ncase \" $* \" in *\" -d \"*) if [ -e \"$0.kill\" ]; then rm -f \"$0.kill\"; kill -9 \"$PPID\"; exit 1; fi; if [ -e \"$0.fail\" ]; then echo 'age: error: no identity matched any of the recipients' >&2; exit 1; fi;; esac\nexec '{}' \"$@\"\n",
             real.display()
         ),
     )
@@ -310,6 +312,48 @@ impl World {
         } else {
             let _ = std::fs::remove_file(flag);
         }
+    }
+
+    /// Kill the next `ljos` that runs `age -d`, from inside that decrypt.
+    fn kill_at_next_open(&self) {
+        std::fs::write(self.shim.join("age.kill"), "").unwrap();
+    }
+
+    /// The plaintext of `rel` in the checkout, opened with this home's key.
+    fn opened(&self, rel: &str) -> String {
+        let out = Command::new("age")
+            .arg("-d")
+            .arg("-i")
+            .arg(self.home.join(".config/ljos/age.key"))
+            .arg(self.repo.join(rel))
+            .output()
+            .expect("age must be installed");
+        assert!(out.status.success(), "age -d {rel}");
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// Seal `plain` to this machine's key at `rel` in the checkout.
+    fn seal_to_me(&self, rel: &str, plain: &str) {
+        let mut seal = Command::new("age")
+            .args(["-r", &self.public, "-o"])
+            .arg(self.repo.join(rel))
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("age must be installed");
+        seal.stdin
+            .take()
+            .unwrap()
+            .write_all(plain.as_bytes())
+            .unwrap();
+        assert!(seal.wait().unwrap().success(), "age seal {rel}");
+    }
+
+    /// The names in this machine's snapshot directory in the checkout.
+    fn here(&self) -> BTreeSet<String> {
+        std::fs::read_dir(self.repo.join(".ljos/atoms/me"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect()
     }
 
     /// Drop the plaintexts this home kept of sealed files, so the next read
@@ -1065,4 +1109,168 @@ fn a_forged_plain_hash_does_not_hide_an_added_or_dropped_atom() {
     let again = w.sync();
     assert!(again.contains("unchanged since the last export"), "{again}");
     assert_eq!(w.import_as_peer(), texts(&rest), "{said}{again}");
+}
+
+#[test]
+fn a_sync_does_not_commit_a_changed_or_removed_sealed_piece() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, mut atoms, _) = sealed_log();
+    let before = w.pieces();
+    let seg = before
+        .keys()
+        .find(|path| path.contains("/seg-"))
+        .unwrap()
+        .clone();
+    let path = w.repo.join(&seg);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x5a;
+    std::fs::write(&path, &bytes).unwrap();
+    let said = w.sync();
+    sealed_since(&w, &before, &w.pieces(), &said);
+    assert_eq!(w.import_as_peer(), texts(&atoms), "{said}");
+
+    std::fs::remove_file(&path).unwrap();
+    let before = w.pieces();
+    let said = w.sync();
+    let new = sealed_since(&w, &before, &w.pieces(), &said);
+    assert!(new.is_empty(), "{new:?}: {said}");
+
+    let atom = lesson(atoms.len(), LINE);
+    w.add(atom.clone());
+    atoms.push(atom);
+    let said = w.sync();
+    let new = sealed_since(&w, &before, &w.pieces(), &said);
+    assert_eq!(new.len(), 1, "{new:?}: {said}");
+    assert!(new[0].0.contains("/seg-"), "{new:?}: {said}");
+    assert_eq!(w.import_as_peer(), texts(&atoms), "{said}");
+
+    let out = w.ljos(&["sync", "--compact"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{said}");
+    let left: Vec<String> = w
+        .pieces()
+        .into_keys()
+        .filter(|path| !path.ends_with("/plain.sha256"))
+        .collect();
+    assert_eq!(left.len(), 1, "{left:?}: {said}");
+    assert!(left[0].contains("/snap-"), "{left:?}: {said}");
+    assert_eq!(w.import_as_peer(), texts(&atoms), "{said}");
+}
+
+/// What `out` printed on stdout and stderr.
+fn printed(out: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+#[test]
+fn a_compaction_seals_past_a_snapshot_path_head_has() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let w = world();
+    let atoms: Vec<Value> = (0..4).map(|n| lesson(n, LINE)).collect();
+    for atom in &atoms[..3] {
+        w.add(atom.clone());
+    }
+    w.sync();
+    w.add(atoms[3].clone());
+    let said = w.sync();
+    assert!(said.contains("1 changed"), "{said}");
+    let stale = ".ljos/atoms/me/snap-2.jsonl.age";
+    let first: String = w
+        .opened(".ljos/atoms/me/snap-0.jsonl.age")
+        .lines()
+        .take(2)
+        .map(|line| format!("{line}\n"))
+        .collect();
+    w.seal_to_me(stale, &first);
+    git(&w.repo, &["add", stale]);
+    git(&w.repo, &["commit", "-q", "-m", "a one-atom snapshot"]);
+    git(&w.repo, &["push", "-q"]);
+    std::fs::remove_file(w.repo.join(stale)).unwrap();
+
+    let out = w.ljos(&["sync", "--compact"]);
+    let said = printed(&out);
+    assert!(out.status.success(), "{said}");
+    let left: Vec<String> = w
+        .pieces()
+        .into_keys()
+        .filter(|path| !path.ends_with("/plain.sha256"))
+        .collect();
+    assert_eq!(left, [".ljos/atoms/me/snap-3.jsonl.age"], "{said}");
+    assert_eq!(git(&w.repo, &["status", "--porcelain"]), "", "{said}");
+    assert_eq!(w.import_as_peer(), texts(&atoms), "{said}");
+    let again = w.sync();
+    assert!(again.contains("unchanged"), "{again}");
+    assert_eq!(w.import_as_peer(), texts(&atoms), "{said}{again}");
+}
+
+#[test]
+fn a_compaction_commits_nothing_beside_a_piece_that_differs_from_head() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let w = world();
+    let atoms: Vec<Value> = (0..3).map(|n| lesson(n, LINE)).collect();
+    for atom in &atoms {
+        w.add(atom.clone());
+    }
+    w.sync();
+    let snap = ".ljos/atoms/me/snap-0.jsonl.age";
+    w.seal_to_me(snap, &w.opened(snap));
+    let before = w.pieces();
+
+    let out = w.ljos(&["sync", "--compact"]);
+    let said = printed(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains(&format!("{snap} differs from HEAD")),
+        "{said}"
+    );
+    assert_eq!(w.pieces(), before, "{said}");
+
+    git(&w.repo, &["checkout", "--", snap]);
+    let out = w.ljos(&["sync", "--compact"]);
+    assert!(out.status.success(), "{}", printed(&out));
+    assert_eq!(w.import_as_peer(), texts(&atoms), "{said}");
+}
+
+#[test]
+fn a_compaction_killed_before_its_removals_loses_no_atom() {
+    use std::os::unix::process::ExitStatusExt as _;
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, atoms, _) = sealed_log();
+    let before = w.pieces();
+    let had = w.here();
+    w.kill_at_next_open();
+    let out = w.ljos(&["sync", "--compact"]);
+    let said = printed(&out);
+    assert_eq!(out.status.signal(), Some(9), "{said}");
+    assert!(!w.shim.join("age.kill").exists(), "{said}");
+    let here = w.here();
+    assert!(had.is_subset(&here), "{had:?} {here:?}");
+    assert!(here.contains("snap-2.jsonl.age"), "{here:?}");
+    assert_eq!(w.pieces(), before, "{said}");
+
+    let said = w.sync();
+    assert_eq!(w.import_as_peer(), texts(&atoms), "{said}");
+    let out = w.ljos(&["sync", "--compact"]);
+    let said = printed(&out);
+    assert!(out.status.success(), "{said}");
+    let left: Vec<String> = w
+        .pieces()
+        .into_keys()
+        .filter(|path| !path.ends_with("/plain.sha256"))
+        .collect();
+    assert_eq!(left.len(), 1, "{left:?}: {said}");
+    assert_eq!(w.import_as_peer(), texts(&atoms), "{said}");
 }

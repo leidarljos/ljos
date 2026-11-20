@@ -1568,35 +1568,61 @@ struct SealedPiece {
 }
 
 fn sealed_pieces(root: &Path, stem: &str) -> Vec<SealedPiece> {
-    let mut out = Vec::new();
-    for name in list_beneath(root, stem).unwrap_or_default() {
-        let rel = format!("{stem}/{name}");
-        if let Some(rest) = name
-            .strip_prefix("snap-")
-            .and_then(|rest| rest.strip_suffix(".jsonl.age"))
-        {
-            if let Ok(seq) = rest.parse::<u32>() {
-                out.push(SealedPiece {
-                    seq,
-                    snap: true,
-                    rel,
-                });
-            }
-        } else if let Some(rest) = name.strip_prefix("seg-") {
-            let rest = rest.strip_suffix(".jsonl.age").unwrap_or(rest);
-            if let Some((seq, _)) = rest.split_once('-') {
-                if let Ok(seq) = seq.parse::<u32>() {
-                    out.push(SealedPiece {
-                        seq,
-                        snap: false,
-                        rel,
-                    });
-                }
-            }
-        }
-    }
+    let mut out: Vec<SealedPiece> = list_beneath(root, stem)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|name| sealed_piece(stem, name))
+        .collect();
     out.sort_by_key(|piece| (piece.seq, !piece.snap));
     out
+}
+
+/// The snapshot or segment `name` below `stem`, by its file name.
+fn sealed_piece(stem: &str, name: &str) -> Option<SealedPiece> {
+    let rel = format!("{stem}/{name}");
+    if let Some(rest) = name
+        .strip_prefix("snap-")
+        .and_then(|rest| rest.strip_suffix(".jsonl.age"))
+    {
+        let seq = rest.parse::<u32>().ok()?;
+        return Some(SealedPiece {
+            seq,
+            snap: true,
+            rel,
+        });
+    }
+    let rest = name.strip_prefix("seg-")?;
+    let rest = rest.strip_suffix(".jsonl.age").unwrap_or(rest);
+    let (seq, _) = rest.split_once('-')?;
+    Some(SealedPiece {
+        seq: seq.parse::<u32>().ok()?,
+        snap: false,
+        rel,
+    })
+}
+
+/// The seq a new snapshot or segment below `stem` takes: one past every
+/// piece here and every piece `HEAD` has, so no new path is one `HEAD`
+/// already names. 0 when there are none.
+fn next_seq(root: &Path, stem: &str, pieces: &[SealedPiece]) -> u32 {
+    let listed = git(
+        root,
+        &["ls-tree", "--name-only", "-z", "HEAD", &format!("{stem}/")],
+    )
+    .ok()
+    .filter(|out| out.status.success())
+    .map(|out| out.stdout)
+    .unwrap_or_default();
+    let in_head = listed
+        .split(|b| *b == 0)
+        .filter_map(|rel| std::str::from_utf8(rel).ok())
+        .filter_map(|rel| sealed_piece(stem, rel.rsplit('/').next()?));
+    pieces
+        .iter()
+        .map(|piece| piece.seq)
+        .chain(in_head.map(|piece| piece.seq))
+        .max()
+        .map_or(0, |n| n + 1)
 }
 
 fn seg_header(host: &str, scope_name: &str, seq: u32, over: u32) -> String {
@@ -2104,7 +2130,7 @@ fn store_log(
             other => other,
         });
     }
-    let seq = pieces.iter().map(|piece| piece.seq).max().unwrap_or(0) + 1;
+    let seq = next_seq(root, &stem, &pieces);
     let over = snap_seq.unwrap_or(0);
     let mut segment = seg_header(&host, scope_name, seq, over);
     for (id, line) in &changes {
@@ -2177,18 +2203,18 @@ fn seal_snapshot(
     pieces: &[SealedPiece],
     remove: bool,
 ) -> Result<StoreOut> {
-    let seq = pieces
-        .iter()
-        .map(|piece| piece.seq)
-        .max()
-        .map_or(0, |n| n + 1);
-    // A first snapshot is seq 0 when nothing is stored yet.
-    let seq = if pieces.is_empty() { 0 } else { seq };
+    let seq = next_seq(root, stem, pieces);
     let Some(sealed) = seal_or_missing(plain, recipients)? else {
         return Ok(StoreOut::MissingAge);
     };
     let rel = snap_file_rel(stem, seq);
     write_beneath(root, &rel, &sealed)?;
+    if remove && !pieces.is_empty() {
+        if let Some(why) = unfit_replacement(root, &rel, plain, scope_name) {
+            remove_beneath(root, &rel)?;
+            bail!("sync: --compact refused: {why}, so no snapshot or segment was removed");
+        }
+    }
     keep_sealed(&sealed, plain, scope_name, recipients);
     if remove {
         remove_pieces(root, pieces)?;
@@ -2197,6 +2223,58 @@ fn seal_snapshot(
     note_log(root, stem, plain);
     remember_digest(root, &format!("{stem}.jsonl.age"), plain, recipients)?;
     Ok(StoreOut::Wrote { rel, changes: 0 })
+}
+
+/// Why the snapshot a compaction wrote at `rel` cannot take the place of
+/// the pieces it removes. It must be a path `HEAD` does not have, so the
+/// commit adds it beside those removals, and read again from disk with
+/// `age -d` it must give `plain`: every atom the pack lists.
+fn unfit_replacement(root: &Path, rel: &str, plain: &str, scope_name: &str) -> Option<String> {
+    if in_head(root, rel) {
+        return Some(format!("{rel} is already in HEAD"));
+    }
+    let opened = match read_beneath(root, rel) {
+        Ok(Some(bytes)) => open_sealed_bytes_with_age(&bytes, &identities_for_open(scope_name)),
+        _ => return Some(format!("{rel} could not be read again")),
+    };
+    let opened = match opened {
+        Ok(Some(opened)) => opened,
+        Ok(None) => return Some(format!("{rel} is not sealed to this machine")),
+        Err(err) => {
+            return Some(format!(
+                "{rel} did not open again ({})",
+                err.to_string().replace('\n', " ")
+            ));
+        }
+    };
+    if opened == plain {
+        return None;
+    }
+    let count = |text: &str| {
+        split_header(text)
+            .map_or(text, |(_, _, body)| body)
+            .lines()
+            .count()
+    };
+    let (read, want) = (count(&opened), count(plain));
+    Some(if read == want {
+        format!("{rel} read again does not give the {want} atoms the pack lists")
+    } else {
+        format!("{rel} read again gives {read} atoms, not the {want} the pack lists")
+    })
+}
+
+/// A snapshot or segment of this machine's logs that differs from `HEAD`
+/// in the checkout and is still there. A commit does not stage it, so a
+/// compaction that would commit removals beside it stops.
+fn unstaged_piece(root: &Path, scope: &Scope) -> Option<String> {
+    let me = host();
+    scope.all_scopes().into_iter().find_map(|named| {
+        let [log_rel, _] = host_log_rels_for_scope(&me, &scope.name, named.name);
+        sealed_changed_from_head(root, &log_stem_dir(&log_rel))
+            .into_iter()
+            .find(|rel| root.join(rel).exists())
+    })
 }
 
 /// Snapshot sequence, segment count and sealed bytes of this machine's log,
@@ -5070,7 +5148,9 @@ fn commit_log(root: &Path, scope: &str, push: bool) -> String {
 /// file (so a migration's deletion is committed), its digest, its old
 /// chunk directory, and each snapshot, segment and plaintext hash in the
 /// snapshot directory, on disk or tracked. The temp file of a write that
-/// was cut off is in that directory too, and is not staged.
+/// was cut off is in that directory too, and is not staged. A snapshot or
+/// segment in `HEAD` is sealed once: one that differs from `HEAD` here is
+/// not staged, and one that is gone only by `ljos sync --compact`.
 fn host_log_paths(root: &Path, host: &str, primary_scope: &str, scope_name: &str) -> Vec<String> {
     let [log, digest] = host_log_rels_for_scope(host, primary_scope, scope_name);
     let chunks = chunk_dir_rel(&log);
@@ -5093,7 +5173,44 @@ fn host_log_paths(root: &Path, host: &str, primary_scope: &str, scope_name: &str
             paths.push(rel.to_string());
         }
     }
+    let changed = sealed_changed_from_head(root, &stem);
+    let compact = compact_requested();
+    paths.retain(|rel| !changed.contains(rel) || (compact && !root.join(rel).exists()));
     paths
+}
+
+/// The snapshots and segments below `stem` whose file here is not what
+/// `HEAD` has: changed, or gone.
+fn sealed_changed_from_head(root: &Path, stem: &str) -> BTreeSet<String> {
+    let Ok(out) = git(
+        root,
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--diff-filter=MDT",
+            "--relative",
+            "HEAD",
+            "--",
+            stem,
+        ],
+    ) else {
+        return BTreeSet::new();
+    };
+    if !out.status.success() {
+        return BTreeSet::new();
+    }
+    out.stdout
+        .split(|b| *b == 0)
+        .filter_map(|rel| std::str::from_utf8(rel).ok())
+        .filter(|rel| {
+            rel.rsplit('/')
+                .next()
+                .is_some_and(|name| name != "plain.sha256" && log_piece_name(name))
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 /// A file the snapshot directory keeps: a snapshot, a segment, or the
@@ -5744,8 +5861,17 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
     if export_log {
         let client = crate::pack()?;
         let atoms = crate::atoms_lean(&client, &client.workspace())?;
+        let said = if scope.scopes.is_empty() {
+            export(&root, &scope, &atoms)?
+        } else {
+            export_all(&root, &scope, &atoms)?
+        };
+        if let Some(rel) = unstaged_piece(&root, &scope).filter(|_| compact_requested()) {
+            bail!(
+                "{said}sync: --compact refused: {rel} differs from HEAD and a commit does not stage it, so nothing was committed"
+            );
+        }
         if scope.scopes.is_empty() {
-            let said = export(&root, &scope, &atoms)?;
             out.push_str(&said);
             out.push_str(&commit_if_sealed(
                 &root,
@@ -5754,7 +5880,6 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
                 mode == TrackerGit::Push,
             ));
         } else {
-            let said = export_all(&root, &scope, &atoms)?;
             out.push_str(&said);
             out.push_str(&commit_if_sealed_scopes(
                 &root,
