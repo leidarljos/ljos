@@ -1317,3 +1317,81 @@ fn a_committed_snapshot_age_cannot_authenticate_is_sealed_over_once() {
     assert!(new[0].1 < TWO_ATOM_SEGMENT, "{new:?}: {said}");
     assert_eq!(w.import_as_peer(), texts(&atoms), "{said}");
 }
+
+/// How [`taken_after_one_sync`] leaves the newest snapshot before it syncs.
+#[derive(Clone, Copy, Debug)]
+enum Damage {
+    None,
+    /// The snapshot's last byte flipped in the checkout, so age cannot
+    /// authenticate it.
+    FlipByte,
+    /// `age -d` refuses, with this key still a recipient.
+    FailOpens,
+}
+
+impl World {
+    fn flip_last_byte(&self, rel: &str) {
+        let path = self.repo.join(rel);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x5a;
+        std::fs::write(&path, &bytes).unwrap();
+    }
+
+    fn snapshot_rel(&self) -> String {
+        self.pieces()
+            .into_keys()
+            .find(|path| path.contains("/snap-"))
+            .unwrap()
+    }
+}
+
+/// What a peer takes from this machine's log after one sync over a
+/// [`sealed_log`], with its last atom dropped from the pack when `pop`.
+/// Returns the texts taken, the texts the pack lists, and what the sync
+/// printed.
+fn taken_after_one_sync(damage: Damage, pop: bool) -> (BTreeSet<String>, BTreeSet<String>, String) {
+    let (w, _, _) = sealed_log();
+    if pop {
+        w.pack.atoms.lock().unwrap().pop();
+    }
+    let pack = texts(&w.pack.atoms.lock().unwrap());
+    match damage {
+        Damage::None => {}
+        Damage::FlipByte => {
+            w.flip_last_byte(&w.snapshot_rel());
+            w.forget_opened();
+        }
+        Damage::FailOpens => {
+            w.forget_opened();
+            w.fail_opens(true);
+        }
+    }
+    let said = w.sync();
+    w.fail_opens(false);
+    (w.import_as_peer(), pack, said)
+}
+
+#[test]
+fn a_reseal_over_an_unopened_snapshot_keeps_what_a_readable_log_would() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    for pop in [false, true] {
+        let (readable, pack, said) = taken_after_one_sync(Damage::None, pop);
+        assert_eq!(readable, pack, "pop {pop}: {said}");
+        for damage in [Damage::FlipByte, Damage::FailOpens] {
+            let (taken, pack, said) = taken_after_one_sync(damage, pop);
+            // Pieces whose bytes this home noted, over atoms that did not
+            // change, are not read, so there is nothing to seal over.
+            let read = pop || matches!(damage, Damage::FlipByte);
+            assert_eq!(
+                said.contains("sealed whole into"),
+                read,
+                "{damage:?}, pop {pop}: {said}"
+            );
+            assert_eq!(taken, readable, "{damage:?}, pop {pop}: {said}");
+            assert_eq!(taken, pack, "{damage:?}, pop {pop}: {said}");
+        }
+    }
+}
