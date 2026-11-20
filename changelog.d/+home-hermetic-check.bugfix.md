@@ -1,0 +1,1 @@
+Scope the real `HOME` and `/tmp` leak scans in `scripts/ci-test-hermetic.sh` to `ljos`-owned paths so concurrent unrelated host writes pass, and catch `/tmp` same-name replacements, nested writes under `/tmp/ljos-$UID`, and `/tmp/ljos-$UID` symlinks.
