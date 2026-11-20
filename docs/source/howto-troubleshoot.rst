@@ -186,6 +186,8 @@ When one of those locks cannot be taken, the push stops before the checkout chan
 
    tracker git: committed chore(issues): Software-t001 noted by saddle; push queued: push: /tmp/seat/tracker/Software/Software/issues.org.lock was not locked (it could not be opened, or another writer kept it past the wait), so the checkout was not rebased; the next push tries again
 
+A ``git ls-files`` or ``git ls-tree`` that cannot list the boards stops the push the same way, before any board is locked or rewritten.
+
 A missing habitat binary
 ========================
 

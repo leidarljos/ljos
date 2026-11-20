@@ -524,11 +524,21 @@ fn lock_not_taken(lock: &Path) -> String {
 /// whole file back under this lock. A rebase, merge or fold that rewrote
 /// the file in between was lost when the writer put back its older copy.
 /// A board only `onto` has appears in the checkout during the replay, so
-/// its directory is made here and its lock taken first.
+/// its directory is made here and its lock taken first. A listing that
+/// fails stops the replay, since a file it did not name would be rewritten
+/// with no lock. An `onto` that does not resolve has no file to list.
 fn lock_issue_files(dir: &Path, onto: &str) -> Result<Vec<crate::CommitLock>, String> {
-    let mut files: std::collections::BTreeSet<String> = tracked(dir, "*.org").into_iter().collect();
-    let listed = git(dir, &["ls-tree", "-r", "-z", "--name-only", onto]);
-    if listed.status.success() {
+    let mut files: std::collections::BTreeSet<String> =
+        tracked(dir, "*.org")?.into_iter().collect();
+    let target = format!("{onto}^{{commit}}");
+    if git(dir, &["rev-parse", "-q", "--verify", &target])
+        .status
+        .success()
+    {
+        let listed = git(dir, &["ls-tree", "-r", "-z", "--name-only", onto]);
+        if !listed.status.success() {
+            return Err(not_listed(dir, &format!("ls-tree {onto}"), &listed));
+        }
         files.extend(
             String::from_utf8_lossy(&listed.stdout)
                 .split('\0')
@@ -1417,7 +1427,7 @@ fn merge_onto(dir: &Path, onto: &str) -> Result<(), String> {
 fn fold_orgs(dir: &Path) -> Result<(), String> {
     crate::refuse_ljos_checkout(dir)?;
     let mut changed = Vec::new();
-    for file in tracked(dir, "*.org") {
+    for file in tracked(dir, "*.org")? {
         let path = dir.join(&file);
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
@@ -1459,8 +1469,8 @@ fn fold_orgs(dir: &Path) -> Result<(), String> {
 }
 
 fn refuse_markers(dir: &Path) -> Result<(), String> {
-    let mut files = tracked(dir, "*.org");
-    files.extend(tracked(dir, ".ljos/atoms"));
+    let mut files = tracked(dir, "*.org")?;
+    files.extend(tracked(dir, ".ljos/atoms")?);
     for file in files {
         let read = if file.starts_with(".ljos/") {
             crate::sync::read_beneath(dir, &file).map_err(|e| e.to_string())
@@ -1481,16 +1491,24 @@ fn refuse_markers(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn tracked(dir: &Path, spec: &str) -> Vec<String> {
+fn tracked(dir: &Path, spec: &str) -> Result<Vec<String>, String> {
     let out = git(dir, &["ls-files", "-z", "--", spec]);
     if !out.status.success() {
-        return Vec::new();
+        return Err(not_listed(dir, &format!("ls-files {spec}"), &out));
     }
-    String::from_utf8_lossy(&out.stdout)
+    Ok(String::from_utf8_lossy(&out.stdout)
         .split('\0')
         .filter(|file| !file.is_empty())
         .map(str::to_string)
-        .collect()
+        .collect())
+}
+
+fn not_listed(dir: &Path, what: &str, out: &Output) -> String {
+    format!(
+        "push: `git {what}` failed in {} ({}), so no issue file was locked or rewritten; the next push tries again",
+        dir.display(),
+        first_line(&output_text(out))
+    )
 }
 
 fn merge_in_progress(dir: &Path) -> bool {
@@ -1948,6 +1966,67 @@ note from b
             std::fs::read_to_string(a.join("notes.txt")).unwrap(),
             "from a\n"
         );
+    }
+
+    /// A `git` first on PATH that runs `arms`, shell `case` arms matched on
+    /// ` ARGS `, for a call in `clone`, then the real git. The caller has
+    /// [`crate::test_env_lock`].
+    fn git_wrapper(root: &Path, clone: &Path, arms: &str) -> crate::PathGuard {
+        use std::os::unix::fs::PermissionsExt as _;
+        let real = crate::git_cmd()
+            .args(["--exec-path"])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let wrapper = bin.join("git");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nif [ \"$2\" = '{}' ]; then\n  case \" $* \" in {arms} esac\nfi\nexec '{real}/git' \"$@\"\n",
+                clone.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::prepend_path(&bin)
+    }
+
+    /// A listing of the issue files that fails stops the replay before it
+    /// locks or rewrites any of them: the checkout's own, by `ls-files`, or
+    /// the target's, by `ls-tree`.
+    #[test]
+    fn a_failed_listing_stops_the_replay_before_any_file() {
+        let _env = crate::test_env_lock();
+        crate::tool_bound::disarm();
+        for (verb, arm) in [
+            ("ls-files", "*' ls-files -z -- *.org '*) exit 1 ;;"),
+            ("ls-tree", "*' ls-tree '*) exit 1 ;;"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (a, b) = two_clones(dir.path());
+            add_heading(&b, "remote");
+            run_ok(&b, &["push", "-q"]);
+            add_heading(&a, "local");
+            let before = run_ok(&a, &["rev-parse", "HEAD"]);
+            let board = std::fs::read_to_string(a.join("Software/issues.org")).unwrap();
+            let path = git_wrapper(dir.path(), &a, arm);
+            let said = integrate_from(&a, "origin", "origin/main");
+            drop(path);
+            let said = said.expect_err(verb);
+            assert!(
+                said.contains(&format!("`git {verb}")) && said.contains("no issue file was locked"),
+                "{verb}: {said}"
+            );
+            assert_eq!(run_ok(&a, &["rev-parse", "HEAD"]), before, "{verb}: {said}");
+            assert_eq!(
+                std::fs::read_to_string(a.join("Software/issues.org")).unwrap(),
+                board,
+                "{verb}"
+            );
+            assert!(!rebase_in_progress(&a), "{verb}: {said}");
+        }
     }
 
     #[test]
