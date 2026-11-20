@@ -669,7 +669,7 @@ enum Cmd {
         /// An unknown name exits 1 and names the projects.
         #[arg(short = 'p', long, value_name = "PROJECT")]
         project: Option<String>,
-        /// Mark this lesson public, so `ljos handbook` may export it. The default is private.
+        /// Mark this lesson public, so `ljos handbook` may export it. The default is private. A runner cannot.
         /// It records the project, from `-p` or the checkout, and exits 1 when none resolves.
         /// A pack that does not take it is not queued: run it again.
         #[arg(long)]
@@ -740,7 +740,7 @@ enum Cmd {
         /// Record this tag on the preference. Repeatable.
         #[arg(long, value_name = "TAG")]
         tag: Vec<String>,
-        /// Mark this preference public, so `ljos handbook` may export it. The default is private. It records the project, from `-p` or the checkout.
+        /// Mark this preference public, so `ljos handbook` may export it. The default is private. It records the project, from `-p` or the checkout. A runner cannot.
         #[arg(long)]
         public: bool,
     },
@@ -771,6 +771,57 @@ enum Cmd {
     Memories {
         #[command(subcommand)]
         cmd: MemCmd,
+    },
+    /// Write the lessons, preferences, rules, tickets and workflows marked public as an Org document.
+    ///
+    /// Nothing leaves unless it is marked. A lesson, preference or rule is
+    /// marked with `--public` on `ljos remember`, `ljos prefer` and `ljos rule`,
+    /// or `ljos memories review --public ID`. A ticket is marked with the tag
+    /// `public`. A workflow file is marked with the exact line `#+public: yes` in its header. The export
+    /// is limited to this project. Repeated `--tag` values narrow it: every
+    /// tag must be present. Each repeated `--tree` follows marked blockers
+    /// inside the project. A parent link nests a ticket and does not order it.
+    /// When a marked item still matches a private pattern, the export is
+    /// refused: the item and the kind of match are named, nothing is written
+    /// and the exit status is non-zero.
+    ///
+    /// Example: `ljos handbook --project Software --tag release --tree Software-8tkn --out release.org`
+    Handbook {
+        /// Project scope for memories and the handbook's empty-project message.
+        #[arg(short = 'p', long)]
+        project: String,
+        /// Also require this tag. Repeatable. The project still has to match.
+        #[arg(long, value_name = "TAG")]
+        tag: Vec<String>,
+        /// Follow blockers of this ticket inside the project. Repeatable. A parent link is nesting only.
+        #[arg(long, value_name = "TICKET")]
+        tree: Vec<String>,
+        /// Keep rows whose text contains this query.
+        #[arg(long)]
+        query: Option<String>,
+        /// Org document title. The default is `Project handbook`. A title that matches a private pattern refuses the export.
+        #[arg(long)]
+        title: Option<String>,
+        /// Write the Org document here. `-` or `/dev/stdout` writes stdout. A symbolic link or a read-only file is refused.
+        #[arg(long, default_value = "-")]
+        out: PathBuf,
+        /// Write each lesson and policy as a heading with an `:ID:` property, and give each ticket one.
+        /// A list item has no id. An id that matches a private pattern is not written.
+        #[arg(long)]
+        ids: bool,
+        /// Include memories and policies that have not been accepted or kept in review.
+        #[arg(long)]
+        include_unreviewed: bool,
+        /// Read Org workflows from this directory.
+        /// When omitted, `.ljos/workflows` is read when it exists.
+        #[arg(long, value_name = "DIR")]
+        workflows: Option<PathBuf>,
+        /// Add this date to the Org preamble. No date is written by default.
+        #[arg(long, value_name = "DATE")]
+        date: Option<String>,
+        /// Regenerate the file and fail when the bytes differ or a line is unsafe.
+        #[arg(long)]
+        check: bool,
     },
     /// List lesson proposals waiting on a review.
     ///
@@ -1997,7 +2048,7 @@ enum Cmd {
         /// Record this tag on the rule. Repeatable.
         #[arg(long, value_name = "TAG")]
         tag: Vec<String>,
-        /// Mark this rule public, so `ljos handbook` may export it. The default is private. It records the project, from `-p` or the checkout.
+        /// Mark this rule public, so `ljos handbook` may export it. The default is private. It records the project, from `-p` or the checkout. A runner cannot.
         #[arg(long)]
         public: bool,
     },
@@ -4109,6 +4160,7 @@ fn queued_lesson_may_go(cmd: &Cmd) -> bool {
         cmd,
         Cmd::Memory { .. }
             | Cmd::Export { .. }
+            | Cmd::Handbook { .. }
             | Cmd::Mesh {
                 cmd: MeshCmd::Pull { .. },
             }
@@ -5535,6 +5587,38 @@ fn run_command() -> Result<()> {
         Cmd::Export { out, machine, json } => export_memories(&out, machine.as_deref(), json)?,
         Cmd::Memory { cmd } => memory_cmd(cmd)?,
         Cmd::Memories { cmd } => memories_cmd(cmd)?,
+        Cmd::Handbook {
+            project,
+            tag,
+            tree,
+            query,
+            title,
+            out,
+            ids,
+            include_unreviewed,
+            workflows,
+            date,
+            check,
+        } => {
+            ljos_cli::handbook::run(
+                &ljos_cli::handbook::Options {
+                    project,
+                    tags: tag,
+                    trees: tree,
+                    query,
+                    title,
+                    ids,
+                    include_unreviewed,
+                    workflows,
+                    date,
+                    seats: Vec::new(),
+                    projects: Vec::new(),
+                    id_lengths: Vec::new(),
+                },
+                &out,
+                check,
+            )?;
+        }
         Cmd::RetireNotes => print!("{}", ljos_cli::note_retire::sweep()?),
         Cmd::Forget { id, why, json } => {
             let body = packset_forget(&id, why.as_deref())?;

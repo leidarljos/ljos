@@ -17,7 +17,7 @@ use std::time::Duration;
 
 const FINANCE_TICKET: &str = "finance-6mrw";
 const GARDEN_TICKET: &str = "garden-6mrw";
-const VERBS: &str = "The verbs that take -p are calibrate, claims, file, list, prefer, ready, remember, rule, search and sitting.";
+const VERBS: &str = "The verbs that take -p are calibrate, claims, file, handbook, list, prefer, ready, remember, rule, search and sitting.";
 
 struct Seat {
     root: PathBuf,

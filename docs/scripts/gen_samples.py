@@ -270,6 +270,11 @@ def org_src(body: str, lang: str = "text") -> str:
     return f"#+begin_src {lang}\n" + body.rstrip("\n") + "\n#+end_src\n"
 
 
+def org_example(body: str) -> str:
+    """An example block, so a sample that contains #+end_src stays one block."""
+    return "#+begin_example\n" + body.rstrip("\n") + "\n#+end_example\n"
+
+
 def rst_src(body: str, lang: str = "text") -> str:
     # expandtabs, not a fixed run of spaces: a tab advances to the next stop.
     expanded = body.expandtabs(RST_TAB)
@@ -1366,11 +1371,202 @@ def receive_sample(ljos: Path) -> str:
     )
 
 
+def handbook_sample(ljos: Path) -> str:
+    """One project's handbook, from a scratch tracker and a scratch pack."""
+    import shutil
+
+    packsetd = shutil.which("packsetd")
+    if packsetd is None:
+        sibling = Path.home() / ".cache/ljos/sibling-bin/packsetd"
+        packsetd = str(sibling) if sibling.is_file() else None
+    if packsetd is None:
+        raise SystemExit("gen_samples: packsetd is not on PATH")
+    home = Path(tempfile.mkdtemp(prefix="ljos-doc-handbook-"))
+    proc: subprocess.Popen[str] | None = None
+    try:
+        for rel in (
+            "tmp",
+            "cache",
+            "config/ljos",
+            "data",
+            "state",
+            "run",
+            "tracker/.ljos/workflows",
+        ):
+            (home / rel).mkdir(parents=True)
+        root = home / "tracker"
+        (root / ".ljos/project").write_text("kiln\n", encoding="utf-8")
+        (root / "vissue.toml").write_text('prefix = "day"\n', encoding="utf-8")
+        project = root / "day/kiln"
+        project.mkdir(parents=True)
+        (project / "issues.org").write_text(
+            "\n".join(
+                [
+                    "#+VISSUE: 1",
+                    "#+TODO: TODO STARTED BLOCKED | DONE CANCELLED",
+                    "",
+                    "* TODO Cut the release :public:",
+                    ":PROPERTIES:",
+                    ":ID:         kiln-a",
+                    ":END:",
+                    "Cut the archive on a Tuesday.",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (root / ".ljos/workflows/release.org").write_text(
+            "#+public: yes\n#+title: Release train\n\nCut the release on a Tuesday.\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        env = _agent_env(
+            home,
+            ljos,
+            {
+                "PACKSET_AUTH": "off",
+                "PACKSET_HOME": str(home / "data/packset"),
+                "PACKSET_WORKSPACE": "hand",
+                "VISSUE_ROOT": str(root),
+                "VISSUE_NO_ROUTE": "1",
+                "LJOS_SEAT": "saddle",
+                "LJOS_TRACKER_GIT": "off",
+                "LJOS_ASK_PACK": "off",
+                "LJOS_USER_RULES_SYNC": "off",
+            },
+        )
+        proc = subprocess.Popen(
+            [packsetd, "--port", "0", "--home", str(home / "data/packset")],
+            cwd=root,
+            env=env,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        port = _writer_port(proc)
+        env["PACKSET_PORT"] = str(port)
+        env["PACKSET_URL"] = f"http://127.0.0.1:{port}"
+        for args in (
+            ["remember", "-p", "kiln", "--public", "Publish the signed archive."],
+            ["remember", "-p", "kiln", "Keep the glaze recipe at home."],
+            ["prefer", "-p", "kiln", "--public", "Count the samples twice."],
+        ):
+            wrote = subprocess.run(
+                [str(ljos), *args],
+                cwd=root,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if wrote.returncode != 0:
+                raise SystemExit(
+                    f"gen_samples: {' '.join(args)} exited {wrote.returncode}:\n{wrote.stderr}"
+                )
+        shown = [
+            "handbook",
+            "--project",
+            "kiln",
+            "--tree",
+            "kiln-a",
+            "--title",
+            "Kiln release notes",
+            "--out",
+            "-",
+        ]
+        result = subprocess.run(
+            [str(ljos), *shown],
+            cwd=root,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise SystemExit(
+                f"gen_samples: handbook exited {result.returncode}:\n{result.stderr}\n{result.stdout}"
+            )
+        block = (
+            '$ ljos handbook --project kiln --tree kiln-a --title "Kiln release notes" --out -\n'
+            f"{result.stdout.rstrip()}\n"
+        )
+        for needle in (
+            "Publish the signed archive.",
+            "Count the samples twice.",
+            "** TODO kiln-a Cut the release",
+            "Cut the archive on a Tuesday.",
+            "Release order",
+            "- kiln-a",
+            "[[file:release.org][release.org]]",
+        ):
+            if needle not in block:
+                raise SystemExit(f"gen_samples: handbook sample missing {needle!r}:\n{block}")
+        for leak in (
+            "/tmp",
+            "/home",
+            "/opt",
+            "/Users",
+            "@",
+            "saddle",
+            "http",
+            "ada",
+            "glaze",
+            "Guards",
+            "dropped",
+        ):
+            if leak in block:
+                raise SystemExit(f"gen_samples: handbook sample contains {leak!r}:\n{block}")
+        return block
+    finally:
+        if proc is not None and proc.poll() is None:
+            import os
+            import signal
+
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=5)
+        _drop_home(home)
+
+
+def _writer_port(proc: subprocess.Popen[str]) -> int:
+    """The port a writer prints, which is never the default 8761."""
+    import select
+
+    assert proc.stderr is not None
+    fd = proc.stderr.fileno()
+    os.set_blocking(fd, False)
+    deadline = time.monotonic() + 15
+    buf = ""
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.2)
+        if ready:
+            chunk = proc.stderr.read()
+            if chunk:
+                buf += chunk
+                mark = "listening on http://"
+                if mark in buf:
+                    hostport = buf.split(mark, 1)[1].split()[0]
+                    port = int(hostport.rsplit(":", 1)[1])
+                    if port == 0 or port == 8761:
+                        raise SystemExit(f"gen_samples: handbook writer bound {port}")
+                    return port
+        if proc.poll() is not None:
+            break
+    raise SystemExit(f"gen_samples: handbook writer did not listen:\n{buf}")
+
+
 _WALK_PAGES = {
     "shell-hook": "howto-runner",
     "calibrate": "howto-vote",
     "sitting-plan": "howto-sitting",
     "receive-empty": "howto-handover",
+    "handbook": "howto-handbook",
 }
 
 
@@ -1423,12 +1619,13 @@ def rewritten(doctor: str, help_text: str, agents: dict[str, str], tutorials: di
         )
     for key, page in _WALK_PAGES.items():
         body = walks[key]
+        org_body = org_example(body) if key == "handbook" else org_src(body, "console")
         regions.append(
             (
                 ROOT / "docs/orgmode" / f"{page}.org",
                 f"# BEGIN ljos-sample {key}",
                 f"# END ljos-sample {key}",
-                org_src(body, "console"),
+                org_body,
             )
         )
         regions.append(
@@ -1475,6 +1672,7 @@ def main() -> int:
         "calibrate": calibrate_sample(ljos),
         "sitting-plan": sitting_plan_sample(ljos),
         "receive-empty": receive_sample(ljos),
+        "handbook": handbook_sample(ljos),
     }
     files = rewritten(doctor, help_text, agent_samples(ljos), tutorials, walks)
     for text in files.values():
