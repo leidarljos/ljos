@@ -115,7 +115,7 @@ fn a_mistyped_command_names_the_closest_and_exits_2() {
     let line = one_line(&out.stderr);
     assert_eq!(
         line,
-        "ljos: no command serach, and the closest is search, so run `ljos search fix the kiln`."
+        "ljos: no command serach, and the closest is search, so run `ljos search <value>`."
     );
     assert!(out.stdout.is_empty(), "{said}");
 }
@@ -162,7 +162,7 @@ fn a_word_after_block_that_is_not_an_id_is_still_no_command() {
     assert_eq!(out.status.code(), Some(2), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "ljos: no command hello, so run `ljos block --help`."
+        "ljos: that is not a command, so run `ljos block --help`."
     );
     assert!(out.stdout.is_empty(), "{said}");
 }
@@ -176,7 +176,7 @@ fn a_mistyped_flag_names_the_closest_and_exits_2() {
     let line = one_line(&out.stderr);
     assert_eq!(
         line,
-        "ljos: search has no flag --limt, and the closest is --limit, so run `ljos search --limit 5 kiln`."
+        "ljos: search has no flag --limt, and the closest is --limit, so run `ljos search --limit <value>`."
     );
 }
 
@@ -189,7 +189,7 @@ fn a_sitting_title_says_how_to_start_a_plan() {
     assert_eq!(title.status.code(), Some(2), "{said}");
     assert_eq!(
         one_line(&title.stderr),
-        "ljos: Title is not a ticket id, so run `ljos sitting --plan \"Title\" -- \"measure the files\"`."
+        "ljos: that is not a ticket id, so run `ljos sitting --plan \"<title>\" -- \"measure the files\"`."
     );
     assert!(title.stdout.is_empty(), "{said}");
     assert!(
@@ -202,7 +202,7 @@ fn a_sitting_title_says_how_to_start_a_plan() {
     assert_eq!(spaced.status.code(), Some(2), "{said}");
     assert_eq!(
         one_line(&spaced.stderr),
-        "ljos: Ship the codec is not a ticket id, so run `ljos sitting --plan \"Ship the codec\" -- \"measure the files\"`."
+        "ljos: that is not a ticket id, so run `ljos sitting --plan \"<title>\" -- \"measure the files\"`."
     );
     assert!(spaced.stdout.is_empty(), "{said}");
 

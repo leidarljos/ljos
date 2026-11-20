@@ -379,7 +379,7 @@ fn a_bad_limit_names_help_and_exits_2() {
     assert_eq!(out.status.code(), Some(2), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "search: --limit does not accept nope. The values it takes are in `ljos search --help`."
+        "search: --limit does not accept that value. The values it takes are in `ljos search --help`."
     );
 }
 
@@ -639,11 +639,11 @@ fn free_text_on_recall_points_at_search_and_exits_2() {
     let cases: [(&[&str], &str); 4] = [
         (
             &["recall", "usability first-run ljos cli"],
-            "recall: \"usability first-run ljos cli\" is not a ticket id, so run `ljos search \"usability first-run ljos cli\"`.",
+            "recall: that text is not a ticket id, so run `ljos search \"<words>\"`.",
         ),
         (
             &["recall", "usability"],
-            "recall: \"usability\" is not a ticket id, so run `ljos search \"usability\"`.",
+            "recall: that text is not a ticket id, so run `ljos search \"<words>\"`.",
         ),
         (
             &["recall", "   "],
@@ -651,7 +651,7 @@ fn free_text_on_recall_points_at_search_and_exits_2() {
         ),
         (
             &["recall", "--", "-flag"],
-            "recall: \"-flag\" is not a ticket id, so run `ljos search -- \"-flag\"`.",
+            "recall: that text is not a ticket id, so run `ljos search \"<words>\"`.",
         ),
     ];
     for (args, want) in cases {
