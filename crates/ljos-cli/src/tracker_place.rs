@@ -603,6 +603,20 @@ pub fn pinned(value: &str) -> bool {
         .is_some_and(|root| root == Path::new(value))
 }
 
+/// Whether the only tracker a write could mean is the working directory
+/// taken as vissue's last guess. Nothing names a root, the directory has no
+/// `vissue.toml`, the seat configured none, and no prefix directory is there.
+/// A write from here would create `vissue.toml` in whatever the person
+/// happened to be standing in.
+#[must_use]
+pub fn cwd_is_only_a_guess() -> bool {
+    let Ok(here) = std::env::current_dir() else {
+        return false;
+    };
+    let (root, guessed) = root_vissue_would_use(&here);
+    guessed && !prefix_at(&root).is_some_and(|prefix| root.join(prefix).is_dir())
+}
+
 /// One line when this process has no tracker to write. It names the
 /// command that makes one, and the how-to page that makes one by hand.
 ///

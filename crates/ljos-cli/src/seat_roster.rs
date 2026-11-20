@@ -49,6 +49,7 @@ pub(crate) fn seat_list() -> SeatList {
 pub fn add(name: &str) -> Result<String> {
     let slug = seat_slug_of(name).context("seat add")?;
     crate::tracker_place::aim_tracker().map_err(anyhow::Error::msg)?;
+    refuse_guessed_tracker()?;
     let caller = crate::resolve_seat();
     let caller_slug = crate::canonical_seat_name(&caller.seat);
     let path = config_path().context("seat add: no tracker; set VISSUE_ROOT")?;
@@ -142,6 +143,7 @@ pub fn grant(
     if caller_slug != via {
         bail!("seat grant: --via names {via}, and this seat is {caller_slug}. Nothing was written");
     }
+    refuse_guessed_tracker()?;
     let path = config_path().context("seat grant: no tracker; set VISSUE_ROOT")?;
     let mut doc = load_doc(&path).context("seat grant")?;
     if !seat_known(&doc, &target) {
@@ -478,6 +480,15 @@ fn seat_slug_of(name: &str) -> Result<String> {
         bail!("pass a seat name, not {name:?}");
     }
     Ok(slug)
+}
+
+/// A roster write needs a tracker something named. The working directory
+/// alone is not one, and `vissue.toml` is not made there.
+fn refuse_guessed_tracker() -> Result<()> {
+    if crate::tracker_place::cwd_is_only_a_guess() {
+        bail!("{}", crate::tracker_place::MISSING_TRACKER);
+    }
+    Ok(())
 }
 
 fn config_path() -> Option<PathBuf> {
