@@ -150,6 +150,7 @@ esac
             .args(["sitting", &self.issue, "--verbose"])
             .current_dir(self._dir.path())
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self._dir.path().display()),

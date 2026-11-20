@@ -40,11 +40,63 @@ fn config() -> &'static MailConfig {
         .1
 }
 
+struct HoldEnv {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    _dir: tempfile::TempDir,
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl HoldEnv {
+    fn isolated() -> Self {
+        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let vars = [
+            ("HOME", p.to_path_buf()),
+            ("XDG_CONFIG_HOME", p.join(".config")),
+            ("XDG_DATA_HOME", p.join(".local/share")),
+            ("XDG_STATE_HOME", p.join(".local/state")),
+            ("XDG_CACHE_HOME", p.join(".cache")),
+            ("XDG_RUNTIME_DIR", p.join("run")),
+            ("VISSUE_ROOT", p.join("tracker")),
+        ];
+        let mut saved = Vec::with_capacity(vars.len());
+        for (k, v) in &vars {
+            saved.push((*k, std::env::var_os(k)));
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::set_var(k, v);
+            }
+        }
+        Self {
+            _guard: guard,
+            _dir: dir,
+            saved,
+        }
+    }
+}
+
+impl Drop for HoldEnv {
+    fn drop(&mut self) {
+        for (k, prev) in &self.saved {
+            #[allow(unused_unsafe)]
+            unsafe {
+                match prev {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+}
+
 fn export(
     draft: &Draft<'_>,
     expires: chrono::DateTime<Utc>,
     now: chrono::DateTime<Utc>,
 ) -> anyhow::Result<Approval> {
+    let _env = HoldEnv::isolated();
     ljos_cli::mailbox::export::export(draft, config(), expires, now)
 }
 

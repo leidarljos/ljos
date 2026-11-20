@@ -117,6 +117,7 @@ impl Place {
         let mut cmd = Command::new(program);
         cmd.current_dir(&self.product)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env(
                 "PATH",
                 format!(

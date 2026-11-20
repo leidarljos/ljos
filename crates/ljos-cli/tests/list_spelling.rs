@@ -51,6 +51,7 @@ impl Board {
             .args(args)
             .current_dir(self.dir.path())
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))

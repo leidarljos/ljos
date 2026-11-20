@@ -30,6 +30,7 @@ fn doctor_reports_a_hanging_version_probe_and_finishes() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("doctor")
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HOME", &home)
         .env("XDG_RUNTIME_DIR", root.path().join("run"))

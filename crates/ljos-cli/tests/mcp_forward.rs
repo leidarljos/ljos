@@ -75,13 +75,22 @@ fn a_forwarded_call_is_answered_by_the_fresh_server() {
         "seats = [\"acme-cli\"]\n",
     )
     .unwrap();
+    let home = runtime.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
     let program = runtime.path().join("server");
     write_program(
         &program,
         &format!(
-            "#!/bin/sh\nexport XDG_RUNTIME_DIR={}\nexport LJOS_CARDS_DIR={}\n\
-         export VISSUE_ROOT={}\nexport ISSUE_ROOT={}\nexport LJOS_SEAT=acme-cli\nexec {}\n",
+            "#!/bin/sh\nexport HOME={}\nexport XDG_CONFIG_HOME={}\nexport XDG_DATA_HOME={}\n\
+         export XDG_STATE_HOME={}\nexport XDG_CACHE_HOME={}\nexport XDG_RUNTIME_DIR={}\n\
+         export LJOS_CARDS_DIR={}\nexport VISSUE_ROOT={}\nexport ISSUE_ROOT={}\n\
+         export LJOS_SEAT=acme-cli\nexec {}\n",
+            quote(home.to_str().unwrap()),
+            quote(home.join(".config").to_str().unwrap()),
+            quote(home.join(".local/share").to_str().unwrap()),
+            quote(home.join(".local/state").to_str().unwrap()),
+            quote(home.join(".cache").to_str().unwrap()),
             quote(runtime.path().to_str().unwrap()),
             quote(cards.path().to_str().unwrap()),
             quote(tracker.path().to_str().unwrap()),

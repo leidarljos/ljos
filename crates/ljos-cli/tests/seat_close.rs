@@ -140,6 +140,7 @@ impl World {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", &self.path)
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
@@ -200,6 +201,7 @@ fn runner_cmd(w: &World, args: &[&str]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", &w.path)
         .env("HOME", &w.home)
         .env("XDG_CONFIG_HOME", w.home.join(".config"))
@@ -676,6 +678,53 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
 /// the ticket and notes the grant. With no grant, finish refuses and the
 /// ticket stays open. A raw tracker close under a runner is allowed with a
 /// warning that names finish.
+struct HoldEnv {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl HoldEnv {
+    fn in_world(w: &World) -> Self {
+        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let vars = [
+            ("HOME", w.home.clone()),
+            ("XDG_CONFIG_HOME", w.home.join(".config")),
+            ("XDG_DATA_HOME", w.home.join(".share")),
+            ("XDG_STATE_HOME", w.home.join(".state")),
+            ("XDG_CACHE_HOME", w.home.join(".cache")),
+            ("XDG_RUNTIME_DIR", w.root.join("run")),
+            ("VISSUE_ROOT", w.tracker.clone()),
+        ];
+        let mut saved = Vec::with_capacity(vars.len());
+        for (k, v) in &vars {
+            saved.push((*k, std::env::var_os(k)));
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::set_var(k, v);
+            }
+        }
+        Self {
+            _guard: guard,
+            saved,
+        }
+    }
+}
+
+impl Drop for HoldEnv {
+    fn drop(&mut self) {
+        for (k, prev) in &self.saved {
+            #[allow(unused_unsafe)]
+            unsafe {
+                match prev {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn a_granted_close_passes_the_hook_and_an_ungranted_close_stays_open() {
     let w = World::new();
@@ -737,7 +786,10 @@ fn a_granted_close_passes_the_hook_and_an_ungranted_close_stays_open() {
     assert!(said.contains("a person closes a ticket"), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
-    let mcp_err = ljos_cli::seat_roster::close_note("proj-clerk").unwrap_err();
+    let mcp_err = {
+        let _env = HoldEnv::in_world(&w);
+        ljos_cli::seat_roster::close_note("proj-clerk").unwrap_err()
+    };
     let label = ljos_cli::policy_label::as_policy(&mcp_err).expect("close-unverified label");
     assert_eq!(label.label, "close-unverified");
     assert!(

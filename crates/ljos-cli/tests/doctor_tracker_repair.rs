@@ -26,6 +26,7 @@ fn doctor(path: &str, home: &Path, tracker: &Path, git_log: &Path) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("doctor")
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", path)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

@@ -41,6 +41,7 @@ fn ljos(dir: &Path, claim_wait: Option<u64>, args: &[&str]) -> (Output, Duration
     cmd.args(args)
         .current_dir(dir)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", &path)
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

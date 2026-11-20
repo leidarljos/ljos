@@ -315,6 +315,7 @@ impl Seat {
             .arg(&script)
             .current_dir(&self.work)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .envs(&self.env)
             .stdin(Stdio::null())
             .output()
@@ -333,6 +334,7 @@ impl Seat {
         cmd.arg("-c").arg(line);
         cmd.current_dir(&self.work);
         cmd.env_clear();
+        cmd.env("TMPDIR", std::env::temp_dir());
         cmd.envs(&self.env);
         cmd.stdin(Stdio::null());
         term.attach_output(&mut cmd);
@@ -480,6 +482,7 @@ fn git_value(seat: &Seat, key: &str) -> String {
     let out = Command::new("git")
         .args(["config", "--global", "--get", key])
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .envs(&seat.env)
         .stdin(Stdio::null())
         .output()

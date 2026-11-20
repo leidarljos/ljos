@@ -33,6 +33,7 @@ fn a_child_is_filed_in_its_parents_project() {
             .arg("file")
             .args(args)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", &path)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

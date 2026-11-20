@@ -111,6 +111,7 @@ impl Seat {
             .arg(ID)
             .args(args)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

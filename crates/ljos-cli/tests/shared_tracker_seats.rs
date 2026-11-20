@@ -25,6 +25,7 @@ fn run_ljos(
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", path)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -54,6 +55,7 @@ fn call_mcp_one(
 ) -> serde_json::Value {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", path)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

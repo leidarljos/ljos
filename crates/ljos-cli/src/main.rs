@@ -4993,8 +4993,13 @@ fn run_command() -> Result<()> {
     let cmd = match Cli::try_parse_from(args) {
         Ok(cli) => cli.cmd,
         Err(err) => {
-            let args: Vec<String> = std::env::args().skip(1).collect();
-            ljos_cli::memory_port::record_memory_error(&args, &err.to_string());
+            if !matches!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                ljos_cli::memory_port::record_memory_error(&args, &err.to_string());
+            }
             if let Some(line) = usage_sentence(&err) {
                 eprintln!("{line}");
                 std::process::exit(USAGE_STATUS);

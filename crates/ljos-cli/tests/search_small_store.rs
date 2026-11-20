@@ -85,6 +85,7 @@ fn search(url: &str, query: &str) -> (bool, String, String) {
         .args(["search", query])
         .current_dir(root.path())
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &home)
         .env("USER", "ada")

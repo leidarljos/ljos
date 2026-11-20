@@ -139,6 +139,7 @@ impl Tracker {
             .args(["record", "check", "--tracker"])
             .arg(&self.root)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.home)
             .env("PACKSET_URL", "off")

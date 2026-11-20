@@ -56,6 +56,7 @@ impl Home {
         let home = self.home();
         let mut cmd = Command::new(program);
         cmd.env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", &self.path)
             .env("HOME", &home)
             .env("USER", "ada")

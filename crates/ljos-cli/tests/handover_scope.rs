@@ -158,6 +158,7 @@ impl World {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("XDG_STATE_HOME", home.join(".local/state"))

@@ -116,6 +116,7 @@ fn tracker_commits_do_not_trigger_git_auto_gc_repack() {
         .args(["note", "probe-autogc", "recorded without auto gc"])
         .current_dir(&tracker)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env(
             "PATH",
             std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
@@ -223,6 +224,7 @@ fn tracker_loose_objects_stay_bounded_over_200_commits() {
             .args(args)
             .current_dir(&tracker)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", &path)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

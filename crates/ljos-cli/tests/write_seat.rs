@@ -65,6 +65,7 @@ impl Bench {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", &self.path)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

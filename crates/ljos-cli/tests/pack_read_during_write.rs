@@ -269,6 +269,7 @@ fn a_held_write_does_not_fail_readers() {
         cmd.args(args)
             .current_dir(root.path())
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", &path)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

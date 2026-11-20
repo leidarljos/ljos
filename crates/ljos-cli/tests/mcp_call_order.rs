@@ -57,6 +57,7 @@ exit 0
     );
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))

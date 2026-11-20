@@ -276,6 +276,7 @@ printf '%s' "$2" > "$d/$id.prompt"
         cmd.args(args)
             .current_dir(&self.bin)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", path)
             .env("HOME", &self.home)
             .env("XDG_DATA_HOME", self.home.join(".local/share"))
@@ -817,6 +818,7 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
         ])
         .current_dir(&world.bin)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env(
             "PATH",
             format!(
@@ -846,6 +848,7 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
         .args(["panel", "run", "demo-brief", "--designers", "3"])
         .current_dir(&world.bin)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env(
             "PATH",
             format!(
@@ -2448,7 +2451,7 @@ fn a_renamed_binary_with_a_new_session_counts_once() {
         "LJOS_SESSION_ID=sess-ln-a-0001 LJOS_SEAT=ljosbot \"$LJOS\" vote {issue} --for ship --used none --as ljosbot; echo first $?\n\
          d=$(mktemp -d); ln -s \"$LJOS\" \"$d/notljos\"\n\
          LJOS_SESSION_ID=sess-ln-b-0002 LJOS_SEAT=inky \"$d/notljos\" vote {issue} --for ship --used none --as inky; echo second $?\n\
-         LJOS_SESSION_ID=sess-ln-c-0003 LJOS_SEAT=mina bash -c 'exec -a other \"$LJOS\" vote {issue} --for ship --used none --as mina'; echo third $?\n"
+         LJOS_SESSION_ID=sess-ln-c-0003 LJOS_SEAT=mina bash -c 'exec -a other \"$LJOS\" vote {issue} --for ship --used none --as mina'; echo third $?; rm -rf \"$d\"\n"
     );
     let out = shell(&world, &[], &script);
     let said = text(&out);

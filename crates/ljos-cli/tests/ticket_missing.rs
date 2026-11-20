@@ -31,6 +31,7 @@ impl Home {
             .args(args)
             .current_dir(self.dir.path())
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", path)
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))

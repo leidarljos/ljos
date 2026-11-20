@@ -51,6 +51,7 @@ impl Run {
         cmd.arg("doctor")
             .args(args)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("HOME", root.join("home"))
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .env("XDG_RUNTIME_DIR", root.join("run"))

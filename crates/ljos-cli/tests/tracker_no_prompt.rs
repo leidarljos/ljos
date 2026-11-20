@@ -153,6 +153,7 @@ impl Board {
     fn env(&self, cmd: &mut Command, root: &Path) {
         let home = self.root.join("home");
         cmd.env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", &self.path)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

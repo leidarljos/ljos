@@ -64,6 +64,7 @@ impl Hab {
         let home = self.dir.path().join("home");
         let mut cmd = Command::new(bin);
         cmd.env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env(
                 "PATH",
                 format!(

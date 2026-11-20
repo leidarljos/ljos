@@ -141,6 +141,7 @@ impl World {
         cmd.args(args)
             .current_dir(self.path("home"))
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self.path("bin").display()),
@@ -807,6 +808,7 @@ fn git_config_is_byte_identical_after_up_and_down() {
             .args(args)
             .current_dir(&repo)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", world.path("home"))
             .env("GIT_CONFIG_NOSYSTEM", "1")

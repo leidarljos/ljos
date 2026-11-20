@@ -12,6 +12,7 @@ fn protocol(home: &std::path::Path, full: bool) -> String {
     }
     let out = cmd
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin")
         .env("PACKSET_URL", "off")

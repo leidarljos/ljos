@@ -4,8 +4,16 @@ ljos_test_boot::harness!();
 use std::process::Command;
 
 fn ljos(args: &[&str]) -> std::process::Output {
+    let home = tempfile::tempdir().unwrap();
     Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_DATA_HOME", home.path().join(".local/share"))
+        .env("XDG_STATE_HOME", home.path().join(".local/state"))
+        .env("XDG_CACHE_HOME", home.path().join(".cache"))
+        .env("XDG_RUNTIME_DIR", home.path().join("run"))
+        .env("LJOS_HOOKD", "off")
         .output()
         .expect("ljos")
 }

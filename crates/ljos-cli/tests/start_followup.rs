@@ -73,6 +73,7 @@ fn the_write_after_start_stays_on_the_issue_start_opened() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .current_dir(&product)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
