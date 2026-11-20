@@ -237,6 +237,7 @@ fi
 if [ "$FROM_CHECKOUT" = 1 ] && [ "$CLOUD" = 1 ]; then
   die "pass --from-checkout or --cloud, not both"
 fi
+[ -n "$BIN_DIR" ] || die "bin directory is empty"
 case $BIN_DIR in
   /*) ;;
   *) here=$(pwd -P); BIN_DIR=${here%/}/$BIN_DIR ;;
