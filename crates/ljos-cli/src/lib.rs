@@ -8752,7 +8752,7 @@ fn is_seat_hook(h: &Value) -> bool {
 fn hook_command() -> String {
     which::which("ljos").map_or_else(
         |_| "ljos hook".to_string(),
-        |p| format!("{} hook", p.display()),
+        |p| format!("{} hook", tools::sh_word(&p.display().to_string())),
     )
 }
 
@@ -57852,6 +57852,29 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn hook_command_quotes_an_ljos_path_with_spaces() {
+        let _env = crate::test_env_lock();
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("my bin");
+        let ljos = bin.join("ljos");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(&ljos, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&ljos, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _path = crate::set_path(&bin);
+        let command = hook_command();
+        assert_eq!(
+            command,
+            format!(
+                "{} hook",
+                crate::tools::sh_word(&ljos.display().to_string())
+            )
+        );
+    }
+
     /// Recall lists an issue's own memories by their tag, newest first, with
     /// a count past the cap, then related search hits it has not listed.
     #[test]
@@ -62898,7 +62921,10 @@ mod tests {
         assert_eq!(truths.len(), MIN_NAMED_OUTCOMES);
 
         let whole = serde_json::json!({"discount": {"a": 1.0, "b": 1.0}, "named": 6, "independent_voters": 2.0});
-        assert!(discount_from(&whole).is_none(), "no pair passed the gate");
+        assert!(
+            discount_from(&whole).is_none(),
+            "every voter kept its whole weight"
+        );
         let shared = serde_json::json!({"discount": {"a": 0.5, "b": 0.5, "c": 1.0}, "named": 6, "independent_voters": 2.0});
         let (discount, line) = discount_from(&shared).unwrap();
         assert_eq!(discount["a"], 0.5);

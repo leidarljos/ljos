@@ -669,14 +669,23 @@ fn with_start_line(out: &str, line: &str) -> String {
 /// The hook command a runner's file names.
 #[must_use]
 pub fn runner_command(base: &str, runner: &str) -> String {
-    format!("{base} --runner {runner}")
+    format!("{} --runner {runner}", quoted_hook_command(base))
+}
+
+fn quoted_hook_command(base: &str) -> String {
+    let program = base.strip_suffix(" hook").unwrap_or(base);
+    let program = if program.starts_with('\'') && program.ends_with('\'') {
+        program.to_string()
+    } else {
+        crate::tools::sh_word(program)
+    };
+    format!("{program} hook")
 }
 
 /// The `exec` line of an Amp or Auggie wrapper. The program is quoted when
 /// the path needs it. The flags stay bare.
 fn hook_exec_line(base: &str, runner: &str) -> String {
-    let program = base.strip_suffix(" hook").unwrap_or(base);
-    format!("{} hook --runner {runner}", crate::tools::sh_word(program))
+    format!("{} --runner {runner}", quoted_hook_command(base))
 }
 
 fn ours(v: &Value, runner: &str) -> bool {
@@ -859,16 +868,22 @@ fn spec(runner: &str, root: &mut Value, command: &str) -> Result<bool, String> {
             let Some(list) = list.as_array_mut() else {
                 return Err("amp.permissions is not a list".into());
             };
-            if list.iter().any(|r| ours(r, runner)) {
-                false
-            } else {
-                // First, since Amp applies the first rule that matches.
-                list.insert(
-                    0,
-                    json!({ "tool": "Bash", "action": "delegate", "to": command }),
-                );
-                true
+            let want = json!({ "tool": "Bash", "action": "delegate", "to": command });
+            let mut seen = false;
+            let mut changed = false;
+            for found in list.iter_mut().filter(|rule| ours(rule, runner)) {
+                seen = true;
+                if *found != want {
+                    *found = want.clone();
+                    changed = true;
+                }
             }
+            if !seen {
+                // First, since Amp applies the first rule that matches.
+                list.insert(0, want);
+                changed = true;
+            }
+            changed
         }
         "crush" => {
             let hooks = hooks_of(obj)?;
@@ -1634,11 +1649,12 @@ mod tests {
         for (runner, name) in [("auggie", "settings.json"), ("amp", "settings.json")] {
             let dir = tempfile::tempdir().unwrap();
             let file = dir.path().join(name);
-            std::fs::write(
-                &file,
-                r#"{"keep": 1, "amp.permissions": [{"tool": "Read", "action": "allow"}]}"#,
-            )
-            .unwrap();
+            let old = if runner == "amp" {
+                r#"{"keep":1,"amp.permissions":[{"tool":"Bash","action":"delegate","to":"/old/ljos-guard-amp.sh"},{"tool":"Read","action":"allow"}]}"#
+            } else {
+                r#"{"keep":1,"amp.permissions":[{"tool":"Read","action":"allow"}]}"#
+            };
+            std::fs::write(&file, old).unwrap();
             let step = hook_step(runner, &file, "/bin/ljos hook", false);
             assert!(step.ok, "{}", step.detail);
             let script = script_path(runner, &file);
@@ -1649,7 +1665,9 @@ mod tests {
             assert!(v.to_string().contains(&script.display().to_string()));
             if runner == "amp" {
                 assert_eq!(v["amp.permissions"][0]["action"], "delegate");
+                assert_eq!(v["amp.permissions"][0]["to"], script.display().to_string());
                 assert_eq!(v["amp.permissions"][1]["tool"], "Read");
+                assert_eq!(v["amp.permissions"].as_array().unwrap().len(), 2);
             }
             let again = hook_step(runner, &file, "/bin/ljos hook", false);
             assert!(again.detail.contains("carries"), "{}", again.detail);
@@ -1661,11 +1679,24 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("my hooks");
         std::fs::create_dir_all(&dir).unwrap();
-        for runner in ["amp", "auggie"] {
-            let file = dir.join("settings.json");
-            let _ = std::fs::remove_file(&file);
+        for runner in ["amp", "auggie", "cline"] {
+            let file = if runner == "cline" {
+                dir.join("cline-hooks")
+            } else {
+                dir.join(format!("{runner}.json"))
+            };
             let step = hook_step(runner, &file, "/opt/my bin/ljos hook", false);
             assert!(step.ok, "{}", step.detail);
+            if runner == "cline" {
+                for event in ["PreToolUse", "UserPromptSubmit"] {
+                    let text = std::fs::read_to_string(file.join(event)).unwrap();
+                    assert!(
+                        text.contains("exec '/opt/my bin/ljos' hook --runner cline"),
+                        "{text}"
+                    );
+                }
+                continue;
+            }
             let script = script_path(runner, &file);
             let text = std::fs::read_to_string(&script).unwrap();
             assert!(
@@ -1684,6 +1715,28 @@ mod tests {
                 assert!(command.starts_with('\''), "{command}");
             }
         }
+    }
+
+    #[test]
+    fn amp_reonboard_repairs_every_owned_permission() {
+        let command = "/safe path/ljos-guard-amp.sh";
+        let stale = json!({
+            "tool": "Bash",
+            "action": "delegate",
+            "to": "/opt/ljos$(echo)/ljos-guard-amp.sh"
+        });
+        let foreign = json!({"tool": "Read", "action": "allow"});
+        let mut root = json!({ "amp.permissions": [stale.clone(), foreign.clone(), stale] });
+
+        assert!(spec("amp", &mut root, command).unwrap());
+        let rules = root["amp.permissions"].as_array().unwrap();
+        assert_eq!(rules.len(), 3, "{root}");
+        assert_eq!(rules[0]["to"], command, "{root}");
+        assert_eq!(rules[1], foreign);
+        assert_eq!(rules[2]["to"], command, "{root}");
+        let before = root.clone();
+        assert!(!spec("amp", &mut root, command).unwrap());
+        assert_eq!(root, before);
     }
 
     #[test]
