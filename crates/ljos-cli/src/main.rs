@@ -1126,6 +1126,46 @@ enum Cmd {
         #[arg(short = 'q', long = "porcelain")]
         porcelain: bool,
     },
+    /// Keep a CSV table on a ticket, list its tables, or print one.
+    ///
+    /// `--add FILE` checks the CSV (a header row, the same number of
+    /// columns on every row, UTF-8, at most 8 MiB), stores it in `deedar`
+    /// and cites it on ISSUE in one tracker commit. Adding a name again
+    /// makes the next version, which supersedes the one before, so
+    /// `ljos current` on an older accession names the newer one. Bytes the
+    /// latest version already has write nothing. With no flag, the latest
+    /// version of each table is listed with its rows, columns, version and
+    /// accession. `--show NAME` prints the latest version, `--version N` an
+    /// older one, read and checked as `ljos deed --show` reads.
+    ///
+    /// Example: `ljos table proj-1a2b --add scores.csv --name scores`
+    #[command(after_help = "Example: `ljos table proj-1a2b --add scores.csv --name scores`")]
+    Table {
+        /// The ticket the tables are cited on.
+        issue: String,
+        /// A CSV file to check, store and cite.
+        #[arg(long, value_name = "FILE", conflicts_with = "show")]
+        add: Option<PathBuf>,
+        /// The table's name with `--add`; the file name without its extension when omitted.
+        #[arg(long, requires = "add")]
+        name: Option<String>,
+        /// Print this table's latest version.
+        #[arg(long, value_name = "NAME")]
+        show: Option<String>,
+        /// With `--show`, this version instead of the latest.
+        #[arg(long, value_name = "N", requires = "show")]
+        version: Option<u32>,
+        /// With `--show`, print the CSV as it was stored. The default.
+        #[arg(long, requires = "show", conflicts_with = "json")]
+        csv: bool,
+        /// Print JSON: the list, or the table's columns and rows.
+        #[arg(long, conflicts_with = "add")]
+        json: bool,
+        /// Print the tracker and sync lines. Without it, a commit that landed
+        /// is quiet. A refusal is still printed.
+        #[arg(long)]
+        verbose: bool,
+    },
     /// File a ticket. The new id is the only line on stdout.
     ///
     /// A child of the issue this conversation holds, unless `--parent`
@@ -4230,6 +4270,7 @@ fn seat_kind(cmd: &Cmd) -> ljos_cli::seat_resolve::Kind {
         | Cmd::Complete { .. }
         | Cmd::Options { .. }
         | Cmd::Deed { .. }
+        | Cmd::Table { .. }
         | Cmd::Seat { action: Some(_) } => Kind::Write,
         _ => Kind::Keep,
     }
@@ -6147,6 +6188,38 @@ fn run_command() -> Result<()> {
                 }
             }
         }
+        Cmd::Table {
+            issue,
+            add,
+            name,
+            show,
+            version,
+            csv: _,
+            json,
+            verbose,
+        } => {
+            stop_ticket(&issue);
+            if let Some(file) = add {
+                let added = ljos_cli::table::add(&issue, &file, name.as_deref())?;
+                let mut said = added.text;
+                if added.wrote {
+                    said.push_str(&ljos_cli::persist_tracker(&issue, &added.verb));
+                }
+                print!("{}", render_write(&said, git_detail(verbose), false, None));
+            } else if let Some(name) = show {
+                let (version, read) = ljos_cli::table::show(&issue, &name, version)?;
+                if json {
+                    print!(
+                        "{}",
+                        ljos_cli::table::as_json(&issue, &version, &read.bytes)?
+                    );
+                } else {
+                    std::io::Write::write_all(&mut std::io::stdout(), &read.bytes)?;
+                }
+            } else {
+                print!("{}", ljos_cli::table::list(&issue, json)?);
+            }
+        }
         Cmd::OpenPanel {
             prompt_file,
             log,
@@ -8046,6 +8119,7 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         Cmd::File { .. } => "file",
         Cmd::Options { .. } => "options",
         Cmd::Deed { add, remove, .. } if !add.is_empty() || !remove.is_empty() => "deed",
+        Cmd::Table { add: Some(_), .. } => "table",
         Cmd::Workflow { start, round, .. } if start.is_some() || *round => "workflow",
         Cmd::Consensus {
             no_file, deadline, ..

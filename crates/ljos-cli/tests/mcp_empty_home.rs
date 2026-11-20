@@ -62,6 +62,7 @@ const EVERY_TOOL: &[&str] = &[
     "ljos_predict",
     "ljos_read",
     "ljos_receive",
+    "ljos_table",
     "ljos_timeline",
     "ljos_trust",
     "ljos_brief",

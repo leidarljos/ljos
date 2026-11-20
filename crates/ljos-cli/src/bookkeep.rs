@@ -43,6 +43,7 @@ const MCP_WRITES: &[&str] = &[
     "ljos_prefer",
     "ljos_forget",
     "ljos_deed",
+    "ljos_table",
     "ljos_rule",
     "ljos_vote",
     "ljos_learn",

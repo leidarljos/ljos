@@ -133,6 +133,8 @@ A word that is not a command names the verb it was reaching for as a line that r
    Stores: machine. How mail wakes a seat that is idle: a shell line this machine runs with ``LJOS_SEAT`` set to the seat, or a URL it posts the envelope to (never the body); ``send`` and ``reply`` start it in its own session and do not wait on it; policyd reads a command when it is set and on every run, and a rule that fires is a warning beside it while the command still runs, and block-on-warning warns with that label and the command runs. It does not block; ``--fire`` runs it now and prints what happened. With ``--fire``, ``--from``, ``--msg``, ``--issue`` and ``--interrupt`` name the message. Alone, show the wake. Kept in ``~/.config/ljos/wake.toml``.
 ``deed ID [--add ACCESSION]... [-q|--porcelain]`` / ``--remove ACCESSION --ticket ID`` / ``--show ACCESSION [--out FILE]``
    Stores: tracker, deed store. Cite with ``--add``, or list; ``--remove`` drops one citation, appended to the ledger, and the heading is not rewritten. ``--show`` prints a stored file's bytes, or writes them to ``--out``, once ``deedar evidence`` passes and the copy in the store hashes to the digest the deed names; a missing or altered copy exits 1 and prints nothing.
+``table ISSUE [--add FILE [--name NAME]]`` / ``--show NAME [--version N] [--csv|--json]`` / ``[--json]``
+   Stores: tracker, deed store. Keep a CSV table on a ticket instead of one ticket per row. ``--add`` checks the file (a header row, the same number of columns on every row, UTF-8, at most 8 MiB), stores it in ``deedar`` as ``table ISSUE NAME vN`` and cites it in one tracker commit; the name is the file name without its extension unless ``--name`` gives one. The same name again is the next version, which supersedes the one before, so ``ljos current`` on an older accession names the newer one; bytes the latest version already has write nothing. Alone it lists each table's latest version with rows, columns, version and accession. ``--show`` prints the latest version, or ``--version N``, read the way ``deed --show`` reads; ``--json`` prints the columns and rows.
 ``claims [--mine | --stale [--days N] [--json]] [ARGS]``
    Stores: tracker. Who has claimed what: ``vissue claims`` with its flags (``--by NAME``, ``--json``, ``-p PROJECT``). ``--mine`` lists this seat's claims with no note, stored file or finish for a day. ``--stale`` lists the ones untouched for ``--days`` or longer (``LJOS_STALE_DAYS``, 7 when unset), oldest first, with the age and the command to finish, release or note each one. ``--json`` prints that list as an array.
 ``recall ID [--json] [--no-graph]``
@@ -444,6 +446,7 @@ slot --key --model --run
 statusline
 supervise --at --cwd --exit --failures --harness --max-restarts --restart --script --window
 sync --adopt --adopt-legacy --compact --dry-run --export --force --import --key
+table --add --csv --json --name --show --verbose
 timeline --json --limit
 trust --about --why
 uninstall --all --bin-dir --dry-run --keep-programs --no-stub --purge

@@ -89,6 +89,7 @@ pub mod slot;
 pub mod subagent;
 pub mod swap_log;
 pub mod sync;
+pub mod table;
 pub mod takeover;
 pub mod ticket_search;
 pub mod tool_bound;

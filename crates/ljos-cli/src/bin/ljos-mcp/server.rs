@@ -193,6 +193,7 @@ fn unlisted_line(tool: &str) -> String {
         "guard_check" | "mail_search" | "mail_show" => String::new(),
         "bump_plan" => ", or run `ljos bump-plan` in a shell".to_string(),
         "deed_show" => ", or run `ljos deed --show ACCESSION` in a shell".to_string(),
+        "table" => ", or run `ljos table ISSUE` in a shell".to_string(),
         other => format!(", or run `ljos {other}` in a shell"),
     };
     format!(
@@ -356,6 +357,10 @@ const TRACKER_WRITES: &[&str] = &[
 ];
 
 fn writes_tracker(name: &str, args: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
+    if name == "ljos_table" {
+        let set = |key| args.and_then(|a| a.get(key)).is_some_and(|v| !v.is_null());
+        return set("add") || set("csv");
+    }
     if name == "ljos_deed" {
         return args
             .and_then(|a| a.get("add"))
@@ -430,6 +435,7 @@ const SEAT_ON_WRITE: &str =
 /// Tools that read or write depending on the arguments.
 const SEAT_MIXED_TOOLS: &[&str] = &[
     "ljos_deed",
+    "ljos_table",
     "ljos_vote",
     "ljos_bump_plan",
     "ljos_habit",
@@ -466,7 +472,7 @@ fn write_needs_named_seat(
         return false;
     }
     match name {
-        "ljos_deed" | "ljos_vote" | "ljos_bump_plan" => writes_tracker(name, args),
+        "ljos_deed" | "ljos_table" | "ljos_vote" | "ljos_bump_plan" => writes_tracker(name, args),
         "ljos_habit" => args
             .and_then(|map| map.get("value"))
             .is_some_and(|value| !value.is_null()),
@@ -880,6 +886,27 @@ pub struct DeedArgs {
     pub issue: String,
     /// An accession to cite. Absent, the tool lists what the issue cites.
     pub add: Option<String>,
+}
+
+/// A table on an issue: one to add, one to show, or none to list them.
+#[derive(Deserialize, JsonSchema)]
+pub struct TableArgs {
+    /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
+    #[serde(alias = "id")]
+    pub issue: String,
+    /// A CSV file to add: a header row, the same column count on each row.
+    pub add: Option<String>,
+    /// The CSV text to add, in place of a file. Needs `name`.
+    pub csv: Option<String>,
+    /// The table's name, such as `scores`.
+    pub name: Option<String>,
+    /// A table name to print.
+    pub show: Option<String>,
+    /// With `show`, this version instead of the latest.
+    pub version: Option<u32>,
+    /// True for JSON.
+    #[serde(default)]
+    pub json: bool,
 }
 
 /// Work found while sitting, filed on the tracker.
@@ -2502,6 +2529,62 @@ impl LjosServer {
             }
             None => habitat("vissue", &["deed", &args.issue]),
         }
+    }
+
+    #[tool(
+        description = "Keep a CSV table on an issue, such as a scoreboard or a ranking, instead of one ticket per row. Pass add (a CSV path) or csv (the text) with name to store it as a deed and cite it in one tracker commit; the same name again is the next version. Pass show to print a table, version for an older one, json for columns and rows. With neither, it lists the tables.",
+        annotations(
+            title = "Keep a table",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_table(
+        &self,
+        Parameters(args): Parameters<TableArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let mut argv: Vec<String> = vec!["table".into(), args.issue];
+        let mut scratch = None;
+        if let Some(text) = args.csv {
+            let name = args
+                .name
+                .clone()
+                .ok_or_else(|| refused(anyhow::anyhow!("ljos_table: csv needs a name")))?;
+            ljos_cli::table::check_name(&name).map_err(refused)?;
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let dir =
+                std::env::temp_dir().join(format!("ljos-table-{}-{nanos}", std::process::id()));
+            std::fs::create_dir(&dir).map_err(|e| refused(e.into()))?;
+            let path = dir.join(format!("{name}.csv"));
+            scratch = Some(dir);
+            std::fs::write(&path, text).map_err(|e| refused(e.into()))?;
+            argv.extend(["--add".into(), path.display().to_string()]);
+        } else if let Some(path) = args.add {
+            argv.extend(["--add".into(), path]);
+        }
+        if argv.len() > 2 {
+            if let Some(name) = args.name {
+                argv.extend(["--name".into(), name]);
+            }
+        } else if let Some(name) = args.show {
+            argv.extend(["--show".into(), name]);
+            if let Some(n) = args.version {
+                argv.extend(["--version".into(), n.to_string()]);
+            }
+        }
+        if args.json && !argv.iter().any(|a| a == "--add") {
+            argv.push("--json".into());
+        }
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let said = habitat("ljos", &refs);
+        if let Some(dir) = scratch {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        said
     }
 
     #[tool(
@@ -5975,7 +6058,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            55,
+            56,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -6038,6 +6121,7 @@ mod tests {
                 "ljos_send",
                 "ljos_sitting",
                 "ljos_start",
+                "ljos_table",
                 "ljos_trust",
                 "ljos_vote"
             ]

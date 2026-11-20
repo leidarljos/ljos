@@ -450,10 +450,11 @@ fn the_mcp_page_sorts_every_tool_into_writers_or_readers() {
     );
 
     // A writer is refused with no seat before its arguments are read. A
-    // reader is not. These six writers and ljos_habit read until a call
+    // reader is not. These seven writers and ljos_habit read until a call
     // asks them to write, so they are left out of the first check.
     let conditional: BTreeSet<&str> = [
         "ljos_deed",
+        "ljos_table",
         "ljos_vote",
         "ljos_bump_plan",
         "ljos_findings",
