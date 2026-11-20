@@ -132,7 +132,7 @@ fn only_a_named_seat_or_a_call_argument_names_the_seat() {
     }
     let shared = ljos_cli::runtime_fallback(
         &std::env::temp_dir(),
-        None,
+        Some(&config),
         // SAFETY: geteuid has no arguments and reads the process identity.
         unsafe { libc::geteuid() },
     );
