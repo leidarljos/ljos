@@ -1018,11 +1018,7 @@ fn positional_flags_seat_values_and_negative_zero_are_unambiguous() {
             Some(2),
             "pass `--` before text that starts with `-`",
         ),
-        (
-            &["file", "-task", "-p", "demo"],
-            Some(2),
-            "pass `--` before text that starts with `-`",
-        ),
+        (&["file", "-task", "-p", "demo"], Some(2), "<TITLE>"),
         (
             &["finish", "demo-kiln", "-hello"],
             Some(2),
@@ -1032,11 +1028,6 @@ fn positional_flags_seat_values_and_negative_zero_are_unambiguous() {
             &["file", "--unknown-flag"],
             Some(2),
             "pass `--` before text that starts with `-`",
-        ),
-        (
-            &["--seat", "--json", "search", "kiln"],
-            Some(2),
-            "ljos: --seat needs a value",
         ),
         (&["search", "kiln", "--limit", "-0"], None, ""),
         (&["conflicts", "--limit", "-0"], None, ""),
@@ -1059,7 +1050,85 @@ fn positional_flags_seat_values_and_negative_zero_are_unambiguous() {
                 !said.contains("takes a number from 0 up"),
                 "{args:?}\n{said}"
             );
+            assert!(!said.contains("Usage:"), "{args:?}\n{said}");
+            assert!(!said.contains("needs a value"), "{args:?}\n{said}");
         }
+    }
+}
+
+#[test]
+fn forwarded_argv_skips_ljos_short_flag_checks() {
+    let home = Home::new();
+    for args in [
+        &["git-hook", "pre-push", "-x", "origin"][..],
+        &["git-hook", "pre-push", "--bogus", "origin"][..],
+        &["evidence", "-x"][..],
+        &["evidence", "--bogus"][..],
+    ] {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_ne!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(!said.contains("has no flag"), "{args:?}\n{said}");
+        assert!(!said.contains("needs a value"), "{args:?}\n{said}");
+    }
+}
+
+#[test]
+fn non_text_hyphen_values_name_the_whole_value_flag() {
+    let home = Home::new();
+    for (args, flag, fragment) in [
+        (&["file", "-p", "-demo", "Title"][..], "--project", "-d"),
+        (
+            &["file", "-t", "-bug", "-p", "demo", "Title"][..],
+            "--type",
+            "-b",
+        ),
+    ] {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert_eq!(
+            one_line(&out.stderr),
+            format!("file: {flag} needs a value"),
+            "{args:?}\n{said}"
+        );
+        assert!(!said.contains(&format!("has no flag {fragment}")), "{said}");
+    }
+}
+
+#[test]
+fn clap_metadata_disambiguates_attached_flags_values_and_positionals() {
+    let home = Home::new();
+    for args in [
+        &["file", "-p", "demo", "-tbug", "Title"][..],
+        &["file", "--body", "-hello", "-p", "demo", "Title"][..],
+        &["finish", "demo-1", "--lesson", "-hello"][..],
+        &["file", "--body", "-quick", "-p", "demo", "Title"][..],
+    ] {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_ne!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(!said.contains("Usage:"), "{args:?}\n{said}");
+        assert!(!said.contains("needs a value"), "{args:?}\n{said}");
+    }
+
+    for (args, command) in [
+        (&["search", "file", "-hello"][..], "search"),
+        (&["file", "-p", "demo", "-hello", "--", "Title"][..], "file"),
+    ] {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        let line = one_line(&out.stderr);
+        assert!(
+            line.starts_with(&format!("ljos: {command}")),
+            "{args:?}\n{said}"
+        );
+        assert!(
+            line.contains("pass `--` before text that starts with `-`"),
+            "{args:?}\n{said}"
+        );
     }
 }
 
@@ -1418,4 +1487,63 @@ fn an_empty_value_on_a_count_flag_is_named() {
         "search: --limit does not accept \"\". The values it takes are in `ljos search --help`.",
         "{said}"
     );
+}
+
+#[test]
+fn a_span_flag_that_is_not_a_span_exits_2() {
+    let home = Home::new();
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &["reap", "--idle", "-1"],
+            "reap: --idle \"-1\" wants a number and s, m, h or d",
+        ),
+        (
+            &["reap", "--idle=-1h"],
+            "reap: --idle \"-1h\" wants a number and s, m, h or d",
+        ),
+        (
+            &["release", "--stale", "--older-than", "-1"],
+            "release: --older-than wants a duration such as 900, 15m, 6h or 2d",
+        ),
+        (
+            &["release", "--stale", "--older-than=-1h"],
+            "release: --older-than wants a duration such as 900, 15m, 6h or 2d",
+        ),
+        (
+            &["habit", "temp", "5", "--every", "-1"],
+            "habit: --every must be positive",
+        ),
+        (
+            &["habit", "temp", "5", "--every=0d"],
+            "habit: --every must be positive",
+        ),
+        (
+            &["habit", "temp", "5", "--every=9223372036854775807w"],
+            "habit: --every \"9223372036854775807w\" is too long; write 7d, 24h, 2w or 30m",
+        ),
+        (
+            &["reap", "--idle", "18446744073709551615h"],
+            "reap: --idle \"18446744073709551615h\" does not fit in a timestamp",
+        ),
+        (
+            &["reap", "--idle=18446744073709551615h", "--apply"],
+            "reap: --idle \"18446744073709551615h\" does not fit in a timestamp",
+        ),
+        (
+            &[
+                "release",
+                "--stale",
+                "--older-than",
+                "18446744073709551615h",
+            ],
+            "release: --older-than \"18446744073709551615h\" does not fit in a timestamp",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert_eq!(one_line(&out.stderr), *want, "{args:?}\n{said}");
+    }
 }
