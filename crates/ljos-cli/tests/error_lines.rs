@@ -1591,6 +1591,18 @@ fn a_span_flag_that_is_not_a_span_exits_2() {
             "reap: --idle \"-1h\" wants a number and s, m, h or d",
         ),
         (
+            &["reap", "--idle", "0"],
+            "reap: --idle \"0\" must be at least 1m because claim times have minute resolution",
+        ),
+        (
+            &["reap", "--idle=0s"],
+            "reap: --idle \"0s\" must be at least 1m because claim times have minute resolution",
+        ),
+        (
+            &["reap", "--idle", "59s"],
+            "reap: --idle \"59s\" must be at least 1m because claim times have minute resolution",
+        ),
+        (
             &["release", "--stale", "--older-than", "-1"],
             "release: --older-than wants a duration such as 900, 15m, 6h or 2d",
         ),
