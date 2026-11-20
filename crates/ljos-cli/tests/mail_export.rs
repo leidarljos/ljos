@@ -91,13 +91,22 @@ impl Drop for HoldEnv {
     }
 }
 
+fn export_with(
+    draft: &Draft<'_>,
+    cfg: &MailConfig,
+    expires: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> anyhow::Result<Approval> {
+    let _env = HoldEnv::isolated();
+    ljos_cli::mailbox::export::export(draft, cfg, expires, now)
+}
+
 fn export(
     draft: &Draft<'_>,
     expires: chrono::DateTime<Utc>,
     now: chrono::DateTime<Utc>,
 ) -> anyhow::Result<Approval> {
-    let _env = HoldEnv::isolated();
-    ljos_cli::mailbox::export::export(draft, config(), expires, now)
+    export_with(draft, config(), expires, now)
 }
 
 fn sha(message: &str) -> &'static str {
@@ -370,6 +379,6 @@ fn no_approval_file_is_minted_for_a_draft_the_checks_refuse() {
         assert!(err.to_string().contains("checks"), "{bad}: {err}");
     }
     let unset = MailConfig::default();
-    let err = ljos_cli::mailbox::export::export(&draft(MESSAGE), &unset, later, now()).unwrap_err();
+    let err = export_with(&draft(MESSAGE), &unset, later, now()).unwrap_err();
     assert!(err.to_string().contains("identity"), "{err}");
 }
