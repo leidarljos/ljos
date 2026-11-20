@@ -613,6 +613,7 @@ pub fn revise_from(name: &str, parent: &str) -> Result<String> {
 /// There is no proposal, consensus did not settle `revise`, or the file is
 /// not a skeleton.
 pub fn revise_apply(name: &str, file: &Path) -> Result<String> {
+    let _lock = acquire_skeleton_lock(name)?;
     let stored = require_stored(name)?;
     let Some(proposal) = stored.proposal.clone() else {
         bail!(
@@ -638,9 +639,23 @@ pub fn revise_apply(name: &str, file: &Path) -> Result<String> {
     }
     let text = std::fs::read_to_string(file)
         .with_context(|| format!("workflow: read {}", file.display()))?;
+    let file_version = version_of(&text).unwrap_or(0);
+    let incoming = body_without_version(&text);
+    let already_stored =
+        |version: i64, body: &str| version > file_version && body_without_version(body) == incoming;
+    if already_stored(stored.version, &stored.body)
+        || stored
+            .versions
+            .iter()
+            .any(|row| already_stored(row.version, &row.body))
+    {
+        return Ok(format!(
+            "proposal {proposal} for {name} is already applied\n"
+        ));
+    }
     let next = stored.version + 1;
     let bumped = set_version(&text, next, file)?;
-    let mut out = define_named(name, &bumped, &file.display().to_string(), Some(&proposal))?;
+    let mut out = define_locked(name, &bumped, &file.display().to_string(), Some(&proposal))?;
     let mut stored = require_stored(name)?;
     stored.applied = Some(proposal.clone());
     write_stored(&stored)?;
@@ -660,7 +675,39 @@ pub fn revise_apply(name: &str, file: &Path) -> Result<String> {
         }
     }
     out.push_str(&format!("noted the proposal {proposal}\n"));
+    close_proposal(&proposal)?;
     Ok(out)
+}
+
+fn close_proposal(id: &str) -> Result<()> {
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    vissue_core::ops::update(&layout, id, Some("DONE"), None, None, None)
+        .with_context(|| format!("workflow: close proposal {id}"))?;
+    Ok(())
+}
+
+fn version_of(text: &str) -> Option<i64> {
+    for line in split_keep(text) {
+        let (body, _) = split_nl(line);
+        if let Some((key, value)) = keyword(body) {
+            if key.eq_ignore_ascii_case("version") {
+                return value.trim().parse().ok();
+            }
+        }
+    }
+    None
+}
+
+fn body_without_version(text: &str) -> String {
+    let mut kept = String::new();
+    for line in split_keep(text) {
+        let (body, _) = split_nl(line);
+        if keyword(body).is_some_and(|(key, _)| key.eq_ignore_ascii_case("version")) {
+            continue;
+        }
+        kept.push_str(line);
+    }
+    sha256_hex(kept.as_bytes())
 }
 
 fn proposal_parent(id: &str) -> Option<String> {
@@ -746,7 +793,23 @@ struct Stored {
     versions: Vec<StoredVer>,
 }
 
+fn check_skeleton_name(name: &str) -> Result<()> {
+    if !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Ok(());
+    }
+    bail!("workflow: `{name}` is not a skeleton name");
+}
+
 fn index_path(name: &str) -> Result<PathBuf> {
+    check_skeleton_name(name)?;
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| {
@@ -852,12 +915,119 @@ fn write_stored(stored: &Stored) -> Result<()> {
         "applied": stored.applied,
         "versions": versions,
     });
-    std::fs::write(&path, serde_json::to_string_pretty(&doc)?)
-        .with_context(|| format!("workflow: write {}", path.display()))?;
+    let bytes = serde_json::to_string_pretty(&doc)?;
+    write_index_atomic(&path, bytes.as_bytes())?;
     Ok(())
 }
 
+fn write_index_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = path
+        .parent()
+        .context("workflow: the skeleton index has no directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("workflow: create {}", dir.display()))?;
+    if path
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        bail!("workflow: {} is a symlink", path.display());
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(
+        ".{}.{}.{nanos}.tmp",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("index"),
+        std::process::id()
+    ));
+    let write_tmp = || -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+            .with_context(|| format!("workflow: create {}", tmp.display()))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    };
+    if let Err(err) = write_tmp() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err).with_context(|| format!("workflow: replace {}", path.display()));
+    }
+    if let Ok(dir_file) = std::fs::File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
+    Ok(())
+}
+
+struct SkeletonLock(std::fs::File);
+
+fn acquire_skeleton_lock(name: &str) -> Result<SkeletonLock> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    check_skeleton_name(name)?;
+    let index = index_path(name)?;
+    let dir = index
+        .parent()
+        .context("workflow: the skeleton index has no directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("workflow: create {}", dir.display()))?;
+    let lock_path = dir.join(format!("{name}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&lock_path)
+        .with_context(|| format!("workflow: lock {}", lock_path.display()))?;
+    let deadline = std::time::Instant::now() + run_lock_wait();
+    let mut pause = std::time::Duration::from_millis(10);
+    loop {
+        // SAFETY: flock on a descriptor this function owns.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(SkeletonLock(file));
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EWOULDBLOCK | libc::EINTR) => {}
+            _ => {
+                return Err(err).with_context(|| format!("workflow: lock {}", lock_path.display()));
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "workflow: timed out waiting for the skeleton lock for {name} at {}",
+                lock_path.display()
+            );
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        std::thread::sleep(pause.min(left));
+        pause = pause
+            .saturating_mul(2)
+            .min(std::time::Duration::from_millis(100));
+    }
+}
+
+impl Drop for SkeletonLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: the descriptor is still open.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
 fn define_named(name: &str, text: &str, source: &str, proposal: Option<&str>) -> Result<String> {
+    let _lock = acquire_skeleton_lock(name)?;
+    define_locked(name, text, source, proposal)
+}
+
+fn define_locked(name: &str, text: &str, source: &str, proposal: Option<&str>) -> Result<String> {
     let skel = parse_skeleton(text, source)?;
     let sha = sha256_hex(text.as_bytes());
     let prev = read_stored(name)?;

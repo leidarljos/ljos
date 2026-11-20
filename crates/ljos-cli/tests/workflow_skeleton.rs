@@ -693,23 +693,20 @@ fn start_keeps_the_pinned_version_after_a_newer_define() {
 fn render_keeps_the_precision_corpus_byte_for_byte() {
     let board = Board::new();
     let corpus = "\
-Move the cursor position.
 composer of music.
-llama farm.
 Codex Sinaiticus.
 Opus 64.
 magnum opus.
-The Gemini program flew in 1965.
-Ask Ai Weiwei.
+The Apollo program flew in 1965.
+Ask the sculptor Weiwei.
 Use the Mistral wind.
 Cursor-based pagination.
 The term sonnet.
 hello3-mini
-xclaude sonnet 4
+xclaude is a word
 firmware 1.2.3.4.
 ships 1.2.3.4
 release 1.2.3.4
-2.0.1.0.
 section 3.4.5.6.
 seat belt.
 add::fee.
@@ -717,6 +714,12 @@ key=value.
 'the token is in the vault' (no value).
 Cargo.toml, v1.2.3, e.g., i.e., std::fs::read, =std::fs::read=, Vec::new, 12:30, 1:02:03, TCP/IP.
 [[https://example.com][link]]
+/dev/null
+$npm_package_version
+agent-based
+pass: all tests green
+کتاب\u{200c}ها
+क्\u{200d}ष
 ";
     for line in corpus.lines() {
         let hits = ljos_cli::scrub::scan_author(line, 1);
@@ -739,6 +742,336 @@ Cargo.toml, v1.2.3, e.g., i.e., std::fs::read, =std::fs::read=, Vec::new, 12:30,
     );
     let page = std::fs::read_to_string(out).unwrap();
     assert!(page.contains(corpus), "prose changed:\n{page}");
+}
+
+#[test]
+fn render_refuses_the_export_and_credential_corpus() {
+    let leaks = [
+        ("{{{author}}}", "Org structure"),
+        ("@@html:<b>x</b>@@", "Org structure"),
+        ("src_sh{whoami}", "Org structure"),
+        ("call_whoami()", "Org structure"),
+        ("#+begin_export html", "Org structure"),
+        ("#+call: whoami()", "Org structure"),
+        ("#+include: secrets.org", "Org structure"),
+        ("#+setupfile: local.org", "Org structure"),
+        ("[[elisp:(message \"hi\")][go]]", "private path"),
+        ("[[shell:whoami][go]]", "private path"),
+        ("[[eshell:whoami][go]]", "private path"),
+        ("[[javascript:alert(1)][go]]", "private path"),
+        ("[[file:/etc/passwd][go]]", "private path"),
+        ("[[help:org][go]]", "private path"),
+        ("[[info:org][go]]", "private path"),
+        ("<img src=x onerror=alert(1)>", "Org structure"),
+        ("Claude Opus 4.1", "tool or model name"),
+        ("Sonnet 4.5", "tool or model name"),
+        ("Cursor", "tool or model name"),
+        ("Copilot", "tool or model name"),
+        ("ChatGPT", "tool or model name"),
+        ("Anthropic", "tool or model name"),
+        (concat!("xap", "p-1-ABCDEFGHIJ"), "secret"),
+        (
+            concat!("https://hooks.slack.com", "/services/T00/B00/secretvalue"),
+            "secret",
+        ),
+        (concat!("glpat", "-abcdefghij"), "secret"),
+        (concat!("gldt", "-abcdefghij"), "secret"),
+        (concat!("glrt", "-abcdefghij"), "secret"),
+        (concat!("AccountKey=", "abcDEF123456"), "secret"),
+        (concat!("\"apiKey\": \"", "abcDEF123456\""), "secret"),
+        (concat!("clientSecret=", "abcDEF123456"), "secret"),
+        (concat!("PGPASSWORD=", "abcDEF123456"), "secret"),
+        ("curl -u ada:s3cret", "secret"),
+        ("0123456789abcdef0123456789abcdef", "secret"),
+        ("abcdefghijklmnopqrstuvwxyz0123456789ABCD", "secret"),
+        (
+            concat!("ey", "JhbGciOiJub25lIn0.ey", "JzdWIiOiIxIn0"),
+            "secret",
+        ),
+        ("ada (at) example.com", "email"),
+        ("ada [at] example.com", "email"),
+        ("8.8.8.8", "address"),
+        ("127.1", "address"),
+        ("2130706433", "address"),
+        ("0x7f000001", "address"),
+        ("$HOME/.ssh/id_rsa", "private path"),
+        ("~ada/.ssh/id_rsa", "private path"),
+        ("\u{0563}hp_abcdefghijklmnop", "secret"),
+        ("\u{0581}hp_abcdefghijklmnop", "secret"),
+    ];
+    let board = Board::new();
+    let body = leaks
+        .iter()
+        .map(|(line, _)| *line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let skel = SKEL.replace("Notes for {{version}}.", &body);
+    let path = board.write_skel("hostile.org", &skel);
+    let out = board.dir.path().join("hostile-public.org");
+    let err = board.fail(&[
+        "workflow",
+        "render",
+        "hostile",
+        "--file",
+        path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert!(!out.exists(), "render wrote a page:\n{err}");
+    for (offset, (line, class)) in leaks.iter().enumerate() {
+        let number = 11 + offset;
+        let needle = format!("line {number} contains {class}");
+        assert!(err.contains(&needle), "{line:?} missing {needle}:\n{err}");
+    }
+}
+
+#[test]
+fn a_skeleton_name_cannot_leave_the_store() {
+    let board = Board::new();
+    let outside = board.dir.path().join("outside.json");
+    std::fs::write(&outside, "{\"name\":\"escaped\"}").unwrap();
+    let err = board.fail(&["workflow", "render", "../outside"]);
+    assert!(err.contains("is not a skeleton name"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&outside).unwrap(),
+        "{\"name\":\"escaped\"}"
+    );
+}
+
+#[test]
+fn a_lost_applied_marker_does_not_store_the_same_body() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Release 1.2.0", "--top", "-p", "demo"]));
+    board.ok(&[
+        "workflow",
+        "--start",
+        "release",
+        &parent,
+        "--var",
+        "version=1.2.0",
+    ]);
+    let filed = board.ok(&["workflow", "revise", "release", "--from", &parent]);
+    let proposal = filed
+        .lines()
+        .find_map(|line| line.strip_prefix("filed proposal "))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    board.ok_as(
+        "alice",
+        &["vote", &proposal, "--for", "revise", "--used", "none"],
+    );
+    board.ok_as(
+        "bob",
+        &["vote", &proposal, "--for", "revise", "--used", "none"],
+    );
+    board.ok(&[
+        "workflow",
+        "revise",
+        "release",
+        "--apply",
+        path.to_str().unwrap(),
+    ]);
+    let index = board
+        .home
+        .join(".state")
+        .join("ljos")
+        .join("workflows")
+        .join("release.json");
+    let mut stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&index).unwrap()).unwrap();
+    assert_eq!(stored["version"], 2);
+    stored["applied"] = serde_json::Value::Null;
+    std::fs::write(&index, serde_json::to_string_pretty(&stored).unwrap()).unwrap();
+    let again = board.ok(&[
+        "workflow",
+        "revise",
+        "release",
+        "--apply",
+        path.to_str().unwrap(),
+    ]);
+    assert!(again.contains("already applied"), "{again}");
+    let stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&index).unwrap()).unwrap();
+    assert_eq!(stored["version"], 2, "{stored}");
+}
+
+#[test]
+fn an_applied_proposal_is_closed_so_the_run_can_revise_again() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Release 1.2.0", "--top", "-p", "demo"]));
+    board.ok(&[
+        "workflow",
+        "--start",
+        "release",
+        &parent,
+        "--var",
+        "version=1.2.0",
+    ]);
+    let filed = board.ok(&["workflow", "revise", "release", "--from", &parent]);
+    let proposal = filed
+        .lines()
+        .find_map(|line| line.strip_prefix("filed proposal "))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    board.ok_as(
+        "alice",
+        &["vote", &proposal, "--for", "revise", "--used", "none"],
+    );
+    board.ok_as(
+        "bob",
+        &["vote", &proposal, "--for", "revise", "--used", "none"],
+    );
+    board.ok(&[
+        "workflow",
+        "revise",
+        "release",
+        "--apply",
+        path.to_str().unwrap(),
+    ]);
+    assert_eq!(board.heading(&proposal).state, "DONE");
+    let next = SKEL.replace(
+        "Notes for {{version}}.",
+        "Notes for {{version}} after the first revise.",
+    );
+    let next_path = board.write_skel("release-next.org", &next);
+    let filed = board.ok(&["workflow", "revise", "release", "--from", &parent]);
+    assert!(
+        filed.contains("filed proposal"),
+        "the closed proposal still blocked revise:\n{filed}"
+    );
+    let proposal = filed
+        .lines()
+        .find_map(|line| line.strip_prefix("filed proposal "))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    board.ok_as(
+        "alice",
+        &["vote", &proposal, "--for", "revise", "--used", "none"],
+    );
+    board.ok_as(
+        "bob",
+        &["vote", &proposal, "--for", "revise", "--used", "none"],
+    );
+    let applied = board.ok(&[
+        "workflow",
+        "revise",
+        "release",
+        "--apply",
+        next_path.to_str().unwrap(),
+    ]);
+    assert!(applied.contains("stored release version 3"), "{applied}");
+}
+
+#[test]
+fn concurrent_define_and_apply_keep_a_readable_index() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    let path_s = path.to_str().unwrap().to_string();
+    for round in 1..=3 {
+        let body = SKEL.replace("#+version: 1", &format!("#+version: {round}"));
+        std::fs::write(&path, &body).unwrap();
+        let mut kids = Vec::new();
+        for _ in 0..8 {
+            kids.push(
+                board
+                    .cmd_as("saddle", &["workflow", "define", &path_s])
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        for kid in kids {
+            let out = kid.wait_with_output().unwrap();
+            let said = text(&out);
+            assert!(out.status.success(), "define round {round} failed:\n{said}");
+            assert!(!said.contains("EOF while parsing"), "{said}");
+            assert!(!said.to_ascii_lowercase().contains("deedar"), "{said}");
+        }
+    }
+    let index = board
+        .home
+        .join(".state")
+        .join("ljos")
+        .join("workflows")
+        .join("release.json");
+    let stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&index).unwrap()).unwrap();
+    assert_eq!(stored["version"], 3);
+
+    let parent = first_id(&board.ok(&["file", "Concurrent revise", "--top", "-p", "demo"]));
+    board.ok(&[
+        "workflow",
+        "--start",
+        "release",
+        &parent,
+        "--var",
+        "version=1.2.0",
+    ]);
+    for round in 1..=3 {
+        let body = SKEL.replace("#+version: 1", "#+version: 3").replace(
+            "Notes for {{version}}.",
+            &format!("Notes for round {round}."),
+        );
+        std::fs::write(&path, &body).unwrap();
+        let filed = board.ok(&["workflow", "revise", "release", "--from", &parent]);
+        assert!(
+            filed.contains("filed proposal"),
+            "round {round} could not file:\n{filed}"
+        );
+        let proposal = filed
+            .lines()
+            .find_map(|line| line.strip_prefix("filed proposal "))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string();
+        board.ok_as(
+            "alice",
+            &["vote", &proposal, "--for", "revise", "--used", "none"],
+        );
+        board.ok_as(
+            "bob",
+            &["vote", &proposal, "--for", "revise", "--used", "none"],
+        );
+        let mut kids = Vec::new();
+        for _ in 0..8 {
+            kids.push(
+                board
+                    .cmd_as(
+                        "saddle",
+                        &["workflow", "revise", "release", "--apply", &path_s],
+                    )
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        for kid in kids {
+            let out = kid.wait_with_output().unwrap();
+            let said = text(&out);
+            assert!(out.status.success(), "apply round {round} failed:\n{said}");
+            assert!(!said.contains("EOF while parsing"), "{said}");
+        }
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&index).unwrap()).unwrap();
+        assert!(stored["version"].as_i64().unwrap() >= 3, "{stored}");
+    }
 }
 
 #[test]

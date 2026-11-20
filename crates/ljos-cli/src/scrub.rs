@@ -10,6 +10,8 @@ use icu_properties::{
 };
 use unicode_normalization::UnicodeNormalization as _;
 
+include!("scrub_fold.rs");
+
 /// Return `text` unchanged.
 ///
 /// Kept as a compatibility helper for callers that used the old scrubber.
@@ -81,7 +83,7 @@ fn scan_with(text: &str, seats: &[String], skip_generated: bool, first_line: usi
     for (idx, line) in text.split_inclusive('\n').enumerate() {
         let line_no = first_line + idx;
         let body = line.strip_suffix('\n').unwrap_or(line);
-        if body.chars().any(is_invisible) {
+        if invisible_hit(body) {
             hits.push(format!("line {line_no} contains invisible character"));
         }
         let normalized = normalize_line(body);
@@ -92,12 +94,15 @@ fn scan_with(text: &str, seats: &[String], skip_generated: bool, first_line: usi
             while i < chars.len() {
                 if let Some(end) = take_secret(&chars, i) {
                     hits.push(format!("line {line_no} contains secret"));
-                    i = end;
+                    i = end.max(i + 1);
                 } else {
-                    i += 1;
+                    i = skip_run(&chars, i);
                 }
             }
             continue;
+        }
+        if org_export_construct(&normalized) {
+            hits.push(format!("line {line_no} contains Org structure"));
         }
         if names_model_or_bot(&normalized) {
             hits.push(format!("line {line_no} contains tool or model name"));
@@ -106,13 +111,93 @@ fn scan_with(text: &str, seats: &[String], skip_generated: bool, first_line: usi
         while i < chars.len() {
             if let Some((end, kind)) = match_token(&chars, i, seats) {
                 hits.push(format!("line {line_no} contains {}", kind.label()));
-                i = end;
+                i = end.max(i + 1);
             } else {
-                i += 1;
+                i = skip_run(&chars, i);
             }
         }
     }
     hits
+}
+
+fn skip_run(chars: &[char], i: usize) -> usize {
+    let mut j = i + 1;
+    if chars.get(i).is_some_and(|c| is_scan_run(*c)) {
+        while j < chars.len() && is_scan_run(chars[j]) {
+            j += 1;
+        }
+    }
+    j
+}
+
+fn is_scan_run(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+' | '/')
+}
+
+fn org_export_construct(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("#+begin_export")
+        || trimmed.starts_with("#+call:")
+        || trimmed.starts_with("#+include:")
+        || trimmed.starts_with("#+setupfile:")
+        || line.contains("{{{")
+        || has_export_snippet(line)
+        || has_inline_babel(line)
+        || has_html_event(line)
+}
+
+fn has_export_snippet(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        if bytes[i] == b'@' && bytes[i + 1] == b'@' {
+            let mut j = i + 2;
+            if j < bytes.len() && bytes[j].is_ascii_alphabetic() {
+                while j < bytes.len() && bytes[j].is_ascii_alphabetic() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b':' {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn has_inline_babel(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i + 5 < bytes.len() {
+        let src = bytes[i..].starts_with(b"src_");
+        let call = bytes[i..].starts_with(b"call_");
+        if (src || call) && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric()) {
+            let mut j = i + if src { 4 } else { 5 };
+            if j < bytes.len() && bytes[j].is_ascii_alphabetic() {
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'-') {
+                    j += 1;
+                }
+                let open = if src { b'{' } else { b'(' };
+                if j < bytes.len() && bytes[j] == open {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn has_html_event(line: &str) -> bool {
+    if line.contains("<script") || line.contains("<iframe") {
+        return true;
+    }
+    (line.contains("<img") || line.contains("<svg") || line.contains("<video"))
+        && (line.contains("onerror")
+            || line.contains("onload")
+            || line.contains("onclick")
+            || line.contains("onmouseover"))
 }
 
 fn is_generated_line(line: &str) -> bool {
@@ -155,15 +240,51 @@ fn is_nonspacing(c: char) -> bool {
     gc.get(c) == GeneralCategory::NonspacingMark
 }
 
+fn is_zwj(c: char) -> bool {
+    matches!(c, '\u{200c}' | '\u{200d}')
+}
+
+/// Arabic and Indic letters use ZWJ and ZWNJ as part of the word.
+fn uses_zwj(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0600}'..='\u{06FF}'
+            | '\u{0750}'..='\u{077F}'
+            | '\u{08A0}'..='\u{08FF}'
+            | '\u{0900}'..='\u{0D7F}'
+            | '\u{FB50}'..='\u{FDFF}'
+            | '\u{FE70}'..='\u{FEFF}'
+    )
+}
+
+fn invisible_hit(line: &str) -> bool {
+    let linguistic = line.chars().any(uses_zwj);
+    line.chars()
+        .any(|c| is_invisible(c) && !(linguistic && is_zwj(c)))
+}
+
 /// A copy for matching. The author's bytes stay as they were.
+///
+/// The copy is NFKC, then invisibles are dropped, then combining marks are
+/// dropped, then each character is replaced by its confusable skeleton and
+/// lowercased. Phrase matching also squeezes whitespace.
 fn normalize_line(line: &str) -> String {
     let compatible: String = line.nfkc().filter(|&c| !is_invisible(c)).collect();
-    compatible
-        .nfd()
-        .filter(|&c| !is_nonspacing(c) && !is_invisible(c))
-        .map(fold_lookalike)
-        .flat_map(char::to_lowercase)
-        .collect()
+    let mut out = String::new();
+    for c in compatible.nfd() {
+        if is_nonspacing(c) || is_invisible(c) {
+            continue;
+        }
+        let folded = fold_lookalike(c);
+        if let Some(skel) = fold_confusable(folded) {
+            for piece in skel.chars() {
+                out.extend(piece.to_lowercase());
+            }
+        } else {
+            out.extend(folded.to_lowercase());
+        }
+    }
+    out
 }
 
 fn declared_seats() -> Vec<String> {
@@ -222,43 +343,100 @@ fn fold_lookalike(c: char) -> char {
     }
 }
 
+/// The same vocabulary the handbook screen matches, plus the unversioned
+/// product names a public page was still publishing.
+const TERMS: &[&str] = &[
+    "gpt",
+    "chatgpt",
+    "claude",
+    "anthropic",
+    "cursor",
+    "copilot",
+    "gemini",
+    "llama",
+    "deepseek",
+    "qwen",
+    "grok",
+    "openai",
+    "agent",
+    "subagent",
+    "sub-agent",
+    "o1",
+    "o3",
+    "o4",
+    "llm",
+    "genai",
+    "gen-ai",
+    "language model",
+    "foundation model",
+    "model context protocol",
+    "ai",
+    "cohere",
+    "huggingface",
+    "hugging face",
+    "hugging-face",
+    "hugging_face",
+    "xai",
+    "x.ai",
+    "gemma",
+    "deepmind",
+    "ollama",
+    "openrouter",
+    "groq",
+    "windsurf",
+    "cline",
+    "kiro",
+    "aider",
+    "codeium",
+    "tabnine",
+    "midjourney",
+    "dall-e",
+    "dalle",
+    "kimi",
+    "glm",
+    "ernie",
+    "minimax",
+    "stable diffusion",
+    "bard",
+    "ai-generated",
+    "ai generated",
+    "cloud agent",
+    "cloud-agent",
+    "co-authored-by",
+    "co-authored by",
+];
+
 fn names_model_or_bot(line: &str) -> bool {
-    let folded: String = normalize_line(line)
-        .chars()
-        .flat_map(char::to_lowercase)
-        .map(fold_lookalike)
-        .collect();
-    let chars: Vec<char> = folded.chars().collect();
-    if [
-        "ai-generated",
-        "ai generated",
-        "subagent",
-        "sub-agent",
-        "cloud agent",
-        "cloud-agent",
-        "co-authored-by",
-        "co-authored by",
-    ]
-    .iter()
-    .any(|phrase| contains_phrase(&folded, phrase))
+    let squeezed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if TERMS
+        .iter()
+        .any(|phrase| contains_phrase(&squeezed, phrase))
     {
         return true;
     }
+    let chars: Vec<char> = squeezed.chars().collect();
     has_product_version(&chars, "gpt", false)
         || has_product_version(&chars, "claude", false)
         || has_named_product_version(&chars, "claude", "sonnet")
+        || has_named_product_version(&chars, "claude", "opus")
+        || has_family_version(&chars, "sonnet")
         || has_product_version(&chars, "gemini", false)
         || has_product_version(&chars, "qwen", true)
         || has_product_version(&chars, "llama", false)
         || has_product_version(&chars, "deepseek", true)
+        || has_product_version(&chars, "mistral", false)
         || has_o_series_mini(&chars)
+}
+
+fn term_edge(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-'
 }
 
 fn contains_phrase(line: &str, phrase: &str) -> bool {
     line.match_indices(phrase).any(|(at, found)| {
         let before = line[..at].chars().next_back();
         let after = line[at + found.len()..].chars().next();
-        before.is_none_or(|c| !c.is_alphanumeric()) && after.is_none_or(|c| !c.is_alphanumeric())
+        before.is_none_or(|c| !term_edge(c)) && after.is_none_or(|c| !term_edge(c))
     })
 }
 
@@ -320,6 +498,29 @@ fn has_named_product_version(chars: &[char], product: &str, family: &str) -> boo
         n += family.len();
         while chars.get(n).is_some_and(|c| matches!(c, ' ' | '-')) {
             n += 1;
+        }
+        if chars.get(n).is_some_and(char::is_ascii_digit) {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_family_version(chars: &[char], family: &str) -> bool {
+    let family: Vec<char> = family.chars().collect();
+    for at in 0..chars.len() {
+        if at + family.len() > chars.len() || chars[at..at + family.len()] != family {
+            continue;
+        }
+        if at > 0 && term_edge(chars[at - 1]) {
+            continue;
+        }
+        let mut n = at + family.len();
+        while chars.get(n).is_some_and(|c| matches!(c, ' ' | '-')) {
+            n += 1;
+        }
+        if n == at + family.len() {
+            continue;
         }
         if chars.get(n).is_some_and(char::is_ascii_digit) {
             return true;
@@ -427,6 +628,12 @@ fn take_secret(chars: &[char], i: usize) -> Option<usize> {
     if let Some(end) = take_url_credentials(chars, i) {
         return Some(end);
     }
+    if let Some(end) = take_slack_hook(chars, i) {
+        return Some(end);
+    }
+    if let Some(end) = take_curl_user(chars, i) {
+        return Some(end);
+    }
     if let Some(end) = take_authorization(chars, i) {
         return Some(end);
     }
@@ -442,7 +649,10 @@ fn take_secret(chars: &[char], i: usize) -> Option<usize> {
     if let Some(end) = take_jwt(chars, i) {
         return Some(end);
     }
-    take_secret_prefix(chars, i)
+    if let Some(end) = take_secret_prefix(chars, i) {
+        return Some(end);
+    }
+    take_opaque(chars, i)
 }
 
 fn is_name_char(c: char) -> bool {
@@ -467,6 +677,10 @@ fn secret_name(name: &str) -> bool {
             | "private_key"
             | "signing_key"
             | "client_secret"
+            | "clientsecret"
+            | "pgpassword"
+            | "accountkey"
+            | "sharedaccesskey"
     ) || name.ends_with("_key")
         || name.ends_with("_token")
         || name.ends_with("_secret")
@@ -477,6 +691,8 @@ fn secret_name(name: &str) -> bool {
         || name.ends_with("_credentials")
         || name.ends_with("_auth")
         || name.ends_with("_authorization")
+        || (name.len() > "secret".len() && name.ends_with("secret"))
+        || (name.len() > "password".len() && name.ends_with("password"))
 }
 
 fn take_secret_assign(chars: &[char], i: usize) -> Option<usize> {
@@ -501,6 +717,9 @@ fn take_secret_assign(chars: &[char], i: usize) -> Option<usize> {
         return None;
     }
     let ident_end = j;
+    if matches!(chars.get(j), Some('"' | '\'')) {
+        j += 1;
+    }
     while j < chars.len() && matches!(chars[j], ' ' | '\t') {
         j += 1;
     }
@@ -542,7 +761,41 @@ fn take_secret_assign(chars: &[char], i: usize) -> Option<usize> {
     if sep == ':' && end == val_start {
         return None;
     }
+    let value: String = chars[val_start..end].iter().collect();
+    let bare = value.trim_matches(|c| c == '"' || c == '\'');
+    if sep == ':' && assignment_is_prose(bare, chars, end) {
+        return None;
+    }
     Some(end)
+}
+
+/// `pass: all tests green` is a sentence. `Authorization: Basic <token>` is not.
+fn assignment_is_prose(value: &str, chars: &[char], end: usize) -> bool {
+    if value.is_empty() || value.chars().any(|c| !c.is_ascii_alphabetic()) {
+        return false;
+    }
+    let mut i = end;
+    let mut words = 0usize;
+    while i < chars.len() {
+        while chars.get(i).is_some_and(|c| c.is_whitespace()) {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+        let start = i;
+        while chars.get(i).is_some_and(|c| c.is_ascii_alphabetic()) {
+            i += 1;
+        }
+        if i == start || chars.get(i).is_some_and(|c| !c.is_whitespace()) {
+            return false;
+        }
+        if i - start >= 8 {
+            return false;
+        }
+        words += 1;
+    }
+    words >= 2
 }
 
 fn take_url_credentials(chars: &[char], i: usize) -> Option<usize> {
@@ -663,23 +916,28 @@ fn take_jwt(chars: &[char], i: usize) -> Option<usize> {
         return None;
     }
     let payload_at = header + 1;
-    starts_with_exact(chars, payload_at, "eyj")?;
     let payload = scan_b64(chars, payload_at)?;
-    if payload - payload_at < 12 || chars.get(payload) != Some(&'.') {
+    if payload - payload_at < 8 {
         return None;
     }
-    let sig_at = payload + 1;
-    let sig = scan_b64(chars, sig_at)?;
-    if sig - sig_at < 8 {
-        return None;
+    if chars.get(payload) == Some(&'.') {
+        let sig_at = payload + 1;
+        if let Some(sig) = scan_b64(chars, sig_at) {
+            if sig - sig_at >= 8 && jwt_boundary(chars, sig) {
+                return Some(sig);
+            }
+            if sig == sig_at && jwt_boundary(chars, sig_at) {
+                return Some(sig_at);
+            }
+        }
     }
-    if chars
-        .get(sig)
-        .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(*c, '_' | '-'))
-    {
-        return None;
-    }
-    Some(sig)
+    jwt_boundary(chars, payload).then_some(payload)
+}
+
+fn jwt_boundary(chars: &[char], at: usize) -> bool {
+    chars
+        .get(at)
+        .is_none_or(|c| !(c.is_ascii_alphanumeric() || matches!(*c, '_' | '-')))
 }
 
 fn scan_b64(chars: &[char], i: usize) -> Option<usize> {
@@ -776,15 +1034,17 @@ fn take_secret_prefix(chars: &[char], i: usize) -> Option<usize> {
             return Some(end);
         }
     }
-    if let Some(after) = starts_with_exact(chars, i, concat!("glp", "at-")) {
-        let mut end = after;
-        while end < chars.len()
-            && (chars[end].is_ascii_alphanumeric() || matches!(chars[end], '_' | '-'))
-        {
-            end += 1;
-        }
-        if end - after >= 3 {
-            return Some(end);
+    for prefix in [concat!("glp", "at-"), "gldt-", "glrt-", "xapp-"] {
+        if let Some(after) = starts_with_exact(chars, i, prefix) {
+            let mut end = after;
+            while end < chars.len()
+                && (chars[end].is_ascii_alphanumeric() || matches!(chars[end], '_' | '-'))
+            {
+                end += 1;
+            }
+            if end - after >= 3 {
+                return Some(end);
+            }
         }
     }
     if let Some(after) = starts_with_exact(chars, i, "npm_") {
@@ -792,7 +1052,7 @@ fn take_secret_prefix(chars: &[char], i: usize) -> Option<usize> {
         while end < chars.len() && chars[end].is_ascii_alphanumeric() {
             end += 1;
         }
-        if end - after >= 4 {
+        if end - after >= 4 && chars[after..end].iter().any(|c| c.is_ascii_digit()) {
             return Some(end);
         }
     }
@@ -828,6 +1088,8 @@ fn take_file_url(chars: &[char], i: usize) -> Option<usize> {
         "file:",
         "elisp:",
         "shell:",
+        "eshell:",
+        "javascript:",
         "help:",
         "info:",
     ]
@@ -848,6 +1110,18 @@ fn is_link_stop(c: char) -> bool {
 }
 
 fn take_path(chars: &[char], i: usize) -> Option<usize> {
+    if chars.get(i) == Some(&'$') {
+        if i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
+            return None;
+        }
+        let end = starts_with_exact(chars, i, "${home}")
+            .or_else(|| starts_with_exact(chars, i, "$home"))?;
+        let mut stop = end;
+        while stop < chars.len() && !is_url_stop(chars[stop]) {
+            stop += 1;
+        }
+        return (stop > i).then_some(stop);
+    }
     if chars.get(i) == Some(&'~') {
         if i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
             return None;
@@ -913,6 +1187,12 @@ fn take_path(chars: &[char], i: usize) -> Option<usize> {
         end += 1;
     }
     let path: String = chars[i..end].iter().collect();
+    if matches!(
+        path.as_str(),
+        "/dev/null" | "/dev/zero" | "/dev/stdin" | "/dev/stdout" | "/dev/stderr" | "/dev/tty"
+    ) {
+        return None;
+    }
     if path.split('/').filter(|seg| !seg.is_empty()).count() >= 2 {
         Some(end)
     } else {
@@ -936,7 +1216,7 @@ fn take_email(chars: &[char], i: usize) -> Option<usize> {
         j += 1;
     }
     if *chars.get(j)? != '@' {
-        return None;
+        return take_obfuscated_email(chars, local_start, j);
     }
     if !chars[j - 1].is_alphanumeric() && !matches!(chars[j - 1], '_' | '+') {
         return None;
@@ -1077,10 +1357,16 @@ fn take_ip(chars: &[char], i: usize) -> Option<usize> {
     if let Some(end) = take_bracketed_ipv6(chars, i) {
         return Some(end);
     }
+    if let Some(end) = take_hex_ip(chars, i) {
+        return Some(end);
+    }
     if let Some(end) = take_ipv6(chars, i) {
         return Some(end);
     }
-    take_ipv4(chars, i)
+    if let Some(end) = take_ipv4(chars, i) {
+        return Some(end);
+    }
+    take_integer_ip(chars, i)
 }
 
 fn take_bracketed_ipv6(chars: &[char], i: usize) -> Option<usize> {
@@ -1192,9 +1478,7 @@ fn take_ipv4(chars: &[char], i: usize) -> Option<usize> {
         return None;
     }
     let candidate: String = chars[i..end].iter().collect();
-    let Ok(address) = candidate.parse::<Ipv4Addr>() else {
-        return None;
-    };
+    let address = parse_ipv4_form(&candidate)?;
     if chars.get(end) == Some(&'.')
         && chars
             .get(end + 1)
@@ -1237,7 +1521,7 @@ fn take_ipv4(chars: &[char], i: usize) -> Option<usize> {
         || (octets[0] == 192 && octets[1] == 168)
         || (octets[0] == 169 && octets[1] == 254)
         || (octets[0] == 100 && (64..=127).contains(&octets[1]));
-    if !private && !has_port && !has_cidr && !has_address_context(chars, i) {
+    if !private && !has_port && !has_cidr && has_version_context(chars, i) {
         return None;
     }
     if end < chars.len() && chars[end].is_alphanumeric() {
@@ -1246,21 +1530,220 @@ fn take_ipv4(chars: &[char], i: usize) -> Option<usize> {
     Some(end)
 }
 
-fn has_address_context(chars: &[char], at: usize) -> bool {
-    let start = at.saturating_sub(24);
-    let before: String = chars[start..at]
+fn parse_ipv4_form(candidate: &str) -> Option<Ipv4Addr> {
+    if let Ok(address) = candidate.parse::<Ipv4Addr>() {
+        return Some(address);
+    }
+    let parts: Vec<&str> = candidate
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        return None;
+    }
+    let nums: Vec<u32> = parts
         .iter()
-        .collect::<String>()
-        .to_ascii_lowercase();
-    [
-        "host", "server", "address", "ip", "connect", "listen", "bind",
-    ]
-    .iter()
-    .any(|word| {
-        before
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .any(|part| part == *word)
-    })
+        .map(|part| part.parse().ok())
+        .collect::<Option<_>>()?;
+    if nums.iter().any(|n| *n > 255) {
+        return None;
+    }
+    let octets = match *nums.as_slice() {
+        [a, b] => [a as u8, 0, 0, b as u8],
+        [a, b, c] => [a as u8, b as u8, 0, c as u8],
+        _ => return None,
+    };
+    Some(Ipv4Addr::from(octets))
+}
+
+fn take_hex_ip(chars: &[char], i: usize) -> Option<usize> {
+    if i > 0 && chars[i - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    let start = starts_with_exact(chars, i, "0x")?;
+    let mut end = start;
+    while chars.get(end).is_some_and(|c| c.is_ascii_hexdigit()) {
+        end += 1;
+    }
+    let digits = end - start;
+    if !(6..=8).contains(&digits) {
+        return None;
+    }
+    if chars.get(end).is_some_and(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let hex: String = chars[start..end].iter().collect();
+    u32::from_str_radix(&hex, 16).ok()?;
+    Some(end)
+}
+
+fn take_integer_ip(chars: &[char], i: usize) -> Option<usize> {
+    if !chars.get(i)?.is_ascii_digit() {
+        return None;
+    }
+    if i > 0 && chars[i - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    let mut end = i;
+    while chars.get(end).is_some_and(|c| c.is_ascii_digit()) {
+        end += 1;
+    }
+    let digits = end - i;
+    if !(8..=10).contains(&digits) {
+        return None;
+    }
+    if chars
+        .get(end)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '.')
+    {
+        return None;
+    }
+    let text: String = chars[i..end].iter().collect();
+    let value: u32 = text.parse().ok()?;
+    if value < 0x0100_0000 {
+        return None;
+    }
+    Some(end)
+}
+
+fn has_version_context(chars: &[char], at: usize) -> bool {
+    let start = at.saturating_sub(24);
+    let before: String = chars[start..at].iter().collect();
+    ["ships", "release", "firmware", "version", "section"]
+        .iter()
+        .any(|word| {
+            before
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|part| part == *word)
+        })
+}
+
+fn take_slack_hook(chars: &[char], i: usize) -> Option<usize> {
+    if i > 0 && is_name_char(chars[i - 1]) {
+        return None;
+    }
+    let mut at = i;
+    if let Some(after) = starts_with_exact(chars, i, "https://") {
+        at = after;
+    } else if let Some(after) = starts_with_exact(chars, i, "http://") {
+        at = after;
+    }
+    let after = starts_with_exact(chars, at, "hooks.slack.com/")?;
+    if starts_with_exact(chars, after, "services/").is_none()
+        && starts_with_exact(chars, after, "workflows/").is_none()
+    {
+        return None;
+    }
+    let mut end = after;
+    while end < chars.len() && !is_url_stop(chars[end]) {
+        end += 1;
+    }
+    Some(end)
+}
+
+fn take_curl_user(chars: &[char], i: usize) -> Option<usize> {
+    if i > 0 && !chars[i - 1].is_whitespace() {
+        return None;
+    }
+    let after = if let Some(end) = starts_with_exact(chars, i, "--user") {
+        end
+    } else if let Some(end) = starts_with_exact(chars, i, "-u") {
+        end
+    } else {
+        return None;
+    };
+    if !chars.get(after).is_some_and(|c| c.is_whitespace()) {
+        return None;
+    }
+    let mut j = after;
+    while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+        j += 1;
+    }
+    let start = j;
+    let mut colon = None;
+    while j < chars.len() && !chars[j].is_whitespace() {
+        if chars[j] == ':' && colon.is_none() {
+            colon = Some(j);
+        }
+        j += 1;
+    }
+    let colon = colon?;
+    if colon == start || colon + 1 == j {
+        return None;
+    }
+    Some(j)
+}
+
+fn take_opaque(chars: &[char], i: usize) -> Option<usize> {
+    if i > 0 && (chars[i - 1].is_ascii_alphanumeric() || matches!(chars[i - 1], '+' | '/' | '=')) {
+        return None;
+    }
+    if !chars.get(i).is_some_and(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let mut end = i;
+    while chars
+        .get(end)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(*c, '+' | '/' | '='))
+    {
+        end += 1;
+    }
+    let n = end - i;
+    if n < 32 {
+        return None;
+    }
+    let token: String = chars[i..end].iter().collect();
+    let hex = token.chars().all(|c| c.is_ascii_hexdigit());
+    if hex && (n == 40 || n == 64) {
+        return None;
+    }
+    let distinct = token
+        .chars()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if distinct < 8 || !token.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if chars
+        .get(end)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(*c, '+' | '/' | '='))
+    {
+        return None;
+    }
+    Some(end)
+}
+
+fn take_obfuscated_email(chars: &[char], local_start: usize, local_end: usize) -> Option<usize> {
+    if local_end <= local_start {
+        return None;
+    }
+    let mut j = local_end;
+    while chars.get(j).is_some_and(|c| c.is_whitespace()) {
+        j += 1;
+    }
+    let domain_at = if let Some(after) = starts_with_exact(chars, j, "(at)") {
+        after
+    } else if let Some(after) = starts_with_exact(chars, j, "[at]") {
+        after
+    } else {
+        return None;
+    };
+    let mut domain_start = domain_at;
+    while chars.get(domain_start).is_some_and(|c| c.is_whitespace()) {
+        domain_start += 1;
+    }
+    let domain_end = scan_domain(chars, domain_start)?;
+    let domain: String = chars[domain_start..domain_end].iter().collect();
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.len() < 2 || !tld_ok(labels.last()?) {
+        return None;
+    }
+    if domain_end < chars.len()
+        && (chars[domain_end].is_alphanumeric() || matches!(chars[domain_end], '_' | '-'))
+    {
+        return None;
+    }
+    Some(domain_end)
 }
 
 fn take_marked(chars: &[char], i: usize, prefixes: &[&str]) -> Option<usize> {
@@ -1277,6 +1760,10 @@ fn take_marked(chars: &[char], i: usize, prefixes: &[&str]) -> Option<usize> {
         end += 1;
     }
     if end - after < 4 {
+        return None;
+    }
+    let prefix: String = chars[i..after].iter().collect();
+    if prefix == "agent-" && !chars[after..end].iter().any(|c| c.is_ascii_digit()) {
         return None;
     }
     Some(end)
@@ -1325,4 +1812,25 @@ fn seat_context_before(chars: &[char], at: usize) -> bool {
             | "ljos_seat"
             | "vissue_agent"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scan_author;
+
+    #[test]
+    fn a_long_repeated_line_scans_in_linear_time() {
+        for unit in ["a-", "a."] {
+            let line = unit.repeat(40_000);
+            assert_eq!(line.chars().count(), 80_000);
+            let started = std::time::Instant::now();
+            let hits = scan_author(&line, 1);
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(2),
+                "{unit:?} took {elapsed:?}"
+            );
+            assert!(hits.is_empty(), "{unit:?}: {hits:?}");
+        }
+    }
 }
