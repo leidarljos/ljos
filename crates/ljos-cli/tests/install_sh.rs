@@ -18,7 +18,6 @@ const PROGRAMS: [&str; 11] = [
     "ljos-consensus",
 ];
 
-const PATH_LINE: &str = "export PATH=\"$HOME/.local/bin:$PATH\"";
 const MARK: &str = "# Added by the ljos installer: its programs on PATH.";
 const SOURCE_CMD: &str = "cargo install --locked ljos packset vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus";
 
@@ -51,6 +50,14 @@ fn said(out: &Output) -> String {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     )
+}
+
+fn posix_word(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+fn path_line(home: &Path) -> String {
+    format!("export PATH={}:$PATH", posix_word(&home.join(".local/bin")))
 }
 
 /// Install the stand-ins in `progs` into `home`'s `~/.local/bin`, with
@@ -176,24 +183,25 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join(".zshrc"), "# mine\n").unwrap();
     let first = install(&home, &progs, "/usr/bin:/bin", &["--modify-path"]);
+    let expected_path = path_line(&home);
     assert!(
         first.contains("to PATH in ~/.profile ~/.bashrc ~/.zshrc"),
         "{first}"
     );
-    assert!(first.contains(PATH_LINE), "{first}");
+    assert!(first.contains(&expected_path), "{first}");
     let again = install(&home, &progs, "/usr/bin:/bin", &["--modify-path"]);
     assert!(again.contains("already add"), "{again}");
     for rc in [".profile", ".bashrc", ".zshrc"] {
         let text = read(&home.join(rc));
         assert_eq!(text.matches(MARK).count(), 1, "{rc}:\n{text}");
-        assert_eq!(text.matches(PATH_LINE).count(), 1, "{rc}:\n{text}");
+        assert_eq!(text.matches(&expected_path).count(), 1, "{rc}:\n{text}");
     }
     assert!(read(&home.join(".zshrc")).starts_with("# mine\n\n"));
     let bin = home.join(".local/bin");
     assert!(
         first.contains(&format!(
-            "Shell completion: run `{}/ljos completions --help`.",
-            bin.display()
+            "Shell completion: run `{} completions --help`.",
+            posix_word(&bin.join("ljos"))
         )),
         "{first}"
     );
@@ -223,7 +231,7 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
 
     let bash_only = dir.path().join("bash-user");
     install(&bash_only, &progs, "/usr/bin:/bin", &["--modify-path"]);
-    assert!(read(&bash_only.join(".bashrc")).contains(PATH_LINE));
+    assert!(read(&bash_only.join(".bashrc")).contains(&path_line(&bash_only)));
     assert!(
         !bash_only.join(".zshrc").exists(),
         "a home without ~/.zshrc got one"
@@ -232,9 +240,10 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
     let opted_out = dir.path().join("opted-out");
     let note = install(&opted_out, &progs, "/usr/bin:/bin", &["--no-modify-path"]);
     assert!(note.contains("not on PATH"), "{note}");
-    assert!(note.contains(PATH_LINE), "{note}");
+    let opted_out_path = path_line(&opted_out);
+    assert!(note.contains(&opted_out_path), "{note}");
     assert!(
-        note.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
+        note.contains(&format!("Next: {opted_out_path} && ljos onboard")),
         "{note}"
     );
     assert!(!note.contains("&& ljos doctor"), "{note}");
@@ -245,7 +254,7 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
     let on_path = dir.path().join("on-path");
     let path = format!("{}:/usr/bin:/bin", on_path.join(".local/bin").display());
     let quiet = install(&on_path, &progs, &path, &[]);
-    assert!(!quiet.contains(PATH_LINE), "{quiet}");
+    assert!(!quiet.contains(&path_line(&on_path)), "{quiet}");
     for rc in [".profile", ".bashrc"] {
         assert!(!on_path.join(rc).exists(), "a bin dir on PATH wrote {rc}");
     }
@@ -445,6 +454,252 @@ fn no_embed_leaves_the_encoder_out_and_the_default_still_installs_it() {
     assert!(said.contains("Encoder model ready."), "{said}");
 }
 
+#[test]
+fn command_paths_with_spaces_are_shell_quoted() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("home with a space");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .args(["--no-embed", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    let binary = home.join(".local/bin/ljos");
+    assert!(
+        text.contains(&format!(
+            "Command guard: run `'{}' policy --help`.",
+            binary.display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "Shell completion: run `'{}' completions --help`.",
+            binary.display()
+        )),
+        "{text}"
+    );
+    for (shell, args, prefix) in [
+        (
+            "/usr/bin/bash",
+            &["--noprofile", "--norc", "-c"][..],
+            "  bash (~/.bashrc): ",
+        ),
+        ("/usr/bin/zsh", &["-f", "-c"][..], "  zsh (~/.zshrc): "),
+        (
+            "/usr/bin/fish",
+            &["-c"][..],
+            "  fish (~/.config/fish/config.fish): ",
+        ),
+    ] {
+        let line = text
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .unwrap_or_else(|| panic!("{prefix} missing:\n{text}"));
+        let ran = Command::new(shell)
+            .args(args)
+            .arg(format!("{line}\nljos --version"))
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert!(
+            ran.status.success(),
+            "{shell} refused {line:?}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+
+    let absolute = dir.path().join("absolute bin");
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(&absolute)
+        .args(["--no-embed", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains(&format!("fish_add_path --path '{}'", absolute.display())),
+        "{text}"
+    );
+}
+
+#[test]
+fn printed_path_lines_preserve_shell_metacharacters() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    let plain_home = dir.path().join("home");
+    let cases = [
+        (
+            "space",
+            plain_home.clone(),
+            dir.path().join("bin dir"),
+            true,
+        ),
+        (
+            "single quote",
+            plain_home.clone(),
+            dir.path().join("bin'quote"),
+            true,
+        ),
+        (
+            "double quote",
+            plain_home.clone(),
+            dir.path().join("bin\"quote"),
+            true,
+        ),
+        (
+            "dollar",
+            plain_home.clone(),
+            dir.path().join("bin$FOO"),
+            true,
+        ),
+        (
+            "backslash",
+            plain_home.clone(),
+            dir.path().join("bin\\back"),
+            true,
+        ),
+        (
+            "trailing backslash",
+            plain_home.clone(),
+            dir.path().join("bin\\"),
+            true,
+        ),
+        (
+            "default dir",
+            dir.path().join("home with a ' quote"),
+            PathBuf::new(),
+            false,
+        ),
+    ];
+
+    for (case, home, named_bin, pass_bin_dir) in cases {
+        let bin = if pass_bin_dir {
+            named_bin
+        } else {
+            home.join(".local/bin")
+        };
+        std::fs::create_dir_all(&home).unwrap();
+        let mut install = Command::new("sh");
+        install
+            .arg(install_sh())
+            .arg("--from-dir")
+            .arg(&progs)
+            .args(["--no-embed", "--no-onboard", "--no-modify-path"]);
+        if pass_bin_dir {
+            install.arg("--bin-dir").arg(&bin);
+        }
+        let out = install
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        let text = said(&out);
+        assert!(out.status.success(), "{case}:\n{text}");
+
+        for (shell, args, prefix) in [
+            (
+                "bash",
+                &["--noprofile", "--norc", "-c"][..],
+                "  bash (~/.bashrc): ",
+            ),
+            ("zsh", &["-f", "-c"][..], "  zsh (~/.zshrc): "),
+            (
+                "fish",
+                &["--no-config", "-c"][..],
+                "  fish (~/.config/fish/config.fish): ",
+            ),
+        ] {
+            let Some(shell_path) = on_path(shell) else {
+                eprintln!("skipped {case}: {shell} is absent");
+                continue;
+            };
+            let line = text
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix))
+                .unwrap_or_else(|| panic!("{case}: {prefix} missing:\n{text}"));
+            let ran = Command::new(&shell_path)
+                .args(args)
+                .arg(format!("{line}\ncommand -v ljos"))
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", "/usr/bin:/bin")
+                .output()
+                .unwrap();
+            assert!(
+                ran.status.success(),
+                "{case}: {shell} refused {line:?}\n{}",
+                said(&ran)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&ran.stdout).trim(),
+                bin.join("ljos").display().to_string(),
+                "{case}: {shell} ran {line:?}\n{}",
+                said(&ran)
+            );
+        }
+    }
+}
+
+#[test]
+fn a_newline_in_bin_dir_is_refused_before_installing() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let bin = dir.path().join("line\nbreak");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(&bin)
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", dir.path().join("home"))
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert_eq!(
+        text, "install.sh: bin directory contains a newline\n",
+        "{text}"
+    );
+    assert!(!bin.exists(), "{text}");
+}
+
 /// With no coding tool on the machine, install.sh still runs `ljos onboard`
 /// for the seat: it makes the tracker and names it in vissue's config, the
 /// deed store and the host key, and starts the memory writer. A sitting on
@@ -535,15 +790,15 @@ fn install_with_no_coding_tool_leaves_a_seat_a_sitting_opens_on() {
     let bin = machine.bin();
     assert!(
         installed.contains(&format!(
-            "Command guard: run `{}/ljos policy --help`.",
-            bin.display()
+            "Command guard: run `{} policy --help`.",
+            posix_word(&bin.join("ljos"))
         )),
         "{installed}"
     );
     assert!(
         installed.contains(&format!(
-            "Shell completion: run `{}/ljos completions --help`.",
-            bin.display()
+            "Shell completion: run `{} completions --help`.",
+            posix_word(&bin.join("ljos"))
         )),
         "{installed}"
     );
@@ -898,15 +1153,15 @@ fn the_final_screen_keeps_optional_help_short() {
     let bin = home.join(".local/bin");
     assert!(
         text.contains(&format!(
-            "Command guard: run `{}/ljos policy --help`.",
-            bin.display()
+            "Command guard: run `{} policy --help`.",
+            posix_word(&bin.join("ljos"))
         )),
         "{text}"
     );
     assert!(
         text.contains(&format!(
-            "Shell completion: run `{}/ljos completions --help`.",
-            bin.display()
+            "Shell completion: run `{} completions --help`.",
+            posix_word(&bin.join("ljos"))
         )),
         "{text}"
     );
@@ -934,8 +1189,9 @@ fn the_final_screen_keeps_optional_help_short() {
     let quiet_text = said(&quiet);
     assert!(quiet.status.success(), "{quiet_text}");
     assert!(!quiet_text.contains("Command guard:"), "{quiet_text}");
+    let skipped_path = path_line(&skipped);
     assert!(
-        quiet_text.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
+        quiet_text.contains(&format!("Next: {skipped_path} && ljos onboard")),
         "{quiet_text}"
     );
 }
@@ -981,9 +1237,10 @@ fn an_older_ljos_earlier_on_path_is_named() {
         "{text}"
     );
     assert!(text.contains("Put the new install first"), "{text}");
-    assert!(text.contains(PATH_LINE), "{text}");
+    let expected_path = path_line(&home);
+    assert!(text.contains(&expected_path), "{text}");
     assert!(
-        text.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
+        text.contains(&format!("Next: {expected_path} && ljos onboard")),
         "{text}"
     );
     assert!(!text.contains("&& ljos doctor"), "{text}");
@@ -1047,8 +1304,9 @@ fn the_next_line_names_onboard_until_a_coding_tool_is_installed() {
     }
     let home = dir.path().join("home");
     let bare = install(&home, &progs, "/usr/bin:/bin", &["--no-modify-path"]);
+    let expected_path = path_line(&home);
     assert!(
-        bare.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
+        bare.contains(&format!("Next: {expected_path} && ljos onboard")),
         "{bare}"
     );
     assert!(!bare.contains("&& ljos doctor"), "{bare}");
@@ -1256,8 +1514,14 @@ fn bin_dir_off_path_names_each_shell_and_does_not_edit_profiles() {
         text.contains("fish (~/.config/fish/config.fish):"),
         "{text}"
     );
-    assert!(text.contains(PATH_LINE), "{text}");
-    assert!(text.contains("fish_add_path $HOME/.local/bin"), "{text}");
+    assert!(text.contains(&path_line(&home)), "{text}");
+    assert!(
+        text.contains(&format!(
+            "fish_add_path --path '{}'",
+            home.join(".local/bin").display()
+        )),
+        "{text}"
+    );
     assert!(text.contains("does not edit that file"), "{text}");
     for rc in [".profile", ".bashrc", ".zshrc", ".config/fish/config.fish"] {
         assert!(!home.join(rc).exists(), "{rc} was written");
@@ -2172,9 +2436,10 @@ exit 0
         "from-checkout",
         "{text}"
     );
-    assert!(text.contains(PATH_LINE), "{text}");
+    let expected_path = path_line(&home);
+    assert!(text.contains(&expected_path), "{text}");
     assert!(
-        text.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
+        text.contains(&format!("Next: {expected_path} && ljos onboard")),
         "{text}"
     );
     assert!(!text.contains("&& ljos doctor"), "{text}");
