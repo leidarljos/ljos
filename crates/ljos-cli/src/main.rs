@@ -1180,11 +1180,28 @@ enum Cmd {
     /// skipped is one sentence naming the command to run. `--verbose` prints
     /// the tracker and sync lines. `--json` keeps those lines in fields.
     ///
+    /// `--from FILE` files one ticket per row of a JSONL or CSV file with
+    /// the columns title, body, tags, parent, priority and type, in one
+    /// tracker commit, and prints the new ids one per line. `-p`, `-t`,
+    /// `--tags`, `--priority` and `--parent` fill a column a row leaves
+    /// empty. A row that cannot be filed files none of them.
+    ///
     /// Example: `LJOS_SEAT=alice ljos file "Pick a codec" -p demo`
-    #[command(after_help = "Example: `LJOS_SEAT=alice ljos file \"Pick a codec\" -p demo`")]
+    #[command(
+        after_help = "Example: `LJOS_SEAT=alice ljos file \"Pick a codec\" -p demo`\nExample: `LJOS_SEAT=alice ljos file --from rows.jsonl -p demo`"
+    )]
     File {
         /// The issue's title.
-        title: String,
+        #[arg(required_unless_present = "from")]
+        title: Option<String>,
+        /// File one ticket per row of this JSONL or CSV file (`-` reads
+        /// stdin) in one tracker commit. Prints the new ids one per line.
+        #[arg(
+            long,
+            value_name = "FILE",
+            conflicts_with_all = ["title", "top", "body", "options", "quorum", "deadline", "json"]
+        )]
+        from: Option<PathBuf>,
         /// The parent issue; the held issue when omitted.
         #[arg(long)]
         parent: Option<String>,
@@ -6235,6 +6252,7 @@ fn run_command() -> Result<()> {
         }
         Cmd::File {
             title,
+            from,
             parent,
             top,
             project,
@@ -6253,6 +6271,36 @@ fn run_command() -> Result<()> {
             // the most recent write that is still the fallback, and the
             // commit line alone does not say to name one.
             ljos_cli::seat_resolve::announce_named_unknown(&ljos_cli::whoami());
+            if let Some(from) = from {
+                let rows = ljos_cli::bulk_file::read_rows(&from)?;
+                if let Some(parent) = parent.as_deref() {
+                    stop_ticket(parent);
+                }
+                let defaults = ljos_cli::bulk_file::Defaults {
+                    project,
+                    parent,
+                    kind,
+                    tags,
+                    priority,
+                };
+                let filed = ljos_cli::bulk_file::file_rows(&rows, &defaults)?;
+                ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
+                for id in &filed.ids {
+                    println!("{id}");
+                }
+                let mut rest = format!(
+                    "filed {} tickets in {}\n{}",
+                    filed.ids.len(),
+                    filed.project,
+                    filed.persisted
+                );
+                if !git_detail(verbose) {
+                    rest = ljos_cli::without_routine_git(&rest);
+                }
+                eprint!("{rest}");
+                return Ok(());
+            }
+            let title = title.unwrap_or_default();
             if let Some(parent) = parent.as_deref() {
                 stop_ticket(parent);
             }

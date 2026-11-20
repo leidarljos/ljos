@@ -48,6 +48,7 @@ const EVERY_TOOL: &[&str] = &[
     "ljos_digest",
     "ljos_due",
     "ljos_evidence",
+    "ljos_file_from",
     "ljos_findings",
     "ljos_forget",
     "ljos_graded",

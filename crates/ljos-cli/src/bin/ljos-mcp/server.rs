@@ -185,6 +185,22 @@ fn next_step(tool: &str) -> &'static str {
     }
 }
 
+/// A new directory under the temp dir holding `name` with `text`, for a
+/// tool that hands text to a command that reads a file.
+fn scratch_file(
+    name: &str,
+    text: &str,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), McpError> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir().join(format!("ljos-mcp-{}-{nanos}", std::process::id()));
+    std::fs::create_dir(&dir).map_err(|e| refused(e.into()))?;
+    let path = dir.join(name);
+    std::fs::write(&path, text).map_err(|e| refused(e.into()))?;
+    Ok((dir, path))
+}
+
 /// A tool this server has and did not list. The person changes the set, and
 /// the tool's shell command, when it has one, answers meanwhile.
 fn unlisted_line(tool: &str) -> String {
@@ -194,6 +210,7 @@ fn unlisted_line(tool: &str) -> String {
         "bump_plan" => ", or run `ljos bump-plan` in a shell".to_string(),
         "deed_show" => ", or run `ljos deed --show ACCESSION` in a shell".to_string(),
         "table" => ", or run `ljos table ISSUE` in a shell".to_string(),
+        "file_from" => ", or run `ljos file --from FILE` in a shell".to_string(),
         other => format!(", or run `ljos {other}` in a shell"),
     };
     format!(
@@ -350,6 +367,7 @@ const TRACKER_WRITES: &[&str] = &[
     "ljos_release",
     "ljos_complete",
     "ljos_file",
+    "ljos_file_from",
     "ljos_options",
     "ljos_deed",
     "ljos_playbook",
@@ -886,6 +904,29 @@ pub struct DeedArgs {
     pub issue: String,
     /// An accession to cite. Absent, the tool lists what the issue cites.
     pub add: Option<String>,
+}
+
+/// Rows to file as tickets in one tracker commit.
+#[derive(Deserialize, JsonSchema)]
+pub struct FileFromArgs {
+    /// One object per ticket with `title` and, when wanted, `body`, `tags`
+    /// (a comma-separated string or a list), `parent`, `priority` (`A`, `B`
+    /// or `C`) and `type`.
+    #[serde(default)]
+    pub rows: Vec<serde_json::Map<String, serde_json::Value>>,
+    /// A JSONL or CSV file with those columns, instead of `rows`.
+    pub path: Option<String>,
+    /// The project; absent, the first parent's.
+    pub project: Option<String>,
+    /// The parent for a row that names none.
+    pub parent: Option<String>,
+    /// The type for a row that names none.
+    #[serde(rename = "issue_kind", alias = "kind")]
+    pub kind: Option<String>,
+    /// Comma-separated tags for a row that names none.
+    pub tags: Option<String>,
+    /// `A`, `B` or `C` for a row that names none.
+    pub priority: Option<String>,
 }
 
 /// A table on an issue: one to add, one to show, or none to list them.
@@ -1742,6 +1783,7 @@ fn help_command(name: &str) -> String {
         "guard_check" => "policy",
         "bump_plan" => "bump-plan",
         "deed_show" => "deed",
+        "file_from" => "file",
         "mail_search" | "mail_show" => return "ljos help".to_string(),
         other => other,
     };
@@ -2553,15 +2595,8 @@ impl LjosServer {
                 .clone()
                 .ok_or_else(|| refused(anyhow::anyhow!("ljos_table: csv needs a name")))?;
             ljos_cli::table::check_name(&name).map_err(refused)?;
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos());
-            let dir =
-                std::env::temp_dir().join(format!("ljos-table-{}-{nanos}", std::process::id()));
-            std::fs::create_dir(&dir).map_err(|e| refused(e.into()))?;
-            let path = dir.join(format!("{name}.csv"));
+            let (dir, path) = scratch_file(&format!("{name}.csv"), &text)?;
             scratch = Some(dir);
-            std::fs::write(&path, text).map_err(|e| refused(e.into()))?;
             argv.extend(["--add".into(), path.display().to_string()]);
         } else if let Some(path) = args.add {
             argv.extend(["--add".into(), path]);
@@ -2648,6 +2683,65 @@ impl LjosServer {
                 e
             }
         })
+    }
+
+    #[tool(
+        description = "File many tickets in one tracker commit: one per entry of `rows` (or per line of the JSONL or CSV file at `path`), each with a `title` and optional `body`, `tags`, `parent`, `priority` and `type`. Returns the new ids one per line. A row that cannot be filed files none of them and names the row.",
+        annotations(
+            title = "File many",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_file_from(
+        &self,
+        Parameters(args): Parameters<FileFromArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let mut scratch = None;
+        let from = match (args.path, args.rows.is_empty()) {
+            (Some(_), false) => {
+                return Err(refused(anyhow::anyhow!(
+                    "ljos_file_from: pass rows or path, not both"
+                )))
+            }
+            (Some(path), true) => path,
+            (None, true) => {
+                return Err(refused(anyhow::anyhow!(
+                    "ljos_file_from: pass rows, or path to a JSONL or CSV file"
+                )))
+            }
+            (None, false) => {
+                let mut text = String::new();
+                for row in &args.rows {
+                    text.push_str(&serde_json::Value::Object(row.clone()).to_string());
+                    text.push('\n');
+                }
+                let (dir, path) = scratch_file("rows.jsonl", &text)?;
+                scratch = Some(dir);
+                path.display().to_string()
+            }
+        };
+        let mut argv: Vec<String> = vec!["file".into(), "--from".into(), from];
+        for (flag, value) in [
+            ("-p", args.project),
+            ("--parent", args.parent),
+            ("-t", args.kind),
+            ("--tags", args.tags),
+            ("--priority", args.priority),
+        ] {
+            if let Some(v) = value {
+                argv.push(flag.into());
+                argv.push(v);
+            }
+        }
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let said = habitat("ljos", &refs);
+        if let Some(dir) = scratch {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        said
     }
 
     #[tool(
@@ -6058,7 +6152,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            56,
+            57,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -6096,6 +6190,7 @@ mod tests {
                 "ljos_consolidate",
                 "ljos_deed",
                 "ljos_file",
+                "ljos_file_from",
                 "ljos_findings",
                 "ljos_finish",
                 "ljos_forget",

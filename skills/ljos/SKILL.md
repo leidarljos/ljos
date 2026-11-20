@@ -16,7 +16,7 @@ as `ljos VERB` in the shell.
 | question | store | verbs |
 |---|---|---|
 | what did the human freeze | cards | `cards` (read-only; never extract-on-write) |
-| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `options`, `note`, `show`, `recall`, `vote`, `consensus`, `deed`, `table` |
+| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `file_from`, `options`, `note`, `show`, `recall`, `vote`, `consensus`, `deed`, `table` |
 | what does this seat know, standing | pack (packset) | `search`, `island`, `remember`, `prefer`, `forget`, `due`, `graded` |
 | what did the work produce | deed store (deedar) | `evidence`, `current`, `deed_show`; `deedar create` |
 | which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |

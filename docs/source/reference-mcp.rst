@@ -8,7 +8,7 @@ MCP tools
 
 The seat serves these over the Model Context Protocol (MCP).
 
-Writers: ``ljos_start``, ``ljos_file``, ``ljos_options``, ``ljos_note``, ``ljos_sitting``, ``ljos_finish``, ``ljos_calibrate``, ``ljos_persona``, ``ljos_playbook``, ``ljos_remember``, ``ljos_prefer``, ``ljos_forget``, ``ljos_trust``,
+Writers: ``ljos_start``, ``ljos_file``, ``ljos_file_from``, ``ljos_options``, ``ljos_note``, ``ljos_sitting``, ``ljos_finish``, ``ljos_calibrate``, ``ljos_persona``, ``ljos_playbook``, ``ljos_remember``, ``ljos_prefer``, ``ljos_forget``, ``ljos_trust``,
 ``ljos_learn``, ``ljos_graded``, ``ljos_island``, ``ljos_deed``, ``ljos_table``, ``ljos_vote``, ``ljos_predict``, ``ljos_rule``, ``ljos_claim``,
 ``ljos_release``, ``ljos_complete``, ``ljos_consolidate``, ``ljos_findings``, ``ljos_bump_plan``, ``ljos_handover``, ``ljos_receive``, ``ljos_send``, ``ljos_inbox``, ``ljos_read``, ``ljos_reply``, ``ljos_group``. Readers: ``ljos_search`` (with ``query`` and optional ``as_of``), ``ljos_guard_check``, ``ljos_conflicts``, ``ljos_show``,
 ``ljos_timeline``, ``ljos_digest``, ``ljos_due``, ``ljos_habit`` (a writer with a value), ``ljos_evidence``, ``ljos_current``, ``ljos_deed_show``, ``ljos_recall``, ``ljos_ready``,
@@ -77,7 +77,7 @@ A named worker occupies one slot, and a ``busy`` refusal names the held node.
 
 Most tools answer with ``text``, the answer as the command prints it, and ``aside``, the lines it printed apart from the answer or null. The aside leaves out the ``file:`` line that names the tracker file on disk.
 
-``ljos_file`` with no ``project``, no ``parent`` and no held issue is refused with a line that says to pass ``project`` or ``parent``. Its type is the ``issue_kind`` argument, and ``kind`` is read too. ``ljos_finish`` does not close the ticket; a person does.
+``ljos_file`` with no ``project``, no ``parent`` and no held issue is refused with a line that says to pass ``project`` or ``parent``. Its type is the ``issue_kind`` argument, and ``kind`` is read too. ``ljos_finish`` does not close the ticket; a person does. ``ljos_file_from`` files every entry of ``rows``, or every row of the JSONL or CSV file at ``path``, as ``ljos file --from`` does: one tracker commit, the new ids one per line, and none of them when a row is refused.
 
 ``ljos_ready`` prints the same first page as ``ljos ready``. The default is 20 tickets. ``limit`` changes that count and ``all`` prints every ticket. The last line of a short page names ``--limit`` and ``--all``. This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last. The id breaks the final tie.
 
