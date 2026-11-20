@@ -76,6 +76,28 @@ fn claimed_id(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn started_under(text: &str, issue: &str) -> Option<String> {
+    let prefix = format!("tracker: {issue} STARTED under ");
+    text.lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .map(str::trim)
+        .filter(|holder| !holder.is_empty())
+        .map(str::to_string)
+}
+
+fn assert_seat_tag_shape(holder: &str) {
+    assert!(
+        holder.starts_with("saddle@"),
+        "expected holder to start with saddle@, got {holder}"
+    );
+    assert_ne!(holder, "saddle", "expected tagged holder, got {holder}");
+    let tag = holder.strip_prefix("saddle@").unwrap_or("");
+    assert!(
+        !tag.is_empty(),
+        "expected non-empty tag after @ in {holder}"
+    );
+}
+
 fn issue_file_for(tracker: &std::path::Path, id: &str) -> Option<PathBuf> {
     let mut stack = vec![tracker.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -190,9 +212,12 @@ fn setup(case: &str) -> Env {
     }
 }
 
-fn run_order(case: &str, first_meta: bool) -> (String, String, String, String) {
+fn run_order(case: &str, first_meta: bool) {
     let env = setup(case);
+    let seat = "saddle";
     let session = "harness-session-xyz1";
+    let session_holder = format!("{seat}@{}", ljos_cli::session_tag(session));
+    assert_seat_tag_shape(&session_holder);
     let mut child = env.spawn_mcp();
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
@@ -221,11 +246,11 @@ fn run_order(case: &str, first_meta: bool) -> (String, String, String, String) {
 
     let plain = serde_json::json!({
         "jsonrpc":"2.0","id":2,"method":"tools/call",
-        "params":{"name":"ljos_start","arguments":{"seat":"saddle","task":"plain start","repo":env.repo.display().to_string()}}
+        "params":{"name":"ljos_start","arguments":{"seat":seat,"task":"plain start","repo":env.repo.display().to_string()}}
     });
     let meta = serde_json::json!({
         "jsonrpc":"2.0","id":3,"method":"tools/call",
-        "params":{"name":"ljos_start","arguments":{"seat":"saddle","task":"meta start","repo":env.repo.display().to_string()},"_meta":{"session_id":session}}
+        "params":{"name":"ljos_start","arguments":{"seat":seat,"task":"meta start","repo":env.repo.display().to_string()},"_meta":{"session_id":session}}
     });
 
     let (first_rsp, second_rsp) = if first_meta {
@@ -249,56 +274,76 @@ fn run_order(case: &str, first_meta: bool) -> (String, String, String, String) {
 
     let first_text = result_text(&first_rsp);
     let second_text = result_text(&second_rsp);
-    let issue = claimed_id(&second_text)
-        .or_else(|| claimed_id(&first_text))
-        .unwrap_or_default();
+    let first_issue = claimed_id(&first_text).unwrap_or_default();
+    let second_issue = claimed_id(&second_text).unwrap_or_default();
+    assert!(
+        !first_issue.is_empty(),
+        "{case} first call did not claim an issue\n{first_text}"
+    );
+    assert_eq!(
+        first_issue, second_issue,
+        "{case} issue ids mismatch\nfirst:\n{first_text}\nsecond:\n{second_text}"
+    );
+    let issue = second_issue;
+    let first_holder = started_under(&first_text, &issue).unwrap_or_default();
+    let second_holder = started_under(&second_text, &issue).unwrap_or_default();
+    let (expected_first_holder, expected_holder) = if first_meta {
+        (session_holder.as_str(), seat)
+    } else {
+        (seat, session_holder.as_str())
+    };
+    if first_meta {
+        assert_seat_tag_shape(&first_holder);
+    } else {
+        assert_seat_tag_shape(&second_holder);
+    }
+    assert_eq!(
+        first_holder, expected_first_holder,
+        "{case} first caller holder mismatch\nfirst:\n{first_text}"
+    );
+    assert_eq!(
+        second_holder, expected_holder,
+        "{case} second caller holder mismatch\nsecond:\n{second_text}"
+    );
     let org = issue_file_for(&env.tracker, &issue)
         .and_then(|path| std::fs::read_to_string(path).ok())
         .unwrap_or_default();
     let starts = started_ids(&org);
     let claims = claim_rows(&org);
-    let expected_holder = if first_meta {
-        "saddle".to_string()
-    } else {
-        ljos_cli::holder_for_session("saddle", session)
-    };
-    let get = if issue.is_empty() {
-        String::new()
-    } else {
-        env.claimdag_get(&issue)
-    };
-    let expected_actor = if issue.is_empty() {
-        String::new()
-    } else {
-        ljos_cli::work_id(&ljos_cli::occupancy_assignee(
-            Some(&expected_holder),
-            &issue,
-        ))
-    };
+    if !first_meta {
+        assert_seat_tag_shape(&claims[0]);
+    }
+    let get = env.claimdag_get(&issue);
+    let expected_actor = ljos_cli::work_id(&format!("{expected_holder}:{issue}"));
     eprintln!(
-        "{case}\nfirst:\n{}\nsecond:\n{}\nstderr:\n{stderr}\nstarted={starts:?}\nclaims={claims:?}\nexpected_holder={expected_holder}\nexpected_actor={expected_actor}\nclaimdag_get:\n{get}\nissues.org:\n{org}",
+        "{case}\nfirst:\n{}\nsecond:\n{}\nstderr:\n{stderr}\nstarted={starts:?}\nclaims={claims:?}\nexpected_first_holder={expected_first_holder}\nexpected_holder={expected_holder}\nexpected_actor={expected_actor}\nclaimdag_get:\n{get}\nissues.org:\n{org}",
         first_text,
         second_text
     );
-    assert_eq!(starts.len(), 1, "{case} started ids mismatch\n{org}");
+    assert_eq!(
+        starts,
+        vec![issue.clone()],
+        "{case} started ids mismatch\n{org}"
+    );
     assert_eq!(claims.len(), 1, "{case} claim rows mismatch\n{org}");
     assert_eq!(
         claims[0], expected_holder,
         "{case} claim row mismatch\nclaims={claims:?}\norg:\n{org}"
     );
+    let first_line = get.lines().next().unwrap_or_default();
     assert!(
-        get.contains("claimed") && get.contains(&format!("assignee={expected_actor}")),
+        first_line.split_whitespace().nth(1) == Some("claimed")
+            && first_line.split_whitespace().any(|field| field == format!("assignee={expected_actor}")),
         "{case} claimdag occupancy mismatch\nexpected assignee={expected_actor}\nget:\n{get}\norg:\n{org}"
     );
-    (issue, expected_holder, expected_actor, get)
 }
 
 #[test]
 fn plain_then_session_meta_keeps_one_started_claim() {
-    let _ = run_order("plain-then-meta", false);
+    run_order("plain-then-meta", false);
 }
 
 #[test]
 fn session_meta_then_plain_keeps_one_started_claim() {
-    let _ = run_order("meta-then-plain", true);
+    run_order("meta-then-plain", true);
 }
