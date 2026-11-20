@@ -94,7 +94,8 @@ skill for one runner. ``NAME`` is a name ``ljos onboard --example`` prints, amon
 ``windsurf``, ``factory``, ``kiro``, ``cline``, ``qwen``, ``crush``, ``zed``, ``vscode``,
 ``claude-desktop``, ``amazonq``, ``aider`` (conventions file, advisory), ``auggie``, ``amp``, ``goose``, ``openhands``,
 ``continue``, ``roo``, ``kilo``, ``example-host`` or ``shell``. The contract is the
-same everywhere and the envelope differs:
+same everywhere and the envelope differs. Running onboard again repairs an
+older ljos hook command, including an unquoted program path with spaces.
 
 +--------------------------+------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+---------------------------------------------------------+------------------------------------------------------------------------------------------------------+
 | Runner                   | Memory injection                                                                                     | Shell check                                                                                | Warning shows as                                        | Notes                                                                                                |

@@ -8616,10 +8616,40 @@ fn hook_events_of(h: &Harness) -> Vec<String> {
     }
 }
 
+fn seat_hook_program(command: &str) -> Option<&str> {
+    let program = command.strip_suffix(" hook")?;
+    if program == "ljos" || (program.starts_with('/') && program.ends_with("/ljos")) {
+        return Some(program);
+    }
+    for quote in ['\'', '"'] {
+        if let Some(program) = program
+            .strip_prefix(quote)
+            .and_then(|program| program.strip_suffix(quote))
+        {
+            if program.starts_with('/') && program.ends_with("/ljos") {
+                return Some(program);
+            }
+        }
+    }
+    None
+}
+
 fn is_seat_hook(h: &Value) -> bool {
-    h["command"]
-        .as_str()
-        .is_some_and(|c| c.contains("ljos") && c.ends_with(" hook"))
+    h["command"].as_str().and_then(seat_hook_program).is_some()
+}
+
+fn repaired_seat_hook_command(command: &str, wanted: &str) -> Option<String> {
+    if command == wanted {
+        return None;
+    }
+    if command == "ljos hook" && wanted != "ljos hook" {
+        return Some(wanted.to_string());
+    }
+    let program = command.strip_suffix(" hook")?;
+    (program.starts_with('/')
+        && program.ends_with("/ljos")
+        && program.chars().any(char::is_whitespace))
+    .then(|| format!("{} hook", tools::sh_word(program)))
 }
 
 /// The command the runner's hook runs.
@@ -8696,6 +8726,7 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
     let mut removed = Vec::new();
     let mut opened = Vec::new();
     let mut widened = Vec::new();
+    let mut repaired = Vec::new();
     for event in events {
         let groups = hooks
             .entry(event.clone())
@@ -8736,6 +8767,13 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
                 continue;
             };
             for hook in hooks.iter_mut().filter(|h| is_seat_hook(h)) {
+                if let Some(fixed) = hook["command"]
+                    .as_str()
+                    .and_then(|old| repaired_seat_hook_command(old, &command))
+                {
+                    hook["command"] = fixed.into();
+                    repaired.push(event.clone());
+                }
                 if hook
                     .as_object_mut()
                     .is_some_and(|h| h.remove("onFailure").is_some())
@@ -8786,7 +8824,12 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
             removed.push(event.clone());
         }
     }
-    if added.is_empty() && removed.is_empty() && opened.is_empty() && widened.is_empty() {
+    if added.is_empty()
+        && removed.is_empty()
+        && opened.is_empty()
+        && widened.is_empty()
+        && repaired.is_empty()
+    {
         return Step {
             what,
             detail: format!(
@@ -8814,6 +8857,12 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
     if !widened.is_empty() {
         change.push(format!("widen its matcher on {}", widened.join(", ")));
         done.push(format!("widened the matcher on {}", widened.join(", ")));
+    }
+    repaired.sort();
+    repaired.dedup();
+    if !repaired.is_empty() {
+        change.push(format!("repair its command on {}", repaired.join(", ")));
+        done.push(format!("repaired the command on {}", repaired.join(", ")));
     }
     let change = change.join(" and ");
     let done = done.join(" and ");
@@ -56789,6 +56838,114 @@ mod tests {
                     crate::tools::sh_word(&ljos.display().to_string())
                 )
             );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reonboard_repairs_unquoted_hook_paths_for_json_runners() {
+        with_env_mutation(|| {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = tempfile::tempdir().unwrap();
+            let bin = dir.path().join("my bin");
+            let ljos = bin.join("ljos");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(&ljos, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&ljos, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let saved = std::env::var_os("PATH");
+            unsafe { std::env::set_var("PATH", &bin) };
+            let wanted = format!(
+                "{} hook",
+                crate::tools::sh_word(&ljos.display().to_string())
+            );
+            for runner in ["claude", "cursor", "codex"] {
+                let file = dir.path().join(format!("{runner}.json"));
+                let old = format!("{} hook", ljos.display());
+                std::fs::write(
+                    &file,
+                    serde_json::json!({
+                        "hooks": {
+                            "PreToolUse": [{
+                                "matcher": "Bash",
+                                "hooks": [{"type": "command", "command": old, "timeout": 20}]
+                            }]
+                        }
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+                let step = hook_step(&file, &["PreToolUse".to_string()], false);
+                assert!(step.detail.contains("repaired the command"), "{step:?}");
+                let value: Value =
+                    serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+                assert_eq!(
+                    value["hooks"]["PreToolUse"][0]["hooks"][0]["command"], wanted,
+                    "{runner}"
+                );
+                let again = hook_step(&file, &["PreToolUse".to_string()], false);
+                assert!(
+                    again.detail.contains("carries the memory hook"),
+                    "{runner}: {again:?}"
+                );
+            }
+            unsafe {
+                match saved {
+                    Some(saved) => std::env::set_var("PATH", saved),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn reonboard_leaves_prefixed_wrapped_and_working_absolute_hooks() {
+        with_env_mutation(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let empty_path = dir.path().join("empty-bin");
+            std::fs::create_dir_all(&empty_path).unwrap();
+            let saved = std::env::var_os("PATH");
+            unsafe { std::env::set_var("PATH", &empty_path) };
+            for (name, old, groups) in [
+                ("seat-prefix", "LJOS_SEAT=reviewer ljos hook", 4),
+                ("env-prefix", "env LJOS_SEAT=reviewer ljos hook", 4),
+                ("wrapper", "/opt/ljos-wrapper.sh hook", 4),
+                ("quoted-absolute", "'/opt/My Tools/ljos' hook", 3),
+                ("absolute", "/opt/ljos/bin/ljos hook", 3),
+            ] {
+                let file = dir.path().join(format!("{name}.json"));
+                std::fs::write(
+                    &file,
+                    serde_json::json!({
+                        "hooks": {
+                            "PreToolUse": [{
+                                "matcher": "Bash",
+                                "hooks": [{"type": "command", "command": old, "timeout": 20}]
+                            }]
+                        }
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+                hook_step(&file, &["PreToolUse".to_string()], false);
+                let value: Value =
+                    serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+                assert_eq!(
+                    value["hooks"]["PreToolUse"][0]["hooks"][0]["command"], old,
+                    "{name}"
+                );
+                assert_eq!(
+                    value["hooks"]["PreToolUse"].as_array().unwrap().len(),
+                    groups,
+                    "{name}"
+                );
+            }
+            unsafe {
+                match saved {
+                    Some(saved) => std::env::set_var("PATH", saved),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
         });
     }
 
