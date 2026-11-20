@@ -207,7 +207,8 @@ A word that is not a command names the verb it was reaching for as a line that r
    With no ``--harness``, ljos onboards every runner it finds, at a terminal or in a pipe.
    A pipe prints the one ``mcpServers`` entry on stdout and the setup lines on stderr.
    The tracker and deed store are set up either way.
-   Outside a temporary home, the memory writer is set up too; under a temporary home, memory is off.
+   Outside a temporary home, the memory writer is set up too.
+   Under a temporary home, memory is off unless ``PACKSET_URL`` names a pack.
    The Model Context Protocol (MCP) is the tool server the runner starts.
    Onboard in json form prints that entry at a terminal too.
    With a runner named in ``~/.config/ljos/harnesses.toml``, register ``ljos-mcp`` with it, install the protocol as its skill, and write the personas into its ``agents`` directory; a shell runner (``shell = true``, ``example-host``, or ``shell``) writes the skill and an env file and registers no server and no hook; changed runner files and their previous bytes are recorded for ``offboard``.

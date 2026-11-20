@@ -198,7 +198,7 @@ and an env file. Source the file, and =LJOS_SEAT= is the name.
 Nothing else needs a variable.
 =ljos onboard= makes the deed store and the tracker.
 Outside a temporary home, it also starts the pack writer.
-Under a temporary home, memory is off.
+Under a temporary home, memory is off unless =PACKSET_URL= names a pack.
 =ljos offboard= removes what onboard wrote.
 
 * What happened

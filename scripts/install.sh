@@ -3,7 +3,7 @@
 # SHA-256 published beside it and its GitHub build attestation, and run
 # `ljos onboard` for every coding runner found on this machine. With none
 # found, the tracker and deed store are still set up. Outside a temporary
-# home, the memory writer is set up too. Under a temporary home, memory is off.
+# home, the memory writer is set up too. Under a temporary home, memory is off unless PACKSET_URL names a pack.
 #
 # One command for a new machine. It fetches the release assets, checks
 # each SHA-256, installs the encoder and its model, and sets up the tracker
@@ -1339,6 +1339,13 @@ cline dir:Documents/Cline"
 # A temporary HOME is a test sandbox to ljos: memory stays off there, and
 # this install does not leave a writer running.
 root=$temporary_root
+memory_off=0
+case ${PACKSET_URL:-} in
+  *[![:space:]]*) root= ;;
+esac
+if [ "${PACKSET_URL:-}" = off ]; then
+  memory_off=1
+fi
 
 found_any=0
 if [ "$ONBOARD" = 1 ]; then
@@ -1363,7 +1370,9 @@ if [ "$ONBOARD" = 1 ]; then
   done < "$TMP/runners"
   if [ "$found_any" = 0 ]; then
     say "  No coding tool is installed."
-    if [ -n "$root" ]; then
+    if [ "$memory_off" = 1 ]; then
+      say "  Setting up the ticket tracker and deed store; memory is off because PACKSET_URL is off."
+    elif [ -n "$root" ]; then
       say "  Setting up the ticket tracker and deed store; memory is off in this temporary home."
     else
       say "  Setting up the ticket tracker, memory writer, and deed store."
@@ -1386,9 +1395,11 @@ if [ -x "$BIN_DIR/packset-embed" ]; then
   fi
 fi
 
-# Say why the writer was not started.
+# Say why the writer or command guard was not started.
 if [ -n "$root" ]; then
   say "memory and the command guard are off because the home is under ${root} (${home_real}); set HOME to a directory outside ${root}"
+elif [ -n "$temporary_root" ]; then
+  say "the command guard is off because the home is under ${temporary_root} (${home_real}); set HOME to a directory outside ${temporary_root}"
 fi
 if [ "$ONBOARD" = 1 ]; then
   shell_command_lines "Command guard" "policy --help"

@@ -74,7 +74,8 @@ The script names the cause and the command that fixes it.
 
 ``ljos onboard`` with no coding tool installed says so.
 It still sets up the ticket tracker and deed store.
-Outside a temporary home, it also sets up the memory writer; under a temporary home, memory is off.
+Outside a temporary home, it also sets up the memory writer.
+Under a temporary home, memory is off unless ``PACKSET_URL`` names a pack.
 The line names that setup and ``ljos doctor`` as the next command.
 The deed row names its directory and says it is for signed records of finished work.
 Install an agent, then run ``ljos onboard``.
@@ -98,7 +99,7 @@ Read the script before you run it. It is ``scripts/install.sh`` in this reposito
 It runs ``ljos onboard`` for each coding runner it finds.
 With none found, it still sets up the ticket tracker and deed store.
 Outside a temporary home, it also sets up the memory writer.
-Under a temporary home, memory is off.
+Under a temporary home, memory is off unless ``PACKSET_URL`` names a pack.
 
 The tracker commits each change, so git needs an identity:
 
@@ -145,7 +146,7 @@ Its memory row says the writer started without printing its local address.
 Nothing else needs a variable set.
 ``ljos onboard`` makes a deed store, a tracker and a config file for ``vissue``.
 Outside a temporary home, it also starts the memory writer.
-Under a temporary home, memory is off.
+Under a temporary home, memory is off unless ``PACKSET_URL`` names a pack.
 
 The runner runs a hook only after you trust it. Trust each ljos hook in the runner.
 Trust it again after an upgrade rewrites one.

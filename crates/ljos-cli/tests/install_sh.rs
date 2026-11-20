@@ -1119,6 +1119,47 @@ fn a_resolved_bin_dir_is_validated_before_installing() {
 }
 
 #[test]
+fn a_named_pack_in_a_temporary_home_keeps_its_own_memory_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    for packset_url in ["off", "http://127.0.0.1:9876"] {
+        let out = Command::new("sh")
+            .arg(install_sh())
+            .arg("--from-dir")
+            .arg(&progs)
+            .args(["--no-embed", "--no-modify-path"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("PACKSET_URL", packset_url)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        let text = said(&out);
+        assert!(out.status.success(), "{packset_url}:\n{text}");
+        if packset_url == "off" {
+            assert!(
+                text.contains(
+                    "Setting up the ticket tracker and deed store; memory is off because \
+                     PACKSET_URL is off."
+                ),
+                "{text}"
+            );
+        }
+        assert!(
+            text.contains("the command guard is off because the home is under"),
+            "{packset_url}:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn an_empty_bin_dir_is_refused_before_installing() {
     let dir = tempfile::tempdir().unwrap();
     let progs = dir.path().join("progs");
