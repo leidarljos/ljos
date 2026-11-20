@@ -164,12 +164,10 @@ impl Pty {
         }
     }
 
-    /// Wait for `child` to exit, close the slave handle, and drain every
-    /// byte the child wrote to the terminal before returning.
+    /// Wait for `child` to exit. When stdout or stderr use this pty,
+    /// call [`Self::finish_reading`] before reading [`Self::shown`].
     pub fn wait_output(&self, child: Child, secs: u64) -> std::process::Output {
-        let out = wait_output(child, secs);
-        self.finish_reading();
-        out
+        wait_output(child, secs)
     }
 
     /// What the child wrote to the terminal so far.

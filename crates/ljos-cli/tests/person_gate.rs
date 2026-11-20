@@ -157,6 +157,7 @@ impl Case {
 /// prompt, so this does not wait for one.
 fn run_hook(cmd: &mut Command, stdin: &str) -> (Output, String) {
     let term = pty::Pty::open();
+    term.attach_output(cmd);
     let mut child = term.spawn(cmd.stdin(Stdio::piped()));
     child
         .stdin
@@ -165,21 +166,36 @@ fn run_hook(cmd: &mut Command, stdin: &str) -> (Output, String) {
         .write_all(stdin.as_bytes())
         .unwrap();
     let out = term.wait_output(child, 30);
+    term.finish_reading();
     (out, term.shown())
 }
 
-fn labelled(out: &Output) -> String {
+fn labelled(out: &Output, shown: &str) -> String {
     let said = String::from_utf8_lossy(&out.stdout);
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(out.status.success(), "held: {said}{err}");
-    assert!(said.contains("gate-child: allowed"), "{said}{err}");
-    assert!(err.contains("sitting-gate"), "{err}");
-    err
+    assert!(out.status.success(), "held: {said}{err}{shown}");
+    assert!(
+        said.contains("gate-child: allowed") || shown.contains("gate-child: allowed"),
+        "{said}{err}{shown}"
+    );
+    assert!(
+        err.contains("sitting-gate") || shown.contains("sitting-gate"),
+        "{err}{shown}"
+    );
+    if err.contains("sitting-gate") {
+        err
+    } else {
+        shown.to_string()
+    }
 }
 
 fn push_is_labelled(case: &Case, cmd: &mut Command) {
     let (out, shown) = run_hook(cmd, &case.push);
-    let err = labelled(&out);
+    let err = labelled(&out, &shown);
+    assert!(
+        shown.contains("gate-child: allowed"),
+        "pty must keep hook output: {shown}"
+    );
     assert!(!shown.contains(PROMPT), "the hook asked: {shown}");
     assert!(!shown.contains(YES_PROMPT), "the hook asked: {shown}");
     assert!(!err.contains("passphrase"), "{err}");
@@ -227,7 +243,11 @@ fn a_hard_runner_is_never_asked() {
         &mut case.command(Some(&claude), Some("CURSOR_AGENT")),
         &case.push,
     );
-    let err = labelled(&out);
+    let err = labelled(&out, &shown);
+    assert!(
+        shown.contains("gate-child: allowed"),
+        "pty must keep hook output: {shown}"
+    );
     assert!(
         !shown.contains("passphrase"),
         "a hard runner was asked: {shown}"
@@ -274,7 +294,7 @@ fn piped_stdin_without_a_terminal_cannot_answer() {
     });
     let out = child.wait_with_output().unwrap();
     done.store(true, std::sync::atomic::Ordering::SeqCst);
-    let err = labelled(&out);
+    let err = labelled(&out, "");
     assert!(!err.contains(PROMPT), "{err}");
 }
 
@@ -320,10 +340,9 @@ fn no_key_and_a_yes_at_the_terminal_lets_the_push_through() {
 fn an_interrupt_at_the_prompt_restores_echo() {
     let case = Case::new(true);
     let term = pty::Pty::open();
-    let mut child = term.spawn(
-        case.command(None, Some("CURSOR_AGENT"))
-            .stdin(Stdio::piped()),
-    );
+    let mut cmd = case.command(None, Some("CURSOR_AGENT"));
+    term.attach_output(&mut cmd);
+    let mut child = term.spawn(cmd.stdin(Stdio::piped()));
     child
         .stdin
         .take()
@@ -331,7 +350,13 @@ fn an_interrupt_at_the_prompt_restores_echo() {
         .write_all(case.push.as_bytes())
         .unwrap();
     let out = term.wait_output(child, 30);
-    labelled(&out);
-    assert!(term.echo_on(), "echo was turned off: {}", term.shown());
+    term.finish_reading();
+    let shown = term.shown();
+    labelled(&out, &shown);
+    assert!(
+        shown.contains("gate-child: allowed"),
+        "pty must keep hook output: {shown}"
+    );
+    assert!(term.echo_on(), "echo was turned off: {shown}");
     assert!(!term.shown().contains(PROMPT), "{}", term.shown());
 }

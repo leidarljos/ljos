@@ -67,25 +67,27 @@ fn a_mark_on_a_terminal_may_not_set_or_clear_the_key() {
     let home = tempfile::tempdir().unwrap();
     for verb in ["set", "clear"] {
         let term = pty::Pty::open();
-        let child = term.spawn(
-            ljos(
-                Command::new(env!("CARGO_BIN_EXE_ljos")).args(["person-key", verb]),
-                home.path(),
-            )
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        cmd.args(["person-key", verb]);
+        ljos(&mut cmd, home.path())
             .env("CURSOR_AGENT", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
-        );
+            .stdin(Stdio::null());
+        term.attach_output(&mut cmd);
+        let child = term.spawn(&mut cmd);
         let out = term.wait_output(child, 30);
+        term.finish_reading();
+        let shown = term.shown();
         let err = String::from_utf8_lossy(&out.stderr);
-        assert!(!out.status.success(), "{verb}: {err}");
-        assert!(err.contains("CURSOR_AGENT"), "{verb}: {err}");
+        assert!(!out.status.success(), "{verb}: {err}{shown}");
         assert!(
-            !term.shown().contains("passphrase"),
-            "{verb}: {}",
-            term.shown()
+            err.contains("CURSOR_AGENT") || shown.contains("CURSOR_AGENT"),
+            "{verb}: {err}{shown}"
         );
+        assert!(
+            shown.contains("CURSOR_AGENT"),
+            "{verb}: pty must keep refusal on the terminal: {shown}"
+        );
+        assert!(!shown.contains("passphrase"), "{verb}: {shown}");
     }
     assert_eq!(kept(), before, "a refused verb changed the key");
 }
