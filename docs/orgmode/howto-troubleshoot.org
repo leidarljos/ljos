@@ -103,6 +103,24 @@ A =vissue= killed between its write and its rename leaves a copy such as =.issue
 The next logbook write, which has the file's issues lock, removes such a copy once it is a minute old.
 The process id in the name decides nothing: it may be another host's, or a later process may have it now.
 
+A git killed while it held the index leaves =.git/index.lock=, and every commit in that checkout fails on it.
+While its git runs, each ljos tracker commit and sync commit records its host name, boot id, process id and process start time in =.git/ljos-index.owner=, with the device and inode of each =index.lock= made then and a mark of what that file last was: its size, its modify and change times, its inode generation where the file system gives one, and a SHA-256 of its bytes.
+A later tracker or sync commit removes a lock a minute old, prints one line, and commits, when that record names this host and boot, the lock's device and inode and an ljos process that no longer runs, and the lock, read through one open descriptor, matches that mark in every field.
+No live process may have the lock open, and no git may name the repository by its working directory, =-C=, =--git-dir=, =--work-tree=, =GIT_DIR=, =GIT_WORK_TREE=, =GIT_INDEX_FILE= or =GIT_COMMON_DIR=, each compared by device and inode through that process's own links, so a bind mount or another mount namespace does not hide it.
+The lock is renamed aside in =.git= and removed only when the renamed file is still the one checked, unchanged, and that scan still finds no owner; otherwise it is put back:
+
+#+begin_src text
+tracker git: removed /tmp/seat/tracker/.git/index.lock, 120s old, which ljos process 4242 on box made and which no longer runs
+#+end_src
+
+A git that ljos stops at its time limit, or one killed some other way, leaves its lock, and the record stays beside it with that lock's last mark.
+The lock is left while that ljos process runs, and a commit after the process has exited removes it.
+
+A lock is named with the =rm= command and the commit is refused when there is no record, since it may be a git's on another host that shares the checkout; when the recorded process still runs; when the file is not what the mark says, since it may be a later file on the same inode; and when it is empty on a file system that gives no inode generation, since a later empty file would match.
+A younger lock, or one a live process may own, is left and the write defers.
+So is any lock when this process cannot see every process: a =/proc= mounted with =hidepid=, a pid namespace other than the host's first, as in most containers, or a process of the lock owner's account whose open files, name, directory or environment cannot be read, such as a git that is not dumpable or an =ssh-agent= or =gpg-agent=.
+That a process has the lock open never clears it, since git keeps its lock by its name after it closes the file.
+
 A claim the tracker did not answer for is not a claim, whether its wait ran out or a tool call's bound stopped =vissue= with =vissue timed out=.
 =ljos claim= exits 1 and names =ljos claim ID= again, and a claim a note retries stays pending until the tracker records it.
 

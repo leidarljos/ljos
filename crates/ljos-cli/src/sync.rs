@@ -5729,13 +5729,22 @@ fn commit_host(
     let paths: Vec<&str> = rels.iter().map(String::as_str).collect();
     let mut add = vec!["add", "-A", "--"];
     add.extend(&paths);
-    let added = git_within_index(root, &add, deadline)?;
+    let mut added = git_within_index(root, &add, deadline)?;
     if !git_succeeded(&added) {
-        if let Some(orphan) = crate::orphaned_index_lock(root) {
-            drop(held);
-            crate::note_deferred_paths(root, &paths);
-            bail!("sync: user rules: {orphan}");
+        match crate::clear_orphaned_index_lock(root) {
+            Some(Ok(line)) => {
+                eprintln!("sync: user rules: {line}");
+                added = git_within_index(root, &add, deadline)?;
+            }
+            Some(Err(orphan)) => {
+                drop(held);
+                crate::note_deferred_paths(root, &paths);
+                bail!("sync: user rules: {orphan}");
+            }
+            None => {}
         }
+    }
+    if !git_succeeded(&added) {
         if crate::git_text_index_busy(&one_line(&added)) {
             drop(held);
             crate::note_deferred_paths(root, &paths);
@@ -5777,14 +5786,20 @@ fn commit_host(
 
 /// [`git_within`], retried while git reports `index.lock`, without sleeping
 /// past `deadline`. A lock still held after that is the caller's to defer.
+/// Each call writes the owner record a tracker commit writes, so a lock
+/// its git leaves can be cleared once this process is gone.
 fn git_within_index(
     root: &Path,
     args: &[&str],
     deadline: std::time::Instant,
 ) -> Result<std::process::Output> {
+    let git_dir = crate::git_dir_and_top(root).map(|(git_dir, _)| git_dir);
     let mut attempt = 0;
     loop {
-        let out = git_within(root, args, deadline)?;
+        let out = {
+            let _owner = git_dir.as_deref().and_then(crate::IndexOwner::record);
+            git_within(root, args, deadline)?
+        };
         if git_succeeded(&out) || !crate::git_text_index_busy(&one_line(&out)) {
             return Ok(out);
         }
@@ -6366,6 +6381,32 @@ mod tests {
             !root.join(".git/index.lock").exists(),
             "the cut-off commit left index.lock behind"
         );
+    }
+
+    /// An `index.lock` a dead ljos commit recorded, which no live process
+    /// may own, is cleared and the user rules commit, with no `rm` for a
+    /// person to run.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_lock_a_dead_ljos_left_is_cleared_and_the_rules_commit() {
+        let _env = crate::test_env_lock();
+        let _whole = crate::OwnTree::assume();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let rel = rules_repo(&root);
+        let lock = root.join(".git/index.lock");
+        let made = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        std::fs::write(&lock, "half an index").unwrap();
+        crate::tests::age_lock(&lock, made);
+        crate::tests::dead_owner_record(&root.join(".git"), made);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let committed = commit_host(&root, &[rel], "probe-host", deadline);
+        assert!(
+            !lock.exists(),
+            "the dead commit's lock stays: {committed:?}"
+        );
+        assert!(matches!(committed, Ok(true)), "{committed:?}");
     }
 
     /// A seat holding the checkout past the budget stops the commit before

@@ -1206,9 +1206,13 @@ fn commit_attributes(root: &Path) -> Result<(), String> {
             Ok(()) => return Ok(()),
             Err(why) if crate::git_text_index_busy(&why) => {
                 if attempt == 0 {
-                    if let Some(orphan) = crate::orphaned_index_lock(root) {
-                        crate::note_deferred_paths(root, &[".gitattributes"]);
-                        return Err(orphan);
+                    match crate::clear_orphaned_index_lock(root) {
+                        Some(Ok(line)) => eprintln!("tracker git: {line}"),
+                        Some(Err(orphan)) => {
+                            crate::note_deferred_paths(root, &[".gitattributes"]);
+                            return Err(orphan);
+                        }
+                        None => {}
                     }
                 }
                 last = why;

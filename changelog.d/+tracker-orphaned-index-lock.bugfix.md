@@ -1,0 +1,4 @@
+A tracker or sync commit that finds a `.git/index.lock` a minute old now removes it, prints one `tracker git: removed ...` line and commits, when `.git/ljos-index.owner` shows that an ljos process of this host and boot made it and no longer runs, and the lock still matches the size, times, inode generation and SHA-256 that record last saw.
+It used to refuse every commit on that checkout and print an `rm` for a person to run.
+The lock is renamed aside first and put back unless it is still the file that was checked.
+A lock is left while its recorded process runs, when it may be a later file on the same inode, while a live process may own it by device and inode, and whenever a process cannot be seen: `hidepid`, a pid namespace other than the host's first, or a process of the lock owner's account that cannot be read.
