@@ -823,6 +823,38 @@ fn a_symlinked_tmpdir_keeps_temporary_home_memory_off() {
     );
 }
 
+#[test]
+fn an_empty_bin_dir_is_refused_before_installing() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg("")
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .current_dir(&work)
+        .env_clear()
+        .env("HOME", dir.path().join("home"))
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert_eq!(text, "install.sh: bin directory is empty\n", "{text}");
+    for name in PROGRAMS {
+        assert!(!work.join(name).exists(), "{name} was installed:\n{text}");
+    }
+}
+
 /// With no coding tool on the machine, install.sh still runs `ljos onboard`
 /// for the seat: it makes the tracker and names it in vissue's config, the
 /// deed store and the host key, and starts the memory writer. A sitting on

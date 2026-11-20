@@ -49,7 +49,9 @@ The script names the cause and the command that fixes it.
 - The OS or CPU is not Linux or macOS on x86_64 or aarch64. The script prints one line naming those systems and =cargo install --locked= for the seat programs. On Windows, run the script inside WSL.
 - =curl= or =wget=, =tar=, or =sha256sum= is missing. On macOS the checksum tool is =shasum=. The script names the missing tool. Install it and run =sh install.sh= again. Programs already unpacked are =sh install.sh --from-dir DIR=.
 - A checksum does not match, or the download stops early. The script stops, deletes the partial file, and says to run =sh install.sh= again.
-- The install directory is not writable. The script names it and =sh install.sh --bin-dir DIR=.
+- The install directory is not writable.
+  The script names it and =sh install.sh --bin-dir DIR=.
+  An empty =--bin-dir= is refused before a program is installed.
 - The install directory is not on =PATH=.
   The script prints the line for bash (=~/.bashrc=), zsh (=~/.zshrc=) and fish (=~/.config/fish/config.fish=).
   Each line uses the resolved absolute path and quotes it for that shell.
