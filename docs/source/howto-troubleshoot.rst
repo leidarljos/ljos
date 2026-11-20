@@ -188,6 +188,10 @@ When one of those locks cannot be taken, the push stops before the checkout chan
 
 A ``git ls-files`` or ``git ls-tree`` that cannot list the boards stops the push the same way, before any board is locked or rewritten.
 
+A replay that cannot be undone, because every ``git rebase --abort`` fails, ends the push with a line that says the checkout is still mid-rebase or mid-merge.
+Every tracker commit there is refused until ``git -C DIR rebase --abort`` or ``git -C DIR merge --abort`` succeeds, so no commit goes into the stopped rebase, and the edit stays only on disk.
+A push that finds the checkout already mid-rebase or mid-merge changes nothing and says so: an abort would drop any edit made there since it stopped, such as a note no commit could take, so a person keeps those edits, aborts and pushes again.
+
 A missing habitat binary
 ========================
 

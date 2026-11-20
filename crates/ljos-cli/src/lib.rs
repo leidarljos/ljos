@@ -49569,6 +49569,13 @@ fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         bounded_output(&mut cmd)
     };
     let git_dir = git_dir_and_top(dir).map(|(git_dir, _)| git_dir);
+    if git_dir.as_deref().is_some_and(tracker_push::stopped_in) {
+        return PathCommit::Refused(format!(
+            "{} is mid-rebase or mid-merge, so no commit was made there and the edit is only on disk; `git -C {} rebase --abort` (or `merge --abort`) clears it and drops edits made since it stopped",
+            dir.display(),
+            dir.display()
+        ));
+    }
     // `Err` is a busy index, with what git said.
     let attempt = || -> Result<PathCommit, String> {
         let _owner = git_dir.as_deref().and_then(IndexOwner::record);

@@ -479,8 +479,10 @@ fn integrate_from(dir: &Path, remote: &str, onto: &str) -> Result<(), String> {
         return Err(lock_not_taken(&lock));
     }
     let _orgs = lock_issue_files(dir, onto)?;
+    if rebase_in_progress(dir) || merge_in_progress(dir) || has_unmerged(dir) {
+        return Err(stopped_before(dir));
+    }
     if !fetched.status.success() {
-        let _ = abort_rebase(dir);
         let why = first_line(&output_text(&fetched));
         if unreached(fetched.status, &output_text(&fetched)) {
             return Err(format!("{NOT_REACHED}{why}"));
@@ -488,11 +490,68 @@ fn integrate_from(dir: &Path, remote: &str, onto: &str) -> Result<(), String> {
         return Err(format!("fetch failed: {why}"));
     }
     let replayed = replay(dir, onto);
-    if replayed.is_err() {
-        let _ = abort_rebase(dir);
-        let _ = git(dir, &["merge", "--abort"]);
+    if let Err(e) = &replayed {
+        undo_stopped(dir).map_err(|why| still_stopped(dir, &why, e))?;
     }
     replayed
+}
+
+/// Abort the rebase or merge a replay left, while its locks are held. A
+/// failed abort is tried again. `Err` is what
+/// the last abort said when git still shows the rebase or merge.
+fn undo_stopped(dir: &Path) -> Result<(), String> {
+    let mut why = String::new();
+    for attempt in 0..3u32 {
+        if !rebase_in_progress(dir) && !merge_in_progress(dir) && !has_unmerged(dir) {
+            return Ok(());
+        }
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(100 << attempt));
+        }
+        if let Err(e) = abort_rebase(dir) {
+            why = e;
+        }
+        if merge_in_progress(dir) || has_unmerged(dir) {
+            let out = git(dir, &["merge", "--abort"]);
+            if !out.status.success() {
+                why = first_line(&output_text(&out));
+            }
+        }
+    }
+    if rebase_in_progress(dir) || merge_in_progress(dir) {
+        if why.is_empty() {
+            why = "git still shows it".into();
+        }
+        return Err(why);
+    }
+    Ok(())
+}
+
+/// A rebase or merge that was stopped before this push began is left as
+/// it is: an abort resets the work tree, and an edit made there since it
+/// stopped, such as a note no commit could take, would be lost.
+fn stopped_before(dir: &Path) -> String {
+    format!(
+        "push: {} was mid-rebase or mid-merge before the push began, so nothing was replayed or aborted; `git -C {} rebase --abort` (or `merge --abort`) drops any edit made since it stopped, so keep those first, then push again",
+        dir.display(),
+        dir.display()
+    )
+}
+
+fn still_stopped(dir: &Path, why: &str, cause: &str) -> String {
+    format!(
+        "push: {} is still mid-rebase or mid-merge because `git rebase --abort` failed ({why}); tracker commits there refuse until `git -C {} rebase --abort` (or `merge --abort`) succeeds; {cause}",
+        dir.display(),
+        dir.display()
+    )
+}
+
+/// Whether the checkout whose git directory is `git_dir` is in a rebase
+/// or a merge, read from the files git keeps there.
+pub(crate) fn stopped_in(git_dir: &Path) -> bool {
+    ["rebase-merge", "rebase-apply", "MERGE_HEAD"]
+        .iter()
+        .any(|name| git_dir.join(name).exists())
 }
 
 fn replay(dir: &Path, onto: &str) -> Result<(), String> {
@@ -2027,6 +2086,90 @@ note from b
             );
             assert!(!rebase_in_progress(&a), "{verb}: {said}");
         }
+    }
+
+    /// A replay whose every abort fails says the checkout is still mid-rebase
+    /// and what clears it, and a tracker commit there refuses until it is
+    /// cleared rather than commit into the stopped rebase.
+    #[test]
+    fn a_replay_that_cannot_be_undone_says_so_and_commits_refuse() {
+        let _env = crate::test_env_lock();
+        crate::tool_bound::disarm();
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = two_clones(dir.path());
+        std::fs::write(b.join("notes.txt"), "from b\n").unwrap();
+        run_ok(&b, &["commit", "-q", "-am", "b notes"]);
+        run_ok(&b, &["push", "-q"]);
+        std::fs::write(a.join("notes.txt"), "from a\n").unwrap();
+        run_ok(&a, &["commit", "-q", "-am", "a notes"]);
+        let before = run_ok(&a, &["rev-parse", "HEAD"]);
+        let path = git_wrapper(
+            dir.path(),
+            &a,
+            "*' rebase --abort '*|*' merge --abort '*) exit 1 ;;",
+        );
+        let said = integrate_from(&a, "origin", "origin/main").unwrap_err();
+        let board = a.join("Software/issues.org");
+        std::fs::write(
+            &board,
+            format!(
+                "{}{}",
+                std::fs::read_to_string(&board).unwrap(),
+                heading("late", "Late")
+            ),
+        )
+        .unwrap();
+        let made = crate::commit_paths_now(&a, &["Software/issues.org"], "late");
+        drop(path);
+        assert!(
+            said.contains("is still mid-rebase or mid-merge")
+                && said.contains("rebase --abort` (or `merge --abort`) succeeds"),
+            "{said}"
+        );
+        assert!(rebase_in_progress(&a), "{said}");
+        match &made {
+            crate::PathCommit::Refused(why) => assert!(why.contains("is mid-rebase"), "{why}"),
+            other => panic!("a commit went into the stopped rebase: {other:?}"),
+        }
+        run_ok(&a, &["rebase", "--abort"]);
+        assert_eq!(run_ok(&a, &["rev-parse", "HEAD"]), before);
+    }
+
+    /// A rebase that stopped before the push began is left as it is, so a
+    /// note written into the work tree while it was stopped is not lost to
+    /// an abort, and the push names the state.
+    #[test]
+    fn a_note_written_while_a_rebase_is_stopped_is_kept_by_a_push() {
+        let _env = crate::test_env_lock();
+        crate::tool_bound::disarm();
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = two_clones(dir.path());
+        std::fs::write(b.join("notes.txt"), "from b\n").unwrap();
+        run_ok(&b, &["commit", "-q", "-am", "b notes"]);
+        run_ok(&b, &["push", "-q"]);
+        std::fs::write(a.join("notes.txt"), "from a\n").unwrap();
+        run_ok(&a, &["commit", "-q", "-am", "a notes"]);
+        run_ok(&a, &["fetch", "-q", "origin"]);
+        let _ = crate::git_at(&a)
+            .args(["rebase", "origin/main"])
+            .output()
+            .unwrap();
+        assert!(rebase_in_progress(&a), "the rebase did not stop");
+        let head = run_ok(&a, &["rev-parse", "HEAD"]);
+        let board = a.join("Software/issues.org");
+        let noted = format!(
+            "{}- Note taken while the rebase was stopped\n",
+            std::fs::read_to_string(&board).unwrap()
+        );
+        std::fs::write(&board, &noted).unwrap();
+        let said = integrate_from(&a, "origin", "origin/main").unwrap_err();
+        assert!(
+            said.contains("was mid-rebase or mid-merge before the push began"),
+            "{said}"
+        );
+        assert_eq!(std::fs::read_to_string(&board).unwrap(), noted);
+        assert!(rebase_in_progress(&a), "{said}");
+        assert_eq!(run_ok(&a, &["rev-parse", "HEAD"]), head);
     }
 
     #[test]
