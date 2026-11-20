@@ -278,7 +278,19 @@ This seat's claims come first, then unclaimed work by priority and recent activi
 
 ``ljos list`` and ``ljos ls`` are the same command. They take the same flags, including ``-p PROJECT``, and print the same page.
 
-To work one ticket with no plan, run ``ljos sitting ID``. It claims the ticket and prints what the seat remembers about it. ``ljos note "TEXT"`` writes on that ticket, and ``ljos finish`` with no id ends the sitting and leaves the ticket open. ``ljos finish --close`` closes it, once the work is accepted. From a container, a CI runner, ``setsid``, or a parent that carries a runner's variables, that close is refused unless a standing grant covers this seat and this ticket. The refusal is one sentence: no terminal was found or a runner was detected, so a person closes the ticket from their own login terminal, or with ``ljos seat grant``. Nothing was written. An agent is not that person. A plain ``ljos finish`` has ended the sitting, so close that ticket by its id with ``ljos finish ID --close``. ``ljos finish --close`` with no id and no open sitting says so and names that form. While a sitting is open, ``ljos file`` files the new ticket under it, and ``--top`` files it at the top of the project. With no plan, ``ljos ready --mine`` prints ``no unfinished item``, because it names the next item of a plan.
+To work one ticket with no plan, run ``ljos sitting ID``.
+It claims the ticket and prints what the seat remembers about it.
+``ljos note "TEXT"`` writes on that ticket, and ``ljos finish`` with no id ends the sitting and leaves the ticket open.
+``ljos finish --close`` closes it, once the work is accepted.
+From a container, a CI runner, ``setsid``, or a parent that carries a runner's variables, that close is refused unless a standing grant covers this seat and this ticket.
+The refusal is one sentence: no terminal was found or a runner was detected, so a person closes the ticket from their own login terminal, or with ``ljos seat grant``.
+Nothing was written.
+An agent is not that person.
+A plain ``ljos finish`` has ended the sitting, so close that ticket by its id with ``ljos finish ID --close``.
+``ljos finish --close`` with no id and no open sitting says so and names that form.
+While a sitting is open, ``ljos file`` files the new ticket under it, and ``--top`` files it at the top of the project.
+While a non-plan sitting is open, ``ljos ready --mine`` names its ticket and says it ``has no plan items``.
+After plain ``ljos finish`` ends that sitting, ``ljos ready --mine`` prints ``no unfinished item``.
 
 The ids are the ones that run printed. The parent is claimed. Each item stays open until ``ljos finish`` ticks it. A sitting with no ``--verbose`` prints the claim, one line for claims still held, what the seat remembers, and the close. With ``--no-embed`` the pack has no encoder, so the sitting prints ``matched by words (encoder not installed)``. Quiet claims are ``N quiet claims are still yours (ljos release --stale)``. Claims untouched for longer than ``LJOS_STALE_DAYS`` (7) are one line, ``ljos claims --stale``. ``ljos sitting ISSUE --verbose`` prints every section.
 Under a runner the holder on the ``STARTED`` line can be ``alice`` plus ``@`` and a session tag. The claim command below prints the seat name.

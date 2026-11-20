@@ -42,6 +42,24 @@ fn install_docs_distinguish_temporary_home_memory() {
     }
 }
 
+#[test]
+fn getting_started_distinguishes_open_non_plan_sittings() {
+    for rel in [
+        "docs/orgmode/getting-started.org",
+        "docs/source/getting-started.rst",
+    ] {
+        let text = page(rel);
+        assert!(
+            text.contains("has no plan items"),
+            "{rel} does not name the open non-plan sitting output"
+        );
+        assert!(
+            text.contains("no unfinished item"),
+            "{rel} does not name the output after the sitting ends"
+        );
+    }
+}
+
 #[cfg(unix)]
 fn script(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;
