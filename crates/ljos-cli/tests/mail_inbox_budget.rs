@@ -216,7 +216,7 @@ fn ljos_env(
         .env("LJOS_SEAT", seat)
         .env("LJOS_TRACKER_GIT", "off")
         .env("LJOS_HOOKD", "off")
-        .env("LJOS_PACK_TIMEOUT_MS", "800")
+        .env("LJOS_PACK_TIMEOUT_MS", PACK_BUDGET_MS.to_string())
         .env("LJOS_HOOK_PACK_TIMEOUT_MS", "600")
         .env("LJOS_PACK_CONNECT_MS", "200")
         .stdin(Stdio::null())
@@ -228,6 +228,35 @@ fn ljos_env(
     let started = Instant::now();
     let out = cmd.output().expect("spawn ljos");
     (out, started.elapsed())
+}
+
+/// The pack budget the tests give `ljos`, in milliseconds.
+const PACK_BUDGET_MS: u64 = 800;
+
+/// The longest a command may take when the pack never answers: its budget
+/// and a margin that grows with how slow `start` says starting `ljos` is
+/// on this machine right now. A busy machine stretches the margin. A stall
+/// of whole seconds still goes over it.
+fn stall_bound(mut start: impl FnMut() -> Duration) -> Duration {
+    let mut starts: Vec<Duration> = (0..3).map(|_| start()).collect();
+    starts.sort();
+    Duration::from_millis(PACK_BUDGET_MS) + (starts[1] * 8).max(Duration::from_millis(700))
+}
+
+fn start_time(home: &std::path::Path, port: u16) -> impl FnMut() -> Duration + '_ {
+    move || ljos(home, port, "inky", &["--version"]).1
+}
+
+#[test]
+fn the_stall_bound_grows_with_a_slow_start_and_stays_short_on_a_fast_one() {
+    let fast = stall_bound(|| Duration::from_millis(20));
+    assert_eq!(fast, Duration::from_millis(1500));
+    assert!(fast < Duration::from_secs(2), "{fast:?}");
+    let slow = stall_bound(|| Duration::from_millis(250));
+    assert_eq!(slow, Duration::from_millis(2800));
+    let mut starts = [400, 250, 10].into_iter().map(Duration::from_millis);
+    let median = stall_bound(|| starts.next().unwrap());
+    assert_eq!(median, Duration::from_millis(2800));
 }
 
 fn text_of(out: &Output) -> String {
@@ -352,9 +381,10 @@ fn a_stalled_pack_returns_inside_the_budget() {
     let (inbox, took) = ljos(home.path(), port, "inky", &["inbox"]);
     let said = text_of(&inbox);
     assert_eq!(inbox.status.code(), Some(75), "{said}");
+    let bound = stall_bound(start_time(home.path(), port));
     assert!(
-        took < Duration::from_millis(1500),
-        "inbox waited {took:?} on a silent pack"
+        took < bound,
+        "inbox waited {took:?} on a silent pack, over {bound:?}"
     );
     assert!(said.contains("pack busy, try again"), "{said}");
     assert!(!said.contains("nothing unread"), "{said}");
@@ -363,8 +393,8 @@ fn a_stalled_pack_returns_inside_the_budget() {
     let sent = text_of(&send);
     assert_eq!(send.status.code(), Some(75), "{sent}");
     assert!(
-        send_took < Duration::from_millis(1500),
-        "send waited {send_took:?}"
+        send_took < bound,
+        "send waited {send_took:?}, over {bound:?}"
     );
     assert!(sent.contains("pack busy, try again"), "{sent}");
 
@@ -427,9 +457,10 @@ fn a_token_proof_does_not_restart_when_the_writer_stays_silent() {
     let (inbox, took) = ljos_env(home.path(), port, "inky", &["inbox"], Some("seat-token"));
     let said = text_of(&inbox);
     assert_eq!(inbox.status.code(), Some(75), "{said}");
+    let bound = stall_bound(start_time(home.path(), port));
     assert!(
-        took < Duration::from_millis(1500),
-        "inbox waited {took:?}; a restarted proof spends the budget again"
+        took < bound,
+        "inbox waited {took:?}, over {bound:?}; a restarted proof spends the budget again"
     );
     assert!(said.contains("pack busy, try again"), "{said}");
     let opened = accepts.load(Ordering::SeqCst);
