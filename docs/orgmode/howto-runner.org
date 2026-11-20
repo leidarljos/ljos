@@ -78,7 +78,8 @@ $ ljos onboard --harness json
 
 =ljos onboard= with no =--harness= onboards every runner it finds, at a terminal or in a pipe, and a pipe prints that JSON on stdout with the setup lines on stderr.
 The tracker and deed store are set up.
-Outside a temporary home, the memory writer is set up too; under a temporary home, memory is off.
+Outside a temporary home, the memory writer is set up too.
+Under a temporary home, memory is off unless =PACKSET_URL= names a pack.
 =ljos onboard --harness json= prints the JSON alone and leaves those stores unchanged.
 Paste it where the runner keeps its MCP servers.
 
