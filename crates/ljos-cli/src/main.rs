@@ -4318,8 +4318,7 @@ fn seat_kind(cmd: &Cmd) -> ljos_cli::seat_resolve::Kind {
         | Cmd::Mesh {
             cmd: MeshCmd::Status,
         } => Kind::Read,
-        Cmd::Remember { .. }
-        | Cmd::Note { .. }
+        Cmd::Note { .. }
         | Cmd::File { .. }
         | Cmd::Parent { .. }
         | Cmd::Sitting { .. }
@@ -5252,6 +5251,11 @@ fn run_command() -> Result<()> {
                 eprintln!("{err}");
                 std::process::exit(USAGE_STATUS);
             }
+            if let Some(line) = ljos_cli::sandbox_memory_off() {
+                eprintln!("{line}");
+                std::process::exit(1);
+            }
+            ljos_cli::seat_resolve::mark_write();
             // A paragraph or a session is several claims: each goes in on
             // its own, where the whole was refused at the pack's cap.
             // Two sentences stay one row. A longer text is split, and

@@ -681,6 +681,13 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
     assert!(!joined.contains("packset ensure"), "{said}");
     assert!(!joined.contains("queued"), "{said}");
     assert_eq!(remembered.status.code(), Some(1), "{said}");
+    assert!(remembered.stdout.is_empty(), "{said}");
+    assert_eq!(
+        String::from_utf8_lossy(&remembered.stderr).lines().count(),
+        1,
+        "{said}"
+    );
+    assert!(!joined.contains("no seat was named"), "{said}");
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
         !calls.contains("ensure"),
