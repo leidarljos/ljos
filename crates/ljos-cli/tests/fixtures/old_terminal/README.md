@@ -8,21 +8,23 @@ repository.
 
 ### `terminal_by_version` (preference and lesson per row)
 
-Each pair is a hand-written `POST /v1/atoms` body shaped like
-`post_legacy_atom` in
-`git show 4e8daa4:crates/ljos-cli/tests/old_terminal.rs` (lines 202–224), which
-the integration test used when release archives were missing. The expected
-stored shape is described in the module comment of
-`git show v0.41.0:crates/ljos-cli/tests/old_terminal.rs` (lines 1–6): no
-`source.seat`, `harness` equals `session`, value `person`, `via` is `ljos`, no
-`turn`, no `@` in `session`.
+Each pair is a hand-written atom record shaped like the bodies built by
+`post_terminal_pair` in the integration test. The expected stored shape and
+the session literals (`harness` equals `session`, value `person`, `via` `ljos`,
+no `turn`, no `@` in `session`) are asserted in
+`git show 4e8daa4:crates/ljos-cli/tests/old_terminal.rs`
+(`assert_terminal_shape` about lines 255–265 and the post calls about 294–311),
+not in the v0.41.0 module comment.
 
-The `preference_text` and `lesson_text` strings are the same literals the test
-used for each `VERSIONS` entry in that file.
+`post_terminal_pair` and `post_held` add `schema`, `kind`, `level`, `origin`,
+`source`, `workspace`, and `via`, so each JSON row is the atom fields only, not
+a full `POST /v1/atoms` body.
+
+The `preference_text` and `lesson_text` strings match the literals in the
+fixture file, which replaced inline `VERSIONS` entries.
 
 ### `runner_lesson` and `agent_lesson`
 
-Hand-written bodies matching the `post_legacy_atom` calls for workspace `held` in
-`git show 4e8daa4:crates/ljos-cli/tests/old_terminal.rs` (runner `0.29.0`
-branch and agent `0.32.1` branch): `RUNNER_LESSON` and `AGENT_LESSON`
-constants, `origin`, `harness`, and `session` fields as in those calls.
+Hand-written records for workspace `held`, matching the two `post_held` calls in
+the same test: lesson text, `origin`, `harness`, and `session` fields as in
+those calls.
