@@ -360,15 +360,15 @@ fn a_sitting_reads_related_memories_with_one_bounded_search() {
         "{said}"
     );
     assert!(
-        stdout.contains("probe project keeps its rollout checklist"),
-        "a lesson on the ticket's project is missing:\n{said}"
+        !stdout.contains("probe project keeps its rollout checklist"),
+        "a lesson tagged to another issue in this project stayed:\n{said}"
     );
     assert!(
         stdout.contains("Oak Tree timing follows the maple calendar"),
         "a strong cross-seat match is missing:\n{said}"
     );
     assert!(
-        stdout.contains("from bob") && stdout.contains("from carol"),
+        stdout.contains("from carol") && !stdout.contains("from bob"),
         "cross-seat lessons are not labelled:\n{said}"
     );
     assert!(
@@ -377,9 +377,8 @@ fn a_sitting_reads_related_memories_with_one_bounded_search() {
     );
     let island = stdout.split("== island").nth(1).unwrap_or(&stdout);
     let own = island.find("Oak Tree on Nov 23").unwrap();
-    let project = island.find("probe project keeps").unwrap();
     let strong = island.find("Oak Tree timing follows").unwrap();
-    assert!(own < project && project < strong, "{said}");
+    assert!(own < strong, "{said}");
     assert!(!said.contains("memory degraded"), "{said}");
     assert!(!stdout.contains("the whole pack was listed"), "{said}");
 }

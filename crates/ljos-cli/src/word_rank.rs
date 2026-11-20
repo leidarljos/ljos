@@ -354,7 +354,7 @@ fn covered_terms(query: &str, text: &str) -> Vec<String> {
         .collect()
 }
 
-fn term_is_weak(term: &str) -> bool {
+pub(crate) fn term_is_weak(term: &str) -> bool {
     let concept = concept_of(term);
     let parts = if concept.parts.is_empty() {
         vec![concept.joined]
