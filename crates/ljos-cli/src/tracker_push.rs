@@ -2447,6 +2447,7 @@ body b
         started
             .command()
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", "/usr/bin:/bin")
             .env("PACKSET_AUTH", "off");
         let daemon = started.spawn();

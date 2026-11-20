@@ -50,6 +50,7 @@ mod tests {
 
     #[test]
     fn a_policy_label_keeps_its_sentence_and_its_name() {
+        let _lock = crate::test_env_lock();
         let err = labelled("seat-unresolved", "pass seat, your own bot name");
         let label = as_policy(&err).expect("label");
         assert_eq!(label.label, "seat-unresolved");
@@ -58,6 +59,7 @@ mod tests {
 
     #[test]
     fn a_failed_read_is_not_a_policy_label() {
+        let _lock = crate::test_env_lock();
         let err = failed(
             "effect-unavailable",
             anyhow::anyhow!("cannot read the file: os error 2"),
@@ -68,6 +70,7 @@ mod tests {
 
     #[test]
     fn a_partial_quote_is_approval_unverified() {
+        let _lock = crate::test_env_lock();
         let err = crate::quoted_yes::read(Some("yes keep the parser"), None, None).unwrap_err();
         let label = as_policy(&err).expect("label");
         assert_eq!(label.label, "approval-unverified");
@@ -76,6 +79,7 @@ mod tests {
 
     #[test]
     fn an_unknown_memory_id_is_a_review_warning() {
+        let _lock = crate::test_env_lock();
         let err = crate::memories::resolve("missing", &[]).unwrap_err();
         let label = as_policy(&err).expect("label");
         assert_eq!(label.label, "review-input-warning");
@@ -83,6 +87,7 @@ mod tests {
 
     #[test]
     fn a_grade_with_no_id_stays_a_failed_read() {
+        let _lock = crate::test_env_lock();
         let err = crate::graded("", true).unwrap_err();
         assert!(as_policy(&err).is_none(), "{err}");
         assert!(err.to_string().contains("atom id is required"), "{err}");
@@ -90,6 +95,7 @@ mod tests {
 
     #[test]
     fn an_empty_message_is_an_input_warning() {
+        let _lock = crate::test_env_lock();
         let err = crate::mail::send(&crate::mail::Send {
             seat: Some("beta"),
             group: None,
@@ -105,6 +111,7 @@ mod tests {
 
     #[test]
     fn a_self_send_is_a_routing_warning() {
+        let _lock = crate::test_env_lock();
         let err = crate::mail::recipients("alfa", Some("alfa"), None, &[]).unwrap_err();
         let label = as_policy(&err).expect("label");
         assert_eq!(label.label, "routing-warning");
@@ -112,6 +119,7 @@ mod tests {
 
     #[test]
     fn an_empty_quote_on_a_grant_is_unverified() {
+        let _lock = crate::test_env_lock();
         let err = crate::seat_roster::grant(
             "alfa",
             "close=own",
@@ -128,6 +136,7 @@ mod tests {
 
     #[test]
     fn an_empty_lesson_is_an_input_label() {
+        let _lock = crate::test_env_lock();
         let err = crate::packset_write_agent("remember", "  ", None, None).unwrap_err();
         let label = as_policy(&err).expect("label");
         assert_eq!(label.label, "empty-input");
@@ -139,6 +148,7 @@ mod tests {
 
     #[test]
     fn a_persona_without_a_name_is_an_owner_warning() {
+        let _lock = crate::test_env_lock();
         let err = crate::persona_atom(
             &crate::Persona {
                 name: " ".into(),
@@ -157,6 +167,7 @@ mod tests {
 
     #[test]
     fn an_unknown_playbook_name_is_a_warning() {
+        let _lock = crate::test_env_lock();
         let err = crate::parse_playbook_name("not-a-recipe").unwrap_err();
         let label = as_policy(&err).expect("label");
         assert_eq!(label.label, "playbook-warning");
@@ -165,6 +176,7 @@ mod tests {
 
     #[test]
     fn an_unseen_recipient_is_labelled() {
+        let _lock = crate::test_env_lock();
         let known = std::collections::BTreeSet::from(["claude-review".to_string()]);
         let err = crate::mail::check_known("claude", &known, false).unwrap_err();
         let label = as_policy(&err).expect("label");
@@ -174,6 +186,7 @@ mod tests {
 
     #[test]
     fn a_rule_without_a_pattern_is_an_input_warning() {
+        let _lock = crate::test_env_lock();
         let err = crate::validate_rule(&crate::Rule {
             pattern: " ".into(),
             verdict: "deny".into(),
@@ -185,6 +198,7 @@ mod tests {
 
     #[test]
     fn a_self_block_is_a_cycle_label() {
+        let _lock = crate::test_env_lock();
         let err = crate::block_edge("probe-aaaa", "probe-aaaa", false).unwrap_err();
         let label = as_policy(&err).expect("label");
         assert_eq!(label.label, "graph-cycle");

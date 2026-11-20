@@ -53497,8 +53497,24 @@ pub fn tcb_check(argv: &[String]) -> Option<String> {
 
 /// [`tcb_check`] for a command that will run in `cwd`.
 fn tcb_check_in(argv: &[String], cwd: Option<&Path>) -> Option<String> {
+    tcb_check_in_with_env(argv, cwd, &[])
+}
+
+/// [`tcb_check`] for a command that will run in `cwd`, passing `extra_env`
+/// only to the spawned `ljos-policyd` child process.
+pub fn tcb_check_in_with_env(
+    argv: &[String],
+    cwd: Option<&Path>,
+    extra_env: &[(&str, &str)],
+) -> Option<String> {
     let bin = policyd_bin()?;
-    Some(tcb_answer_in(&bin, argv, guard_timeout(), cwd))
+    Some(tcb_answer_in_with_env(
+        &bin,
+        argv,
+        guard_timeout(),
+        cwd,
+        extra_env,
+    ))
 }
 
 /// What `bin check -- argv` says within `deadline`, as a verdict line.
@@ -53522,6 +53538,16 @@ pub fn tcb_answer_in(
     argv: &[String],
     deadline: std::time::Duration,
     cwd: Option<&Path>,
+) -> String {
+    tcb_answer_in_with_env(bin, argv, deadline, cwd, &[])
+}
+
+fn tcb_answer_in_with_env(
+    bin: &Path,
+    argv: &[String],
+    deadline: std::time::Duration,
+    cwd: Option<&Path>,
+    extra_env: &[(&str, &str)],
 ) -> String {
     use std::io::Read as _;
     // A missing file is not a fault. CI and a fresh install have no
@@ -53581,6 +53607,9 @@ pub fn tcb_answer_in(
         // the command will run in. The hook already has that directory.
         if let Some(dir) = run_dir.as_deref() {
             cmd.current_dir(dir);
+        }
+        for (k, v) in extra_env {
+            cmd.env(k, v);
         }
         cmd.spawn()
     };
@@ -55797,6 +55826,7 @@ pub(crate) struct EnvLock {
     _guard: std::sync::MutexGuard<'static, ()>,
     snapshot: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     runtime: tempfile::TempDir,
+    _home: tempfile::TempDir,
     _git_config: tempfile::NamedTempFile,
 }
 
@@ -56103,7 +56133,7 @@ pub(crate) fn test_env_lock() -> EnvLock {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     ENV_LOCK_HELD.with(|held| held.set(true));
-    let (snapshot, runtime, git_config) = with_env_mutation(|| {
+    let (snapshot, runtime, home_root, git_config) = with_env_mutation(|| {
         // The runner that launched the suite is not put back: a test sees
         // only the runner it sets itself, whatever shell ran `cargo test`.
         let snapshot: Vec<_> = std::env::vars_os()
@@ -56116,6 +56146,25 @@ pub(crate) fn test_env_lock() -> EnvLock {
         }
         let runtime = tempfile::tempdir().expect("private runtime dir");
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", runtime.path()) };
+        let home_root = tempfile::Builder::new()
+            .prefix("ljos-test-home-")
+            .tempdir_in(crate::proc_tree::test_non_temp_root())
+            .expect("private home dir");
+        let home = home_root.path().join("u");
+        std::fs::create_dir_all(&home).expect("private home");
+        let config = home.join(".config");
+        let data = home.join(".local/share");
+        let state = home.join(".local/state");
+        let cache = home.join(".cache");
+        for (key, value) in [
+            ("HOME", home.as_path()),
+            ("XDG_CONFIG_HOME", config.as_path()),
+            ("XDG_DATA_HOME", data.as_path()),
+            ("XDG_STATE_HOME", state.as_path()),
+            ("XDG_CACHE_HOME", cache.as_path()),
+        ] {
+            unsafe { std::env::set_var(key, value) };
+        }
         // The login's git config would hand every git this test starts,
         // and every git its children start, the machine's signing, hooks
         // and identity.
@@ -56123,12 +56172,13 @@ pub(crate) fn test_env_lock() -> EnvLock {
         for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
             unsafe { std::env::set_var(key, git_config.path()) };
         }
-        (snapshot, runtime, git_config)
+        (snapshot, runtime, home_root, git_config)
     });
     EnvLock {
         _guard: guard,
         snapshot,
         runtime,
+        _home: home_root,
         _git_config: git_config,
     }
 }
@@ -56855,8 +56905,15 @@ mod tests {
         );
         assert_eq!(super::take_guard_note(), None, "a temp HOME names no rule");
         let refused = super::ensure_writer().expect_err("a temp HOME names its refusal");
-        let temp =
+        let canon_temp =
             std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        let temp = if canon_temp.starts_with("/tmp") {
+            PathBuf::from("/tmp")
+        } else if canon_temp.starts_with("/private/tmp") {
+            PathBuf::from("/private/tmp")
+        } else {
+            canon_temp
+        };
         let under_temp = format!("under {}", temp.display());
         let refused = refused.to_string();
         assert!(
@@ -56928,6 +56985,7 @@ mod tests {
     /// a count past the cap, then related search hits it has not listed.
     #[test]
     fn recall_lists_the_issue_own_memories_newest_first() {
+        let _g = env_guard();
         let mut atoms: Vec<Value> = (0..22)
             .map(|n| {
                 serde_json::json!({
@@ -57636,6 +57694,28 @@ mod tests {
             }
         });
         guard
+    }
+
+    #[test]
+    fn test_env_lock_isolates_home_and_xdg_dirs() {
+        let _guard = env_guard();
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap();
+        assert!(!bookkeep::path_is_temp(Some(&home)), "{home:?}");
+        for var in [
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+        ] {
+            let val = std::env::var_os(var).map(std::path::PathBuf::from).unwrap();
+            assert!(val.starts_with(&home), "{var}={val:?} outside {home:?}");
+        }
+        assert_eq!(
+            crate::note_queue::state_dir(),
+            home.join(".local/state/ljos")
+        );
     }
 
     /// A root that kept its tilde is the home one.
@@ -59584,6 +59664,7 @@ mod tests {
     /// same step a write prints. A registry that did not answer is a warning.
     #[test]
     fn doctor_names_the_fix_for_a_tracker_a_seat_and_the_registry() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let id = |root: &str| format!("vissue 0.24.1\nroot={root}\nprefix=Software\n");
         let missing = dir.path().join("gone");
@@ -61612,6 +61693,7 @@ mod tests {
 
     #[test]
     fn the_record_weighs_a_voter_by_what_it_got_right() {
+        let _g = env_guard();
         let ballots = vec![
             ("a".to_string(), "ship".to_string()),
             ("b".to_string(), "ship".to_string()),
@@ -61648,6 +61730,7 @@ mod tests {
 
     #[test]
     fn an_empty_outcome_does_not_store_a_record() {
+        let _g = env_guard();
         let ballots = vec![
             ("a".to_string(), "ship".to_string()),
             ("b".to_string(), "hold".to_string()),
@@ -61660,6 +61743,7 @@ mod tests {
 
     #[test]
     fn fewer_than_two_voters_do_not_store_a_record() {
+        let _g = env_guard();
         let ballots = vec![("a".to_string(), "ship".to_string())];
         let prior = std::collections::BTreeMap::from([("a".to_string(), (2.0, 1.0))]);
         let err = learn_record(&ballots, "ship", &prior, &[]).unwrap_err();
@@ -61669,6 +61753,7 @@ mod tests {
 
     #[test]
     fn a_beta_outside_the_range_does_not_store_a_record() {
+        let _g = env_guard();
         let ballots = vec![
             ("a".to_string(), "ship".to_string()),
             ("b".to_string(), "hold".to_string()),
@@ -61686,6 +61771,7 @@ mod tests {
 
     #[test]
     fn a_share_outside_the_range_does_not_store_a_record() {
+        let _g = env_guard();
         let ballots = vec![
             ("a".to_string(), "ship".to_string()),
             ("b".to_string(), "hold".to_string()),
@@ -61703,6 +61789,7 @@ mod tests {
 
     #[test]
     fn an_empty_outcome_on_a_shared_learn_does_not_store_a_record() {
+        let _g = env_guard();
         let ballots = vec![
             ("a".to_string(), "ship".to_string()),
             ("b".to_string(), "hold".to_string()),
@@ -61720,6 +61807,7 @@ mod tests {
 
     #[test]
     fn fewer_than_two_voters_on_a_shared_learn_do_not_store_a_record() {
+        let _g = env_guard();
         let ballots = vec![("a".to_string(), "ship".to_string())];
         let rows = vec![Trust {
             from: "a".into(),
@@ -65325,6 +65413,7 @@ mod tests {
 
     #[test]
     fn a_claim_under_a_legacy_holder_is_held_as_the_seat() {
+        let _g = env_guard();
         assert_eq!(claim_holder("inky-n9o").unwrap(), "inky");
         assert_eq!(claim_holder("disk-saver-t4t").unwrap(), "disk-saver");
         assert_eq!(claim_holder("ljos-bot").unwrap(), "ljosbot");
@@ -66902,6 +66991,7 @@ mod tests {
 
     #[test]
     fn playbook_among_pack_latest_wins_and_unknown_names_are_refused() {
+        let _g = env_guard();
         let rewritten = Playbook {
             name: "sit".into(),
             body: "rewritten sit body".into(),
@@ -67903,6 +67993,7 @@ mod tests {
 
     #[test]
     fn options_come_from_a_line_or_its_bullets() {
+        let _g = env_guard();
         assert_eq!(
             issue_options("Why.\nOptions: age, gpg\n"),
             vec!["age", "gpg"]
@@ -67964,6 +68055,7 @@ mod tests {
 
     #[test]
     fn a_probe_passes_only_when_the_runner_lists_ljos() {
+        let _g = env_guard();
         let s = |v: &[&str]| v.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
         assert!(probe_lists_ljos(&s(&["sh", "-c", "echo '  ljos_sitting   Call this'"])).is_ok());
         assert!(probe_lists_ljos(&s(&["sh", "-c", "echo 'MCP SDK not installed'"])).is_err());
@@ -68705,6 +68797,7 @@ mod tests {
                     env.display()
                 ))
                 .env_clear()
+                .env("TMPDIR", std::env::temp_dir())
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .output()
                 .unwrap();
@@ -68721,6 +68814,7 @@ mod tests {
                     env.display()
                 ))
                 .env_clear()
+                .env("TMPDIR", std::env::temp_dir())
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .output()
                 .unwrap();
@@ -71482,6 +71576,7 @@ box-1 is yours.
     /// A sitting shows the memories `ljos recall` shows, and the same number.
     #[test]
     fn a_sitting_lists_every_memory_recall_lists() {
+        let _g = env_guard();
         let hits: Vec<Hit> = (0..4)
             .map(|i| {
                 serde_json::from_value(serde_json::json!({
@@ -74094,6 +74189,7 @@ lesson, due yesterday, seat ada
 
     #[test]
     fn empty_claim_is_refused() {
+        let _g = env_guard();
         let client = PacksetClient::new("http://127.0.0.1:1");
         let err = post_claim(&client, "Remember", "   ", "ws").unwrap_err();
         assert!(err.to_string().contains("empty text"));
@@ -74243,6 +74339,7 @@ lesson, due yesterday, seat ada
     /// one keeps it; the rows come back complete.
     #[test]
     fn learning_downweights_the_refuted_voter() {
+        let _g = env_guard();
         let ballots = vec![
             ("a".to_string(), "ship".to_string()),
             ("b".to_string(), "ship".to_string()),
@@ -78477,9 +78574,17 @@ lesson, due yesterday, seat ada
     /// Each rule ljos-policyd names, with a [`policyd_warning`] line, for
     /// the calls ljos sends it for `line` run from `cwd`.
     fn policyd_rules(line: &str, cwd: Option<&std::path::Path>) -> Vec<String> {
+        policyd_rules_with_env(line, cwd, &[])
+    }
+
+    fn policyd_rules_with_env(
+        line: &str,
+        cwd: Option<&std::path::Path>,
+        extra_env: &[(&str, &str)],
+    ) -> Vec<String> {
         tcb_argvs(line)
             .iter()
-            .filter_map(|argv| tcb_check_in(argv, cwd))
+            .filter_map(|argv| tcb_check_in_with_env(argv, cwd, extra_env))
             .filter_map(|said| policyd_warning(&said).map(|(rule, _)| rule.to_string()))
             .collect()
     }
@@ -78487,7 +78592,15 @@ lesson, due yesterday, seat ada
     /// Whether ljos-policyd names `line`, run from `cwd`, a write of the
     /// seat's hook file.
     fn seat_write_named(line: &str, cwd: Option<&std::path::Path>) -> bool {
-        policyd_rules(line, cwd)
+        seat_write_named_with_env(line, cwd, &[])
+    }
+
+    fn seat_write_named_with_env(
+        line: &str,
+        cwd: Option<&std::path::Path>,
+        extra_env: &[(&str, &str)],
+    ) -> bool {
+        policyd_rules_with_env(line, cwd, extra_env)
             .iter()
             .any(|rule| rule == "seat-guard-path")
     }
@@ -78572,6 +78685,162 @@ lesson, due yesterday, seat ada
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn policyd_passwd_preload_so() -> PathBuf {
+        use std::sync::OnceLock;
+        static SO: OnceLock<PathBuf> = OnceLock::new();
+        SO.get_or_init(|| {
+            let dir = std::env::var_os("CARGO_TARGET_DIR")
+                .filter(|dir| !dir.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join("target"))
+                .join("test-preload");
+            std::fs::create_dir_all(&dir).unwrap();
+            let code = r#"#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <pwd.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static const char *test_passwd_home(void) {
+    const char *home = getenv("LJOS_TEST_PASSWD_HOME");
+    return (home && home[0] == '/') ? home : NULL;
+}
+
+static int matches_user(const char *name) {
+    const char *user = getenv("LJOS_TEST_PASSWD_USER");
+    return user && name && strcmp(user, name) == 0;
+}
+
+static int rewrite_pwd_r(struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
+    const char *home = test_passwd_home();
+    if (!home) {
+        return 0;
+    }
+    size_t need = strlen(home) + 1;
+    const char *fields[5] = {pwd->pw_name, pwd->pw_passwd, pwd->pw_gecos, pwd->pw_dir, pwd->pw_shell};
+    size_t used = 0;
+    for (int i = 0; i < 5; i++) {
+        if (fields[i] && fields[i] >= buf && fields[i] < buf + buflen) {
+            size_t end = (size_t)(fields[i] - buf) + strlen(fields[i]) + 1;
+            if (end > used) {
+                used = end;
+            }
+        }
+    }
+    if (used + need > buflen) {
+        *result = NULL;
+        return ERANGE;
+    }
+    memcpy(buf + used, home, need);
+    pwd->pw_dir = buf + used;
+    return 0;
+}
+
+struct passwd *getpwuid(uid_t uid) {
+    static struct passwd *(*real_fn)(uid_t) = NULL;
+    static __thread struct passwd copy;
+    static __thread char home_buf[4096];
+    if (!real_fn) {
+        real_fn = (struct passwd *(*)(uid_t))dlsym(RTLD_NEXT, "getpwuid");
+    }
+    struct passwd *res = real_fn ? real_fn(uid) : NULL;
+    const char *home = (uid == getuid()) ? test_passwd_home() : NULL;
+    if (!res || !home) {
+        return res;
+    }
+    copy = *res;
+    size_t need = strlen(home) + 1;
+    if (need <= sizeof(home_buf)) {
+        memcpy(home_buf, home, need);
+        copy.pw_dir = home_buf;
+    }
+    return &copy;
+}
+
+int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
+    static int (*real_fn)(uid_t, struct passwd *, char *, size_t, struct passwd **) = NULL;
+    if (!real_fn) {
+        real_fn = (int (*)(uid_t, struct passwd *, char *, size_t, struct passwd **))dlsym(
+            RTLD_NEXT, "getpwuid_r");
+    }
+    int rc = real_fn ? real_fn(uid, pwd, buf, buflen, result) : ENOENT;
+    if (rc != 0 || !result || !*result || uid != getuid()) {
+        return rc;
+    }
+    return rewrite_pwd_r(pwd, buf, buflen, result);
+}
+
+struct passwd *getpwnam(const char *name) {
+    static struct passwd *(*real_fn)(const char *) = NULL;
+    static __thread struct passwd copy;
+    static __thread char home_buf[4096];
+    if (!real_fn) {
+        real_fn = (struct passwd *(*)(const char *))dlsym(RTLD_NEXT, "getpwnam");
+    }
+    struct passwd *res = real_fn ? real_fn(name) : NULL;
+    const char *home = matches_user(name) ? test_passwd_home() : NULL;
+    if (!res || !home) {
+        return res;
+    }
+    copy = *res;
+    size_t need = strlen(home) + 1;
+    if (need <= sizeof(home_buf)) {
+        memcpy(home_buf, home, need);
+        copy.pw_dir = home_buf;
+    }
+    return &copy;
+}
+
+int getpwnam_r(const char *name, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
+    static int (*real_fn)(const char *, struct passwd *, char *, size_t, struct passwd **) = NULL;
+    if (!real_fn) {
+        real_fn = (int (*)(const char *, struct passwd *, char *, size_t, struct passwd **))dlsym(
+            RTLD_NEXT, "getpwnam_r");
+    }
+    int rc = real_fn ? real_fn(name, pwd, buf, buflen, result) : ENOENT;
+    if (rc != 0 || !result || !*result || !matches_user(name)) {
+        return rc;
+    }
+    return rewrite_pwd_r(pwd, buf, buflen, result);
+}
+"#;
+            let mut hash: u64 = 0xcbf29ce484222325;
+            for b in code.as_bytes() {
+                hash ^= u64::from(*b);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            let so = dir.join(format!("libtest_pwnam-{hash:016x}.so"));
+            if so.is_file() {
+                return so;
+            }
+            let pid = std::process::id();
+            let src = dir.join(format!("test_pwnam-{pid}.c"));
+            let tmp = dir.join(format!("libtest_pwnam-{pid}.so.tmp"));
+            std::fs::write(&src, code).unwrap();
+            let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+            let out = std::process::Command::new(cc)
+                .args(["-shared", "-fPIC", "-O2", "-o"])
+                .arg(&tmp)
+                .arg(&src)
+                .arg("-ldl")
+                .output()
+                .expect("compile test pwnam preload");
+            let _ = std::fs::remove_file(&src);
+            assert!(
+                out.status.success(),
+                "cc preload failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let _ = std::fs::rename(&tmp, &so);
+            let _ = std::fs::remove_file(&tmp);
+            so
+        })
+        .clone()
+    }
+
     /// A `cd` through `$HOME`, `${HOME}`, `~` or `~login` still writes the
     /// hook file where it lands. A `CDPATH` entry is not applied to that
     /// write, so `cd proj` stays at the start.
@@ -78589,31 +78858,55 @@ lesson, due yesterday, seat ada
         plain_seat(&home.path().join("plain"));
         plain_seat(&root.path().join("lib"));
         plain_seat(root.path());
-        // SAFETY: getpwuid returns null or a record that stays valid until
-        // the next lookup, and both fields are copied out at once.
-        let (login, pw_home) = unsafe {
-            let pw = libc::getpwuid(libc::getuid());
-            assert!(!pw.is_null(), "no passwd entry for this user");
-            let field =
-                |p: *const libc::c_char| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
-            (field((*pw).pw_name), PathBuf::from(field((*pw).pw_dir)))
-        };
-        let theirs = tempfile::Builder::new()
-            .prefix(".ljos-login-")
-            .tempdir_in(&pw_home)
-            .unwrap();
-        risky_seat(&theirs.path().join("proj"), home.path());
-        let below = theirs.path().strip_prefix(&pw_home).unwrap().display();
-        let named = |line: &str| seat_write_named(line, Some(root.path()));
         let write = SEAT_WRITE;
         for line in [
             format!("cd $HOME/proj && {write}"),
             format!("cd ${{HOME}}/proj && {write}"),
             format!("cd ~/proj && {write}"),
-            format!("cd ~{login}/{below}/proj && {write}"),
         ] {
-            assert!(named(&line), "{line:?}");
+            assert!(seat_write_named(&line, Some(root.path())), "{line:?}");
         }
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: getpwuid returns null or a record that stays valid until
+            // the next lookup, and pw_name is copied out at once.
+            let login = unsafe {
+                let pw = libc::getpwuid(libc::getuid());
+                assert!(!pw.is_null(), "no passwd entry for this user");
+                std::ffi::CStr::from_ptr((*pw).pw_name)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let theirs = tempfile::Builder::new()
+                .prefix(".ljos-login-")
+                .tempdir_in(home.path())
+                .unwrap();
+            risky_seat(&theirs.path().join("proj"), home.path());
+            let below = theirs.path().strip_prefix(home.path()).unwrap().display();
+            let preload = policyd_passwd_preload_so();
+            let line = format!("cd ~{login}/{below}/proj && {write}");
+            assert!(
+                std::env::var_os("LD_PRELOAD").is_none(),
+                "LD_PRELOAD must not be set on the test process"
+            );
+            assert!(
+                seat_write_named_with_env(
+                    &line,
+                    Some(root.path()),
+                    &[
+                        ("LD_PRELOAD", preload.to_str().unwrap()),
+                        ("LJOS_TEST_PASSWD_HOME", home.path().to_str().unwrap()),
+                        ("LJOS_TEST_PASSWD_USER", &login),
+                    ],
+                ),
+                "{line:?}"
+            );
+            assert!(
+                std::env::var_os("LD_PRELOAD").is_none(),
+                "LD_PRELOAD must remain unset on the test process"
+            );
+        }
+        let named = |line: &str| seat_write_named(line, Some(root.path()));
         for line in [
             format!("CDPATH=lib cd proj && {write}"),
             format!("CDPATH=$HOME cd proj && {write}"),
@@ -80040,6 +80333,7 @@ lesson, due yesterday, seat ada
 
     #[test]
     fn a_preference_carries_the_rules_that_enforce_it() {
+        let _g = env_guard();
         let text = "never tear down the terraform stack";
         let rules = preference_rules(
             text,
@@ -81348,6 +81642,7 @@ lesson, due yesterday, seat ada
 
     #[test]
     fn a_steps_runner_is_read_and_answered_in_its_own_shape() {
+        let _env = env_guard();
         let gate = hook_call_as(
             r#"{"toolCall":{"name":"run_command","args":{"CommandLine":"git push origin main"}},"stepIdx":4,"conversationId":"c-1"}"#,
             Some("PreToolUse"),
@@ -82086,6 +82381,7 @@ lesson, due yesterday, seat ada
 
     #[test]
     fn invalid_tracker_confidence_is_not_silently_unscored() {
+        let _g = env_guard();
         for confidence in ["0", "-0.1", "1.1", "\"NaN\""] {
             let raw =
                 format!(r#"[{{"agent":"alice","choice":"accept","confidence":{confidence}}}]"#);

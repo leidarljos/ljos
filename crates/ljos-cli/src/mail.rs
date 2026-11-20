@@ -1380,6 +1380,7 @@ mod tests {
 
     #[test]
     fn a_long_body_fits_the_pack_and_reads_back_whole() {
+        let _lock = crate::test_env_lock();
         let long = "the aarch64 log says the Highway test times out. ".repeat(40);
         let m = outgoing("msg-1", "saddle", &["inky"], &long);
         let atom = message_atom(&m, "seat");
@@ -1519,6 +1520,7 @@ mod tests {
 
     #[test]
     fn a_group_send_reaches_the_other_members() {
+        let _lock = crate::test_env_lock();
         let atoms = [
             json!({
                 "kind": "group",
@@ -1606,6 +1608,7 @@ mod tests {
 
     #[test]
     fn a_seat_hint_names_a_few_seats_and_no_ids() {
+        let _lock = crate::test_env_lock();
         let known: BTreeSet<String> = [
             "alpha",
             "bravo",
@@ -1647,6 +1650,7 @@ mod tests {
 
     #[test]
     fn a_misspelt_seat_is_answered_with_the_seat_it_meant() {
+        let _lock = crate::test_env_lock();
         let known: BTreeSet<String> = ["ljos-bot", "saddle", "inky"]
             .iter()
             .map(|s| (*s).to_string())

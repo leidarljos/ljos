@@ -6248,6 +6248,7 @@ mod tests {
         started
             .command()
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", "/usr/bin:/bin")
             .env("PACKSET_AUTH", "off");
         let daemon = started.spawn();
@@ -11046,6 +11047,7 @@ mod tests {
 
     #[test]
     fn a_bad_scope_name_seals_nothing() {
+        let _g = crate::test_env_lock();
         let err = handover_recipients("Not A Scope").unwrap_err();
         assert_eq!(
             crate::policy_label::as_policy(&err).expect("label").label,
@@ -11310,6 +11312,7 @@ mod tests {
         started
             .command()
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", "/usr/bin:/bin")
             .env("PACKSET_AUTH", "off");
         let _daemon = started.spawn();
