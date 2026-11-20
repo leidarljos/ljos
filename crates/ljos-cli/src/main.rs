@@ -167,8 +167,13 @@ enum MemCmd {
         #[arg(long)]
         stale: bool,
         /// How many days without a recall counts as never recalled. The default is 30.
-        #[arg(long, default_value_t = 30, allow_hyphen_values = true)]
-        days: i64,
+        #[arg(
+            long,
+            default_value_t = 30,
+            allow_hyphen_values = true,
+            value_parser = u64_with_negative_zero
+        )]
+        days: u64,
         /// Remove the memories the report names. Without this, the command only lists them.
         #[arg(long)]
         apply: bool,
@@ -322,7 +327,6 @@ fn memories_cmd(cmd: MemCmd) -> Result<()> {
             apply,
             json,
         } => {
-            count_from_zero("memories prune", "--days", days);
             if !stale {
                 bail!("memories prune: pass --stale");
             }
@@ -601,7 +605,14 @@ struct ReadyArgs {
     #[arg(long, conflicts_with = "json")]
     mine: bool,
     /// How many tickets to print. `-n` is this flag. The default page prints 20.
-    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["all", "mine"], allow_hyphen_values = true)]
+    #[arg(
+        short = 'n',
+        long,
+        value_name = "N",
+        conflicts_with_all = ["all", "mine"],
+        allow_hyphen_values = true,
+        value_parser = usize_with_negative_zero
+    )]
     limit: Option<usize>,
     /// Print every ticket on the page.
     #[arg(long, conflicts_with_all = ["limit", "mine"])]
@@ -915,7 +926,13 @@ enum Cmd {
         /// Words to look for.
         query: Vec<String>,
         /// Most hits to print.
-        #[arg(short = 'n', long, default_value_t = 10, allow_hyphen_values = true)]
+        #[arg(
+            short = 'n',
+            long,
+            default_value_t = 10,
+            allow_hyphen_values = true,
+            value_parser = u32_with_negative_zero
+        )]
         limit: u32,
         /// Score the top hits again, slower and sharper, by reading the text itself.
         #[arg(long)]
@@ -1274,7 +1291,8 @@ enum Cmd {
             long,
             value_name = "N",
             requires = "deadline",
-            allow_hyphen_values = true
+            allow_hyphen_values = true,
+            value_parser = usize_with_negative_zero
         )]
         quorum: Option<usize>,
         /// RFC 3339 time the ballots are due, with `--quorum`.
@@ -1497,7 +1515,12 @@ enum Cmd {
         #[arg(long, requires = "webhook")]
         key_env: Option<String>,
         /// Seconds before a wake command is stopped (default 30).
-        #[arg(long, requires = "command", allow_hyphen_values = true)]
+        #[arg(
+            long,
+            requires = "command",
+            allow_hyphen_values = true,
+            value_parser = u64_with_negative_zero
+        )]
         timeout: Option<u64>,
         /// Remove the seat's wake.
         #[arg(long, conflicts_with = "fire")]
@@ -2194,7 +2217,12 @@ enum Cmd {
         no_file: bool,
         /// Ballots the decision needs. Short of it the reading says so and
         /// exits 1: nothing is decided yet.
-        #[arg(long, value_name = "N", allow_hyphen_values = true)]
+        #[arg(
+            long,
+            value_name = "N",
+            allow_hyphen_values = true,
+            value_parser = usize_with_negative_zero
+        )]
         quorum: Option<usize>,
         /// With `--quorum`, the RFC 3339 time the ballots were due. Past it
         /// and still short, the vote has lapsed: the tracker notes `quorum
@@ -4377,6 +4405,22 @@ fn usize_with_negative_zero(value: &str) -> std::result::Result<usize, String> {
         Ok(0)
     } else {
         value.parse::<usize>().map_err(|error| error.to_string())
+    }
+}
+
+fn u32_with_negative_zero(value: &str) -> std::result::Result<u32, String> {
+    if value == "-0" {
+        Ok(0)
+    } else {
+        value.parse::<u32>().map_err(|error| error.to_string())
+    }
+}
+
+fn u64_with_negative_zero(value: &str) -> std::result::Result<u64, String> {
+    if value == "-0" {
+        Ok(0)
+    } else {
+        value.parse::<u64>().map_err(|error| error.to_string())
     }
 }
 

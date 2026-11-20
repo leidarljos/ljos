@@ -671,7 +671,7 @@ pub fn lesson_key(kind: &str, text: &str) -> String {
 /// newest is kept), and one never recalled that is older than `days` as
 /// of `today` (`YYYY-MM-DD`). A kept verdict protects a memory.
 #[must_use]
-pub fn stale(all: &[Memory], days: i64, today: &str) -> Vec<Stale> {
+pub fn stale(all: &[Memory], days: u64, today: &str) -> Vec<Stale> {
     let mut out = Vec::new();
     let mut seen: BTreeMap<String, &Memory> = BTreeMap::new();
     let mut newest_first: Vec<&Memory> = all.iter().collect();
@@ -695,7 +695,7 @@ pub fn stale(all: &[Memory], days: i64, today: &str) -> Vec<Stale> {
     let cutoff = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d")
         .ok()
         .and_then(|d| {
-            let back = chrono::Duration::try_days(days)?;
+            let back = chrono::Duration::try_days(i64::try_from(days).ok()?)?;
             Some(d.checked_sub_signed(back)?.format("%Y-%m-%d").to_string())
         });
     if let Some(cutoff) = cutoff {
