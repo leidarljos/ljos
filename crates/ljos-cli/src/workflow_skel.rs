@@ -222,12 +222,17 @@ fn acquire_run_lock(parent: &str) -> Result<crate::CommitLock> {
         .with_context(|| format!("workflow: create {}", lock_dir.display()))?;
     let lock_path = lock_dir.join(format!("workflow-start-{slug}.lock"));
     let deadline = std::time::Instant::now() + run_lock_wait();
-    crate::CommitLock::acquire_by(&lock_path, deadline).ok_or_else(|| {
-        anyhow::anyhow!(
+    match crate::CommitLock::acquire_by(&lock_path, deadline) {
+        Ok(Some(lock)) => Ok(lock),
+        Ok(None) => Err(anyhow::anyhow!(
             "workflow: timed out waiting for the run lock for {parent} at {}",
             lock_path.display()
-        )
-    })
+        )),
+        Err(err) => Err(anyhow::anyhow!(
+            "workflow: cannot lock the run for {parent} at {}: {err}",
+            lock_path.display()
+        )),
+    }
 }
 
 /// How long `--start` waits for the per-run lock.

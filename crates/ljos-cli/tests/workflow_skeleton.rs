@@ -1625,6 +1625,65 @@ fn start_lock_times_out_with_a_clear_error() {
 }
 
 #[test]
+fn start_refuses_an_unreadable_lock_and_files_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Unreadable lock", "--top", "-p", "demo"]));
+    let lock_dir = board.root.join(".ljos-locks");
+    std::fs::create_dir_all(&lock_dir).unwrap();
+    let lock_path = lock_dir.join(format!("workflow-start-{parent}.lock"));
+    std::fs::write(&lock_path, b"").unwrap();
+    std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let args = [
+        "workflow",
+        "--start",
+        "release",
+        &parent,
+        "--var",
+        "version=1.2.0",
+    ];
+    let first = board
+        .cmd_as("saddle", &args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let second = board
+        .cmd_as("saddle", &args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out1 = first.wait_with_output().unwrap();
+    let out2 = second.wait_with_output().unwrap();
+    let err1 = text(&out1);
+    let err2 = text(&out2);
+    assert!(!out1.status.success(), "{err1}");
+    assert!(!out2.status.success(), "{err2}");
+    assert!(err1.contains("cannot lock"), "{err1}");
+    assert!(err2.contains("cannot lock"), "{err2}");
+    assert!(err1.contains(&parent), "{err1}");
+    assert!(err1.contains(lock_path.to_str().unwrap()), "{err1}");
+
+    let layout = vissue_core::Layout::new(&board.root, "Software");
+    let doc =
+        vissue_core::IssueDoc::parse_file("demo", &layout.project_issues_path("demo")).unwrap();
+    let children: Vec<_> = doc
+        .headings
+        .iter()
+        .filter(|h| h.parent().map(str::trim) == Some(parent.as_str()))
+        .collect();
+    assert!(
+        children.is_empty(),
+        "unreadable lock filed {} steps:\n{err1}\n{err2}",
+        children.len()
+    );
+}
+
+#[test]
 fn external_blocked_by_edges_appear_in_status_and_block_signoff() {
     let board = Board::new();
     let path = board.write_skel("release.org", SKEL);
