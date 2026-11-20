@@ -47775,14 +47775,12 @@ fn tracker_git_out(dir: &Path, args: &[&str]) -> Option<String> {
 }
 
 fn issue_block_lines(text: &str, issue: &str) -> Option<Vec<String>> {
+    let heading = issue_heading(text, issue)?;
     let lines: Vec<&str> = text.lines().collect();
-    let id_at = lines
-        .iter()
-        .position(|line| line_is_issue_id(line, issue))?;
-    let start = (0..=id_at).rev().find(|i| heading_line(lines[*i]))?;
-    let end = ((id_at + 1)..lines.len())
+    let start = heading.line_start.saturating_sub(1);
+    let end = ((start + 1)..heading.line_end.min(lines.len()))
         .find(|i| heading_line(lines[*i]))
-        .unwrap_or(lines.len());
+        .unwrap_or(heading.line_end.min(lines.len()));
     Some(lines[start..end].iter().map(|s| (*s).to_owned()).collect())
 }
 
@@ -49015,50 +49013,103 @@ fn heading_line(line: &str) -> bool {
     rest.is_empty() || rest.starts_with(['*', ' ', '\t'])
 }
 
-fn line_is_issue_id(line: &str, issue: &str) -> bool {
-    let trimmed = line.trim();
-    let Some(rest) = trimmed.strip_prefix(":ID:") else {
-        return false;
-    };
-    rest.trim() == issue
+/// The heading whose own property drawer has `:ID: issue`, parsed the way
+/// the tracker parses it. An `:ID:` line quoted in another heading's body,
+/// or in an example block, is not that heading.
+fn issue_heading(text: &str, issue: &str) -> Option<vissue_core::IssueHeading> {
+    let doc = vissue_core::IssueDoc::parse("", PathBuf::new(), text).ok()?;
+    doc.headings.into_iter().find(|h| h.id == issue)
 }
 
-fn insert_logbook_line(text: &str, issue: &str, entry: &str) -> Option<String> {
+/// Where `issue`'s logbook sits: the index of its first line after
+/// `:LOGBOOK:` with the drawer's lines, or the index to open one at.
+fn logbook_site(
+    lines: &[&str],
+    heading: &vissue_core::IssueHeading,
+) -> (usize, Option<Vec<String>>) {
+    let start = heading.line_start.saturating_sub(1);
+    let end = heading.line_end.min(lines.len());
+    let mut i = start + 1;
+    while i < end && !vissue_core::org::parse_planning_line(lines[i]).is_empty() {
+        i += 1;
+    }
+    let mut open_at = i;
+    while i < end {
+        let trimmed = lines[i].trim();
+        if trimmed.is_empty() {
+            i += 1;
+            continue;
+        }
+        if !vissue_core::org::opens_a_drawer(trimmed) {
+            break;
+        }
+        let logbook = trimmed.eq_ignore_ascii_case(":LOGBOOK:");
+        let first = i + 1;
+        i = first;
+        while i < end && !lines[i].trim().eq_ignore_ascii_case(":END:") {
+            i += 1;
+        }
+        if logbook {
+            let held = lines[first..i]
+                .iter()
+                .map(|l| l.trim().to_string())
+                .collect();
+            return (first, Some(held));
+        }
+        i = (i + 1).min(end);
+        open_at = i;
+    }
+    (open_at, None)
+}
+
+/// Whether the heading's `:CLAIMED_BY:` names a seat other than `seat`.
+fn claimed_by_another_seat(heading: &vissue_core::IssueHeading, seat: &str) -> bool {
+    heading.claimed_by().is_some_and(|held| {
+        let (holder, _) = holder_parts(unscoped_holder(held, &heading.id));
+        seat_slug(&holder) != seat_slug(seat)
+    })
+}
+
+/// `text` with `entry` at the top of `issue`'s logbook, or `None` when the
+/// file does not hold the issue or the drawer already has the line. A
+/// `noted` line counts only above the newest note, so each note gets its
+/// own. A `claimed` line is not written while `:CLAIMED_BY:` names another
+/// seat.
+fn insert_logbook_line(
+    text: &str,
+    issue: &str,
+    verb: &str,
+    seat: &str,
+    entry: &str,
+) -> Option<String> {
+    let heading = issue_heading(text, issue)?;
+    let noted = verb.trim() == "noted";
+    if verb.trim() == "claimed" && claimed_by_another_seat(&heading, seat) {
+        return None;
+    }
     let ends_nl = text.ends_with('\n');
-    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
-    if ends_nl && lines.last().is_some_and(String::is_empty) {
-        lines.pop();
+    let lines: Vec<&str> = text.lines().collect();
+    let (at, held) = logbook_site(&lines, &heading);
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len() + 3);
+    out.extend_from_slice(&lines[..at]);
+    match held {
+        Some(held)
+            if held
+                .iter()
+                .take_while(|line| !(noted && line.starts_with("- Note:")))
+                .any(|line| line == entry.trim()) =>
+        {
+            return None
+        }
+        Some(_) => out.push(entry),
+        None => out.extend([":LOGBOOK:", entry, ":END:"]),
     }
-    let id_at = lines
-        .iter()
-        .position(|line| line_is_issue_id(line, issue))?;
-    let start = (0..=id_at)
-        .rev()
-        .find(|i| heading_line(&lines[*i]))
-        .unwrap_or(0);
-    let end = ((id_at + 1)..lines.len())
-        .find(|i| heading_line(&lines[*i]))
-        .unwrap_or(lines.len());
-    let block_end = end;
-    if let Some(rel) = lines[start..block_end]
-        .iter()
-        .position(|line| line.trim() == ":LOGBOOK:")
-    {
-        lines.insert(start + rel + 1, entry.to_string());
-    } else {
-        let rel = lines[start..block_end]
-            .iter()
-            .rposition(|line| line.trim() == ":END:")?;
-        let at = start + rel + 1;
-        lines.insert(at, ":END:".into());
-        lines.insert(at, entry.to_string());
-        lines.insert(at, ":LOGBOOK:".into());
-    }
-    let mut out = lines.join("\n");
+    out.extend_from_slice(&lines[at..]);
+    let mut next = out.join("\n");
     if ends_nl {
-        out.push('\n');
+        next.push('\n');
     }
-    Some(out)
+    Some(next)
 }
 
 /// Put `- {Verb} by {seat} [timestamp]` at the top of the issue's logbook.
@@ -49069,6 +49120,11 @@ fn insert_logbook_line(text: &str, issue: &str, entry: &str) -> Option<String> {
 /// whole, and so does this. Rewritten in place, the stamp could drop a
 /// ballot another seat wrote between the read and the write, and a `git
 /// add` hashing the file meanwhile dies on unstable object data.
+///
+/// The file is read under that lock and the heading is the one whose own
+/// drawer has the `:ID:`. A rerun in the same minute finds its line and
+/// writes nothing, while a second note gets a second line. `claimed` is
+/// not written over a `:CLAIMED_BY:` that names another seat.
 pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> bool {
     let entry = format!(
         "- {} by {} {}",
@@ -49078,7 +49134,7 @@ pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> b
     );
     with_wall_bounded_issues_lock(path, || {
         let text = std::fs::read_to_string(path)?;
-        let Some(next) = insert_logbook_line(&text, issue, &entry) else {
+        let Some(next) = insert_logbook_line(&text, issue, verb, seat, &entry) else {
             return Ok(false);
         };
         vissue_core::store::replace_file_atomically(path, &next)?;
@@ -49142,20 +49198,15 @@ fn logbook_opens_with_note_seat(path: &Path, issue: &str, seat: &str) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else {
         return false;
     };
-    let lines: Vec<&str> = text.lines().collect();
-    let Some(id_at) = lines.iter().position(|line| line_is_issue_id(line, issue)) else {
+    let Some(heading) = issue_heading(&text, issue) else {
         return false;
     };
-    let Some(book) = lines[id_at..]
-        .iter()
-        .position(|line| line.trim() == ":LOGBOOK:")
-    else {
+    let lines: Vec<&str> = text.lines().collect();
+    let (_, Some(held)) = logbook_site(&lines, &heading) else {
         return false;
     };
     let want = format!("- Noted by {seat} ");
-    lines
-        .get(id_at + book + 1)
-        .is_some_and(|line| line.trim().starts_with(&want))
+    held.first().is_some_and(|line| line.starts_with(&want))
 }
 
 /// Use vissue's blocking write lock normally, but honor an armed wall
@@ -62322,6 +62373,87 @@ mod tests {
             std::fs::metadata(&path).unwrap().ino(),
             before,
             "a git add hashing the old file keeps reading the old file"
+        );
+    }
+
+    const QUOTED_DRAWER: &str = "\
+* TODO first :ticket:
+:PROPERTIES:
+:ID:         demo-a
+:END:
+:LOGBOOK:
+- Note: \"seeded\" [2026-11-19 Thu 10:00]
+:END:
+
+Copied from the second ticket:
+#+begin_example
+:PROPERTIES:
+:ID:         demo-b
+:END:
+#+end_example
+* TODO second
+:PROPERTIES:
+:ID:         demo-b
+:CLAIMED_BY: bob@host-b
+:END:
+";
+
+    fn logbook_of(text: &str, id: &str) -> Vec<String> {
+        let doc = vissue_core::IssueDoc::parse("demo", PathBuf::new(), text).unwrap();
+        let heading = doc.headings.iter().find(|h| h.id == id).unwrap();
+        heading.logbook.iter().map(|e| e.render()).collect()
+    }
+
+    #[test]
+    fn a_logbook_stamp_lands_on_the_heading_whose_drawer_has_the_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("issues.org");
+        std::fs::write(&path, QUOTED_DRAWER).unwrap();
+        assert!(stamp_seat_logbook(&path, "demo-b", "noted", "bob"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(logbook_of(&text, "demo-a").len(), 1, "{text}");
+        let b = logbook_of(&text, "demo-b");
+        assert!(
+            b.len() == 1 && b[0].starts_with("- Noted by bob ["),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_claim_stamp_rerun_in_the_same_minute_writes_one_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("issues.org");
+        std::fs::write(&path, QUOTED_DRAWER).unwrap();
+        stamp_seat_logbook(&path, "demo-b", "claimed", "bob");
+        stamp_seat_logbook(&path, "demo-b", "claimed", "bob");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(logbook_of(&text, "demo-b").len(), 1, "{text}");
+        assert!(stamp_seat_logbook(&path, "demo-b", "noted", "bob"));
+        assert!(!stamp_seat_logbook(&path, "demo-b", "noted", "bob"));
+        let second = std::fs::read_to_string(&path).unwrap().replacen(
+            "- Noted by bob",
+            "- Note: \"second\" [2026-11-20 Fri 10:00]\n- Noted by bob",
+            1,
+        );
+        std::fs::write(&path, second).unwrap();
+        assert!(stamp_seat_logbook(&path, "demo-b", "noted", "bob"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(logbook_of(&text, "demo-b").len(), 4, "{text}");
+    }
+
+    #[test]
+    fn a_claimed_stamp_is_not_written_over_another_seats_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("issues.org");
+        std::fs::write(&path, QUOTED_DRAWER).unwrap();
+        assert!(!stamp_seat_logbook(&path, "demo-b", "claimed", "eessi"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("Claimed by eessi"), "{text}");
+        assert!(stamp_seat_logbook(&path, "demo-b", "claimed", "bob"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            logbook_of(&text, "demo-b")[0].starts_with("- Claimed by bob ["),
+            "{text}"
         );
     }
 
