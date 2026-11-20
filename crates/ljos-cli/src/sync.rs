@@ -925,6 +925,16 @@ pub(crate) fn open_dir_beneath(
     rel: &str,
     create: bool,
 ) -> Result<Option<std::fs::File>> {
+    open_dir_beneath_mode(root, rel, create, 0o777)
+}
+
+/// [`open_dir_beneath`], making a missing component with `mode`.
+fn open_dir_beneath_mode(
+    root: &Path,
+    rel: &str,
+    create: bool,
+    mode: libc::mode_t,
+) -> Result<Option<std::fs::File>> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::OpenOptionsExt;
     let flags =
@@ -948,7 +958,7 @@ pub(crate) fn open_dir_beneath(
         let mut fd = open(&dir);
         if fd < 0 && create && last_errno() == Some(libc::ENOENT) {
             // SAFETY: as above; mkdirat makes one directory entry.
-            if unsafe { libc::mkdirat(dir.as_raw_fd(), cname.as_ptr(), 0o777) } < 0
+            if unsafe { libc::mkdirat(dir.as_raw_fd(), cname.as_ptr(), mode) } < 0
                 && last_errno() != Some(libc::EEXIST)
             {
                 return Err(std::io::Error::last_os_error())
@@ -1046,13 +1056,33 @@ thread_local! {
 /// with no symlink at any component. The directory is fsynced once the
 /// new name is in place.
 pub(crate) fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
+    write_beneath_mode(root, rel, bytes, false)
+}
+
+/// [`write_beneath`] for a file only this user may read: the file is
+/// 0600, and its directory is made or left 0700, as `age.key` is.
+fn write_private_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
+    write_beneath_mode(root, rel, bytes, true)
+}
+
+fn write_beneath_mode(root: &Path, rel: &str, bytes: &[u8], private: bool) -> Result<()> {
     use std::io::Write;
     use std::os::fd::AsRawFd;
     let _durable = crate::bookkeep::durable_write();
     let (parent, name) = split_rel(rel);
     std::fs::create_dir_all(root).with_context(|| format!("sync: {}", root.display()))?;
-    let dir = open_dir_beneath(root, parent, true)?
+    let (dir_mode, file_mode) = if private {
+        (0o700, 0o600)
+    } else {
+        (0o777, 0o666)
+    };
+    let dir = open_dir_beneath_mode(root, parent, true, dir_mode)?
         .with_context(|| format!("sync: {} was not made", root.join(parent).display()))?;
+    // SAFETY: dir is an open directory fd owned here.
+    if private && unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("sync: {}", root.join(parent).display()));
+    }
     // The directory fd is what the write uses. A symlink swapped in for a
     // parent after this open is not followed.
     before_dir_write();
@@ -1073,7 +1103,7 @@ pub(crate) fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> 
         &ctmp,
         &shown,
         libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-        0o666,
+        file_mode,
     )
     .with_context(|| format!("sync: {}", shown.display()))?;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
@@ -1808,7 +1838,7 @@ fn keep_sealed(sealed: &[u8], plain: &str, scope_name: &str, recipients: &[Strin
         identity_recipient(identity).is_ok_and(|key| recipients.iter().any(|r| r.trim() == key))
     });
     if opens {
-        let _ = write_beneath(
+        let _ = write_private_beneath(
             &state_base(),
             &opened_mark_rel(sealed, &identities),
             plain.as_bytes(),
@@ -3500,7 +3530,7 @@ fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<Stri
     let opened = open_sealed_bytes_with_age(bytes, identities)?;
     if KEEP_OPENED.with(std::cell::Cell::get) {
         let body: &[u8] = opened.as_deref().map_or(&[], str::as_bytes);
-        let _ = write_beneath(&state_base(), &rel, body);
+        let _ = write_private_beneath(&state_base(), &rel, body);
     }
     Ok(opened)
 }

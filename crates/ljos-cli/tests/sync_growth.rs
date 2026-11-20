@@ -855,3 +855,37 @@ fn a_temp_file_left_by_a_cut_write_is_not_committed() {
     let listed = git(&w.origin, &["ls-tree", "-r", "--name-only", "main"]);
     assert!(!listed.contains(".tmp-"), "{listed}\n{said}");
 }
+
+impl World {
+    /// Where this home keeps the plaintext of sealed files.
+    fn opened_dir(&self) -> PathBuf {
+        self.home.join(".local/state/ljos/sync/opened")
+    }
+}
+
+#[test]
+fn the_kept_plaintexts_are_this_users_alone_and_not_committed() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, atoms, _) = sealed_log();
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    std::fs::set_permissions(w.opened_dir(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    w.add(lesson(atoms.len(), LINE));
+    let said = w.sync();
+    assert!(said.contains("1 changed"), "{said}");
+    let dir = w.opened_dir();
+    assert_eq!(mode(&dir), 0o700, "{}", dir.display());
+    let files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert!(files.len() >= 3, "{files:?}");
+    for file in &files {
+        assert_eq!(mode(file), 0o600, "{}", file.display());
+    }
+    let tracked = git(&w.repo, &["ls-files"]);
+    assert!(!tracked.contains("opened"), "{tracked}");
+    assert_eq!(git(&w.repo, &["status", "--porcelain"]), "", "{said}");
+}
