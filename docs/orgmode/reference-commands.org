@@ -10,7 +10,7 @@ A command exits 0 when it did what was asked.
 A bad command, a bad flag, or a bad flag value exits 2.
 A runtime failure exits 1.
 A check that writes nothing exits 1. That includes a blank persona name or view, an unknown runner, a playbook the closed set does not name, a rule or preference the checks refuse, a learn step that cannot weigh, an unknown or ambiguous memory id, a grade of a claim no due page showed, a no ballot with no open child, a close that leaves the parent open, and a mail draft the checks refuse.
-That is a missing program, a ticket the tracker does not hold, a store that is missing, read-only or full, a pack that was turned off, or a network error while upgrading.
+Runtime failures include a missing program, a ticket absent from the tracker, a store that is missing, read-only or full, a pack that was turned off, or a network error while upgrading.
 Mail, inbox and recall exit 75 when the pack is busy.
 A search that cannot ask the pack ranks by words from local data and says it fell back.
 The first line says why. A writer that is not running names =packset ensure=. A writer that stays busy says the rows are word matches. When no words match, search exits 1.
