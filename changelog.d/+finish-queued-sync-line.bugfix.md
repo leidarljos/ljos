@@ -1,0 +1,1 @@
+Queue the ticket seal from `ljos finish` when a write is queued so the next ordinary call sends the write and seals the ticket log, and print one clean `ljos doctor` line when an unqueued finish cannot reach the pack.

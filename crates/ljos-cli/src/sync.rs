@@ -2036,20 +2036,96 @@ pub(crate) fn atoms_doctor_state() -> Option<String> {
 /// The pack did not answer, or age refused to seal for a reason other
 /// than being absent.
 pub fn seal_ticket_in_passing(issue: &str) -> Result<String> {
+    let _call_budget = crate::pack_link::CallRetryBudget::enter();
+    let _quiet = crate::pack_link::QuietPack::enter();
+    seal_ticket_in_passing_at(issue, None)
+}
+
+pub(crate) fn seal_roots() -> Vec<String> {
+    sync_roots()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|root| matches!(scope_of_repo(root), Ok(Some(_))))
+        .map(|root| root.display().to_string())
+        .filter(|root| !root.trim().is_empty())
+        .collect()
+}
+
+pub(crate) fn has_scoped_root() -> bool {
+    !seal_roots().is_empty()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PassingSeal {
+    Blocked,
+    Wait { text: String, why: String },
+    Drop { text: String, why: String },
+    Unchanged(String),
+    Sealed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SealState {
+    Sealed,
+    Unchanged,
+    MissingAge,
+    Warn,
+}
+
+pub(crate) fn seal_ticket_in_passing_at(issue: &str, root: Option<&Path>) -> Result<String> {
+    Ok(match seal_ticket_in_passing_checked(issue, root, None)? {
+        PassingSeal::Blocked => String::new(),
+        PassingSeal::Wait { text, .. }
+        | PassingSeal::Drop { text, .. }
+        | PassingSeal::Unchanged(text)
+        | PassingSeal::Sealed(text) => text,
+    })
+}
+
+pub(crate) fn seal_ticket_in_passing_checked(
+    issue: &str,
+    root: Option<&Path>,
+    mut can_seal: Option<&mut dyn FnMut() -> bool>,
+) -> Result<PassingSeal> {
     let mode = tracker_git(false);
     let mut atoms: Option<Vec<Value>> = None;
     let mut out = String::new();
-    for root in sync_roots()? {
+    let mut sealed = false;
+    let mut saw_off = false;
+    let mut saw_missing_age = false;
+    let mut saw_warn = false;
+    let mut saw_unscoped = false;
+    let explicit_root = root.is_some();
+    let roots = match root {
+        Some(path) if path.exists() => vec![path.to_path_buf()],
+        Some(_) => {
+            return Ok(PassingSeal::Drop {
+                text: String::new(),
+                why: "queued seal root is missing".into(),
+            });
+        }
+        None => sync_roots()?,
+    };
+    for root in roots {
         let Some(scope) = scope_of_repo(&root)? else {
+            if explicit_root {
+                saw_unscoped = true;
+            }
             continue;
         };
         if mode == TrackerGit::Off {
             out.push_str("sync: off (LJOS_TRACKER_GIT); `ljos sync` runs it by hand\n");
+            saw_off = true;
             continue;
         }
         let ticket = match &atoms {
             Some(ticket) => ticket,
             None => {
+                if let Some(check) = can_seal.as_deref_mut() {
+                    if !check() {
+                        return Ok(PassingSeal::Blocked);
+                    }
+                }
                 let client = crate::pack()?;
                 let all = crate::atoms_lean(&client, &client.workspace())?;
                 atoms.insert(
@@ -2065,15 +2141,46 @@ pub fn seal_ticket_in_passing(issue: &str) -> Result<String> {
         if let Err(e) = crate::tracker_push::prepare_tracker(&root, false, true) {
             out.push_str(&format!("sync: merge setup: {e}\n"));
         }
-        out.push_str(&seal_ticket(
-            &root,
-            &scope,
-            issue,
-            ticket,
-            mode == TrackerGit::Push,
-        )?);
+        if let Some(check) = can_seal.as_deref_mut() {
+            if !check() {
+                return Ok(PassingSeal::Blocked);
+            }
+        }
+        let (said, state) = seal_ticket(&root, &scope, issue, ticket, mode == TrackerGit::Push)?;
+        out.push_str(&said);
+        match state {
+            SealState::Sealed => sealed = true,
+            SealState::MissingAge => saw_missing_age = true,
+            SealState::Warn => saw_warn = true,
+            SealState::Unchanged => {}
+        }
     }
-    Ok(out)
+    if sealed {
+        return Ok(PassingSeal::Sealed(out));
+    }
+    if saw_missing_age {
+        return Ok(PassingSeal::Wait {
+            text: out,
+            why: "age is not on PATH".into(),
+        });
+    }
+    if saw_off {
+        return Ok(PassingSeal::Wait {
+            text: out,
+            why: "LJOS_TRACKER_GIT is off".into(),
+        });
+    }
+    if saw_warn {
+        let why = out.trim().to_string();
+        return Ok(PassingSeal::Drop { text: out, why });
+    }
+    if saw_unscoped {
+        return Ok(PassingSeal::Drop {
+            text: out,
+            why: "queued seal root has no sync scope".into(),
+        });
+    }
+    Ok(PassingSeal::Unchanged(out))
 }
 
 /// [`seal_ticket_in_passing`] for one tracker, with the ticket's atoms
@@ -2084,10 +2191,10 @@ fn seal_ticket(
     issue: &str,
     atoms: &[Value],
     push: bool,
-) -> Result<String> {
+) -> Result<(String, SealState)> {
     let default = configured_default(scope)?;
     if !age_on_path() {
-        return Ok(age_missing_line());
+        return Ok((age_missing_line(), SealState::MissingAge));
     }
     let mut out = String::new();
     let mut sealed = false;
@@ -2105,7 +2212,7 @@ fn seal_ticket(
             &default,
         )?;
         if said == age_missing_line() {
-            return Ok(said);
+            return Ok((said, SealState::MissingAge));
         }
         out.push_str(&said);
         sealed |= wrote;
@@ -2116,8 +2223,14 @@ fn seal_ticket(
         } else {
             commit_logs(root, scope, push)
         });
+        return Ok((out, SealState::Sealed));
     }
-    Ok(out)
+    let state = if out.contains("warning:") {
+        SealState::Warn
+    } else {
+        SealState::Unchanged
+    };
+    Ok((out, state))
 }
 
 /// Seal the atoms of `issue` in `scope_name` as one chunk over this
@@ -4887,6 +5000,8 @@ fn followed_refs(root: &Path) -> Vec<String> {
 /// A scope file that does not parse, the pack not answering, or age
 /// refusing to seal.
 pub fn sync_repo(pull_import: bool, export_log: bool) -> Result<String> {
+    let _call_budget = crate::pack_link::CallRetryBudget::enter();
+    let _quiet = crate::pack_link::QuietPack::enter();
     let said = sync_repos(pull_import, export_log, true)?;
     Ok(sync_summary(said))
 }
@@ -4900,6 +5015,8 @@ pub fn sync_repo(pull_import: bool, export_log: bool) -> Result<String> {
 ///
 /// As [`sync_repo`].
 pub fn sync_repo_in_passing(pull_import: bool, export_log: bool) -> Result<String> {
+    let _call_budget = crate::pack_link::CallRetryBudget::enter();
+    let _quiet = crate::pack_link::QuietPack::enter();
     sync_repos(pull_import, export_log, false)
 }
 
@@ -9613,7 +9730,8 @@ mod tests {
         atoms.push(atom("o1", "another ticket's lesson", &["issue:proj-o1"]));
         atoms.extend(ticket.iter().cloned());
         let name = fix.scope.name.clone();
-        let said = seal_ticket(&fix.root, &fix.scope, "proj-t1", &ticket, false).unwrap();
+        let (said, state) = seal_ticket(&fix.root, &fix.scope, "proj-t1", &ticket, false).unwrap();
+        assert_eq!(state, SealState::Sealed, "{said}");
         assert!(
             said.contains(&format!("sealed 4 {name} atoms of proj-t1")),
             "{said}"
@@ -12783,5 +12901,186 @@ mod tests {
             assert!(!said.contains("unread"), "{}: {said}", root.display());
         }
         assert_eq!(fix.held(), vec!["Alice's box note.", "Alice's cloud note."]);
+    }
+
+    #[test]
+    fn seal_ticket_in_passing_respects_no_tracker_to_write() {
+        let _g = crate::tests::env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let work = dir.path().join("plain-checkout");
+        std::fs::create_dir_all(home.join(".config")).unwrap();
+        std::fs::create_dir_all(home.join(".local/state")).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        let prev_cwd = std::env::current_dir().unwrap();
+        struct Restore {
+            cwd: PathBuf,
+            home: Option<std::ffi::OsString>,
+            xdg_cfg: Option<std::ffi::OsString>,
+            xdg_state: Option<std::ffi::OsString>,
+            vissue_root: Option<std::ffi::OsString>,
+            vissue_cfg: Option<std::ffi::OsString>,
+            ljos_home: Option<std::ffi::OsString>,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.cwd);
+                unsafe {
+                    match &self.home {
+                        Some(v) => std::env::set_var("HOME", v),
+                        None => std::env::remove_var("HOME"),
+                    }
+                    match &self.xdg_cfg {
+                        Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                        None => std::env::remove_var("XDG_CONFIG_HOME"),
+                    }
+                    match &self.xdg_state {
+                        Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                        None => std::env::remove_var("XDG_STATE_HOME"),
+                    }
+                    match &self.vissue_root {
+                        Some(v) => std::env::set_var("VISSUE_ROOT", v),
+                        None => std::env::remove_var("VISSUE_ROOT"),
+                    }
+                    match &self.vissue_cfg {
+                        Some(v) => std::env::set_var("VISSUE_CONFIG", v),
+                        None => std::env::remove_var("VISSUE_CONFIG"),
+                    }
+                    match &self.ljos_home {
+                        Some(v) => std::env::set_var("LJOS_HOME", v),
+                        None => std::env::remove_var("LJOS_HOME"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore {
+            cwd: prev_cwd,
+            home: std::env::var_os("HOME"),
+            xdg_cfg: std::env::var_os("XDG_CONFIG_HOME"),
+            xdg_state: std::env::var_os("XDG_STATE_HOME"),
+            vissue_root: std::env::var_os("VISSUE_ROOT"),
+            vissue_cfg: std::env::var_os("VISSUE_CONFIG"),
+            ljos_home: std::env::var_os("LJOS_HOME"),
+        };
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+            std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+            std::env::remove_var("VISSUE_ROOT");
+            std::env::remove_var("VISSUE_CONFIG");
+            std::env::remove_var("LJOS_HOME");
+        }
+        std::env::set_current_dir(&work).unwrap();
+        let said = super::seal_ticket_in_passing("demo-none")
+            .expect("no_tracker_to_write must return Ok empty instead of failing or writing");
+        assert!(said.is_empty(), "{said}");
+        assert!(!work.join(".gitattributes").exists());
+    }
+
+    #[test]
+    fn seal_ticket_in_passing_checked_skips_missing_root_and_checks_gate_before_atoms_fetch() {
+        let _g = crate::tests::env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let tracker = dir.path().join("tracker");
+        let missing = dir.path().join("vanished-tracker");
+        std::fs::create_dir_all(home.join(".config")).unwrap();
+        std::fs::create_dir_all(home.join(".local/state")).unwrap();
+        std::fs::create_dir_all(tracker.join(".git")).unwrap();
+        std::fs::create_dir_all(tracker.join(".ljos")).unwrap();
+        std::fs::create_dir_all(tracker.join("issues")).unwrap();
+        let machine = age_keygen(&dir.path().join("machine.key"));
+        std::fs::write(
+            tracker.join(".ljos/sync.toml"),
+            format!("name = \"demo\"\nrecipients = [\"{machine}\"]\n"),
+        )
+        .unwrap();
+        std::fs::write(tracker.join(".vissue.toml"), "project = \"demo\"\n").unwrap();
+        let prev_cwd = std::env::current_dir().unwrap();
+        struct Restore {
+            cwd: PathBuf,
+            home: Option<std::ffi::OsString>,
+            xdg_cfg: Option<std::ffi::OsString>,
+            xdg_state: Option<std::ffi::OsString>,
+            vissue_root: Option<std::ffi::OsString>,
+            vissue_cfg: Option<std::ffi::OsString>,
+            ljos_home: Option<std::ffi::OsString>,
+            tracker_git: Option<std::ffi::OsString>,
+            pack_url: Option<std::ffi::OsString>,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.cwd);
+                unsafe {
+                    for (k, v) in [
+                        ("HOME", &self.home),
+                        ("XDG_CONFIG_HOME", &self.xdg_cfg),
+                        ("XDG_STATE_HOME", &self.xdg_state),
+                        ("VISSUE_ROOT", &self.vissue_root),
+                        ("VISSUE_CONFIG", &self.vissue_cfg),
+                        ("LJOS_HOME", &self.ljos_home),
+                        ("LJOS_TRACKER_GIT", &self.tracker_git),
+                        ("PACKSET_URL", &self.pack_url),
+                    ] {
+                        match v {
+                            Some(val) => std::env::set_var(k, val),
+                            None => std::env::remove_var(k),
+                        }
+                    }
+                }
+            }
+        }
+        let _restore = Restore {
+            cwd: prev_cwd,
+            home: std::env::var_os("HOME"),
+            xdg_cfg: std::env::var_os("XDG_CONFIG_HOME"),
+            xdg_state: std::env::var_os("XDG_STATE_HOME"),
+            vissue_root: std::env::var_os("VISSUE_ROOT"),
+            vissue_cfg: std::env::var_os("VISSUE_CONFIG"),
+            ljos_home: std::env::var_os("LJOS_HOME"),
+            tracker_git: std::env::var_os("LJOS_TRACKER_GIT"),
+            pack_url: std::env::var_os("PACKSET_URL"),
+        };
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+            std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+            std::env::remove_var("VISSUE_ROOT");
+            std::env::remove_var("VISSUE_CONFIG");
+            std::env::remove_var("LJOS_HOME");
+            std::env::set_var("LJOS_TRACKER_GIT", "off");
+            std::env::set_var("PACKSET_URL", "off");
+        }
+        let _ = std::fs::create_dir_all(home.join(".config/ljos"));
+        std::fs::write(
+            home.join(".config/ljos/sync.toml"),
+            format!("repos = [\"{}\"]\n", tracker.display()),
+        )
+        .unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&tracker)
+            .status();
+        std::env::set_current_dir(&tracker).unwrap();
+
+        let missed = super::seal_ticket_in_passing_checked("demo-1", Some(&missing), None)
+            .expect("missing explicit root must return Drop, not fall back to cwd");
+        assert!(
+            matches!(missed, super::PassingSeal::Drop { ref text, .. } if text.is_empty()),
+            "missing root fell back to sync_roots(): {missed:?}"
+        );
+
+        unsafe {
+            std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        }
+        let mut blocked = || false;
+        let gated =
+            super::seal_ticket_in_passing_checked("demo-1", Some(&tracker), Some(&mut blocked))
+                .expect("blocked gate must abort before touching the pack");
+        assert_eq!(
+            gated,
+            super::PassingSeal::Blocked,
+            "gate must run before atoms_lean so PACKSET_URL=off is never read"
+        );
     }
 }

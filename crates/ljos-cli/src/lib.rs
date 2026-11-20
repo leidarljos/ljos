@@ -21504,15 +21504,18 @@ fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
         }
         Err(err) if pack_link::write_bytes_sent(&err) => Err(err),
         Err(err) if writer_unreachable(&err) && !skip_writer_ensure() => match ensure_writer() {
-            Ok(()) => match op() {
-                // The start did not bring a writer up. A timeout on the
-                // retry is that same down writer, not a pack that is busy.
-                Err(err) if writer_unreachable(&err) || is_pack_busy(&err) => {
-                    mark_writer_down();
-                    Err(anyhow::anyhow!("{}", pack_down_line()))
+            Ok(()) => {
+                pack_link::clear_pack_quiet();
+                match op() {
+                    // The start did not bring a writer up. A timeout on the
+                    // retry is that same down writer, not a pack that is busy.
+                    Err(err) if writer_unreachable(&err) || is_pack_busy(&err) => {
+                        mark_writer_down();
+                        Err(anyhow::anyhow!("{}", pack_down_line()))
+                    }
+                    other => other,
                 }
-                other => other,
-            },
+            }
             Err(err) => {
                 mark_writer_down();
                 Err(err)
@@ -23618,61 +23621,105 @@ fn fit_queued(notes: Vec<note_queue::Queued>) -> Vec<note_queue::Queued> {
 fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
     // Nothing was queued. Creating the directory here is what left
     // note-queue.lock behind a read, a dry run, onboard and doctor.
-    if !note_queue::queue_exists(dir) {
+    let has_notes = note_queue::queue_exists(dir);
+    let has_seals = note_queue::seal_queue_exists(dir);
+    if !has_notes && !has_seals {
         return Ok(note_queue::Drained::default());
     }
-    let set_aside = note_queue::tidy_in(dir, fit_queued)?;
-    if note_queue::pending_in(dir).is_empty() {
-        return Ok(note_queue::Drained {
+    let set_aside = if has_notes {
+        note_queue::tidy_in(dir, fit_queued)?
+    } else {
+        None
+    };
+    let mut done = if note_queue::pending_in(dir).is_empty() {
+        note_queue::Drained {
             set_aside: set_aside.into_iter().collect(),
             ..Default::default()
-        });
-    }
-    let client = pack();
-    let mut done = note_queue::drain_in(dir, |note| {
-        let client = match &client {
-            Ok(client) => client.clone().with_workspace(note.workspace.clone()),
-            Err(e) => return note_queue::Sent::Wait(format!("{e:#}")),
-        };
-        // A row an older ljos queued from `ljos note` is left where it
-        // was said, on the ticket. Sending it now would put the working
-        // note back in memory, which is what this queue stopped doing.
-        if note.kind != "lesson" {
-            memory_port::keep_prose(
-                &note.text,
-                &note.kind,
-                "a note is kept on the ticket, not in memory; this copy was dropped",
-            );
-            return note_queue::Sent::Refused(
-                "a note is kept on the ticket, not in memory; this copy was dropped".into(),
-            );
         }
-        match post_queued_lesson(&client, note) {
-            QueuedPost::Wait(e) => note_queue::Sent::Wait(format!("{e:#}")),
-            QueuedPost::Done(Ok(body)) => {
-                note_queue::Sent::Kept(body["id"].as_str().unwrap_or("?").to_string())
+    } else {
+        let client = pack();
+        let mut done = note_queue::drain_in(dir, |note| {
+            let client = match &client {
+                Ok(client) => client.clone().with_workspace(note.workspace.clone()),
+                Err(e) => return note_queue::Sent::Wait(format!("{e:#}")),
+            };
+            // A row an older ljos queued from `ljos note` is left where it
+            // was said, on the ticket. Sending it now would put the working
+            // note back in memory, which is what this queue stopped doing.
+            if note.kind != "lesson" {
+                memory_port::keep_prose(
+                    &note.text,
+                    &note.kind,
+                    "a note is kept on the ticket, not in memory; this copy was dropped",
+                );
+                return note_queue::Sent::Refused(
+                    "a note is kept on the ticket, not in memory; this copy was dropped".into(),
+                );
             }
-            QueuedPost::Done(Err(e)) if existing_atom_id(&e).is_some() => {
-                note_queue::Sent::Kept(existing_atom_id(&e).unwrap_or_default())
-            }
-            QueuedPost::Done(Err(e)) if note_can_wait(&e) => {
-                note_queue::Sent::Wait(format!("{e:#}"))
-            }
-            QueuedPost::Done(Err(e)) => {
-                // A refused lesson is kept in this seat's memory slot.
-                // A lesson another seat queued stays that seat's, so the
-                // drainer does not take the copy.
-                let why = plain_refusal(&format!("{e:#}"));
-                let mine = seat_name();
-                let queued = note.seat.trim();
-                if queued.is_empty() || queued == mine {
-                    memory_port::keep_prose(&note.text, &note.kind, &why);
+            match post_queued_lesson(&client, note) {
+                QueuedPost::Wait(e) => note_queue::Sent::Wait(format!("{e:#}")),
+                QueuedPost::Done(Ok(body)) => {
+                    note_queue::Sent::Kept(body["id"].as_str().unwrap_or("?").to_string())
                 }
-                note_queue::Sent::Refused(why)
+                QueuedPost::Done(Err(e)) if existing_atom_id(&e).is_some() => {
+                    note_queue::Sent::Kept(existing_atom_id(&e).unwrap_or_default())
+                }
+                QueuedPost::Done(Err(e)) if note_can_wait(&e) => {
+                    note_queue::Sent::Wait(format!("{e:#}"))
+                }
+                QueuedPost::Done(Err(e)) => {
+                    // A refused lesson is kept in this seat's memory slot.
+                    // A lesson another seat queued stays that seat's, so the
+                    // drainer does not take the copy.
+                    let why = plain_refusal(&format!("{e:#}"));
+                    let mine = seat_name();
+                    let queued = note.seat.trim();
+                    if queued.is_empty() || queued == mine {
+                        memory_port::keep_prose(&note.text, &note.kind, &why);
+                    }
+                    note_queue::Sent::Refused(why)
+                }
             }
-        }
-    })?;
-    done.set_aside.splice(0..0, set_aside);
+        })?;
+        done.set_aside.splice(0..0, set_aside);
+        done
+    };
+    if note_queue::seal_queue_exists(dir) {
+        note_queue::drain_seals_in(dir, &mut done, |seal, gate| {
+            if let Some(wait) = gate.wait_if_blocked() {
+                return wait;
+            }
+            let trimmed_root = seal.root.trim();
+            if trimmed_root.is_empty() {
+                return note_queue::SealOutcome::Drop("queued seal has no tracker root".into());
+            }
+            let root = Path::new(trimmed_root);
+            if !root.exists() {
+                return note_queue::SealOutcome::Drop("queued seal root is missing".into());
+            }
+            let mut aborted: Option<note_queue::SealOutcome> = None;
+            let mut check = || match gate.wait_if_blocked() {
+                Some(wait) => {
+                    aborted = Some(wait);
+                    false
+                }
+                None => true,
+            };
+            match sync::seal_ticket_in_passing_checked(&seal.issue, Some(root), Some(&mut check)) {
+                Ok(sync::PassingSeal::Sealed(said)) => note_queue::SealOutcome::Sealed(said),
+                Ok(sync::PassingSeal::Unchanged(_)) => note_queue::SealOutcome::Nothing,
+                Ok(sync::PassingSeal::Wait { why, .. }) => note_queue::SealOutcome::Wait(why),
+                Ok(sync::PassingSeal::Drop { why, .. }) => note_queue::SealOutcome::Drop(why),
+                Ok(sync::PassingSeal::Blocked) => aborted.unwrap_or_else(|| {
+                    note_queue::SealOutcome::Wait("queued note still pending".into())
+                }),
+                Err(e) if remember_should_queue(&e) || note_can_wait(&e) => {
+                    note_queue::SealOutcome::Wait(format!("{e:#}"))
+                }
+                Err(e) => note_queue::SealOutcome::Drop(format!("{e:#}")),
+            }
+        })?;
+    }
     Ok(done)
 }
 
@@ -23789,14 +23836,19 @@ fn queued_already_stored(
 /// land stays queued for the next call.
 fn replay_ready_lessons() -> String {
     let dir = note_queue::state_dir();
-    if !note_queue::queue_exists(&dir) || note_queue::pending_in(&dir).is_empty() {
+    let has_notes = note_queue::queue_exists(&dir) && !note_queue::pending_in(&dir).is_empty();
+    let has_seals =
+        note_queue::seal_queue_exists(&dir) && !note_queue::pending_seals_in(&dir).is_empty();
+    if !has_notes && !has_seals {
         return String::new();
     }
     if pack_link::clock_left().is_some_and(|left| left <= std::time::Duration::from_millis(50)) {
         return String::new();
     }
     match flush_note_queue() {
-        Ok(done) if !done.kept.is_empty() => note_queue::drained_lines(&done),
+        Ok(done) if !done.kept.is_empty() || !done.sealed.is_empty() => {
+            note_queue::drained_lines(&done)
+        }
         _ => String::new(),
     }
 }
@@ -24777,7 +24829,7 @@ fn plain_refusal(why: &str) -> String {
 /// call this, and they say when a lesson is still waiting.
 pub fn flush_queued_lessons() {
     let dir = note_queue::state_dir();
-    if note_queue::pending_in(&dir).is_empty() {
+    if note_queue::pending_in(&dir).is_empty() && note_queue::pending_seals_in(&dir).is_empty() {
         return;
     }
     let _call_budget = pack_link::CallRetryBudget::enter();
@@ -24801,7 +24853,7 @@ pub fn flush_queued_lessons() {
             return;
         }
     };
-    let done = if done.left > 0
+    let done = if (done.left > 0 || done.seals_left > 0)
         && !queue_waits_on_writer(&done)
         && pack_link::clock_left().is_some_and(|left| left > std::time::Duration::from_millis(50))
     {
@@ -24811,6 +24863,8 @@ pub fn flush_queued_lessons() {
                 again.kept.splice(0..0, done.kept);
                 again.refused.splice(0..0, done.refused);
                 again.set_aside.splice(0..0, done.set_aside);
+                again.sealed.splice(0..0, done.sealed);
+                again.seals_dropped.splice(0..0, done.seals_dropped);
                 again
             }
             Err(_) => done,
@@ -24823,6 +24877,8 @@ pub fn flush_queued_lessons() {
         let mut rest = done;
         rest.left = 0;
         rest.waiting_on = None;
+        rest.seals_left = 0;
+        rest.seal_waiting_on = None;
         let lines = note_queue::drained_lines(&rest);
         if !lines.is_empty() {
             eprint!("{lines}");
@@ -24837,7 +24893,8 @@ pub fn flush_queued_lessons() {
 
 /// The drain left lessons because the writer refused the connection.
 fn queue_waits_on_writer(done: &note_queue::Drained) -> bool {
-    done.left > 0 && done.waiting_on.as_deref().is_some_and(text_is_down)
+    (done.left > 0 && done.waiting_on.as_deref().is_some_and(text_is_down))
+        || (done.seals_left > 0 && done.seal_waiting_on.as_deref().is_some_and(text_is_down))
 }
 
 /// The preference `ljos prefer` writes, stored at once from any caller.
@@ -38317,7 +38374,10 @@ fn plain_write_line(line: &str) -> String {
             None => format!("{lead}, so run `ljos sync`."),
         });
     }
-    if body.contains("could not") && !body.contains("not reached") {
+    if body.contains("could not")
+        && !body.contains("not reached")
+        && !(sync && body.contains("ljos doctor"))
+    {
         return say(format!(
             "The tracker write could not be committed ({}), so run `ljos doctor`.",
             clip_why(body)
@@ -38342,6 +38402,15 @@ fn plain_write_line(line: &str) -> String {
             "Sync could not update the tracker ({}), so run `ljos sync`.",
             clip_why(body)
         ));
+    }
+    if sync
+        && ((body.contains("queued") && body.contains("will be sent on the next call"))
+            || body.contains("ticket seal(s) still queued"))
+    {
+        return say("The sync step is queued and will be sent on the next call.".into());
+    }
+    if sync && body.contains("ljos doctor") {
+        return say("The sync step could not reach the pack, so run `ljos doctor`.".into());
     }
     if sync && body.contains("warning") {
         return say(
@@ -38439,11 +38508,19 @@ pub fn without_routine_git(text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
+    const QUEUED_SYNC: &str = "The sync step is queued and will be sent on the next call.";
+    let mut seen_queued_sync = false;
     let mut out = String::new();
     for line in text.lines() {
         let trim = line.trim();
         if trim.starts_with("tracker git:") || trim.starts_with("sync:") {
             if let Some(shown) = present_write_line(line) {
+                if shown == QUEUED_SYNC {
+                    if seen_queued_sync {
+                        continue;
+                    }
+                    seen_queued_sync = true;
+                }
                 out.push_str(&shown);
                 out.push('\n');
             }
@@ -38541,6 +38618,28 @@ sync: committed chore(sync): runner grokbot atoms; not pushed (LJOS_TRACKER_GIT=
         assert!(skipped.contains("push was skipped"), "{skipped}");
         assert!(skipped.contains("`ljos sync`"), "{skipped}");
         assert!(!skipped.contains("tracker git:"), "{skipped}");
+        let queued_sync =
+            without_routine_git("sync: a write is queued and will be sent on the next call\n");
+        assert_eq!(
+            queued_sync,
+            "The sync step is queued and will be sent on the next call.\n"
+        );
+        assert!(!queued_sync.contains("ljos sync"), "{queued_sync}");
+        let combined = without_routine_git(
+            "sync: 1 ticket seal(s) still queued (queued note still pending)\n\
+             sync: a write is queued and will be sent on the next call\n",
+        );
+        assert_eq!(
+            combined,
+            "The sync step is queued and will be sent on the next call.\n"
+        );
+        let unqueued_doctor = without_routine_git(
+            "sync: could not reach the pack to seal this ticket, so run `ljos doctor`.\n",
+        );
+        assert_eq!(
+            unqueued_doctor,
+            "The sync step could not reach the pack, so run `ljos doctor`.\n"
+        );
     }
 
     #[test]
@@ -48091,7 +48190,35 @@ pub fn finish(
     // What this ticket taught leaves the machine with the tracker. The
     // rest of the pack waits for `ljos sync`.
     out.push_str(&flush_queue_before_seal());
-    out.push_str(&sync::seal_ticket_in_passing(issue).unwrap_or_else(|e| format!("sync: {e:#}\n")));
+    let dir = note_queue::state_dir();
+    let pending = note_queue::pending_in(&dir);
+    let queued = !pending.is_empty();
+    let queued_for_issue = pending.iter().any(|row| row.issue.trim() == issue.trim());
+    let sync_line = match sync::seal_ticket_in_passing(issue) {
+        Ok(said) if queued_for_issue && said.trim().is_empty() && sync::has_scoped_root() => {
+            match queue_ticket_seal(&dir, issue) {
+                Ok(_) => "sync: a write is queued and will be sent on the next call\n".to_string(),
+                Err(e) => format!("sync: {e:#}\n"),
+            }
+        }
+        Ok(said) => said,
+        Err(e) if queued && remember_should_queue(&e) => match queue_ticket_seal(&dir, issue) {
+            Ok(false) if !sync::has_scoped_root() => String::new(),
+            Ok(_) => "sync: a write is queued and will be sent on the next call\n".to_string(),
+            Err(qerr) => format!("sync: {qerr:#} (after {e:#})\n"),
+        },
+        Err(e)
+            if is_pack_busy(&e)
+                || writer_is_down(&e)
+                || pack_under_load(&e)
+                || pack_unreachable(&e) =>
+        {
+            "sync: could not reach the pack to seal this ticket, so run `ljos doctor`.\n"
+                .to_string()
+        }
+        Err(e) => format!("sync: {e:#}\n"),
+    };
+    out.push_str(&sync_line);
     if !matches!(
         std::env::var("LJOS_TRACKER_GIT").ok().as_deref(),
         Some("off" | "0" | "false")
@@ -48103,6 +48230,26 @@ pub fn finish(
     Ok(out)
 }
 
+fn queue_ticket_seal(dir: &Path, issue: &str) -> Result<bool> {
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut queued = false;
+    for root in sync::seal_roots() {
+        queued |= note_queue::push_seal_in(
+            dir,
+            note_queue::QueuedSeal {
+                issue: issue.trim().to_string(),
+                root,
+                at,
+                claim: None,
+            },
+        )?;
+    }
+    Ok(queued)
+}
+
 /// Send what waits in the note queue before finish seals the atom log.
 ///
 /// The seal reads the pack, so a lesson that finish itself queued on a
@@ -48112,7 +48259,7 @@ pub fn finish(
 /// Nothing queued returns at once and writes nothing.
 fn flush_queue_before_seal() -> String {
     let dir = note_queue::state_dir();
-    if note_queue::pending_in(&dir).is_empty() {
+    if note_queue::pending_in(&dir).is_empty() && note_queue::pending_seals_in(&dir).is_empty() {
         return String::new();
     }
     let budget = std::time::Duration::from_secs(2);

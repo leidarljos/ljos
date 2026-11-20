@@ -7865,7 +7865,6 @@ fn run_command() -> Result<()> {
                     ljos_cli::pack_link::CommandDeadline::enter(std::time::Duration::from_secs(2));
                 let _clock =
                     ljos_cli::pack_link::PackClock::enter(std::time::Duration::from_secs(2));
-                let _quiet = ljos_cli::pack_link::QuietPack::enter();
                 match ljos_cli::flush_note_queue() {
                     Ok(done) => print!("{}", ljos_cli::note_queue::drained_lines(&done)),
                     Err(e) => eprintln!("ljos finish: note queue: {e:#}"),

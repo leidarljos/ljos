@@ -211,7 +211,9 @@ Another machine retires that host's copies, including each extra
 scope's `sync:HOST+SCOPE` copies, when it imports the adopt commit.
 A log is a base and the chunks sealed after it, `HOST.chunks/N.age`.
 `ljos finish` adds a chunk only when this machine can open its own log.
-When it cannot, finish prints a warning, leaves the atoms in the pack, and names `ljos sync`, which seals that log whole.
+When a write is queued and the seal cannot finish because the pack still needs that queued write or does not answer, `finish` queues the ticket seal and the next ordinary command sends the queued write before sealing.
+When no write is queued and the pack cannot be reached, `finish` prints one clean line naming `ljos doctor`.
+When the seal fails for another reason, `finish` prints a warning, leaves the atoms in the pack, and names `ljos sync`, which seals that log whole.
 A failed attributes stage does not cause that warning.
 A sync seals only the atoms added, changed or dropped as one chunk and
 leaves the base alone; a sync that changed no atom seals and commits
