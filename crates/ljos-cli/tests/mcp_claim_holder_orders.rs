@@ -8,6 +8,10 @@ mod sibling;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
+
+const READ_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn result_text(answer: &serde_json::Value) -> String {
     answer["result"]["structuredContent"]["text"]
@@ -16,15 +20,32 @@ fn result_text(answer: &serde_json::Value) -> String {
         .unwrap_or_else(|| answer.to_string())
 }
 
-fn read_response(stdout: &mut BufReader<std::process::ChildStdout>, id: u64) -> serde_json::Value {
-    let mut line = String::new();
+fn spawn_stdout_reader(stdout: std::process::ChildStdout) -> Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut stdout = BufReader::new(stdout);
+        let mut line = String::new();
+        while stdout.read_line(&mut line).unwrap_or(0) > 0 {
+            if tx.send(line.clone()).is_err() {
+                break;
+            }
+            line.clear();
+        }
+    });
+    rx
+}
+
+fn read_response(lines: &Receiver<String>, id: u64) -> serde_json::Value {
+    let deadline = Instant::now() + READ_TIMEOUT;
     loop {
-        line.clear();
-        assert_ne!(
-            stdout.read_line(&mut line).unwrap(),
-            0,
-            "no response for {id}"
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out after {READ_TIMEOUT:?} waiting for response {id}"
         );
+        let line = lines
+            .recv_timeout(deadline - now)
+            .unwrap_or_else(|err| panic!("no response for {id} within {READ_TIMEOUT:?}: {err}"));
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
@@ -220,7 +241,7 @@ fn run_order(case: &str, first_meta: bool) {
     assert_seat_tag_shape(&session_holder);
     let mut child = env.spawn_mcp();
     let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let stdout = spawn_stdout_reader(child.stdout.take().unwrap());
     writeln!(
         stdin,
         "{}",
@@ -236,7 +257,7 @@ fn run_order(case: &str, first_meta: bool) {
         })
     )
     .unwrap();
-    let _initialized = read_response(&mut stdout, 1);
+    let _initialized = read_response(&stdout, 1);
     writeln!(
         stdin,
         "{}",
@@ -255,19 +276,30 @@ fn run_order(case: &str, first_meta: bool) {
 
     let (first_rsp, second_rsp) = if first_meta {
         writeln!(stdin, "{meta}").unwrap();
-        let first = read_response(&mut stdout, 3);
+        let first = read_response(&stdout, 3);
         writeln!(stdin, "{plain}").unwrap();
-        let second = read_response(&mut stdout, 2);
+        let second = read_response(&stdout, 2);
         (first, second)
     } else {
         writeln!(stdin, "{plain}").unwrap();
-        let first = read_response(&mut stdout, 2);
+        let first = read_response(&stdout, 2);
         writeln!(stdin, "{meta}").unwrap();
-        let second = read_response(&mut stdout, 3);
+        let second = read_response(&stdout, 3);
         (first, second)
     };
     drop(stdin);
     drop(stdout);
+    let wait_deadline = Instant::now() + READ_TIMEOUT;
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < wait_deadline,
+            "timed out after {READ_TIMEOUT:?} waiting for ljos-mcp exit"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let out = child.wait_with_output().unwrap();
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(!stderr.contains("panicked"), "{stderr}");
@@ -331,9 +363,16 @@ fn run_order(case: &str, first_meta: bool) {
         "{case} claim row mismatch\nclaims={claims:?}\norg:\n{org}"
     );
     let first_line = get.lines().next().unwrap_or_default();
+    let status = first_line.split_whitespace().nth(1);
+    assert_eq!(
+        status,
+        Some("claimed"),
+        "{case} claimdag status column mismatch\nget:\n{get}\norg:\n{org}"
+    );
     assert!(
-        first_line.split_whitespace().nth(1) == Some("claimed")
-            && first_line.split_whitespace().any(|field| field == format!("assignee={expected_actor}")),
+        first_line
+            .split_whitespace()
+            .any(|field| field == format!("assignee={expected_actor}")),
         "{case} claimdag occupancy mismatch\nexpected assignee={expected_actor}\nget:\n{get}\norg:\n{org}"
     );
 }
