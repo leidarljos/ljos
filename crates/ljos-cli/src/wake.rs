@@ -1191,6 +1191,21 @@ mod tests {
     }
 
     #[test]
+    fn set_command_rejects_a_timeout_that_does_not_fit_toml() {
+        let (_lock, _dir) = isolated();
+        let err = set_command("inky", "true", Some(u64::MAX))
+            .expect_err("an oversized timeout must be refused");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "wake: --timeout takes a number no larger than {}, not {}.",
+                i64::MAX,
+                u64::MAX
+            )
+        );
+    }
+
+    #[test]
     fn set_webhook_refuses_to_overwrite_a_broken_wake_toml() {
         let (_lock, _dir) = isolated();
         let wake_file = path();

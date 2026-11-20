@@ -1579,6 +1579,30 @@ fn an_empty_value_on_a_count_flag_is_named() {
 }
 
 #[test]
+fn wake_refuses_a_timeout_that_does_not_fit_toml() {
+    let home = Home::new();
+    let out = home.run(
+        &[
+            "wake",
+            "alice",
+            "--command",
+            "true",
+            "--timeout",
+            "18446744073709551615",
+        ],
+        &[("LJOS_SEAT", "alice")],
+    );
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert_eq!(
+        one_line(&out.stderr),
+        "wake: --timeout takes a number no larger than 9223372036854775807, not 18446744073709551615.",
+        "{said}"
+    );
+}
+
+#[test]
 fn a_span_flag_that_is_not_a_span_exits_2() {
     let home = Home::new();
     let cases: &[(&[&str], &str)] = &[
