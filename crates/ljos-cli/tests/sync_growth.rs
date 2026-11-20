@@ -1274,3 +1274,46 @@ fn a_compaction_killed_before_its_removals_loses_no_atom() {
     assert_eq!(left.len(), 1, "{left:?}: {said}");
     assert_eq!(w.import_as_peer(), texts(&atoms), "{said}");
 }
+
+#[test]
+fn a_committed_snapshot_age_cannot_authenticate_is_sealed_over_once() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, mut atoms, _) = sealed_log();
+    let snap = w
+        .pieces()
+        .into_keys()
+        .find(|path| path.contains("/snap-"))
+        .unwrap();
+    let path = w.repo.join(&snap);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x5a;
+    std::fs::write(&path, &bytes).unwrap();
+    git(&w.repo, &["commit", "-q", "-am", "a damaged snapshot"]);
+    git(&w.repo, &["push", "-q"]);
+    w.forget_opened();
+
+    let before = w.pieces();
+    let atom = lesson(atoms.len(), LINE);
+    w.add(atom.clone());
+    atoms.push(atom);
+    let said = w.sync();
+    let new = sealed_since(&w, &before, &w.pieces(), &said);
+    assert_eq!(new.len(), 1, "{new:?}: {said}");
+    assert!(new[0].0.contains("/snap-"), "{new:?}: {said}");
+    assert!(said.contains("did not open"), "{said}");
+    assert_eq!(w.import_as_peer(), texts(&atoms), "{said}");
+
+    let before = w.pieces();
+    let atom = lesson(atoms.len(), LINE);
+    w.add(atom.clone());
+    atoms.push(atom);
+    let said = w.sync();
+    let new = sealed_since(&w, &before, &w.pieces(), &said);
+    assert_eq!(new.len(), 1, "{new:?}: {said}");
+    assert!(new[0].0.contains("/seg-"), "{new:?}: {said}");
+    assert!(new[0].1 < TWO_ATOM_SEGMENT, "{new:?}: {said}");
+    assert_eq!(w.import_as_peer(), texts(&atoms), "{said}");
+}

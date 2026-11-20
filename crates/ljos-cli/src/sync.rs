@@ -1799,8 +1799,8 @@ fn log_noted(root: &Path, stem: &str, plain: &str) -> bool {
 
 /// The atom lines of `host`'s `scope_name` log: the legacy file and its
 /// chunks when no snapshot has been written, otherwise the newest snapshot
-/// and the segments after it, in sequence order. A segment that does not
-/// open ends the read. The same last-line-wins rule as [`read_chunks`].
+/// and the segments after it, in sequence order. A snapshot or segment
+/// that does not open, as when age cannot authenticate it, ends the read. The same last-line-wins rule as [`read_chunks`].
 fn read_log_view(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Result<LogView> {
     let stem = log_stem_dir(log_rel);
     let pieces = sealed_pieces(root, &stem);
@@ -1817,16 +1817,27 @@ fn read_log_view(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Re
                 stopped: Some(format!("{} could not be read", snap.rel)),
             });
         };
-        let body = match open_log(root, &bytes, host, scope_name, &snap.rel)? {
-            Opened::Atoms(body) => body,
-            Opened::Miss => {
+        let body = match open_log(root, &bytes, host, scope_name, &snap.rel) {
+            Ok(Opened::Atoms(body)) => body,
+            Err(err) => {
+                return Ok(LogView {
+                    body: String::new(),
+                    chunks_read: 0,
+                    stopped: Some(format!(
+                        "{} did not open ({})",
+                        snap.rel,
+                        err.to_string().replace('\n', " ")
+                    )),
+                });
+            }
+            Ok(Opened::Miss) => {
                 return Ok(LogView {
                     body: String::new(),
                     chunks_read: 0,
                     stopped: Some(format!("{} is not sealed to this machine", snap.rel)),
                 });
             }
-            Opened::Refused(line) | Opened::Hidden { line, .. } => {
+            Ok(Opened::Refused(line) | Opened::Hidden { line, .. }) => {
                 return Ok(LogView {
                     body: String::new(),
                     chunks_read: 0,
