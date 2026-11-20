@@ -49148,6 +49148,7 @@ pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> b
         chrono::Local::now().format("[%Y-%m-%d %a %H:%M]")
     );
     with_wall_bounded_issues_lock(path, || {
+        sweep_dead_temps(path);
         let text = std::fs::read_to_string(path)?;
         let Some(next) = insert_logbook_line(&text, issue, verb, seat, &entry) else {
             return Ok(false);
@@ -49156,6 +49157,47 @@ pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> b
         Ok(true)
     })
     .unwrap_or(false)
+}
+
+/// How old a writer's copy of an issues file must be before a logbook
+/// write removes it.
+const DEAD_TEMP_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Remove the copies a writer killed between its write and its rename left
+/// beside `path`: `.NAME.tmp.PID-N` or `.NAME.tmp.PID-N-N`, a minute old.
+/// The caller has the file's issues lock, and every writer keeps that lock
+/// while its copy exists, so no such copy is a live write's. The pid in the
+/// name is not asked about: it may be another host's, or reused since. The
+/// minute leaves a copy alone while a writer that took no lock may still
+/// rename it.
+fn sweep_dead_temps(path: &Path) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+        return;
+    };
+    let prefix = format!(".{name}.tmp.");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let Some(rest) = file.to_str().and_then(|f| f.strip_prefix(&prefix)) else {
+            continue;
+        };
+        let parts: Vec<&str> = rest.split('-').collect();
+        let digits = |p: &&str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+        if !(2..=3).contains(&parts.len()) || !parts.iter().all(digits) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|at| std::time::SystemTime::now().duration_since(at).ok())
+            .is_some_and(|age| age >= DEAD_TEMP_AFTER);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Name the seat on a note when the tracker commit did not.
@@ -62497,6 +62539,40 @@ Copied from the second ticket:
             logbook_of(&text, "demo-b")[0].starts_with("- Claimed by bob ["),
             "{text}"
         );
+    }
+
+    /// The pid in a copy's name may be reused by a live process, or be
+    /// another host's, so it decides nothing: under the issues lock a copy
+    /// a minute old is a killed writer's, and a fresh one is left.
+    #[test]
+    fn a_logbook_stamp_removes_the_copies_a_killed_writer_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("issues.org");
+        std::fs::write(&path, QUOTED_DRAWER).unwrap();
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let dead = gone.id();
+        gone.wait().unwrap();
+        let me = std::process::id();
+        let killed = dir
+            .path()
+            .join(format!(".issues.org.tmp.{dead}-1763600000-0"));
+        let reused = dir.path().join(format!(".issues.org.tmp.{me}-3"));
+        let fresh = dir
+            .path()
+            .join(format!(".issues.org.tmp.{dead}-1763600001-0"));
+        let other = dir.path().join(".notes.org.tmp.1-2-0");
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        for leftover in [&killed, &reused, &fresh, &other] {
+            let file = std::fs::File::create(leftover).unwrap();
+            if leftover != &fresh {
+                file.set_modified(long_ago).unwrap();
+            }
+        }
+        assert!(stamp_seat_logbook(&path, "demo-a", "noted", "bob"));
+        assert!(!killed.exists(), "a dead writer's copy stays");
+        assert!(!reused.exists(), "a copy whose pid now runs stays");
+        assert!(fresh.exists(), "a copy younger than a minute is removed");
+        assert!(other.exists(), "another file's copy is not this lock's");
     }
 
     #[test]

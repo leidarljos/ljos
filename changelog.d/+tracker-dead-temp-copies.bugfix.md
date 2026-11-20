@@ -1,0 +1,1 @@
+A tracker logbook write now removes, under the file's issues lock, the `.issues.org.tmp.<pid>-<n>-0` copies a minute old that a `vissue` killed between its write and its rename left beside the file. The process id in the name is not used, since it may be another host's or reused.

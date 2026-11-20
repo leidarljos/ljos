@@ -154,6 +154,10 @@ The printed row is:
 ..
    # proseguard:on
 
+A ``vissue`` killed between its write and its rename leaves a copy such as ``.issues.org.tmp.4242-1763600000-0`` beside the file.
+The next logbook write, which has the file's issues lock, removes such a copy once it is a minute old.
+The process id in the name decides nothing: it may be another host's, or a later process may have it now.
+
 A claim the tracker did not answer for is not a claim, whether its wait ran out or a tool call's bound stopped ``vissue`` with ``vissue timed out``.
 ``ljos claim`` exits 1 and names ``ljos claim ID`` again, and a claim a note retries stays pending until the tracker records it.
 
