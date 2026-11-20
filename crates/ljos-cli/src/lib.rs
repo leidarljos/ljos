@@ -30,6 +30,7 @@ pub mod command_prefs;
 pub mod config_diag;
 pub mod converge;
 mod cwd_probe;
+pub mod deed_bytes;
 mod deedbag;
 pub mod digest;
 mod doctor_fix;

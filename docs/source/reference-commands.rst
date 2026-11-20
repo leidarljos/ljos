@@ -131,8 +131,8 @@ A word that is not a command names the verb it was reaching for as a line that r
    Stores: pack. List a group, or add and drop members; membership is atoms and travels in the sealed log.
 ``wake [SEAT] [--command CMD [--timeout S]|--webhook URL [--key-file F] [--key-env VAR]|--clear|--fire]``
    Stores: machine. How mail wakes a seat that is idle: a shell line this machine runs with ``LJOS_SEAT`` set to the seat, or a URL it posts the envelope to (never the body); ``send`` and ``reply`` start it in its own session and do not wait on it; policyd reads a command when it is set and on every run, and a rule that fires is a warning beside it while the command still runs, and block-on-warning warns with that label and the command runs. It does not block; ``--fire`` runs it now and prints what happened. With ``--fire``, ``--from``, ``--msg``, ``--issue`` and ``--interrupt`` name the message. Alone, show the wake. Kept in ``~/.config/ljos/wake.toml``.
-``deed ID [--add ACCESSION]... [-q|--porcelain]`` / ``--remove ACCESSION --ticket ID``
-   Stores: tracker. Cite with ``--add``, or list; ``--remove`` drops one citation, appended to the ledger, and the heading is not rewritten.
+``deed ID [--add ACCESSION]... [-q|--porcelain]`` / ``--remove ACCESSION --ticket ID`` / ``--show ACCESSION [--out FILE]``
+   Stores: tracker, deed store. Cite with ``--add``, or list; ``--remove`` drops one citation, appended to the ledger, and the heading is not rewritten. ``--show`` prints a stored file's bytes, or writes them to ``--out``, once ``deedar evidence`` passes and the copy in the store hashes to the digest the deed names; a missing or altered copy exits 1 and prints nothing.
 ``claims [--mine | --stale [--days N] [--json]] [ARGS]``
    Stores: tracker. Who has claimed what: ``vissue claims`` with its flags (``--by NAME``, ``--json``, ``-p PROJECT``). ``--mine`` lists this seat's claims with no note, stored file or finish for a day. ``--stale`` lists the ones untouched for ``--days`` or longer (``LJOS_STALE_DAYS``, 7 when unset), oldest first, with the age and the command to finish, release or note each one. ``--json`` prints that list as an array.
 ``recall ID [--json] [--no-graph]``
@@ -355,7 +355,7 @@ conflicts --limit
 consensus --compare --deadline --json --no-file --quorum
 consolidate --apply
 current
-deed --add --porcelain --remove --ticket
+deed --add --out --porcelain --remove --show --ticket
 digest --json --mark --since
 doctor --all --fix --verbose
 due --all --json --judge

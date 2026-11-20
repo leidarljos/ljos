@@ -192,6 +192,7 @@ fn unlisted_line(tool: &str) -> String {
     let tail = match verb {
         "guard_check" | "mail_search" | "mail_show" => String::new(),
         "bump_plan" => ", or run `ljos bump-plan` in a shell".to_string(),
+        "deed_show" => ", or run `ljos deed --show ACCESSION` in a shell".to_string(),
         other => format!(", or run `ljos {other}` in a shell"),
     };
     format!(
@@ -322,6 +323,7 @@ const SEAT_FREE_TOOLS: &[&str] = &[
     "ljos_conflicts",
     "ljos_evidence",
     "ljos_current",
+    "ljos_deed_show",
     "ljos_digest",
     "ljos_timeline",
     "ljos_cards",
@@ -859,6 +861,15 @@ pub struct ForgetArgs {
 pub struct AccessionArgs {
     /// `deed-<kind>-<slug>`, or `sha256:` of the deed or of a product path.
     pub accession: String,
+}
+
+/// A stored deed to read, and where to write its bytes.
+#[derive(Deserialize, JsonSchema)]
+pub struct DeedShowArgs {
+    /// `deed-<kind>-<slug>`, as `ljos_deed` lists it.
+    pub accession: String,
+    /// A file to write the bytes to. Absent, they are the text of the answer.
+    pub out: Option<String>,
 }
 
 /// A tracker node, and optionally a deed to cite on it.
@@ -1703,6 +1714,7 @@ fn help_command(name: &str) -> String {
     let command = match tool {
         "guard_check" => "policy",
         "bump_plan" => "bump-plan",
+        "deed_show" => "deed",
         "mail_search" | "mail_show" => return "ljos help".to_string(),
         other => other,
     };
@@ -2432,6 +2444,36 @@ impl LjosServer {
         Parameters(args): Parameters<AccessionArgs>,
     ) -> Result<Json<Said>, McpError> {
         habitat("deedar", &["current", &args.accession])
+    }
+
+    #[tool(
+        description = "Read a stored deed's bytes, such as a cited CSV. They are returned only after deedar evidence passes and the store's copy hashes to the deed's digest; a missing or altered copy is refused. Pass out to write them to a file, which bytes that are not UTF-8 need.",
+        annotations(title = "Read a deed", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn ljos_deed_show(
+        &self,
+        Parameters(args): Parameters<DeedShowArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let read = ljos_cli::deed_bytes::read_deed(&args.accession).map_err(refused)?;
+        let text = match args.out.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
+            Some(out) => {
+                std::fs::write(out, &read.bytes)
+                    .map_err(|e| refused(anyhow::anyhow!("deed: could not write {out}: {e}")))?;
+                format!(
+                    "wrote {} bytes of {} to {out} (sha256:{})\n",
+                    read.bytes.len(),
+                    read.accession,
+                    read.sha256
+                )
+            }
+            None => String::from_utf8(read.bytes).map_err(|_| {
+                refused(anyhow::anyhow!(
+                    "deed: {} is not UTF-8 text, so pass out to write it to a file",
+                    read.accession
+                ))
+            })?,
+        };
+        Ok(Json(Said { text, aside: None }))
     }
 
     // ---- the tracker ---------------------------------------------------------
@@ -5933,7 +5975,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            54,
+            55,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );

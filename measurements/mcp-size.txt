@@ -7,9 +7,9 @@ core.instructions_tokens: 237
 core.tools_tokens: 10267
 core.sha256: 75340a2aef7417694d852de55cf1a4c21a2e69af30815ef04164f5f9ef4f1653
 core.names: ljos_rule ljos_prefer ljos_remember ljos_search ljos_start ljos_guard_check ljos_file ljos_options ljos_note ljos_recall ljos_show ljos_ready ljos_sitting ljos_finish ljos_claim ljos_release ljos_send ljos_inbox ljos_reply ljos_vote ljos_consensus ljos_doctor
-all.tools: 54
-all.tokens: 23477
+all.tools: 55
+all.tokens: 23727
 all.instructions_tokens: 237
-all.tools_tokens: 23240
-all.sha256: 8c0f43414272aafc6721025402c27c82c4c19bf0f1ba9b15d7da0f7d13bc5919
-all.names: ljos_rule ljos_prefer ljos_remember ljos_search ljos_start ljos_guard_check ljos_file ljos_options ljos_note ljos_recall ljos_show ljos_ready ljos_sitting ljos_finish ljos_claim ljos_release ljos_send ljos_inbox ljos_reply ljos_vote ljos_consensus ljos_doctor ljos_bump_plan ljos_calibrate ljos_cards ljos_complete ljos_conflicts ljos_consolidate ljos_current ljos_deed ljos_digest ljos_due ljos_evidence ljos_findings ljos_forget ljos_graded ljos_group ljos_habit ljos_handover ljos_island ljos_learn ljos_mail_search ljos_mail_show ljos_policy ljos_predict ljos_read ljos_receive ljos_timeline ljos_trust ljos_brief ljos_persona ljos_personas ljos_playbook ljos_playbooks
+all.tools_tokens: 23490
+all.sha256: 1ff4e8e9443b21b30e6d27226f912faa84d7d3a14ef4fd123b7b3797b93a71bb
+all.names: ljos_rule ljos_prefer ljos_remember ljos_search ljos_start ljos_guard_check ljos_file ljos_options ljos_note ljos_recall ljos_show ljos_ready ljos_sitting ljos_finish ljos_claim ljos_release ljos_send ljos_inbox ljos_reply ljos_vote ljos_consensus ljos_doctor ljos_bump_plan ljos_calibrate ljos_cards ljos_complete ljos_conflicts ljos_consolidate ljos_current ljos_deed ljos_deed_show ljos_digest ljos_due ljos_evidence ljos_findings ljos_forget ljos_graded ljos_group ljos_habit ljos_handover ljos_island ljos_learn ljos_mail_search ljos_mail_show ljos_policy ljos_predict ljos_read ljos_receive ljos_timeline ljos_trust ljos_brief ljos_persona ljos_personas ljos_playbook ljos_playbooks

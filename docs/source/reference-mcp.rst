@@ -11,7 +11,7 @@ The seat serves these over the Model Context Protocol (MCP).
 Writers: ``ljos_start``, ``ljos_file``, ``ljos_options``, ``ljos_note``, ``ljos_sitting``, ``ljos_finish``, ``ljos_calibrate``, ``ljos_persona``, ``ljos_playbook``, ``ljos_remember``, ``ljos_prefer``, ``ljos_forget``, ``ljos_trust``,
 ``ljos_learn``, ``ljos_graded``, ``ljos_island``, ``ljos_deed``, ``ljos_vote``, ``ljos_predict``, ``ljos_rule``, ``ljos_claim``,
 ``ljos_release``, ``ljos_complete``, ``ljos_consolidate``, ``ljos_findings``, ``ljos_bump_plan``, ``ljos_handover``, ``ljos_receive``, ``ljos_send``, ``ljos_inbox``, ``ljos_read``, ``ljos_reply``, ``ljos_group``. Readers: ``ljos_search`` (with ``query`` and optional ``as_of``), ``ljos_guard_check``, ``ljos_conflicts``, ``ljos_show``,
-``ljos_timeline``, ``ljos_digest``, ``ljos_due``, ``ljos_habit`` (a writer with a value), ``ljos_evidence``, ``ljos_current``, ``ljos_recall``, ``ljos_ready``,
+``ljos_timeline``, ``ljos_digest``, ``ljos_due``, ``ljos_habit`` (a writer with a value), ``ljos_evidence``, ``ljos_current``, ``ljos_deed_show``, ``ljos_recall``, ``ljos_ready``,
 ``ljos_consensus``, ``ljos_brief``, ``ljos_personas``, ``ljos_playbooks``, ``ljos_cards``, ``ljos_policy``, ``ljos_doctor``, ``ljos_mail_search``, ``ljos_mail_show``. Resources:
 ``ljos://protocol``, ``ljos://cards/USER.md``, ``ljos://cards/MEMORY.md``. Prompts:
 ``start_a_sitting``, ``run_a_panel``, ``check_a_handover``. Most tool descriptions open with
@@ -64,6 +64,7 @@ Call ``ljos_claim`` only to name the issue yourself without ``ljos_start`` or ``
 A named worker occupies one slot, and a ``busy`` refusal names the held node.
 ``ljos_finish`` or ``ljos_release`` frees it.
 ``ljos_deed`` is the same: a git commit is cited as a deed for you, so call it for the other deeds.
+``ljos_deed_show`` returns a stored deed's bytes as ``ljos deed --show`` prints them, and refuses a copy that is missing or altered; ``out`` writes them to a file, which bytes that are not UTF-8 need.
 
 ``ljos_start`` is the short opening: it recalls and claims. ``ljos_sitting`` is the full opening in the protocol's order, and stops at the first store that does not answer. Pass ``issue``, or ``plan`` with ``items`` to file the checklist in one tracker commit. ``playbook`` is one of ``sit``, ``arena``, ``land``, ``company-panel``, ``overnight`` or ``feature``, and stays bound until ``ljos_finish`` or ``ljos_release``. Leave ``assignee`` out unless the call runs as a named worker.
 

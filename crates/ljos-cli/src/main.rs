@@ -1097,12 +1097,22 @@ enum Cmd {
     /// Name a stored file on a ticket, or list the ones named.
     ///
     /// The bytes stay in `deedar`, the program that keeps those files. Citing records the id.
+    /// `--show ACCESSION` prints a stored file's bytes once `deedar evidence`
+    /// passes and the copy in the store hashes to the digest it was stored
+    /// under.
+    /// A missing or altered copy exits 1 and prints nothing.
     ///
     /// Example: `ljos deed proj-1a2b`
     Deed {
         /// The issue: cited on, listed, or dropped from.
-        #[arg(required_unless_present = "ticket")]
+        #[arg(required_unless_present_any = ["ticket", "show"])]
         issue: Option<String>,
+        /// Print the bytes of this stored file, checked first.
+        #[arg(long, value_name = "ACCESSION", conflicts_with_all = ["issue", "add", "remove", "ticket"])]
+        show: Option<String>,
+        /// With `--show`, write the bytes to FILE instead of stdout.
+        #[arg(long, value_name = "FILE", requires = "show")]
+        out: Option<PathBuf>,
         /// An accession to cite, from `deedar create`; repeat for several.
         #[arg(long, conflicts_with = "remove")]
         add: Vec<String>,
@@ -6048,12 +6058,30 @@ fn run_command() -> Result<()> {
         Cmd::Current { accession } => run("deedar", &["current", &accession])?,
         Cmd::Deed {
             issue,
+            show,
+            out,
             add,
             remove,
             ticket,
             porcelain,
         } => {
-            if !remove.is_empty() {
+            if let Some(accession) = show {
+                let read = ljos_cli::deed_bytes::read_deed(&accession)?;
+                match out {
+                    Some(path) => {
+                        std::fs::write(&path, &read.bytes)
+                            .with_context(|| format!("deed: could not write {}", path.display()))?;
+                        println!(
+                            "wrote {} bytes of {} to {} (sha256:{})",
+                            read.bytes.len(),
+                            read.accession,
+                            path.display(),
+                            read.sha256
+                        );
+                    }
+                    None => std::io::Write::write_all(&mut std::io::stdout(), &read.bytes)?,
+                }
+            } else if !remove.is_empty() {
                 let ticket = ticket
                     .as_deref()
                     .or(issue.as_deref())

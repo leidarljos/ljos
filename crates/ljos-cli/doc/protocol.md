@@ -12,7 +12,7 @@ as `ljos VERB` in the shell.
 | what did the human freeze | cards | `cards` (read-only; never extract-on-write) |
 | what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `options`, `note`, `show`, `recall`, `vote`, `consensus`, `deed` |
 | what does this seat know, standing | pack (packset) | `search`, `island`, `remember`, `prefer`, `forget`, `due`, `graded` |
-| what did the work produce | deed store (deedar) | `evidence`, `current`; `deedar create` |
+| what did the work produce | deed store (deedar) | `evidence`, `current`, `deed_show`; `deedar create` |
 | which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |
 | how do the voters weigh each other | pack, trust rows | `trust`, `learn`, `calibrate` |
 | who votes with a view of its own | pack, persona atoms | `persona`; a session casts `vote --as` and consensus counts it |
@@ -178,7 +178,8 @@ cloud seat git runs only the hooks the repository and the login name.
 - Every artefact the work produces is a deed, then a citation:
   `deedar create file --name NAME --path PATH --agent NAME` prints an
   accession; `ljos deed ISSUE --add ACCESSION` cites it on the issue.
-  Citing a deed names it; the bytes stay in deedar.
+  Citing a deed names it; the bytes stay in deedar, and
+  `ljos deed --show ACCESSION` prints them once the stored copy checks.
   `ljos deed --remove ACCESSION --ticket ISSUE` drops a citation. The
   removal is appended. The heading is not rewritten.
 - A lesson in the person's words is one `ljos remember` of two short
