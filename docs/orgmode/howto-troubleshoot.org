@@ -137,6 +137,16 @@ A replay that cannot be undone, because every =git rebase --abort= fails, ends t
 Every tracker commit there is refused until =git -C DIR rebase --abort= or =git -C DIR merge --abort= succeeds, so no commit goes into the stopped rebase, and the edit stays only on disk.
 A push that finds the checkout already mid-rebase or mid-merge changes nothing and says so: an abort would drop any edit made there since it stopped, such as a note no commit could take, so a person keeps those edits, aborts and pushes again.
 
+A replay records =.git/ljos-index.owner= for each of its git calls, as a commit does.
+The push after a replay killed outright removes the =index.lock= that record names, reads the index again from =HEAD=, and leaves the stopped rebase for a person to abort once any edit made during it is kept; the push after that replays:
+
+#+begin_src text
+tracker git: removed /tmp/seat/tracker/.git/index.lock, 3s old, which ljos process 4242 on box made and which no longer runs
+tracker git: read /tmp/seat/tracker/.git/index again from HEAD after a killed git
+#+end_src
+
+An index git cannot read, such as one cut short, is read again from =HEAD= the same way. The work tree is not touched.
+
 * A missing habitat binary
 
 =deedar= not on =PATH=, with the registry answering, printed:

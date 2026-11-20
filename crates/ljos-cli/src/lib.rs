@@ -49905,7 +49905,9 @@ pub(crate) fn clear_orphaned_index_lock(dir: &Path) -> Option<Result<String, Str
     clear_index_lock_older_than(dir, ORPHAN_AFTER)
 }
 
-/// [`clear_orphaned_index_lock`] for a lock at least `min_age` old.
+/// [`clear_orphaned_index_lock`] for a lock at least `min_age` old. A
+/// replay calls it with no age while it has the commit lock and the issues
+/// locks, so no ljos writer of the checkout runs.
 ///
 /// Every check reads the lock through one open descriptor, which also
 /// keeps its inode from being given to a new file. The lock is then

@@ -467,7 +467,7 @@ fn integrate(dir: &Path) -> Result<(), String> {
 }
 
 fn integrate_from(dir: &Path, remote: &str, onto: &str) -> Result<(), String> {
-    let fetched = git(dir, &["fetch", "-q", remote]);
+    let mut fetched = git(dir, &["fetch", "-q", remote]);
     // The replay rewrites the index and the working tree, so it waits for
     // a seat's commit in flight and no commit starts until it is done. The
     // fetch, which may wait on the network, is outside. A lock not taken
@@ -477,6 +477,10 @@ fn integrate_from(dir: &Path, remote: &str, onto: &str) -> Result<(), String> {
     if !held.taken() {
         let lock = crate::tracker_lock_path(dir).unwrap_or_else(|| dir.join(crate::TRACKER_LOCK));
         return Err(lock_not_taken(&lock));
+    }
+    let _named = OwnerRecords::start(dir);
+    if recover_killed(dir)? && !fetched.status.success() {
+        fetched = git(dir, &["fetch", "-q", remote]);
     }
     let _orgs = lock_issue_files(dir, onto)?;
     if rebase_in_progress(dir) || merge_in_progress(dir) || has_unmerged(dir) {
@@ -496,8 +500,99 @@ fn integrate_from(dir: &Path, remote: &str, onto: &str) -> Result<(), String> {
     replayed
 }
 
+thread_local! {
+    static RECORD_IN: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While it lives, each git call of this thread writes the record beside
+/// the index that names this process, as a tracker commit does. A replay
+/// killed outright then leaves an `index.lock` the next replay can show
+/// was this host's and is gone.
+struct OwnerRecords;
+
+impl OwnerRecords {
+    fn start(dir: &Path) -> Self {
+        let git_dir = crate::git_dir_and_top(dir).map(|(git_dir, _)| git_dir);
+        RECORD_IN.with(|slot| *slot.borrow_mut() = git_dir);
+        Self
+    }
+}
+
+impl Drop for OwnerRecords {
+    fn drop(&mut self) {
+        RECORD_IN.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// Undo what a replay killed outright left, under the commit lock and
+/// before any file is listed: an `index.lock` this host's dead ljos made,
+/// with no live git working on the repository, and an index git cannot
+/// read. git writes the index through that lock, so the index a killed
+/// git leaves is not trusted and is read again from `HEAD`. The work tree
+/// is not touched. `Ok(true)` when the index was read again, and `Err` is
+/// a lock that is not known to be dead.
+fn recover_killed(dir: &Path) -> Result<bool, String> {
+    let Some((git_dir, _)) = crate::git_dir_and_top(dir) else {
+        return Ok(false);
+    };
+    let lock = git_dir.join("index.lock");
+    let mut suspect = false;
+    if lock.exists() {
+        match crate::clear_index_lock_older_than(dir, std::time::Duration::ZERO) {
+            Some(Ok(line)) => {
+                eprintln!("tracker git: {line}");
+                suspect = true;
+            }
+            Some(Err(line)) => return Err(format!("push: {line}; the checkout was not rebased")),
+            None => {
+                return Err(format!(
+                    "push: {} is held by a running git, so the checkout was not rebased; the next push tries again",
+                    lock.display()
+                ));
+            }
+        }
+    }
+    if !suspect {
+        let read = git(dir, &["ls-files", "-z", "--", ":(top).ljos-index-probe"]);
+        suspect = !read.status.success() && index_unreadable(&output_text(&read));
+    }
+    if !suspect {
+        return Ok(false);
+    }
+    let index = git_dir.join("index");
+    if let Err(e) = std::fs::remove_file(&index) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "push: {} could not be read again: {e}",
+                index.display()
+            ));
+        }
+    }
+    let read = git(dir, &["read-tree", "HEAD"]);
+    if !read.status.success() {
+        return Err(format!(
+            "push: {} could not be read again from HEAD: {}",
+            index.display(),
+            first_line(&output_text(&read))
+        ));
+    }
+    eprintln!(
+        "tracker git: read {} again from HEAD after a killed git",
+        index.display()
+    );
+    Ok(true)
+}
+
+fn index_unreadable(said: &str) -> bool {
+    said.contains("index file smaller than expected")
+        || said.contains("index file corrupt")
+        || said.contains("bad signature")
+        || said.contains("bad index version")
+        || said.contains("index uses")
+}
+
 /// Abort the rebase or merge a replay left, while its locks are held. A
-/// failed abort is tried again. `Err` is what
+/// failed abort is tried again, after the index is checked. `Err` is what
 /// the last abort said when git still shows the rebase or merge.
 fn undo_stopped(dir: &Path) -> Result<(), String> {
     let mut why = String::new();
@@ -507,6 +602,7 @@ fn undo_stopped(dir: &Path) -> Result<(), String> {
         }
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_millis(100 << attempt));
+            let _ = recover_killed(dir);
         }
         if let Err(e) = abort_rebase(dir) {
             why = e;
@@ -974,6 +1070,9 @@ fn git(dir: &Path, args: &[&str]) -> Output {
         .stdin(std::process::Stdio::null());
     crate::git_hooks::hook_child_env(&mut cmd);
     crate::seat_git_child(&mut cmd);
+    let _owner = RECORD_IN
+        .with(|slot| slot.borrow().clone())
+        .and_then(|git_dir| crate::IndexOwner::record(&git_dir));
     crate::bounded_output(&mut cmd).unwrap_or_else(|e| Output {
         status: std::process::ExitStatus::from_raw(1),
         stdout: Vec::new(),
@@ -2052,6 +2151,13 @@ note from b
         crate::prepend_path(&bin)
     }
 
+    #[cfg(target_os = "linux")]
+    fn ids_in(text: &str, id: &str) -> usize {
+        text.lines()
+            .filter(|line| line.strip_prefix(":ID:").map(str::trim) == Some(id))
+            .count()
+    }
+
     /// A listing of the issue files that fails stops the replay before it
     /// locks or rewrites any of them: the checkout's own, by `ls-files`, or
     /// the target's, by `ls-tree`.
@@ -2170,6 +2276,106 @@ note from b
         assert_eq!(std::fs::read_to_string(&board).unwrap(), noted);
         assert!(rebase_in_progress(&a), "{said}");
         assert_eq!(run_ok(&a, &["rev-parse", "HEAD"]), head);
+    }
+
+    /// A replay killed outright leaves its rebase stopped, an `index.lock`
+    /// beside the record of its dead process, and an index cut short. The
+    /// next push removes the lock, reads the index again from HEAD and
+    /// leaves the rebase; once it is aborted, a push has each heading once.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_killed_replay_is_recovered_with_each_heading_once() {
+        let _env = crate::test_env_lock();
+        let _whole = crate::OwnTree::assume();
+        crate::tool_bound::disarm();
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = two_clones(dir.path());
+        add_heading(&b, "remote");
+        run_ok(&b, &["push", "-q"]);
+        add_heading(&a, "local");
+        run_ok(&a, &["fetch", "-q", "origin"]);
+        let _ = crate::git_at(&a)
+            .args(["rebase", "origin/main"])
+            .output()
+            .unwrap();
+        assert!(rebase_in_progress(&a), "the rebase did not stop");
+        let git_dir = a.join(".git");
+        let index = std::fs::read(git_dir.join("index")).unwrap();
+        std::fs::write(git_dir.join("index"), &index[..12]).unwrap();
+        std::fs::write(git_dir.join("index.lock"), &index[..index.len() / 2]).unwrap();
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let dead = gone.id();
+        gone.wait().unwrap();
+        let (host, boot) = crate::host_identity().unwrap();
+        let (dev, ino) = crate::file_id(&git_dir.join("index.lock")).unwrap();
+        let mark = crate::index_mark_line(&git_dir.join("index.lock"));
+        let at = crate::unix_secs(std::time::SystemTime::now()) - 1;
+        std::fs::write(
+            git_dir.join(crate::INDEX_OWNER),
+            format!(
+                "host {host}\nboot {boot}\npid {dead}\nstart 1\nat {at}\nuntil {}\nlock {dev} {ino}\n{mark}\n",
+                at + 60
+            ),
+        )
+        .unwrap();
+        let said = integrate_from(&a, "origin", "origin/main").unwrap_err();
+        assert!(
+            said.contains("was mid-rebase or mid-merge before the push began"),
+            "{said}"
+        );
+        assert!(!git_dir.join("index.lock").exists());
+        assert!(rebase_in_progress(&a), "{said}");
+        run_ok(&a, &["ls-files"]);
+        run_ok(&a, &["rebase", "--abort"]);
+        let said = integrate_from(&a, "origin", "origin/main");
+        assert!(said.is_ok(), "{said:?}");
+        assert!(!rebase_in_progress(&a) && !merge_in_progress(&a) && !has_unmerged(&a));
+        assert_eq!(
+            run_ok(&a, &["status", "--porcelain", "--untracked-files=no"]),
+            ""
+        );
+        let files = run_ok(&a, &["ls-files"]);
+        assert_eq!(files, "Software/issues.org\nnotes.txt", "{files}");
+        let board = run_ok(&a, &["show", "HEAD:Software/issues.org"]);
+        for id in ["seed", "remote", "local"] {
+            assert_eq!(ids_in(&board, id), 1, "{id}:\n{board}");
+        }
+        run_ok(&a, &["merge-base", "--is-ancestor", "origin/main", "HEAD"]);
+    }
+
+    /// Each git call of a replay writes the record of this process beside
+    /// the index, so a replay killed outright leaves a lock the next one can
+    /// show was this host's.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_replay_names_its_process_beside_the_index() {
+        let _env = crate::test_env_lock();
+        crate::tool_bound::disarm();
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = two_clones(dir.path());
+        add_heading(&b, "remote");
+        run_ok(&b, &["push", "-q"]);
+        std::fs::write(a.join("notes.txt"), "from a\n").unwrap();
+        run_ok(&a, &["commit", "-q", "-am", "a notes"]);
+        let seen = dir.path().join("seen");
+        let path = git_wrapper(
+            dir.path(),
+            &a,
+            &format!(
+                "*' rebase '*) cp '{}' '{}' 2>/dev/null ;;",
+                a.join(".git").join(crate::INDEX_OWNER).display(),
+                seen.display()
+            ),
+        );
+        let said = integrate_from(&a, "origin", "origin/main");
+        drop(path);
+        assert!(said.is_ok(), "{said:?}");
+        let record = std::fs::read_to_string(&seen).unwrap_or_default();
+        assert!(
+            record.contains(&format!("\npid {}\n", std::process::id())),
+            "no record beside the index during the rebase: {record:?}"
+        );
+        assert!(!a.join(".git").join(crate::INDEX_OWNER).exists());
     }
 
     #[test]
