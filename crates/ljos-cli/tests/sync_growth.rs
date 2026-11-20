@@ -10,7 +10,7 @@ ljos_test_boot::harness!();
 #[path = "common/tools.rs"]
 mod tools;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -129,6 +129,33 @@ struct World {
     origin: PathBuf,
     repo: PathBuf,
     pack: Pack,
+    /// A directory put ahead of `PATH` with an `age` in it that runs the
+    /// real one, and refuses to decrypt while `age.fail` is beside it.
+    shim: PathBuf,
+}
+
+/// The `age` in [`World::shim`]. A refused `-d` says no identity
+/// matched, as age does for a file sealed to a key this home lost.
+fn age_shim(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let real = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|dir| dir.join("age"))
+        .find(|age| age.is_file())
+        .unwrap_or_else(|| PathBuf::from("/usr/bin/age"));
+    std::fs::create_dir_all(dir).unwrap();
+    let age = dir.join("age");
+    std::fs::write(
+        &age,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in *\" -d \"*) if [ -e \"$0.fail\" ]; then echo 'age: error: no identity matched any of the recipients' >&2; exit 1; fi;; esac\nexec '{}' \"$@\"\n",
+            real.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&age, std::fs::Permissions::from_mode(0o755)).unwrap();
+    dir.to_path_buf()
 }
 
 fn world() -> World {
@@ -169,6 +196,7 @@ fn world() -> World {
         format!("repos = [\"{}\"]\n", repo.display()),
     )
     .unwrap();
+    let shim = age_shim(&dir.path().join("shim"));
     World {
         _dir: dir,
         home,
@@ -176,22 +204,26 @@ fn world() -> World {
         origin,
         repo,
         pack: pack(),
+        shim,
     }
 }
 
 impl World {
     fn ljos(&self, args: &[&str]) -> Output {
+        self.ljos_as(HOST, args)
+    }
+
+    /// `ljos` as the machine named `host`, with this world's home and key.
+    fn ljos_as(&self, host: &str, args: &[&str]) -> Output {
+        let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
-            .env(
-                "PATH",
-                std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
-            )
+            .env("PATH", format!("{}:{path}", self.shim.display()))
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
             .env("XDG_STATE_HOME", self.home.join(".local/state"))
-            .env("LJOS_TEST_HOSTNAME", HOST)
+            .env("LJOS_TEST_HOSTNAME", host)
             .env("LJOS_USER_RULES_SYNC", "off")
             .env("PACKSET_URL", &self.pack.url)
             .env("PACKSET_AUTH", "off")
@@ -253,6 +285,92 @@ impl World {
             .unwrap_or_else(|| panic!("no snapshot in {listed}"));
         git(&self.origin, &["rev-parse", &format!("main:{snap}")])
     }
+
+    /// Each file of this machine's log at the origin's head, by path, with
+    /// its blob id.
+    fn pieces(&self) -> BTreeMap<String, String> {
+        git(&self.origin, &["ls-tree", "-r", "main", ".ljos/atoms/me"])
+            .lines()
+            .filter_map(|line| {
+                let (meta, path) = line.split_once('\t')?;
+                Some((path.to_string(), meta.split(' ').nth(2)?.to_string()))
+            })
+            .collect()
+    }
+
+    fn blob_size(&self, oid: &str) -> u64 {
+        git(&self.origin, &["cat-file", "-s", oid]).parse().unwrap()
+    }
+
+    /// Make the shim's `age -d` refuse, or run again.
+    fn fail_opens(&self, on: bool) {
+        let flag = self.shim.join("age.fail");
+        if on {
+            std::fs::write(flag, "").unwrap();
+        } else {
+            let _ = std::fs::remove_file(flag);
+        }
+    }
+
+    /// Drop the plaintexts this home kept of sealed files, so the next read
+    /// of a log runs `age -d`.
+    fn forget_opened(&self) {
+        let _ = std::fs::remove_dir_all(self.home.join(".local/state/ljos/sync/opened"));
+    }
+
+    /// The texts another machine with this key takes from this machine's
+    /// log, read from every piece at the origin's head.
+    fn import_as_peer(&self) -> BTreeSet<String> {
+        self.pack.atoms.lock().unwrap().clear();
+        self.pack.posted.lock().unwrap().clear();
+        let out = self.ljos_as("peer", &["sync", "--import"]);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{text}");
+        self.pack
+            .posted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|atom| atom["text"].as_str().map(str::to_string))
+            .collect()
+    }
+}
+
+/// The pieces of `after` that `before` did not have, other than the
+/// plaintext hash. Fails when a piece of `before` was removed or written
+/// again.
+fn sealed_since(
+    w: &World,
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+    said: &str,
+) -> Vec<(String, u64)> {
+    for (path, oid) in before {
+        if path.ends_with("/plain.sha256") {
+            continue;
+        }
+        assert_eq!(
+            after.get(path),
+            Some(oid),
+            "{path} was removed or sealed again: {said}"
+        );
+    }
+    after
+        .iter()
+        .filter(|(path, oid)| !path.ends_with("/plain.sha256") && before.get(*path) != Some(oid))
+        .map(|(path, oid)| (path.clone(), w.blob_size(oid)))
+        .collect()
+}
+
+fn texts(atoms: &[Value]) -> BTreeSet<String> {
+    atoms
+        .iter()
+        .map(|atom| atom["text"].as_str().unwrap().to_string())
+        .collect()
 }
 
 /// A lesson whose JSON line is about `bytes` long, distinct by `n`.
@@ -427,4 +545,105 @@ fn a_single_file_log_from_before_chunks_imports_every_atom() {
         .map(|atom| atom["text"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(posted, sent, "{text}");
+}
+
+/// Atoms in the log the append tests start from.
+const LOG_ATOMS: usize = 300;
+/// A segment of two `LINE` atoms seals to less than this, whatever the
+/// size of the log it is sealed over.
+const TWO_ATOM_SEGMENT: u64 = 4 * LINE as u64;
+
+/// A world whose log is a snapshot of [`LOG_ATOMS`] lessons and one
+/// segment of one more. Returns the atoms and the snapshot's size.
+fn sealed_log() -> (World, Vec<Value>, u64) {
+    let w = world();
+    let mut atoms: Vec<Value> = (0..LOG_ATOMS).map(|n| lesson(n, LINE)).collect();
+    for atom in &atoms {
+        w.add(atom.clone());
+    }
+    w.sync();
+    let whole = w.blob_size(&w.log_blob());
+    atoms.push(lesson(LOG_ATOMS, LINE));
+    w.add(atoms[LOG_ATOMS].clone());
+    let said = w.sync();
+    assert!(said.contains("1 changed"), "{said}");
+    (w, atoms, whole)
+}
+
+#[test]
+fn a_log_this_machine_cannot_open_is_left_as_it_is() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, mut atoms, whole) = sealed_log();
+    let before = w.pieces();
+    let head = w.head();
+    w.forget_opened();
+    w.fail_opens(true);
+    for _ in 0..2 {
+        let atom = lesson(atoms.len(), LINE);
+        w.add(atom.clone());
+        atoms.push(atom);
+    }
+    let said = w.sync();
+    let after = w.pieces();
+    let new: Vec<(String, u64)> = after
+        .iter()
+        .filter(|(path, oid)| before.get(*path) != Some(oid))
+        .map(|(path, oid)| (path.clone(), w.blob_size(oid)))
+        .collect();
+    assert_eq!(
+        after, before,
+        "a sync that could not open its {whole} byte log wrote {new:?}: {said}"
+    );
+    assert_eq!(w.head(), head, "{said}");
+    assert_eq!(git(&w.repo, &["status", "--porcelain"]), "", "{said}");
+    assert!(said.contains("warning"), "{said}");
+
+    w.fail_opens(false);
+    let said = w.sync();
+    let new = sealed_since(&w, &before, &w.pieces(), &said);
+    assert_eq!(new.len(), 1, "{new:?}: {said}");
+    assert!(new[0].0.contains("/seg-"), "{new:?}: {said}");
+    assert!(new[0].1 < TWO_ATOM_SEGMENT, "{new:?}: {said}");
+    assert_eq!(w.import_as_peer(), texts(&atoms));
+}
+
+#[test]
+fn a_compaction_over_a_log_this_machine_cannot_open_removes_nothing() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, atoms, _) = sealed_log();
+    let other = keygen(&w.home.join("other.key"));
+    std::fs::write(
+        w.repo.join(".ljos/sync.toml"),
+        format!("name = \"probe\"\nrecipients = [\"{other}\"]\n"),
+    )
+    .unwrap();
+    git(&w.repo, &["commit", "-q", "-am", "recipients"]);
+    git(&w.repo, &["push", "-q"]);
+    w.pack.atoms.lock().unwrap().pop();
+    w.forget_opened();
+    w.fail_opens(true);
+    let before = w.pieces();
+    let said = w.sync();
+    assert_eq!(w.pieces(), before, "{said}");
+
+    let out = w.ljos(&["sync", "--compact"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains("ljos sync --key"), "{said}");
+    assert_eq!(w.pieces(), before, "{said}");
+    for path in before.keys() {
+        assert!(w.repo.join(path).is_file(), "{path}: {said}");
+    }
+    w.fail_opens(false);
+    let taken = w.import_as_peer();
+    let last = atoms[LOG_ATOMS]["text"].as_str().unwrap();
+    assert!(taken.contains(last), "{said}");
 }
