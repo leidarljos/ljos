@@ -687,6 +687,23 @@ fn ours(v: &Value, runner: &str) -> bool {
     t.contains(&format!("--runner {runner}")) || t.contains(&format!("ljos-guard-{runner}.sh"))
 }
 
+fn repair_owned_hook(found: &mut Value, item: &Value, runner: &str) -> Option<bool> {
+    let wanted = item["hooks"]
+        .as_array()?
+        .iter()
+        .find(|hook| ours(hook, runner))?;
+    let owned = found["hooks"]
+        .as_array_mut()?
+        .iter_mut()
+        .find(|hook| ours(hook, runner))?;
+    if owned == wanted {
+        Some(false)
+    } else {
+        *owned = wanted.clone();
+        Some(true)
+    }
+}
+
 /// Put `item` in the array at `key` of `obj`. An older entry owned by this
 /// seat is repaired in place; unrelated entries stay. True when it changed.
 fn ensure_in(obj: &mut Map<String, Value>, key: &str, item: Value, runner: &str) -> bool {
@@ -695,6 +712,9 @@ fn ensure_in(obj: &mut Map<String, Value>, key: &str, item: Value, runner: &str)
         return false;
     };
     if let Some(found) = list.iter_mut().find(|g| ours(g, runner)) {
+        if let Some(changed) = repair_owned_hook(found, &item, runner) {
+            return changed;
+        }
         if *found == item {
             return false;
         }
@@ -1762,6 +1782,52 @@ mod tests {
             fixed["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
             json!(crate::tools::sh_word(&script.display().to_string()))
         );
+    }
+
+    #[test]
+    fn json_runner_reonboard_keeps_sibling_hooks_in_an_owned_group() {
+        for (runner, groups) in [
+            ("gemini", 2),
+            ("qwen", 2),
+            ("factory", 2),
+            ("openhands", 2),
+            ("auggie", 1),
+        ] {
+            let mut root = json!({});
+            let old = format!("/old/ljos hook --runner {runner}");
+            assert!(spec(runner, &mut root, &old).unwrap(), "{runner}");
+            let events = if runner == "factory" {
+                root.as_object_mut().unwrap()
+            } else {
+                root["hooks"].as_object_mut().unwrap()
+            };
+            let mut added = 0;
+            for event in events.values_mut() {
+                for group in event.as_array_mut().unwrap() {
+                    if ours(group, runner) {
+                        group["hooks"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!({"type": "command", "command": "/usr/bin/true"}));
+                        added += 1;
+                    }
+                }
+            }
+            assert_eq!(added, groups, "{runner}: {root}");
+
+            let new = format!("/new/ljos hook --runner {runner}");
+            assert!(spec(runner, &mut root, &new).unwrap(), "{runner}");
+            assert_eq!(
+                root.to_string().matches("/usr/bin/true").count(),
+                groups,
+                "{runner}: {root}"
+            );
+            assert_eq!(
+                root.to_string().matches(&new).count(),
+                groups,
+                "{runner}: {root}"
+            );
+        }
     }
 
     #[test]
