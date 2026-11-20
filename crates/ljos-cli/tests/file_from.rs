@@ -243,3 +243,21 @@ fn a_refused_row_takes_back_every_project_it_wrote() {
     assert_eq!(tracked(&world), files);
     assert_eq!(world.commits(), before);
 }
+
+#[test]
+fn a_csv_header_named_twice_is_refused_and_nothing_is_filed() {
+    let world = World::new();
+    let before = world.commits();
+    let files = tracked(&world);
+    let file = world.write("rows.csv", "title,title \nkept,dropped\n");
+    let filed = world.ljos(&["file", "--from", &file, "-p", "demo"]);
+    assert_eq!(filed.status.code(), Some(1), "{}", said(&filed));
+    assert!(stdout(&filed).is_empty(), "{}", said(&filed));
+    assert!(
+        stderr(&filed).contains("header columns 1 (\"title\") and 2 (\"title \") are both title"),
+        "{}",
+        said(&filed)
+    );
+    assert_eq!(tracked(&world), files);
+    assert_eq!(world.commits(), before);
+}

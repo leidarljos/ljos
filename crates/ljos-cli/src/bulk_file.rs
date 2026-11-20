@@ -139,9 +139,21 @@ pub fn parse_csv_rows(what: &str, bytes: &[u8]) -> Result<Vec<Row>> {
             e.to_string().trim_start_matches("table: ")
         )
     })?;
-    for name in &csv.header {
+    for (at, name) in csv.header.iter().enumerate() {
         if !COLUMNS.contains(&name.trim()) {
             return Err(unknown_column(1, name));
+        }
+        if let Some(first) = csv.header[..at]
+            .iter()
+            .position(|h| h.trim() == name.trim())
+        {
+            bail!(
+                "file --from: {what}: header columns {} ({:?}) and {} ({name:?}) are both {}",
+                first + 1,
+                csv.header[first],
+                at + 1,
+                name.trim()
+            );
         }
     }
     if !csv.header.iter().any(|h| h.trim() == "title") {
@@ -486,6 +498,24 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("row 1: unknown column \"owner\""), "{e}");
+    }
+
+    #[test]
+    fn a_header_named_twice_once_with_spaces_is_refused() {
+        let e = parse_csv_rows("s.csv", b"title,title \nkept,dropped\n")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            e,
+            "file --from: s.csv: header columns 1 (\"title\") and 2 (\"title \") are both title"
+        );
+        let e = parse_csv_rows("s.csv", b"title, body,body\na,b,c\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("header columns 2 (\" body\") and 3 (\"body\")"),
+            "{e}"
+        );
     }
 
     #[test]
