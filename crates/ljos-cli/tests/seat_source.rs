@@ -47,6 +47,7 @@ fn seat_out(daemon: &Path, config: &Path, extra: &[(&str, &str)]) -> String {
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", config)
         .env("XDG_CONFIG_HOME", config)
+        .env("XDG_STATE_HOME", config.join("state"))
         .env("XDG_RUNTIME_DIR", config.join("run"))
         .env("USER", "probe-login");
     seat_env::clear(&mut cmd);
@@ -93,7 +94,7 @@ fn only_a_named_seat_or_a_call_argument_names_the_seat() {
     assert_eq!(field(&named, "seat"), "saddle", "{named}");
     assert!(field(&named, "source").contains("LJOS_SEAT"), "{named}");
 
-    let saved: Vec<_> = [
+    let mut isolated: std::collections::BTreeSet<String> = [
         "LJOS_SEAT",
         "VISSUE_AGENT",
         "LJOS_HOLD",
@@ -101,28 +102,60 @@ fn only_a_named_seat_or_a_call_argument_names_the_seat() {
         "ISSUE_ROOT",
         "HOME",
         "XDG_CONFIG_HOME",
-        "CURSOR_CONVERSATION_ID",
-        "CLAUDE_CODE_SESSION_ID",
-        "CODEX_THREAD_ID",
-        "CODEX_SESSION_ID",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
     ]
     .into_iter()
-    .map(|key| (key, std::env::var_os(key)))
+    .map(str::to_string)
     .collect();
+    isolated.extend(seat_env::KEYS.iter().map(|key| (*key).to_string()));
+    isolated.extend(std::env::vars_os().filter_map(|(key, _)| {
+        let key = key.into_string().ok()?;
+        (key.ends_with("_SESSION_ID")
+            || key.ends_with("_THREAD_ID")
+            || key.ends_with("_CONVERSATION_ID"))
+        .then_some(key)
+    }));
+    let saved: Vec<_> = isolated
+        .into_iter()
+        .map(|key| {
+            let value = std::env::var_os(&key);
+            (key, value)
+        })
+        .collect();
     let tracker = dir.path().join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
+    let state = dir.path().join("state");
+    let runtime = dir.path().join("runtime");
+    for path in [&state, &runtime] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let shared = ljos_cli::runtime_fallback(
+        &std::env::temp_dir(),
+        None,
+        // SAFETY: geteuid has no arguments and reads the process identity.
+        unsafe { libc::geteuid() },
+    );
+    std::fs::create_dir_all(&shared).unwrap();
+    let intruder = shared.join(format!(
+        "seat-{}",
+        // SAFETY: getppid has no arguments and reads the parent process id.
+        unsafe { libc::getppid() }
+    ));
+    let old_intruder = std::fs::read(&intruder).ok();
+    std::fs::write(&intruder, "intruder\nintruder\n").unwrap();
     unsafe {
-        std::env::set_var("HOME", &config);
-        std::env::set_var("XDG_CONFIG_HOME", &config);
-        std::env::set_var("VISSUE_ROOT", &tracker);
-        std::env::set_var("ISSUE_ROOT", &tracker);
-        std::env::remove_var("LJOS_SEAT");
+        for (key, _) in &saved {
+            std::env::remove_var(key);
+        }
         std::env::remove_var("VISSUE_AGENT");
         std::env::remove_var("LJOS_HOLD");
-        std::env::remove_var("CURSOR_CONVERSATION_ID");
-        std::env::remove_var("CLAUDE_CODE_SESSION_ID");
-        std::env::remove_var("CODEX_THREAD_ID");
-        std::env::remove_var("CODEX_SESSION_ID");
+        std::env::set_var("HOME", &config);
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+        std::env::set_var("XDG_STATE_HOME", &state);
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+        std::env::set_var("VISSUE_ROOT", &tracker);
+        std::env::set_var("ISSUE_ROOT", &tracker);
     }
     let missing = ljos_cli::resolve_call_seat(None);
     let from_arg = ljos_cli::resolve_call_seat(Some("inky"));
@@ -132,16 +165,21 @@ fn only_a_named_seat_or_a_call_argument_names_the_seat() {
     unsafe {
         for (key, value) in saved {
             match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
+                Some(value) => std::env::set_var(&key, value),
+                None => std::env::remove_var(&key),
             }
         }
+    }
+    match old_intruder {
+        Some(bytes) => std::fs::write(&intruder, bytes).unwrap(),
+        None => std::fs::remove_file(&intruder).unwrap(),
     }
     let missing = missing.expect("a missing seat still resolves");
     assert!(
         missing.source.contains("no seat rule matched") || missing.seat.starts_with("unknown-"),
         "{missing:?}"
     );
+    assert_ne!(missing.seat, "intruder", "{missing:?}");
     assert_eq!(from_arg.expect("the call's seat").seat, "inky");
     assert_eq!(from_env.expect("LJOS_SEAT").seat, "saddle");
     assert_eq!(explicit.expect("the explicit seat").seat, "inky");
