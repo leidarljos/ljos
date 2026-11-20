@@ -1596,6 +1596,11 @@ fn take_ipv4(chars: &[char], i: usize) -> Option<usize> {
         || (octets[0] == 192 && octets[1] == 168)
         || (octets[0] == 169 && octets[1] == 254)
         || (octets[0] == 100 && (64..=127).contains(&octets[1]));
+    // Two- and three-part forms such as 1.89, 3.12.3, 0.5 and 139.1 are
+    // versions and decimals. A private short form such as 127.1 stays.
+    if candidate.matches('.').count() < 3 && !private && !has_port && !has_cidr {
+        return None;
+    }
     if !private && !has_port && !has_cidr && has_version_context(chars, i) {
         return None;
     }

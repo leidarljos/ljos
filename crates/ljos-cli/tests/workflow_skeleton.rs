@@ -778,6 +778,10 @@ firmware 1.2.3.4.
 ships 1.2.3.4
 release 1.2.3.4
 section 3.4.5.6.
+Requires Rust 1.89
+Python 3.12.3
+0.5
+median 139.1 ms
 seat belt.
 add::fee.
 key=value.
