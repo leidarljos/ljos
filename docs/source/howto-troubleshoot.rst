@@ -154,6 +154,9 @@ The printed row is:
 ..
    # proseguard:on
 
+A tracker write waits for another seat's commit lock, which a push keeps until git exits, for ``LJOS_TRACKER_LOCK_WAIT`` seconds (20 when unset).
+Only a lock that is still taken after that wait leaves the write on disk, with a line that says the commit is deferred to the next write or push.
+
 A missing habitat binary
 ========================
 
