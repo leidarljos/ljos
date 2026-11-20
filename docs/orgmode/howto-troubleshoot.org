@@ -99,6 +99,9 @@ The printed row is:
 no	tickets	vissue 0.24.1 root=/tmp/seat/old-tracker prefix=Software from seat config or working directory; /tmp/seat/.config/vissue/config.toml names /tmp/seat/old-tracker, which is not a directory. `mkdir -p /tmp/seat/old-tracker/Software` creates it
 #+end_src
 
+A tracker write waits for another seat's commit lock, which a push keeps until git exits, for =LJOS_TRACKER_LOCK_WAIT= seconds (20 when unset).
+Only a lock that is still taken after that wait leaves the write on disk, with a line that says the commit is deferred to the next write or push.
+
 * A missing habitat binary
 
 =deedar= not on =PATH=, with the registry answering, printed:
