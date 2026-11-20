@@ -29,6 +29,9 @@ A habit reading may be negative, and the number is stored.
 A flag given another flag of the same command as the next word is missing that value, and the line names the flag.
 A global =--seat= follows that rule and does not take a following flag as its value.
 A value joined to its flag with an equals sign is that value, even when the text looks like a flag.
+Free-text flags such as =--body= take a following hyphen word. For other
+values that start with a hyphen, bind the value with ===.
+An attached short value such as =-tbug= is the value =bug= of =-t=.
 A flag's bound value may start with a hyphen. That includes a lesson, a body and a view.
 Positional text that starts with a hyphen, including a file title or finish lesson, follows =--=. Without it the command refuses the text as a flag instead of printing help or acting.
 The same rule covers words of a query, a note or a message, and a flag of the command stays a flag.
