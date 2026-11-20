@@ -1638,43 +1638,144 @@ fn migrate_legacy(root: &Path, log_rel: &str) -> Result<Option<String>> {
     Ok(Some(snap))
 }
 
-fn plaintext_matches(root: &Path, stem: &str, plain: &str) -> bool {
-    let want = format!("{}\n", blob_digest(plain.as_bytes()));
-    read_beneath(root, &plain_hash_rel(stem))
-        .ok()
-        .flatten()
-        .is_some_and(|have| have == want.as_bytes())
-}
-
+/// Write the plaintext hash beside the log when it does not say `plain`
+/// already. Peers and the wake read that it exists; no sync reads what it
+/// says, since a checkout can carry any hash there.
 fn write_plain_hash(root: &Path, stem: &str, plain: &str) -> Result<()> {
     let line = format!("{}\n", blob_digest(plain.as_bytes()));
-    write_beneath(root, &plain_hash_rel(stem), line.as_bytes())
+    let rel = plain_hash_rel(stem);
+    if read_beneath(root, &rel).ok().flatten().as_deref() == Some(line.as_bytes()) {
+        return Ok(());
+    }
+    write_beneath(root, &rel, line.as_bytes())
+}
+
+/// The key that signs what this home keeps of sealed logs: 32 random
+/// bytes in `sync/kept.key` below the state root, mode 0600. A kept file
+/// is taken only when this key signed it, so one written by hand or copied
+/// from another home is not. None when there is no key; then nothing kept
+/// is used. A read never makes one: see [`make_kept_key`].
+fn kept_key() -> Option<[u8; 32]> {
+    let kept = read_beneath(&state_base(), KEPT_KEY_REL).ok().flatten()?;
+    <[u8; 32]>::try_from(kept.as_slice()).ok()
+}
+
+/// [`kept_key`], made on first use by a write of the sync state.
+fn make_kept_key() -> Option<[u8; 32]> {
+    if let Some(key) = kept_key() {
+        return Some(key);
+    }
+    let base = state_base();
+    let mut key = [0u8; 32];
+    getrandom::fill(&mut key).ok()?;
+    write_private_beneath(&base, KEPT_KEY_REL, &key).ok()?;
+    Some(key)
+}
+
+const KEPT_KEY_REL: &str = "sync/kept.key";
+
+/// HMAC-SHA256 of `parts`, each with its length before it, under `key`.
+fn kept_tag(key: &[u8; 32], parts: &[&[u8]]) -> String {
+    use sha2::Digest as _;
+    let mut inner_pad = [0x36u8; 64];
+    let mut outer_pad = [0x5cu8; 64];
+    for (n, byte) in key.iter().enumerate() {
+        inner_pad[n] ^= byte;
+        outer_pad[n] ^= byte;
+    }
+    let mut inner = sha2::Sha256::new();
+    inner.update(inner_pad);
+    for part in parts {
+        inner.update((part.len() as u64).to_le_bytes());
+        inner.update(part);
+    }
+    let mut outer = sha2::Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner.finalize());
+    hex::encode(outer.finalize())
+}
+
+fn tags_equal(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
+/// Digest of the names and bytes of every snapshot and segment of the log
+/// at `stem`, as they are in the checkout. None when one cannot be read.
+fn pieces_digest(root: &Path, stem: &str) -> Option<String> {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    for piece in sealed_pieces(root, stem) {
+        let bytes = read_beneath(root, &piece.rel).ok().flatten()?;
+        hasher.update((piece.rel.len() as u64).to_le_bytes());
+        hasher.update(piece.rel.as_bytes());
+        hasher.update(sha2::Sha256::digest(&bytes));
+    }
+    Some(hex::encode(hasher.finalize()))
+}
+
+/// Where below the state root this home notes what the log at `stem` in
+/// the checkout at `root` opens to: `sync/logs/<digest>`.
+fn log_note_rel(root: &Path, stem: &str) -> String {
+    use sha2::Digest as _;
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(root.as_os_str().as_encoded_bytes());
+    hasher.update([0]);
+    hasher.update(stem.as_bytes());
+    format!("sync/logs/{}", hex::encode(hasher.finalize()))
+}
+
+/// Note that the pieces of the log at `stem`, as they are now, open to
+/// `plain`. Written after this sync sealed them or read them whole.
+fn note_log(root: &Path, stem: &str, plain: &str) {
+    let Some(key) = make_kept_key() else {
+        return;
+    };
+    let Some(pieces) = pieces_digest(root, stem) else {
+        return;
+    };
+    let plain = blob_digest(plain.as_bytes());
+    let tag = kept_tag(&key, &[b"log", pieces.as_bytes(), plain.as_bytes()]);
+    let line = format!("{tag} {pieces} {plain}\n");
+    let rel = log_note_rel(root, stem);
+    if read_beneath(&state_base(), &rel).ok().flatten().as_deref() != Some(line.as_bytes()) {
+        let _ = write_private_beneath(&state_base(), &rel, line.as_bytes());
+    }
+}
+
+/// Whether this home noted that the log at `stem`, with the bytes its
+/// pieces have now, opens to `plain`. The note is keyed to those bytes
+/// and signed with [`kept_key`], so a piece that changed, a note from
+/// elsewhere, or a hash in the checkout never makes a sync skip its log.
+fn log_noted(root: &Path, stem: &str, plain: &str) -> bool {
+    let Some(key) = kept_key() else {
+        return false;
+    };
+    let Ok(Some(kept)) = read_beneath(&state_base(), &log_note_rel(root, stem)) else {
+        return false;
+    };
+    let Ok(kept) = String::from_utf8(kept) else {
+        return false;
+    };
+    let mut words = kept.split_whitespace();
+    let (Some(tag), Some(pieces), Some(noted)) = (words.next(), words.next(), words.next()) else {
+        return false;
+    };
+    let want = kept_tag(&key, &[b"log", pieces.as_bytes(), noted.as_bytes()]);
+    tags_equal(tag, &want)
+        && noted == blob_digest(plain.as_bytes())
+        && pieces_digest(root, stem).as_deref() == Some(pieces)
 }
 
 /// The atom lines of `host`'s `scope_name` log: the legacy file and its
 /// chunks when no snapshot has been written, otherwise the newest snapshot
 /// and the segments after it, in sequence order. A segment that does not
 /// open ends the read. The same last-line-wins rule as [`read_chunks`].
-///
-/// A view that took a kept plaintext is used only when it hashes to the
-/// `plain.sha256` beside the log. Otherwise, and when there is no hash,
-/// the log is read again with age past every kept plaintext, so a kept
-/// file that was changed or is stale never decides what the log carries.
 fn read_log_view(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Result<LogView> {
-    let hits = OPENED_HITS.with(std::cell::Cell::get);
-    let view = read_log_view_once(root, log_rel, host, scope_name)?;
-    if OPENED_HITS.with(std::cell::Cell::get) == hits {
-        return Ok(view);
-    }
-    let plain = log_header(host, scope_name) + &view.body;
-    if view.stopped.is_none() && plaintext_matches(root, &log_stem_dir(log_rel), &plain) {
-        return Ok(view);
-    }
-    let _fresh = BypassOpened::start();
-    read_log_view_once(root, log_rel, host, scope_name)
-}
-
-fn read_log_view_once(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Result<LogView> {
     let stem = log_stem_dir(log_rel);
     let pieces = sealed_pieces(root, &stem);
     let identities = identities_for_open(scope_name);
@@ -1869,11 +1970,14 @@ fn atom_changes(
 /// identities is a recipient: a file it could not open stays unopened.
 fn keep_sealed(sealed: &[u8], plain: &str, scope_name: &str, recipients: &[String]) {
     let identities = identities_for_open(scope_name);
-    if opens_here(&identities, recipients) {
+    if !opens_here(&identities, recipients) {
+        return;
+    }
+    if let Some(key) = make_kept_key() {
         let _ = write_private_beneath(
             &state_base(),
             &opened_mark_rel(sealed, &identities),
-            plain.as_bytes(),
+            &mark_bytes(&key, sealed, Some(plain)),
         );
     }
 }
@@ -1902,8 +2006,9 @@ fn remove_pieces(root: &Path, pieces: &[SealedPiece]) -> Result<()> {
 }
 
 /// Write `body`, this host's atoms of `scope_name`, without sealing a blob
-/// again. The plaintext hash beside the log decides. A match writes
-/// nothing. A legacy `<stem>.jsonl.age` is copied once into `snap-0` and
+/// again. A log whose pieces this home noted opening to `body`
+/// ([`log_noted`]) writes nothing; otherwise the pieces are read and only
+/// what differs is sealed. A legacy `<stem>.jsonl.age` is copied once into `snap-0` and
 /// removed. Later atoms go into one new segment. A sealed piece is not
 /// removed or sealed again by a sync. When one does not open here, the
 /// atoms are sealed whole into a new snapshot once, and the pieces before
@@ -1923,10 +2028,11 @@ fn store_log(
     let stem = log_stem_dir(&log_rel);
     let plain = log_header(&host, scope_name) + body;
     let compact = compact_requested();
-    if plaintext_matches(root, &stem, &plain) && read_beneath(root, &log_rel)?.is_none() {
+    if read_beneath(root, &log_rel)?.is_none() && log_noted(root, &stem, &plain) {
         let pieces = sealed_pieces(root, &stem);
         let segs = pieces.iter().filter(|piece| !piece.snap).count();
         if !compact || segs == 0 {
+            write_plain_hash(root, &stem, &plain)?;
             return Ok(StoreOut::Unchanged);
         }
     }
@@ -1934,20 +2040,6 @@ fn store_log(
         return Ok(StoreOut::MissingAge);
     }
     let migrated = migrate_legacy(root, &log_rel)?;
-    if plaintext_matches(root, &stem, &plain) {
-        if migrated.is_some() {
-            write_plain_hash(root, &stem, &plain)?;
-            remember_digest(root, &log_rel, &plain, recipients)?;
-            return Ok(StoreOut::Migrated {
-                rel: migrated.unwrap_or_else(|| snap_file_rel(&stem, 0)),
-            });
-        }
-        let pieces = sealed_pieces(root, &stem);
-        let segs = pieces.iter().filter(|piece| !piece.snap).count();
-        if !compact || segs == 0 {
-            return Ok(StoreOut::Unchanged);
-        }
-    }
     let view = read_log_view(root, &log_rel, &host, scope_name)?;
     if compact {
         if let Some(why) = view
@@ -1993,6 +2085,10 @@ fn store_log(
     let segs = pieces.iter().filter(|piece| !piece.snap).count();
     if changes.is_empty() && !(compact && segs > 0) {
         write_plain_hash(root, &stem, &plain)?;
+        note_log(root, &stem, &plain);
+        if migrated.is_some() {
+            remember_digest(root, &log_rel, &plain, recipients)?;
+        }
         return Ok(match migrated {
             Some(rel) => StoreOut::Migrated { rel },
             None => StoreOut::Unchanged,
@@ -2025,6 +2121,7 @@ fn store_log(
     write_beneath(root, &rel, &sealed)?;
     keep_sealed(&sealed, &segment, scope_name, recipients);
     write_plain_hash(root, &stem, &plain)?;
+    note_log(root, &stem, &plain);
     remember_digest(root, &log_rel, &plain, recipients)?;
     Ok(StoreOut::Wrote {
         rel,
@@ -2097,6 +2194,7 @@ fn seal_snapshot(
         remove_pieces(root, pieces)?;
     }
     write_plain_hash(root, stem, plain)?;
+    note_log(root, stem, plain);
     remember_digest(root, &format!("{stem}.jsonl.age"), plain, recipients)?;
     Ok(StoreOut::Wrote { rel, changes: 0 })
 }
@@ -3580,65 +3678,63 @@ fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<Stri
     // with nothing new. The taken records already hold this plaintext at
     // rest in the same state tree, and the mark is read and written the
     // way they are, below the state root with no symlink followed. A miss
-    // is kept as an empty mark; an error is not kept. Only an import
+    // is kept as a `miss` mark; an error is not kept. Only an import
     // keeps one: the doctor's other reads leave the state as they found
     // it, and a mark that cannot be read is opened again.
-    // A kept mark may not match what the ciphertext carries: a reader
-    // counts the marks it took, and [`read_log_view`] checks a view that
-    // took one to the log's plaintext hash and reads it again with age,
-    // past every mark, when they differ. That read replaces the marks.
+    // A mark is taken only when it is signed with [`kept_key`] over this
+    // ciphertext and what it says. One that is not is opened with age, and
+    // an import writes it again.
     let rel = opened_mark_rel(bytes, identities);
-    let fresh = OPENED_BYPASS.with(std::cell::Cell::get);
-    if !fresh {
-        match read_beneath(&state_base(), &rel) {
-            Ok(Some(kept)) if kept.is_empty() => {
-                OPENED_HITS.with(|hits| hits.set(hits.get() + 1));
-                return Ok(None);
+    if let Some(key) = kept_key() {
+        if let Ok(Some(kept)) = read_beneath(&state_base(), &rel) {
+            if let Some(opened) = read_mark(&key, bytes, &kept) {
+                return Ok(opened);
             }
-            Ok(Some(kept)) => {
-                if let Ok(text) = String::from_utf8(kept) {
-                    OPENED_HITS.with(|hits| hits.set(hits.get() + 1));
-                    return Ok(Some(text));
-                }
-            }
-            Ok(None) | Err(_) => {}
         }
     }
     let opened = open_sealed_bytes_with_age(bytes, identities)?;
-    if fresh || KEEP_OPENED.with(std::cell::Cell::get) {
-        let body: &[u8] = opened.as_deref().map_or(&[], str::as_bytes);
-        let _ = write_private_beneath(&state_base(), &rel, body);
+    if KEEP_OPENED.with(std::cell::Cell::get) {
+        if let Some(key) = make_kept_key() {
+            let mark = mark_bytes(&key, bytes, opened.as_deref());
+            let _ = write_private_beneath(&state_base(), &rel, &mark);
+        }
     }
     Ok(opened)
+}
+
+/// A mark: the tag, a space, `open` or `miss`, a newline, and what age
+/// gave.
+fn mark_bytes(key: &[u8; 32], sealed: &[u8], opened: Option<&str>) -> Vec<u8> {
+    use sha2::Digest as _;
+    let kind = if opened.is_some() { "open" } else { "miss" };
+    let plain = opened.unwrap_or("");
+    let sum = sha2::Sha256::digest(sealed);
+    let tag = kept_tag(key, &[b"mark", &sum, kind.as_bytes(), plain.as_bytes()]);
+    format!("{tag} {kind}\n{plain}").into_bytes()
+}
+
+/// What a mark says `sealed` opens to, when its tag is right.
+fn read_mark(key: &[u8; 32], sealed: &[u8], kept: &[u8]) -> Option<Option<String>> {
+    use sha2::Digest as _;
+    let kept = std::str::from_utf8(kept).ok()?;
+    let (first, plain) = kept.split_once('\n')?;
+    let (tag, kind) = first.split_once(' ')?;
+    let sum = sha2::Sha256::digest(sealed);
+    let want = kept_tag(key, &[b"mark", &sum, kind.as_bytes(), plain.as_bytes()]);
+    if !tags_equal(tag, &want) {
+        return None;
+    }
+    match kind {
+        "open" => Some(Some(plain.to_string())),
+        "miss" if plain.is_empty() => Some(None),
+        _ => None,
+    }
 }
 
 thread_local! {
     /// Whether this thread is inside a write of the sync state, where
     /// [`open_sealed_bytes`] may keep what age gave.
     static KEEP_OPENED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-thread_local! {
-    /// Marks [`open_sealed_bytes`] answered from on this thread.
-    static OPENED_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// Set while [`open_sealed_bytes`] runs age past every mark.
-    static OPENED_BYPASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Makes [`open_sealed_bytes`] run age past every kept mark while the
-/// holder lives, on this thread, and keep what age gave.
-struct BypassOpened(bool);
-
-impl BypassOpened {
-    fn start() -> Self {
-        Self(OPENED_BYPASS.with(|fresh| fresh.replace(true)))
-    }
-}
-
-impl Drop for BypassOpened {
-    fn drop(&mut self) {
-        OPENED_BYPASS.with(|fresh| fresh.set(self.0));
-    }
 }
 
 /// Lets [`open_sealed_bytes`] keep what age gave while the holder lives,
@@ -9910,8 +10006,8 @@ mod tests {
 
     /// A chunk cut short after it was written, as by a torn write or a
     /// checkout that stopped, never reaches the view: a peer reads the base
-    /// and the chunks before it. The next export with a new atom leaves the
-    /// cut file in place and seals the log whole into a new snapshot.
+    /// and the chunks before it. The next export leaves the cut file in
+    /// place and seals the log whole into a new snapshot, once.
     #[test]
     fn a_cut_chunk_is_left_unread_and_sealed_over() {
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
@@ -9943,14 +10039,13 @@ mod tests {
         assert!(out.contains("did not open"), "{out}");
 
         let said = fix.sync(&atoms);
-        assert!(
-            said.contains("unchanged since the last export"),
-            "an unchanged plaintext rewrote the cut segment: {said}"
-        );
-        atoms.push(note(204));
-        let said = fix.sync(&atoms);
         assert!(said.contains("sealed whole into"), "{said}");
         assert!(said.contains("/snap-"), "{said}");
+        let again = fix.sync(&atoms);
+        assert!(again.contains("unchanged since the last export"), "{again}");
+        atoms.push(note(204));
+        let said = fix.sync(&atoms);
+        assert!(said.contains("1 changed"), "{said}");
         assert_eq!(
             std::fs::read(&cut).unwrap(),
             &bytes[..bytes.len() / 2],
@@ -11179,11 +11274,12 @@ mod tests {
         assert!(!primary.contains("cloud only"), "{primary}");
     }
 
-    /// The plaintext hash, not the ciphertext, decides a repeat. Replacing
-    /// the sealed bytes under the same atoms writes nothing, and an older
-    /// two-field digest does not seal the log again once that hash is stored.
+    /// The sealed bytes this home noted, not the plaintext hash beside the
+    /// log, decide a repeat. An older two-field digest does not seal the log
+    /// again. Sealed bytes replaced under the same atoms are read again, and
+    /// a machine that is not a recipient writes nothing and says why.
     #[test]
-    fn a_log_replaced_under_the_same_atoms_is_sealed_again() {
+    fn a_log_replaced_under_the_same_atoms_is_read_again() {
         let dir = tempfile::tempdir().unwrap();
         let _env = hold_env(dir.path());
         let scope: Scope =
@@ -11202,21 +11298,6 @@ mod tests {
         let sealed = snap_text(&root, &log_rel);
         let said = run();
         assert!(said.contains("unchanged since the last export"), "{said}");
-        let stem = log_stem_dir(&log_rel);
-        let snap = sealed_pieces(&root, &stem)
-            .into_iter()
-            .find(|piece| piece.snap)
-            .unwrap();
-        std::fs::write(root.join(&snap.rel), "another seal\n").unwrap();
-        let said = run();
-        assert!(
-            said.contains("unchanged since the last export"),
-            "a replaced ciphertext of the same atoms was sealed again: {said}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(root.join(&snap.rel)).unwrap(),
-            "another seal\n"
-        );
         let older = format!(
             "{} {}\n",
             crate::work_id(&sealed),
@@ -11225,6 +11306,20 @@ mod tests {
         std::fs::write(root.join(&digest_rel), older).unwrap();
         let said = run();
         assert!(said.contains("unchanged since the last export"), "{said}");
+        let stem = log_stem_dir(&log_rel);
+        let snap = sealed_pieces(&root, &stem)
+            .into_iter()
+            .find(|piece| piece.snap)
+            .unwrap();
+        std::fs::write(root.join(&snap.rel), "another seal\n").unwrap();
+        let said = run();
+        assert!(said.contains("warning"), "{said}");
+        assert!(!said.contains("unchanged since the last export"), "{said}");
+        assert_eq!(
+            std::fs::read_to_string(root.join(&snap.rel)).unwrap(),
+            "another seal\n"
+        );
+        assert_eq!(sealed_pieces(&root, &stem).len(), 1, "{said}");
     }
 
     #[test]

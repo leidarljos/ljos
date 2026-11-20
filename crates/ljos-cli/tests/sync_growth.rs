@@ -891,13 +891,17 @@ fn the_kept_plaintexts_are_this_users_alone_and_not_committed() {
 
 impl World {
     /// Rewrite each kept plaintext whose first line starts with `first`.
+    /// The line before it, the tag the home signed, stays as it was.
     fn tamper_kept(&self, first: &str, edit: impl Fn(&str) -> String) -> usize {
         let mut changed = 0;
         for entry in std::fs::read_dir(self.opened_dir()).unwrap() {
             let path = entry.unwrap().path();
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let kept = std::fs::read_to_string(&path).unwrap_or_default();
+            let Some((tag, text)) = kept.split_once('\n') else {
+                continue;
+            };
             if text.starts_with(first) {
-                std::fs::write(&path, edit(&text)).unwrap();
+                std::fs::write(&path, format!("{tag}\n{}", edit(text))).unwrap();
                 changed += 1;
             }
         }
@@ -1007,4 +1011,58 @@ fn a_waiting_atom_goes_out_once_this_machine_is_a_recipient_again() {
     assert!(new[0].0.contains("/seg-"), "{new:?}: {said}");
     assert!(new[0].1 < TWO_ATOM_SEGMENT, "{new:?}: {said}");
     assert_eq!(w.import_as_peer(), texts(&atoms), "{said}");
+}
+
+impl World {
+    /// What the plaintext hash beside this machine's log says.
+    fn plain_hash(&self) -> String {
+        std::fs::read_to_string(self.repo.join(".ljos/atoms/me/plain.sha256")).unwrap()
+    }
+
+    fn forge_plain_hash(&self, line: &str) {
+        std::fs::write(self.repo.join(".ljos/atoms/me/plain.sha256"), line).unwrap();
+    }
+
+    fn keep_only(&self, atoms: &[Value]) {
+        *self.pack.atoms.lock().unwrap() = atoms.to_vec();
+    }
+}
+
+#[test]
+fn a_forged_plain_hash_does_not_hide_an_added_or_dropped_atom() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, atoms, _) = sealed_log();
+    let all = w.plain_hash();
+    let gone = atoms[0].clone();
+    let id = format!("\"id\":\"{}\"", gone["id"].as_str().unwrap());
+    let rest = atoms[1..].to_vec();
+    w.keep_only(&rest);
+    w.sync();
+    let without = w.plain_hash();
+
+    w.keep_only(&atoms);
+    w.forge_plain_hash(&all);
+    let said = w.sync();
+    assert!(said.contains("1 changed"), "{said}");
+    assert_eq!(w.import_as_peer(), texts(&atoms), "{said}");
+
+    let tampered = w.tamper_kept("{\"ljos_seg\"", |text| {
+        text.lines()
+            .filter(|line| !line.contains(&id))
+            .map(|line| format!("{line}\n"))
+            .collect()
+    });
+    assert!(tampered > 0);
+    w.keep_only(&rest);
+    w.forge_plain_hash(&without);
+    let said = w.sync();
+    assert!(said.contains("1 changed"), "{said}");
+    assert_eq!(w.import_as_peer(), texts(&rest), "{said}");
+
+    w.forget_opened();
+    let again = w.sync();
+    assert!(again.contains("unchanged since the last export"), "{again}");
+    assert_eq!(w.import_as_peer(), texts(&rest), "{said}{again}");
 }
