@@ -76,6 +76,9 @@ pub struct Memory {
     /// Ticket the memory was filed on, from an `issue:ID` entity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    /// The atom's entities. Not part of the JSON listing.
+    #[serde(skip)]
+    pub entities: Vec<String>,
 }
 
 fn s(v: &Value) -> String {
@@ -136,6 +139,13 @@ impl Memory {
             earlier: 0,
             verdict: None,
             aliases: aliases_of(atom).map(str::to_string).collect(),
+            entities: atom["entities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
             ticket: atom["entities"].as_array().and_then(|entities| {
                 entities.iter().find_map(|item| {
                     item.as_str()
@@ -446,34 +456,15 @@ pub fn drop_memory(id: &str, all: &[Memory]) -> Result<String> {
 /// A missing basis is left missing: origin `user-declared` is not a
 /// person basis, and this does not stamp one. Under a runner the new text
 /// is the agent's, so it is written as `agent-derived`.
-fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
+fn replace(olds: &[&Memory], text: &str, verdict: &str, carry: &[String]) -> Result<String> {
     let text = text.trim();
     if text.is_empty() {
         bail!("memories: {verdict} needs a text");
     }
     let first = olds.first().context("memories: nothing to replace")?;
     let client = crate::pack()?;
-    let ws = client.workspace();
-    let mut atom = crate::atom_body(&first.kind, text, &ws);
-    atom["source"]["seat"] = Value::String(first.seat.clone());
-    atom["source"]["harness"] = Value::String(first.harness.clone());
-    atom["source"]["session"] = Value::String(first.session.clone());
-    atom["source"]["reviewed_by"] = Value::String(crate::seat_name());
-    atom["source"]["replaces"] =
-        Value::Array(olds.iter().map(|m| Value::String(m.id.clone())).collect());
-    if let Some(reason) = &first.reason {
-        atom["source"]["reason"] = Value::String(reason.clone());
-    }
-    crate::add_entities(&mut atom, ["horizon:standing".to_string()]);
-    let posted = if first.is_agents() || crate::under_a_runner() {
-        crate::admit::write_agent(&client, atom)?
-    } else {
-        atom["origin"] = Value::String(first.origin.clone());
-        if !first.basis.is_empty() {
-            atom["source"]["basis"] = Value::String(first.basis.clone());
-        }
-        crate::admit::post_kept(&client, &atom)?
-    };
+    let atom = replacement(&client, olds, text, carry);
+    let posted = post_replacement(&client, first, atom)?;
     let new_id = s(&posted["id"]);
     for m in olds {
         // Record the verdict before retiring the old claim, so a pack that
@@ -497,6 +488,47 @@ fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
     ))
 }
 
+/// The atom that stands in for `olds`, with the first one's provenance and
+/// the entities in `carry`.
+fn replacement(
+    client: &crate::PacksetClient,
+    olds: &[&Memory],
+    text: &str,
+    carry: &[String],
+) -> Value {
+    let first = olds[0];
+    let ws = client.workspace();
+    let mut atom = crate::atom_body(&first.kind, text, &ws);
+    atom["source"]["seat"] = Value::String(first.seat.clone());
+    atom["source"]["harness"] = Value::String(first.harness.clone());
+    atom["source"]["session"] = Value::String(first.session.clone());
+    atom["source"]["reviewed_by"] = Value::String(crate::seat_name());
+    atom["source"]["replaces"] =
+        Value::Array(olds.iter().map(|m| Value::String(m.id.clone())).collect());
+    if let Some(reason) = &first.reason {
+        atom["source"]["reason"] = Value::String(reason.clone());
+    }
+    crate::add_entities(&mut atom, ["horizon:standing".to_string()]);
+    crate::add_entities(&mut atom, carry.iter().cloned());
+    atom
+}
+
+fn post_replacement(
+    client: &crate::PacksetClient,
+    first: &Memory,
+    mut atom: Value,
+) -> Result<Value> {
+    if first.is_agents() || crate::under_a_runner() {
+        crate::admit::write_agent(client, atom)
+    } else {
+        atom["origin"] = Value::String(first.origin.clone());
+        if !first.basis.is_empty() {
+            atom["source"]["basis"] = Value::String(first.basis.clone());
+        }
+        crate::admit::post_kept(client, &atom)
+    }
+}
+
 /// Rewrite one memory's text. The replacement keeps the basis the memory
 /// already had, or is the agent's under a runner.
 ///
@@ -505,7 +537,125 @@ fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
 /// An id that names no memory, an empty text, or the pack refusing.
 pub fn edit(id: &str, text: &str, all: &[Memory]) -> Result<String> {
     let m = find(id, all)?;
-    replace(&[m], text, "edited")
+    replace(&[m], text, "edited", &[])
+}
+
+/// Mark a lesson or a preference public: write the same text again
+/// with the public entity and the project, tag and ticket entities it had,
+/// and retire the old claim. `ljos handbook` exports only a marked row. A
+/// later edit or merge writes a row with no mark, because the person
+/// approved the words they read.
+///
+/// `project` is recorded when the memory names none. With no `project` and
+/// no project on the memory, the checkout's project is used. When neither
+/// resolves, the error says to pass `-p`. A memory that already names a
+/// project keeps it. An explicit `project` that names a different one is
+/// refused.
+///
+/// # Errors
+///
+/// An id that names no memory, a kind that is not a lesson or a preference,
+/// a runner caller, a project that cannot be resolved, or the pack refusing.
+pub fn mark_public(id: &str, all: &[Memory], project: Option<&str>) -> Result<String> {
+    crate::refuse_public_under_a_runner("memories", true)?;
+    let m = find(id, all)?;
+    if !matches!(m.kind.as_str(), "lesson" | "preference") {
+        bail!("memories: only a lesson or a preference can be marked here. Write a rule with `ljos rule --public`");
+    }
+    if m.entities
+        .iter()
+        .any(|entity| entity == crate::PUBLIC_ENTITY)
+    {
+        return Ok(format!("{} is already public\n", m.short_id()));
+    }
+    let extra = project_to_add(m, project)?;
+    let client = crate::pack()?;
+    let posted = write_marked(&client, m, &extra)?;
+    let new_id = s(&posted["id"]);
+    let short_new = new_id.get(..8).unwrap_or(&new_id);
+    Ok(format!(
+        "marked {} public as {short_new}\n`ljos handbook` can export {short_new}. `ljos forget {short_new}` retires it.\n",
+        m.short_id()
+    ))
+}
+
+fn project_names(memory: &Memory) -> Vec<&str> {
+    memory
+        .entities
+        .iter()
+        .filter_map(|entity| entity.strip_prefix("project:"))
+        .collect()
+}
+
+fn project_to_add(memory: &Memory, project: Option<&str>) -> Result<Vec<String>> {
+    let existing = project_names(memory);
+    if let Some(name) = project.map(str::trim).filter(|name| !name.is_empty()) {
+        if existing.is_empty() {
+            return Ok(vec![format!("project:{name}")]);
+        }
+        if existing.iter().any(|have| have.eq_ignore_ascii_case(name)) {
+            return Ok(Vec::new());
+        }
+        bail!(
+            "memories: {} already names a project, so leave -p off",
+            memory.short_id()
+        );
+    }
+    if !existing.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Some(name) = crate::seat_tracker_project() {
+        return Ok(vec![format!("project:{name}")]);
+    }
+    bail!("memories: --public needs a project, so pass -p");
+}
+
+fn scoped_carry(memory: &Memory, extra: &[String]) -> Vec<String> {
+    let mut carry: Vec<String> = memory
+        .entities
+        .iter()
+        .filter(|entity| {
+            ["project:", "tag:", "issue:"]
+                .iter()
+                .any(|prefix| entity.starts_with(prefix))
+        })
+        .cloned()
+        .collect();
+    for entity in extra {
+        if !carry.iter().any(|have| have.eq_ignore_ascii_case(entity)) {
+            carry.push(entity.clone());
+        }
+    }
+    carry
+}
+
+/// The pack keeps one live row for a text, so the unmarked row is retired
+/// first and the marked one written after it. A write that fails puts the
+/// unmarked row back, so the memory is not lost.
+fn write_marked(
+    client: &crate::pack_link::PacksetClient,
+    memory: &Memory,
+    extra: &[String],
+) -> Result<Value> {
+    let mut carry = scoped_carry(memory, extra);
+    let plain = replacement(client, &[memory], memory.text.trim(), &carry);
+    carry.push(crate::PUBLIC_ENTITY.to_string());
+    let marked = replacement(client, &[memory], memory.text.trim(), &carry);
+    record(&memory.id, "marked", None)?;
+    crate::packset_forget(&memory.id, None)?;
+    let posted = match post_replacement(client, memory, marked) {
+        Ok(posted) => posted,
+        Err(err) => {
+            let _ = post_replacement(client, memory, plain);
+            return Err(err.context("memories: the pack did not take the marked row, and the unmarked one was written back"));
+        }
+    };
+    let new_id = s(&posted["id"]);
+    record(&memory.id, "marked", Some(&new_id))?;
+    if !new_id.is_empty() {
+        record(&new_id, "keep", None)?;
+    }
+    Ok(posted)
 }
 
 /// Merge memories into one. Without `text` the merged text is theirs,
@@ -531,7 +681,7 @@ pub fn merge(ids: &[String], text: Option<&str>, all: &[Memory]) -> Result<Strin
             .join(" ");
         &joined
     };
-    replace(&olds, text, "merged")
+    replace(&olds, text, "merged", &[])
 }
 
 /// The memories as a person reads them: a count, newest first, each claim
@@ -806,16 +956,27 @@ fn aliases_of(atom: &Value) -> impl Iterator<Item = &str> {
         .filter_map(Value::as_str)
 }
 
-/// The live memory `atom` says again, reinforced in its place: graded
-/// recalled, as `ljos graded` does, with the new wording kept in its
-/// `aliases`. Only a memory of the same kind and set counts, and not one
-/// the pack closes itself when `atom` is posted: a person's rewrite still
-/// revises. A person's words reinforce only a person's memory; folded
-/// into a derived one they would lose the `explicit` level they are filed
-/// at ([`crate::admit::admission_level`]). `None` sends the caller on to
-/// post `atom` as before, and so does a pack that does not answer, so the
-/// post says what went wrong.
-pub fn reinforce_held(client: &crate::pack_link::PacksetClient, atom: &Value) -> Option<Value> {
+fn entity_strs(atom: &Value) -> Vec<String> {
+    atom["entities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn has_public(atom: &Value) -> bool {
+    entity_strs(atom)
+        .iter()
+        .any(|entity| entity == crate::PUBLIC_ENTITY)
+}
+
+/// The live memory `atom` says again. Only a memory of the same kind and
+/// set counts, and not one the pack closes itself when `atom` is posted.
+/// A person's words match only a person's memory. `None` when the pack
+/// does not answer, so the caller posts and says what went wrong.
+fn matching_held(client: &crate::pack_link::PacksetClient, atom: &Value) -> Option<Value> {
     let text = atom["text"].as_str()?.trim();
     let new = atom.as_object()?;
     // An alias skips the pack's secret check on `text`; the post makes it.
@@ -828,24 +989,80 @@ pub fn reinforce_held(client: &crate::pack_link::PacksetClient, atom: &Value) ->
     let now = crate::now_utc();
     let set = |a: &Value| a["set"].as_str().unwrap_or("").to_string();
     let persons = |a: &Value| a["origin"].as_str() == Some(crate::admit::ORIGIN_USER);
-    let found = held.iter().find(|h| {
-        h["kind"] == atom["kind"]
-            && set(h) == set(atom)
-            && (persons(h) || !persons(atom))
-            && crate::live_now(h, &now)
-            && h.as_object()
-                .is_some_and(|old| !packset_core::record::replaces(new, old))
-            && std::iter::once(h["text"].as_str().unwrap_or(""))
-                .chain(aliases_of(h))
-                .any(|w| same_lesson(text, w))
-    })?;
+    held.iter()
+        .find(|h| {
+            h["kind"] == atom["kind"]
+                && set(h) == set(atom)
+                && (persons(h) || !persons(atom))
+                && crate::live_now(h, &now)
+                && h.as_object()
+                    .is_some_and(|old| !packset_core::record::replaces(new, old))
+                && std::iter::once(h["text"].as_str().unwrap_or(""))
+                    .chain(aliases_of(h))
+                    .any(|w| same_lesson(text, w))
+        })
+        .cloned()
+}
+
+/// A public repeat of a private lesson marks that row public instead of
+/// reinforcing it. An atom with no public mark, a row that is already
+/// public, and a pack that does not answer return `Ok(None)`, so the
+/// caller reinforces or posts as before. The posted row is not marked
+/// reinforced.
+///
+/// # Errors
+///
+/// The pack refuses the marked row after the unmarked one was retired.
+/// The unmarked row is written back first.
+pub fn publish_repeat(
+    client: &crate::pack_link::PacksetClient,
+    atom: &Value,
+) -> Result<Option<Value>> {
+    if !has_public(atom) {
+        return Ok(None);
+    }
+    let Some(found) = matching_held(client, atom) else {
+        return Ok(None);
+    };
+    if has_public(&found) {
+        return Ok(None);
+    }
+    let Some(memory) = Memory::of(&found) else {
+        return Ok(None);
+    };
+    let extra = if project_names(&memory).is_empty() {
+        entity_strs(atom)
+            .into_iter()
+            .filter(|entity| entity.starts_with("project:"))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(Some(write_marked(client, &memory, &extra)?))
+}
+
+/// The live memory `atom` says again, reinforced in its place: graded
+/// recalled, as `ljos graded` does, with the new wording kept in its
+/// `aliases`. Only a memory of the same kind and set counts, and not one
+/// the pack closes itself when `atom` is posted: a person's rewrite still
+/// revises. A person's words reinforce only a person's memory; folded
+/// into a derived one they would lose the `explicit` level they are filed
+/// at ([`crate::admit::admission_level`]). `None` sends the caller on to
+/// post `atom` as before, and so does a pack that does not answer, so the
+/// post says what went wrong.
+pub fn reinforce_held(client: &crate::pack_link::PacksetClient, atom: &Value) -> Option<Value> {
+    let text = atom["text"].as_str()?.trim();
+    let found = matching_held(client, atom)?;
     let id = found["id"].as_str().filter(|id| !id.is_empty())?;
+    let ws = atom["workspace"]
+        .as_str()
+        .map_or_else(|| client.workspace(), str::to_string);
     let mut out = client.grade(&ws, id, true).ok()?;
     let said = std::iter::once(found["text"].as_str().unwrap_or(""))
-        .chain(aliases_of(found))
+        .chain(aliases_of(&found))
         .any(|w| fold(w) == fold(text));
     if !said {
-        let mut aliases: Vec<Value> = aliases_of(found).map(Value::from).collect();
+        let mut aliases: Vec<Value> = aliases_of(&found).map(Value::from).collect();
         aliases.push(Value::from(text));
         if let Ok(updated) = client.update_atom(&ws, id, &serde_json::json!({"aliases": aliases})) {
             out = updated;
@@ -1784,6 +2001,7 @@ mod tests {
             verdict: None,
             aliases: Vec::new(),
             ticket: None,
+            entities: Vec::new(),
         };
         let wide = describe(&m, Width::columns(200));
         assert!(
