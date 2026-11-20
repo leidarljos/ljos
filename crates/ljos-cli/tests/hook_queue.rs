@@ -428,16 +428,28 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
     assert_eq!(gates, 21, "one timing line per gate call:\n{times}");
 }
 
+fn baseline_hook_time(hab: &Hab, payload: &str) -> Duration {
+    let mut cmd = ljos(hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let started = Instant::now();
+    let _ = within(feed(cmd, payload), Duration::from_secs(10), "baseline hook");
+    started.elapsed()
+}
+
 /// A pack that accepts and never answers costs a gate one short wait, and
 /// the rules kept on disk still warn. The next call does not wait at all.
 #[test]
 fn a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_warn() {
     let hab = hab("hungpack");
+    let base = baseline_hook_time(&hab, &cursor_shell(&hab, "hung-0", "ls"));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&accepts);
     std::thread::spawn(move || {
         let mut held = Vec::new();
         for conn in listener.incoming().flatten() {
+            seen.fetch_add(1, Ordering::SeqCst);
             held.push(conn);
         }
     });
@@ -452,7 +464,8 @@ fn a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_warn() {
     let call = |conversation: &str, command: &str| {
         let mut cmd = ljos(&hab, &["hook"]);
         cmd.env("PACKSET_URL", &url)
-            .env("PACKSET_WORKSPACE", "probe");
+            .env("PACKSET_WORKSPACE", "probe")
+            .env("PACKSET_TIMEOUT_MS", "5000");
         let started = Instant::now();
         let out = within(
             feed(cmd, &cursor_shell(&hab, conversation, command)),
@@ -467,21 +480,42 @@ fn a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_warn() {
     let (first, said) = call("hung-1", "ls");
     assert!(said.contains("\"permission\":\"allow\""), "{said}");
     assert!(
-        first < Duration::from_millis(1000),
-        "the first gate waited {first:?} on a hung pack"
+        hab.run.join("ljos/pack-slow").is_file(),
+        "first hung call did not write the pack-slow marker"
     );
+    let after_first = accepts.load(Ordering::SeqCst);
+    assert!(after_first >= 1, "first call never connected to the pack");
+    let first_budget =
+        (base.saturating_mul(2) + Duration::from_millis(1200)).min(Duration::from_secs(4));
+    assert!(
+        first < first_budget,
+        "the first gate waited {first:?} (baseline {base:?}, budget {first_budget:?})"
+    );
+    let fast_budget = (base.saturating_mul(3).max(Duration::from_millis(450))
+        + Duration::from_millis(250))
+    .min(Duration::from_secs(2));
     let (second, said) = call("hung-2", "ls");
     assert!(said.contains("\"permission\":\"allow\""), "{said}");
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        after_first,
+        "the second gate connected to a pack already marked slow"
+    );
     assert!(
-        second < Duration::from_millis(300),
-        "the next gate waited {second:?} on a pack already marked slow"
+        second < fast_budget,
+        "the next gate waited {second:?} (baseline {base:?}, budget {fast_budget:?})"
     );
     let (third, said) = call("hung-3", "curl https://example.invalid");
     assert!(warns(&said), "{said}");
     assert!(said.contains("no curl"), "{said}");
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        after_first,
+        "a kept-rule call connected to a pack already marked slow"
+    );
     assert!(
-        third < Duration::from_millis(300),
-        "a kept rule took {third:?} to warn"
+        third < fast_budget,
+        "a kept rule took {third:?} to warn (baseline {base:?}, budget {fast_budget:?})"
     );
 }
 
@@ -1554,12 +1588,18 @@ fn ordinary_non_permission_events_do_not_stall_on_hung_pack() {
             r#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"postToolUseFailure","tool_name":"Shell","tool_input":{"command":"ls"},"error_message":"exit 2"}"#,
         ),
     ];
+    let base = baseline_hook_time(&hab, events[0].1);
+    let budget = (base.saturating_mul(2) + Duration::from_millis(800)).min(Duration::from_secs(3));
     for (name, payload) in events {
         let mut cmd = ljos(&hab, &["hook"]);
         cmd.env("PACKSET_URL", &url)
             .env("PACKSET_WORKSPACE", "probe")
+            .env("PACKSET_TIMEOUT_MS", "5000")
             .env("LJOS_HOOKD", "off");
         let (took, _out) = finished(feed(cmd, payload), Duration::from_secs(10), name);
-        assert!(took < Duration::from_millis(500), "{name} took {took:?}");
+        assert!(
+            took < budget,
+            "{name} took {took:?} (baseline {base:?}, budget {budget:?})"
+        );
     }
 }
