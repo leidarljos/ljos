@@ -704,3 +704,20 @@ fn a_sync_seals_new_atoms_without_opening_its_own_log() {
     w.fail_opens(false);
     assert_eq!(w.import_as_peer(), texts(&atoms));
 }
+
+#[test]
+fn a_temp_file_left_by_a_cut_write_is_not_committed() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let (w, atoms, _) = sealed_log();
+    let stray = w.repo.join(".ljos/atoms/me/.seg-9-0000.jsonl.age.tmp-1");
+    std::fs::write(&stray, b"half a seal").unwrap();
+    let head = w.head();
+    let said = w.sync();
+    assert_eq!(w.head(), head, "an unchanged sync committed: {said}");
+    w.add(lesson(atoms.len(), LINE));
+    let said = w.sync();
+    let listed = git(&w.origin, &["ls-tree", "-r", "--name-only", "main"]);
+    assert!(!listed.contains(".tmp-"), "{listed}\n{said}");
+}

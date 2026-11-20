@@ -4650,7 +4650,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
         let mine: Vec<String> = scope
             .all_scopes()
             .into_iter()
-            .flat_map(|named| host_log_paths(&me, &scope.name, named.name))
+            .flat_map(|named| host_log_paths(root, &me, &scope.name, named.name))
             .collect();
         for rel in mine {
             if stageable_path(root, &rel) {
@@ -4830,7 +4830,7 @@ fn commits_to_push(root: &Path) -> bool {
 /// not even a commit already waiting.
 fn commit_log(root: &Path, scope: &str, push: bool) -> String {
     let host = host();
-    let files = host_log_paths(&host, scope, scope);
+    let files = host_log_paths(root, &host, scope, scope);
     let files: Vec<&str> = files
         .iter()
         .filter(|rel| stageable_path(root, rel))
@@ -4842,12 +4842,39 @@ fn commit_log(root: &Path, scope: &str, push: bool) -> String {
 
 /// The paths a commit of `host`'s log of `scope_name` stages: the legacy
 /// file (so a migration's deletion is committed), its digest, its old
-/// chunk directory, and the snapshot directory.
-fn host_log_paths(host: &str, primary_scope: &str, scope_name: &str) -> Vec<String> {
+/// chunk directory, and each snapshot, segment and plaintext hash in the
+/// snapshot directory, on disk or tracked. The temp file of a write that
+/// was cut off is in that directory too, and is not staged.
+fn host_log_paths(root: &Path, host: &str, primary_scope: &str, scope_name: &str) -> Vec<String> {
     let [log, digest] = host_log_rels_for_scope(host, primary_scope, scope_name);
     let chunks = chunk_dir_rel(&log);
     let stem = log_stem_dir(&log);
-    vec![log, digest, chunks, stem]
+    let mut paths = vec![log, digest, chunks];
+    for name in list_beneath(root, &stem).unwrap_or_default() {
+        if log_piece_name(&name) {
+            paths.push(format!("{stem}/{name}"));
+        }
+    }
+    let tracked = git(root, &["ls-files", "-z", "--", &stem]).ok();
+    for rel in tracked
+        .iter()
+        .filter(|out| out.status.success())
+        .flat_map(|out| out.stdout.split(|b| *b == 0))
+        .filter_map(|rel| std::str::from_utf8(rel).ok())
+        .filter(|rel| !rel.is_empty())
+    {
+        if !paths.iter().any(|path| path == rel) {
+            paths.push(rel.to_string());
+        }
+    }
+    paths
+}
+
+/// A file the snapshot directory keeps: a snapshot, a segment, or the
+/// plaintext hash.
+fn log_piece_name(name: &str) -> bool {
+    name == "plain.sha256"
+        || ((name.starts_with("snap-") || name.starts_with("seg-")) && name.ends_with(".jsonl.age"))
 }
 
 fn commit_logs(root: &Path, scope: &Scope, push: bool) -> String {
@@ -4856,7 +4883,7 @@ fn commit_logs(root: &Path, scope: &Scope, push: bool) -> String {
     let mut refs: Vec<String> = scope
         .all_scopes()
         .into_iter()
-        .flat_map(|named_scope| host_log_paths(&me, &scope.name, named_scope.name))
+        .flat_map(|named_scope| host_log_paths(root, &me, &scope.name, named_scope.name))
         .filter(|rel| stageable_path(root, rel))
         .collect();
     for rel in stale_scope_rels(root, scope) {
