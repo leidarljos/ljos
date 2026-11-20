@@ -123,14 +123,15 @@ sitting that gets that far.
    the other machines' logs for this scope and takes them before the island
    is walked. `ljos sync` runs the same pull and push by hand.
 6. `== cards`. `ljos cards`. What the human froze. Read, never write.
-7. `== due`. `ljos due`. What is due for review: the soonest eight and the total.
-   The verb prints a page; it does not grade. Grade it after the sitting:
-   check a shown claim against the work, then run `ljos graded ID`
+7. `== due`. The due memories that name this issue: the soonest eight and the count of those.
+   `ljos due` prints the pack's own page. The sitting does not copy it. Grade a shown claim after the sitting:
+   check it against the work, then run `ljos graded ID`
    (`--lapsed` when it is no longer true). `graded` takes only a claim a due page showed in the
    last hour, so a saved list cannot be graded unread; `ljos due --all`
    lists everything to read and puts none of it up. The review clock
    moves only when you grade, and a backlog is left due, not drained.
-   The short form leaves this count for `--verbose`.
+   The short form leaves this count, and the line that nothing relevant is due, for `--verbose`.
+   The project name is not a subject word, in the title or on its own line, so a lesson that shares only that name stays out.
 8. `== island`. `ljos island` on the issue's title. The sitting takes the strongest
    eight. The number on a row is the activation spread along links.
    `--as NAME` walks that persona's weights. `--fire` after the island
@@ -166,7 +167,7 @@ sitting that gets that far.
 12. `== recall`. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
    cited so far.
 13. `== timeline`. `ljos timeline ISSUE`. The last twelve dated events across the three
-   stores; `ljos timeline` without a sitting prints them all.
+   stores. A sitting also lists up to eight memories that name the issue; `ljos timeline` without a sitting prints them all.
 
 A decision is handed to the panel by the sitting. An issue tagged
 `decision`, typed `decision`, or with a body line opening `Options:`
