@@ -37714,7 +37714,7 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
             for l in lines {
                 if is_memory_noise_line(l) {
                     note_degraded(out);
-                } else if !due_schedule(l) && !l.trim().is_empty() {
+                } else if !due_schedule(l) && !sitting_due_quiet(l) && !l.trim().is_empty() {
                     out.push_str(l);
                     out.push('\n');
                 }
@@ -37933,6 +37933,13 @@ fn short_doctor_line(line: &str) -> bool {
         return false;
     }
     true
+}
+
+/// The plain line a verbose due section prints when no due memory names
+/// the issue. The short form leaves it out, the same way it leaves the
+/// count out.
+fn sitting_due_quiet(line: &str) -> bool {
+    line.trim() == "nothing relevant is due"
 }
 
 /// A due summary (`16 due; 4 scheduled`). An error that starts with `due:`
@@ -38956,9 +38963,9 @@ pub const SITTING_DUE: usize = 8;
 /// How many dated events a sitting's timeline prints. Protocol: last twelve.
 pub const SITTING_TIMELINE: usize = 12;
 
-/// The review clock as a sitting prints it: the due cards that overlap
-/// the ticket, then the count. When no card clears the recall rule, the
-/// line is only the count.
+/// The review clock as a sitting prints it: the due cards that name this
+/// issue, then the count of those. When none do, the line is
+/// `nothing relevant is due`.
 pub fn sitting_due_report(issue: &str) -> Result<String> {
     let title = issue_title(issue).unwrap_or_else(|_| issue.to_string());
     Ok(sitting_due_and_atoms(issue, &title)?.0)
@@ -38983,18 +38990,46 @@ fn sitting_due_and_atoms(issue: &str, title: &str) -> Result<(String, Vec<Value>
     let now = now_utc();
     let ticket = sitting_ticket_text(issue, title);
     let seat = seat_name();
-    let due = due_of(&atoms, &now);
-    let kept: Vec<Value> = due
+    let (text, kept) = sitting_due_text(issue, &ticket, &atoms, &now, &seat);
+    record_due_shown(&kept);
+    Ok((text, atoms))
+}
+
+/// Due cards for `ticket`, and the rows those cards came from.
+///
+/// The count covers the memories that name the issue. An unrelated lesson
+/// that is also due is not a card and is not part of that count. When no
+/// due memory names the issue, the line says so. A related lesson that is
+/// scheduled and not yet due is in that count and is not a card. A pack
+/// with no reviewable row still says the seat has remembered nothing.
+fn sitting_due_text(
+    issue: &str,
+    ticket: &str,
+    atoms: &[Value],
+    now: &str,
+    seat: &str,
+) -> (String, Vec<Value>) {
+    let relevant = sitting_subject_rows(issue, ticket, atoms, now, seat);
+    let kept: Vec<Value> = due_of(&relevant, now)
         .into_iter()
-        .filter(|atom| sitting_memory_score(issue, &ticket, atom, &now, &seat).is_some())
         .take(SITTING_DUE)
         .collect();
-    record_due_shown(&kept);
+    if kept.is_empty() {
+        if !relevant.is_empty() {
+            let count = review_summary(&relevant, now);
+            return (format!("nothing relevant is due\n{count}\n"), kept);
+        }
+        if atoms.iter().any(reviewable) {
+            return ("nothing relevant is due\n".to_string(), kept);
+        }
+        let line = review_summary(atoms, now);
+        return (format!("{line}\n"), kept);
+    }
     // The tab row stays in [`format_due`] for the tests that pin the
     // columns. A person reads the same cards as `ljos due`.
     let cards = format_due_cards(&kept);
-    let count = review_summary(&atoms, &now);
-    Ok((format!("{cards}{count}\n"), atoms))
+    let count = review_summary(&relevant, now);
+    (format!("{cards}{count}\n"), kept)
 }
 
 /// The review sweep, once the listing and the recall are already printed.
@@ -42864,6 +42899,7 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
         if !listing.ok {
             // The pack read already failed inside this clock. Word matches
             // from this seat's memory slot do not open another socket.
+            // They still go through sitting_subject_rows.
             let cues = recall_cues(issue);
             let mut hits = Vec::new();
             for cue in &cues {
@@ -42877,27 +42913,40 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
             if hits.is_empty() {
                 bail!(PACK_READ_BUSY_LINE);
             }
+            let title = issue_title(issue).unwrap_or_default();
+            let ticket = sitting_ticket_text(issue, &title);
+            let now = now_utc();
+            let seat = seat_name();
+            let hits = sitting_slot_hits(issue, &ticket, hits, &now, &seat);
             return Ok(recall_lines(
                 &hits,
                 Vec::new(),
                 &cues.join(" "),
-                &now_utc(),
+                &now,
                 include_notes,
                 false,
             ));
         }
         let own = tagged_with_issue(listing.atoms.as_ref(), issue);
         let cues = recall_cues(issue);
-        let related = if listing.searched {
-            searched_hits(listing.atoms.as_ref(), &own, &listing.query, issue)
-        } else {
-            related_from_listing(listing.atoms.as_ref(), &cues, &own)
-        };
+        let title = issue_title(issue).unwrap_or_default();
+        let ticket = sitting_ticket_text(issue, &title);
+        let now = now_utc();
+        let seat = seat_name();
+        let related = sitting_recall_hits(
+            issue,
+            &ticket,
+            listing.atoms.as_ref(),
+            listing.searched,
+            &listing.query,
+            &now,
+            &seat,
+        );
         return Ok(recall_lines(
             &own,
             related,
             &cues.join(" "),
-            &now_utc(),
+            &now,
             include_notes,
             listing.searched,
         ));
@@ -43075,17 +43124,10 @@ fn written_at(atom: &Value) -> Option<String> {
 /// memory was written, newest first.
 fn tagged_with_issue(atoms: &[impl Listed], issue: &str) -> Vec<Hit> {
     let proven = pack().ok().is_some_and(|client| pack_proven(&client));
-    let tag = format!("issue:{issue}");
     let mut own: Vec<Hit> = atoms
         .iter()
         .filter(|atom| atom.field("tombstone") != Some(&Value::Bool(true)))
-        .filter(|atom| {
-            atom.field("issue").and_then(Value::as_str).map(str::trim) == Some(issue)
-                || atom
-                    .field("entities")
-                    .and_then(Value::as_array)
-                    .is_some_and(|e| e.iter().any(|x| x.as_str() == Some(tag.as_str())))
-        })
+        .filter(|atom| filed_on_issue(atom, issue))
         .filter_map(|atom| {
             let atom = atom.atom();
             let mut hit = serde_json::from_value::<Hit>(atom.clone()).ok()?;
@@ -43611,43 +43653,19 @@ fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>, usize)>
     }
     // An island from a listener that did not take the token is not a
     // memory. The row would otherwise be the listener's text, dated.
-    // A sitting already spent its one pack read. The timeline keeps the
-    // tracker's rows and does not ask the pack for another island.
-    if sitting_listing().is_none() {
-        if let Ok(island) = packset_island(&title, false) {
-            if !pack().is_ok_and(|client| client.carried()) {
-                events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
-                let matched = events.len();
-                let skip = matched.saturating_sub(limit);
-                return Ok((title, events[skip..].to_vec(), matched));
-            }
-            let ticket = sitting_ticket_text(issue, &title);
-            let now = now_utc();
-            let seat = seat_name();
-            for atom in island["island"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(reviewable)
-                .filter(|a| sitting_memory_score(issue, &ticket, a, &now, &seat).is_some())
-                .take(8)
-            {
-                if let Some((days, clock)) =
-                    stamp_key(atom["ts"].as_str().map(local_stamp).as_deref())
-                {
-                    events.push(Event {
-                        days,
-                        clock,
-                        source: "memory",
-                        text: format!(
-                            "[{}] {}",
-                            atom_label(atom),
-                            atom["text"].as_str().unwrap_or("").trim()
-                        ),
-                    });
-                }
-            }
+    // A sitting already spent its one pack read. Timeline memories come
+    // from that listing, under the same subject rule as the due cards.
+    if let Some(listing) = sitting_listing() {
+        events.extend(related_memory_events(issue, &title, &listing.atoms));
+    } else if let Ok(island) = packset_island(&title, false) {
+        if !pack().is_ok_and(|client| client.carried()) {
+            events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
+            let matched = events.len();
+            let skip = matched.saturating_sub(limit);
+            return Ok((title, events[skip..].to_vec(), matched));
         }
+        let island_atoms = island["island"].as_array().cloned().unwrap_or_default();
+        events.extend(related_memory_events(issue, &title, &island_atoms));
     }
     events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
     let matched = events.len();
@@ -44173,14 +44191,15 @@ is walked. `ljos sync` runs the same pull and push by hand.",
     SittingSection {
         name: "due",
         optional: false,
-        step: "`== due`. `ljos due`. What is due for review: the soonest eight and the total.\n   \
-The verb prints a page; it does not grade. Grade it after the sitting:\n   \
-check a shown claim against the work, then run `ljos graded ID`\n   \
+        step: "`== due`. The due memories that name this issue: the soonest eight and the count of those.\n   \
+`ljos due` prints the pack's own page. The sitting does not copy it. Grade a shown claim after the sitting:\n   \
+check it against the work, then run `ljos graded ID`\n   \
 (`--lapsed` when it is no longer true). `graded` takes only a claim a due page showed in the\n   \
 last hour, so a saved list cannot be graded unread; `ljos due --all`\n   \
 lists everything to read and puts none of it up. The review clock\n   \
 moves only when you grade, and a backlog is left due, not drained.\n   \
-The short form leaves this count for `--verbose`.",
+The short form leaves this count, and the line that nothing relevant is due, for `--verbose`.\n   \
+The project name is not a subject word, in the title or on its own line, so a lesson that shares only that name stays out.",
     },
     SittingSection {
         name: "island",
@@ -44240,7 +44259,7 @@ cited so far.",
         name: "timeline",
         optional: false,
         step: "`== timeline`. `ljos timeline ISSUE`. The last twelve dated events across the three\n   \
-stores; `ljos timeline` without a sitting prints them all.",
+stores. A sitting also lists up to eight memories that name the issue; `ljos timeline` without a sitting prints them all.",
     },
 ];
 
@@ -45270,34 +45289,78 @@ const SITTING_WIDE: &[&str] = &["ljos", "seat", "sitting", "note", "ticket"];
 #[cfg(test)]
 const SITTING_RECALL_CAP: usize = 5;
 
-/// The least share of the ticket's own words a memory must cover.
+/// The least score a memory must reach. The score is the share of the
+/// issue's subject words times the memory's weight.
+///
+/// Subject words leave out stop words, weak words such as `review` and
+/// `order` (the weak list lesson search uses), the project name, and the
+/// project-wide words in [`SITTING_WIDE`]. This seat's own lesson weighs
+/// 1.15, so a share of about 30 percent clears 0.34. A memory of weight 1
+/// needs 34 percent. Two words of a six-word subject stay under it. One
+/// word of a one-word or two-word subject clears it. Another seat's
+/// process notes fade.
 const SITTING_RECALL_FLOOR: f64 = 0.34;
 
-/// Title, body and logbook notes of the issue, for the sitting's recall.
+/// Title, body, project and logbook of the issue, for due cards and the
+/// timeline. A `playbook:` note is the sitting's own binding, not history
+/// of the work, so it does not add subject words. The project is its own
+/// line so the score can leave that name out of the subject words.
 fn sitting_ticket_text(issue: &str, title: &str) -> String {
-    let mut parts = vec![title.to_string()];
+    let project = sitting_project_name(issue);
+    let mut body = String::new();
+    let mut notes = Vec::new();
     if let Ok(card) = tracker_show_json(issue) {
-        if let Some(body) = card["body"].as_str() {
-            parts.push(body.to_string());
+        if let Some(text) = card["body"].as_str() {
+            body = text.to_string();
         }
         if let Some(log) = card["logbook"].as_array() {
             for line in log {
                 if let Some(note) = line["note"].as_str() {
-                    parts.push(note.to_string());
+                    notes.push(note.to_string());
                 }
             }
         }
     }
+    sitting_cue_parts(title, &body, &notes, &project)
+}
+
+/// The cue [`sitting_ticket_text`] builds from parts it already has.
+fn sitting_cue_parts(title: &str, body: &str, notes: &[String], project: &str) -> String {
+    let mut parts = Vec::new();
+    let title = title.trim();
+    if !title.is_empty() {
+        parts.push(title.to_string());
+    }
+    let project = project.trim();
+    if !project.is_empty() {
+        parts.push(project.to_string());
+    }
+    let body = body.trim();
+    if !body.is_empty() {
+        parts.push(body.to_string());
+    }
+    for note in notes {
+        let note = note.trim();
+        if note.is_empty() || playbook_binding(note) {
+            continue;
+        }
+        parts.push(note.to_string());
+    }
     parts.join("\n")
+}
+
+/// Whether `note` is the sitting's playbook binding, not a history note.
+/// The writer stores [`PLAYBOOK_NOTE_PREFIX`] in that spelling.
+fn playbook_binding(note: &str) -> bool {
+    note.trim().starts_with(PLAYBOOK_NOTE_PREFIX)
 }
 
 /// The bounded pack search for a sitting: its title and tracker project.
 /// Body and old notes can describe another ticket and do not select the
 /// lessons shown for this one.
 fn sitting_search_text(issue: &str, title: &str) -> String {
-    let project = issue_spot::find(issue)
-        .map(|spot| spot.rec().project.clone())
-        .or_else(|| issue_spot::project_of(issue).map(str::to_string));
+    let project = sitting_project_name(issue);
+    let project = (!project.is_empty()).then_some(project);
     match project.filter(|project| !word_rank::shares_term(project, title)) {
         Some(project) => format!("{title} {project}"),
         None => title.to_string(),
@@ -45316,7 +45379,7 @@ fn sitting_terms(ticket: &str) -> Vec<String> {
 fn sitting_wide(word: &str) -> bool {
     SITTING_WIDE
         .iter()
-        .any(|wide| *wide == word || *wide == singular(word))
+        .any(|wide| *wide == word || singular(wide) == word || *wide == singular(word))
 }
 
 /// A ticket id in `text` that is not `issue`, when `issue` itself is not
@@ -45417,12 +45480,25 @@ fn sitting_memory_weight(issue: &str, atom: &Value, now: &str, seat: &str) -> Op
     Some(weight)
 }
 
+/// Subject words for one sitting, built once and shared by every atom.
+struct SittingSubject {
+    terms: Vec<String>,
+    /// Multi-part names from the title, such as `review_order`. A lesson
+    /// that contains one of these clears the rule.
+    identifiers: Vec<String>,
+}
+
 /// The recall overlap rule. `None` when the memory does not clear it.
 ///
-/// Overlap is with the ticket's own words, not with `ljos`, `seat`,
-/// `sitting`, `note` or `ticket`. Nothing under the floor is kept. Due
-/// cards and timeline rows use this admission rule; the ranked sitting
-/// list uses BM25 over the whole eligible pack.
+/// Overlap is with the issue's subject words: its text and history,
+/// without the project name, without `ljos`, `seat`, `sitting`, `note`,
+/// `ticket`, and without a weak word such as `review` or `order`. A
+/// lesson that only shares the project name, or only those wide or weak
+/// words, does not clear the floor. A title identifier such as
+/// `review_order` does, when the lesson contains that name. Due cards
+/// and timeline rows use this admission rule; the ranked sitting list
+/// uses BM25 over the whole eligible pack.
+#[cfg(test)]
 fn sitting_memory_score(
     issue: &str,
     ticket: &str,
@@ -45430,22 +45506,258 @@ fn sitting_memory_score(
     now: &str,
     seat: &str,
 ) -> Option<f64> {
-    let terms = sitting_terms(ticket);
-    if terms.is_empty() {
-        return None;
-    }
+    sitting_scored(issue, &sitting_subject(issue, ticket), atom, now, seat)
+}
+
+fn sitting_scored(
+    issue: &str,
+    subject: &SittingSubject,
+    atom: &Value,
+    now: &str,
+    seat: &str,
+) -> Option<f64> {
     let weight = sitting_memory_weight(issue, atom, now, seat)?;
     let text = atom["text"].as_str().unwrap_or("").trim();
+    if subject
+        .identifiers
+        .iter()
+        .any(|ident| text_has_identifier(text, ident))
+    {
+        return (weight >= SITTING_RECALL_FLOOR).then_some(weight);
+    }
     let have = prompt_words(text);
-    let shared = terms
+    let shared = subject
+        .terms
         .iter()
         .filter(|term| have.binary_search(term).is_ok())
         .count();
-    if shared == 0 {
+    if subject.terms.is_empty() || shared == 0 {
         return None;
     }
-    let score = shared as f64 / terms.len() as f64 * weight;
+    let score = (shared as f64 / subject.terms.len() as f64) * weight;
     (score >= SITTING_RECALL_FLOOR).then_some(score)
+}
+
+/// Whether `atom` is filed on `issue`: the `issue` field or an `issue:ID`
+/// entity of that id. A tag for another issue in the same project is not
+/// this one.
+fn filed_on_issue(atom: &impl Claim, issue: &str) -> bool {
+    let issue = issue.trim();
+    if issue.is_empty() {
+        return false;
+    }
+    if atom.field("issue").and_then(Value::as_str).map(str::trim) == Some(issue) {
+        return true;
+    }
+    let tag = format!("issue:{issue}");
+    atom.field("entities")
+        .and_then(Value::as_array)
+        .is_some_and(|list| list.iter().any(|item| item.as_str() == Some(tag.as_str())))
+}
+
+/// The subject rule due cards, timeline rows and the sitting's recall list
+/// share. A memory clears it when [`sitting_scored`] does, or when
+/// it is filed on this issue. A tag for another issue in the same project
+/// does not skip the text rule. A same-seat lesson that only shares weak
+/// words does not.
+fn sitting_names_issue(
+    issue: &str,
+    subject: &SittingSubject,
+    atom: &Value,
+    now: &str,
+    seat: &str,
+) -> bool {
+    if atom["tombstone"] == Value::Bool(true) || !reviewable(atom) {
+        return false;
+    }
+    filed_on_issue(atom, issue) || sitting_scored(issue, subject, atom, now, seat).is_some()
+}
+
+/// Slot hits after a failed pack read, kept by [`sitting_subject_rows`].
+/// The hit order stays. A hit the rule drops is not what the seat remembers.
+fn sitting_slot_hits(issue: &str, ticket: &str, hits: Vec<Hit>, now: &str, seat: &str) -> Vec<Hit> {
+    let atoms: Vec<Value> = hits.iter().map(hit_subject_atom).collect();
+    let mut kept = sitting_subject_rows(issue, ticket, &atoms, now, seat);
+    hits.into_iter()
+        .filter(|hit| {
+            let atom = hit_subject_atom(hit);
+            let Some(index) = kept.iter().position(|row| row == &atom) else {
+                return false;
+            };
+            kept.remove(index);
+            true
+        })
+        .collect()
+}
+
+fn hit_subject_atom(hit: &Hit) -> Value {
+    serde_json::json!({
+        "id": hit.id,
+        "kind": hit.kind,
+        "text": hit.text,
+        "ts": hit.ts,
+        "entities": hit.entities,
+    })
+}
+
+/// The rows of `atoms` that clear [`sitting_names_issue`].
+fn sitting_subject_rows(
+    issue: &str,
+    ticket: &str,
+    atoms: &[Value],
+    now: &str,
+    seat: &str,
+) -> Vec<Value> {
+    let subject = sitting_subject(issue, ticket);
+    atoms
+        .iter()
+        .filter(|atom| sitting_names_issue(issue, &subject, atom, now, seat))
+        .cloned()
+        .collect()
+}
+
+/// Search hits and word matches for a sitting's recall list, after
+/// [`sitting_names_issue`]. The search order is unchanged for the rows
+/// that clear it.
+fn sitting_recall_hits(
+    issue: &str,
+    ticket: &str,
+    atoms: &[Value],
+    searched: bool,
+    query: &str,
+    now: &str,
+    seat: &str,
+) -> Vec<Hit> {
+    let own = tagged_with_issue(atoms, issue);
+    let kept = sitting_subject_rows(issue, ticket, atoms, now, seat);
+    if searched {
+        searched_hits(&kept, &own, query, issue)
+    } else {
+        related_from_listing(&kept, &recall_cues(issue), &own)
+    }
+}
+
+/// Subject words and title identifiers for one sitting. The project name
+/// is not a subject word on its own line or inside the title, and the
+/// older word list does not put that name back.
+fn sitting_subject(issue: &str, ticket: &str) -> SittingSubject {
+    let project = sitting_project_name(issue);
+    let project = project.trim();
+    let body = if project.is_empty() {
+        ticket.to_string()
+    } else {
+        ticket
+            .lines()
+            .filter(|line| line.trim() != project)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let title = ticket.lines().next().unwrap_or("");
+    SittingSubject {
+        terms: drop_project_terms(sitting_subject_terms(&body), project),
+        identifiers: title_identifiers(title),
+    }
+}
+
+/// `terms` without the project name. A title such as `Fix the kiln draft`
+/// then shares `draft` and not `kiln`.
+fn drop_project_terms(terms: Vec<String>, project: &str) -> Vec<String> {
+    if project.is_empty() {
+        return terms;
+    }
+    let names = sitting_terms(project);
+    if names.is_empty() {
+        return terms;
+    }
+    terms
+        .into_iter()
+        .filter(|term| !names.iter().any(|name| name == term))
+        .collect()
+}
+
+/// `review_order` and `review-order` from a title. The parts are weak
+/// words, and the joined name is the term a lesson has to contain.
+fn title_identifiers(title: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in title.split_whitespace() {
+        let token = raw.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-');
+        if !multipart_name(token) {
+            continue;
+        }
+        let lower = token.to_ascii_lowercase();
+        if !out.contains(&lower) {
+            out.push(lower);
+        }
+    }
+    out
+}
+
+fn multipart_name(token: &str) -> bool {
+    let parts: Vec<&str> = token
+        .split(['_', '-'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    parts.len() > 1
+        && parts
+            .iter()
+            .all(|part| part.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+fn text_has_identifier(text: &str, ident: &str) -> bool {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .any(|token| !token.is_empty() && token.eq_ignore_ascii_case(ident))
+}
+
+fn sitting_project_name(issue: &str) -> String {
+    issue_spot::find(issue)
+        .map(|spot| spot.rec().project.clone())
+        .or_else(|| issue_spot::project_of(issue).map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// [`sitting_terms`] with weak words taken out. `review` and `order` name
+/// no kiln. `release`, `docs` and `record` stay, the same words lesson
+/// search keeps. When the issue's text and history have no strong word,
+/// the older list is the subject, so a lesson that repeats that text stays.
+fn sitting_subject_terms(ticket: &str) -> Vec<String> {
+    let terms = sitting_terms(ticket);
+    let kept: Vec<String> = terms
+        .iter()
+        .filter(|term| !word_rank::term_is_weak(term))
+        .cloned()
+        .collect();
+    if kept.is_empty() {
+        terms
+    } else {
+        kept
+    }
+}
+
+/// Timeline rows for memories that clear [`sitting_memory_score`]. At most
+/// eight, in the order `atoms` already has. Tracker rows are not touched.
+fn related_memory_events(issue: &str, title: &str, atoms: &[Value]) -> Vec<Event> {
+    let ticket = sitting_ticket_text(issue, title);
+    let now = now_utc();
+    let seat = seat_name();
+    let mut events = Vec::new();
+    for atom in sitting_subject_rows(issue, &ticket, atoms, &now, &seat)
+        .into_iter()
+        .take(8)
+    {
+        if let Some((days, clock)) = stamp_key(atom["ts"].as_str().map(local_stamp).as_deref()) {
+            events.push(Event {
+                days,
+                clock,
+                source: "memory",
+                text: format!(
+                    "[{}] {}",
+                    atom_label(&atom),
+                    atom["text"].as_str().unwrap_or("").trim()
+                ),
+            });
+        }
+    }
+    events
 }
 
 /// A BM25 query from a ticket. BM25F gives fields separate weights
@@ -45642,6 +45954,23 @@ thread_local! {
 
 fn sitting_listing() -> Option<SittingListing> {
     SITTING_LISTING.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
+fn fail_sitting_listing() {
+    SITTING_LISTING.with(|slot| {
+        *slot.borrow_mut() = Some(SittingListing {
+            atoms: std::sync::Arc::new(Vec::new()),
+            ok: false,
+            searched: false,
+            query: String::new(),
+        });
+    });
+}
+
+#[cfg(test)]
+fn clear_sitting_listing() {
+    SITTING_LISTING.with(|slot| *slot.borrow_mut() = None);
 }
 
 /// Read the pack once, inside [`SITTING_PACK_READ`], and keep that answer
@@ -47501,14 +47830,10 @@ fn ticket_has_lesson(issue: &str) -> bool {
     }) else {
         return false;
     };
-    let tag = format!("issue:{issue}");
     atoms.iter().any(|atom| {
         atom["tombstone"] != Value::Bool(true)
             && atom["kind"].as_str() == Some("lesson")
-            && (atom["issue"].as_str().map(str::trim) == Some(issue)
-                || atom["entities"]
-                    .as_array()
-                    .is_some_and(|ents| ents.iter().any(|ent| ent.as_str() == Some(tag.as_str()))))
+            && filed_on_issue(atom, issue)
     })
 }
 
@@ -71645,6 +71970,780 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             after,
             "2026-10-20\ttracker\tcreated\n2026-10-31 08:46\tmemory\tRecall ranks a memory by the ticket's own words and drops an unrelated agent note.\n",
             "before:\n{before}\nafter:\n{after}"
+        );
+    }
+
+    /// A kiln ticket used to print a landing-review lesson that shares
+    /// `review`, `order` and `schedule`, and the due count treated that
+    /// lesson as this issue's review. Due cards and timeline memories
+    /// keep a lesson that names the issue and leave the others out.
+    #[test]
+    fn a_sitting_drops_due_lessons_that_only_share_weak_words() {
+        let now = "2026-11-20T12:00:00Z";
+        let ticket = "\
+Review the kiln order
+The anneal damper sticks when the kiln schedule drifts.
+playbook: sit
+";
+        let lesson = |id: &str, text: &str| {
+            serde_json::json!({
+                "id": id,
+                "kind": "lesson",
+                "text": text,
+                "ts": "2026-11-18T12:00:00Z",
+                "due_at": "2026-11-19T12:00:00Z",
+                "origin": "user-declared",
+                "source": {"seat": "ada", "basis": "person"},
+                "entities": ["seat:ada"],
+            })
+        };
+        let damper = "The damper sticks when the kiln is cold during anneal.";
+        let paper = "Hold the kiln schedule steady while the anneal paper dries.";
+        let slipped = "Fix the review schedule after the landing order slipped.";
+        let catalog = "Please review the catalog order.";
+        let joss = "The JOSS editor review order is a weekly checklist.";
+        let atoms = vec![
+            lesson("damper", damper),
+            lesson("slipped", slipped),
+            lesson("paper", paper),
+            lesson("catalog", catalog),
+            lesson("joss", joss),
+        ];
+        let kept: Vec<String> = super::due_of(&atoms, now)
+            .iter()
+            .filter(|atom| {
+                super::sitting_memory_score("demo-lk1e", ticket, atom, now, "ada").is_some()
+            })
+            .map(|atom| atom["text"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert!(
+            kept.iter().any(|text| text == damper) && kept.iter().any(|text| text == paper),
+            "related lessons were dropped: {kept:?}"
+        );
+        assert!(
+            kept.iter()
+                .all(|text| text != slipped && text != catalog && text != joss),
+            "unrelated due lessons were kept: {kept:?}"
+        );
+        let unrelated = vec![
+            lesson("slipped", slipped),
+            lesson("catalog", catalog),
+            lesson("joss", joss),
+        ];
+        let (line, _) = super::sitting_due_text("demo-lk1e", ticket, &unrelated, now, "ada");
+        assert_eq!(line, "nothing relevant is due\n");
+        let (shown, _) = super::sitting_due_text("demo-lk1e", ticket, &atoms, now, "ada");
+        assert!(
+            shown.contains(damper) && shown.contains(paper) && !shown.contains(slipped),
+            "due section:\n{shown}"
+        );
+        assert!(
+            shown.contains("2 due; nothing else scheduled"),
+            "the due count is not the two related lessons:\n{shown}"
+        );
+        let recall = super::recall_lines(
+            &[],
+            super::sitting_recall_hits("demo-lk1e", ticket, &atoms, true, ticket, now, "ada"),
+            ticket,
+            now,
+            true,
+            true,
+        );
+        let mut recalled: Vec<String> = recall
+            .lines()
+            .filter_map(super::sitting_memory_text)
+            .collect();
+        recalled.sort();
+        let mut want = vec![damper.to_string(), paper.to_string()];
+        want.sort();
+        assert_eq!(recalled, want, "recall list:\n{recall}");
+    }
+
+    /// A project name such as `ljos` is stemmed to `ljo` before the wide
+    /// list is checked, and that extra word used to push a two-word title
+    /// under the floor. Another seat's process notes and a faded note stay
+    /// out. `release`, `docs` and `record` stay in, the same words lesson
+    /// search keeps.
+    #[test]
+    fn a_sitting_keeps_a_short_title_and_drops_a_faded_note() {
+        let now = "2026-11-20T12:00:00Z";
+        let terms = super::sitting_subject_terms("Kiln damper\nljos");
+        assert!(
+            !terms.iter().any(|word| word == "ljo" || word == "ljos"),
+            "the project name stayed in the subject words: {terms:?}"
+        );
+        let row = |id: &str, seat: &str, kind: &str, text: &str, ts: &str| {
+            serde_json::json!({
+                "id": id,
+                "kind": kind,
+                "text": text,
+                "ts": ts,
+                "due_at": "2026-11-19T12:00:00Z",
+                "origin": "user-declared",
+                "source": {"seat": seat, "basis": "person"},
+                "entities": [format!("seat:{seat}")],
+            })
+        };
+        let kiln = row(
+            "kiln",
+            "ada",
+            "lesson",
+            "The kiln walls crack when the fire is shut.",
+            "2026-11-18T12:00:00Z",
+        );
+        let ticket = super::sitting_ticket_text("demo-ab12", "Kiln damper");
+        assert!(
+            super::sitting_memory_score("demo-ab12", &ticket, &kiln, now, "ada").is_some(),
+            "one word of a two-word title was dropped: {ticket}"
+        );
+        let one = row(
+            "one",
+            "ada",
+            "lesson",
+            "The kiln walls crack.",
+            "2026-11-18T12:00:00Z",
+        );
+        let three = super::sitting_ticket_text("demo-ab12", "Kiln damper sticks");
+        assert!(
+            super::sitting_memory_score("demo-ab12", &three, &one, now, "ada").is_some(),
+            "one word of a three-word title was dropped: {three}"
+        );
+        let named = row(
+            "named",
+            "ada",
+            "lesson",
+            "The ljos sitting prints cards before the work.",
+            "2026-11-18T12:00:00Z",
+        );
+        let ljos = super::sitting_ticket_text("ljos-ab12", "Kiln");
+        assert!(
+            super::sitting_memory_score("ljos-ab12", &ljos, &named, now, "ada").is_none(),
+            "a lesson that only names the project was kept: {ljos}"
+        );
+        let note = row(
+            "note",
+            "bee",
+            "note",
+            "The kiln damper was oiled by hand.",
+            "2026-11-18T12:00:00Z",
+        );
+        let four = super::sitting_ticket_text("demo-ab12", "Kiln damper anneal drift");
+        assert!(
+            super::sitting_memory_score("demo-ab12", &four, &note, now, "ada").is_none(),
+            "another seat's process note was kept"
+        );
+        let old = row(
+            "old",
+            "ada",
+            "note",
+            "The kiln damper anneal drift was logged by hand.",
+            "2026-09-01T12:00:00Z",
+        );
+        assert!(
+            super::sitting_memory_score("demo-ab12", &four, &old, now, "ada").is_none(),
+            "a faded process note was kept"
+        );
+        let release = row(
+            "rel",
+            "ada",
+            "lesson",
+            "The release notes list the kiln page.",
+            "2026-11-18T12:00:00Z",
+        );
+        let release_ticket = super::sitting_ticket_text("docs-ab12", "Release notes");
+        assert!(
+            super::sitting_memory_score("docs-ab12", &release_ticket, &release, now, "ada")
+                .is_some(),
+            "a release lesson was dropped: {release_ticket}"
+        );
+        let docs = row(
+            "docs",
+            "ada",
+            "lesson",
+            "The docs page lists the columns.",
+            "2026-11-18T12:00:00Z",
+        );
+        // `demo`, not `docs`: the project name is not a subject word.
+        let docs_ticket = super::sitting_ticket_text("demo-ab12", "Docs layout");
+        assert!(
+            super::sitting_memory_score("demo-ab12", &docs_ticket, &docs, now, "ada").is_some(),
+            "a docs lesson was dropped: {docs_ticket}"
+        );
+        let record = row(
+            "rec",
+            "ada",
+            "lesson",
+            "Record the temperature each hour.",
+            "2026-11-18T12:00:00Z",
+        );
+        let record_ticket = super::sitting_ticket_text("kiln-ab12", "Record kiln");
+        assert!(
+            super::sitting_memory_score("kiln-ab12", &record_ticket, &record, now, "ada").is_some(),
+            "a record lesson was dropped: {record_ticket}"
+        );
+    }
+
+    /// The short form stays quiet when nothing relevant is due. An empty
+    /// pack still says the seat has remembered nothing. A lesson that is
+    /// scheduled and not due is counted, and more than eight related due
+    /// lessons keep eight cards and the full count.
+    #[test]
+    fn a_sitting_due_section_counts_only_the_related_set() {
+        let now = "2026-11-20T12:00:00Z";
+        let ticket = "Review the kiln order\nThe anneal damper sticks.\n";
+        let (empty, kept) = super::sitting_due_text("demo-lk1e", ticket, &[], now, "ada");
+        assert!(kept.is_empty());
+        assert_eq!(
+            empty,
+            "0 due; nothing scheduled: this seat has remembered nothing yet\n"
+        );
+        let later = serde_json::json!({
+            "id": "later",
+            "kind": "lesson",
+            "text": "Hold the kiln schedule steady while the anneal paper dries.",
+            "ts": "2026-11-18T12:00:00Z",
+            "due_at": "2026-11-21T12:00:00Z",
+            "origin": "user-declared",
+            "source": {"seat": "ada", "basis": "person"},
+            "entities": ["seat:ada"],
+        });
+        let (scheduled, cards) = super::sitting_due_text("demo-lk1e", ticket, &[later], now, "ada");
+        assert!(cards.is_empty(), "{cards:?}");
+        assert!(
+            scheduled.starts_with("nothing relevant is due\n") && scheduled.contains("1 scheduled"),
+            "{scheduled}"
+        );
+        let mut many = Vec::new();
+        for n in 0..9 {
+            many.push(serde_json::json!({
+                "id": format!("kiln{n}"),
+                "kind": "lesson",
+                "text": format!("The kiln damper anneal step {n} needs oil."),
+                "ts": "2026-11-18T12:00:00Z",
+                "due_at": "2026-11-19T12:00:00Z",
+                "origin": "user-declared",
+                "source": {"seat": "ada", "basis": "person"},
+                "entities": ["seat:ada"],
+            }));
+        }
+        let wide = "Kiln damper anneal";
+        let (shown, kept) = super::sitting_due_text("demo-lk1e", wide, &many, now, "ada");
+        assert_eq!(kept.len(), 8, "{shown}");
+        assert!(shown.contains("9 due"), "{shown}");
+        assert!(!shown.contains("step 8"), "{shown}");
+        let block = "\
+== due
+nothing relevant is due
+lesson, due yesterday, seat ada
+  The damper sticks when the kiln is cold during anneal.
+2 due; nothing else scheduled
+";
+        let mut memories = Vec::new();
+        let short = super::compact_sitting_block(block, &mut memories);
+        assert!(
+            !short.contains("nothing relevant is due") && short.contains("damper sticks"),
+            "{short}"
+        );
+        assert!(!short.contains("2 due"), "{short}");
+    }
+
+    /// Timeline memories follow the same subject rule, and the list stops
+    /// at eight.
+    #[test]
+    fn a_sitting_timeline_lists_related_memories_up_to_eight() {
+        let mut atoms = Vec::new();
+        atoms.push(serde_json::json!({
+            "id": "catalog",
+            "kind": "lesson",
+            "text": "Please review the catalog order.",
+            "ts": "2026-11-18T12:00:00Z",
+            "origin": "user-declared",
+            "source": {"seat": "ada", "basis": "person"},
+            "entities": ["seat:ada"],
+        }));
+        for n in 0..9 {
+            atoms.push(serde_json::json!({
+                "id": format!("kiln{n}"),
+                "kind": "lesson",
+                "text": format!("The kiln damper anneal step {n} needs oil."),
+                "ts": "2026-11-18T12:00:00Z",
+                "origin": "user-declared",
+                "source": {"seat": "ada", "basis": "person"},
+                "entities": ["seat:ada"],
+            }));
+        }
+        let events = super::related_memory_events("demo-lk1e", "Kiln damper anneal", &atoms);
+        assert_eq!(events.len(), 8, "{events:?}");
+        assert!(events
+            .iter()
+            .all(|event| event.text.contains("kiln damper")));
+        assert!(events.iter().all(|event| !event.text.contains("step 8")));
+        assert!(events.iter().all(|event| !event.text.contains("catalog")));
+    }
+
+    /// One row of `(title, lesson, tag)` through due, timeline and recall.
+    /// A tag for this issue skips the text rule. A tag for another issue
+    /// in the same project does not. An all-weak title uses the older list.
+    #[test]
+    fn a_sitting_subject_table_covers_due_timeline_and_recall() {
+        let slipped = "Fix the review schedule after the landing order slipped.";
+        let rows = [
+            (
+                "ljos-lk1e",
+                "Fix the kiln damper",
+                "The kiln damper needs oil.",
+                None,
+                true,
+            ),
+            (
+                "ljos-lk1e",
+                "Fix the kiln damper",
+                slipped,
+                Some("ljos-9999"),
+                false,
+            ),
+            ("ljos-lk1e", "Fix the kiln damper", slipped, None, false),
+            (
+                "ljos-lk1e",
+                "Fix the kiln damper",
+                slipped,
+                Some("stove-1111"),
+                false,
+            ),
+            (
+                "ljos-lk1e",
+                "Fix the kiln damper",
+                slipped,
+                Some("ljos-lk1e"),
+                true,
+            ),
+            (
+                "demo-lk1e",
+                "Fix search page",
+                "The search page truncates results at twenty rows.",
+                None,
+                true,
+            ),
+            (
+                "demo-lk1e",
+                "Fix search page",
+                "Please review the catalog order.",
+                None,
+                false,
+            ),
+            (
+                "demo-lk1e",
+                "Review the order",
+                "Review the order of firing: load the top shelf first.",
+                None,
+                true,
+            ),
+            (
+                "demo-lk1e",
+                "Review the order",
+                "The damper sticks.",
+                None,
+                false,
+            ),
+            (
+                "demo-lk1e",
+                "Add user list",
+                "The user list needs paging.",
+                None,
+                true,
+            ),
+            (
+                "demo-lk1e",
+                "Add user list",
+                "The damper sticks.",
+                None,
+                false,
+            ),
+            ("demo-lk1e", "Review", "Review lessons weekly.", None, true),
+            ("demo-lk1e", "Review", "The damper sticks.", None, false),
+            (
+                "demo-lk1e",
+                "Fix review_order",
+                "review_order must run weekly.",
+                None,
+                true,
+            ),
+            (
+                "demo-lk1e",
+                "Fix review_order",
+                "Please review the catalog order.",
+                None,
+                true,
+            ),
+            (
+                "demo-lk1e",
+                "Fix review_order crash",
+                "review_order must run weekly.",
+                None,
+                true,
+            ),
+            (
+                "demo-lk1e",
+                "Fix review_order crash",
+                "Please review the catalog order.",
+                None,
+                false,
+            ),
+            (
+                "kiln-lk1e",
+                "Fix the stove draft",
+                "The kiln damper needs oil.",
+                None,
+                false,
+            ),
+            (
+                "kiln-lk1e",
+                "Fix the stove draft",
+                "The stove draft pulls the flue closed.",
+                None,
+                true,
+            ),
+        ];
+        let now = "2026-11-20T12:00:00Z";
+        for (issue, title, text, tag, keep) in rows {
+            let mut entities = vec!["seat:ada".to_string()];
+            if let Some(tag) = tag {
+                entities.push(format!("issue:{tag}"));
+            }
+            let atom = serde_json::json!({
+                "id": "row",
+                "kind": "lesson",
+                "text": text,
+                "ts": "2026-11-18T12:00:00Z",
+                "due_at": "2026-11-19T12:00:00Z",
+                "origin": "user-declared",
+                "source": {"seat": "ada", "basis": "person"},
+                "entities": entities,
+            });
+            let ticket = super::sitting_ticket_text(issue, title);
+            let (due, _) =
+                super::sitting_due_text(issue, &ticket, std::slice::from_ref(&atom), now, "ada");
+            let timeline = super::related_memory_events(issue, title, std::slice::from_ref(&atom))
+                .into_iter()
+                .map(|event| event.text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let own = super::tagged_with_issue(std::slice::from_ref(&atom), issue);
+            let recall = super::recall_lines(
+                &own,
+                super::sitting_recall_hits(
+                    issue,
+                    &ticket,
+                    std::slice::from_ref(&atom),
+                    true,
+                    &ticket,
+                    now,
+                    "ada",
+                ),
+                &ticket,
+                now,
+                false,
+                true,
+            );
+            let shown = format!("due:\n{due}\ntimeline:\n{timeline}\nrecall:\n{recall}");
+            assert_eq!(due.contains(text), keep, "{title} tag={tag:?}\n{shown}");
+            assert_eq!(
+                timeline.contains(text),
+                keep,
+                "{title} tag={tag:?}\n{shown}"
+            );
+            assert_eq!(recall.contains(text), keep, "{title} tag={tag:?}\n{shown}");
+        }
+    }
+
+    /// `Fix review_order crash` keeps the lesson that names that identifier.
+    #[test]
+    fn a_title_identifier_keeps_the_lesson_that_names_it() {
+        let now = "2026-11-20T12:00:00Z";
+        let issue = "demo-lk1e";
+        let title = "Fix review_order crash";
+        let text = "review_order must run weekly.";
+        let atom = serde_json::json!({
+            "id": "weekly",
+            "kind": "lesson",
+            "text": text,
+            "ts": "2026-11-18T12:00:00Z",
+            "due_at": "2026-11-19T12:00:00Z",
+            "origin": "user-declared",
+            "source": {"seat": "ada", "basis": "person"},
+            "entities": ["seat:ada"],
+        });
+        let ticket = super::sitting_ticket_text(issue, title);
+        let (due, _) =
+            super::sitting_due_text(issue, &ticket, std::slice::from_ref(&atom), now, "ada");
+        assert!(
+            due.contains(text),
+            "due dropped the identifier lesson:\n{due}"
+        );
+    }
+
+    /// A lesson that shares only the project name is not a due card.
+    #[test]
+    fn a_project_name_alone_is_not_a_due_card() {
+        let now = "2026-11-20T12:00:00Z";
+        let issue = "kiln-lk1e";
+        let title = "Fix the stove draft";
+        let oil = "The kiln damper needs oil.";
+        let atom = serde_json::json!({
+            "id": "oil",
+            "kind": "lesson",
+            "text": oil,
+            "ts": "2026-11-18T12:00:00Z",
+            "due_at": "2026-11-19T12:00:00Z",
+            "origin": "user-declared",
+            "source": {"seat": "ada", "basis": "person"},
+            "entities": ["seat:ada"],
+        });
+        let ticket = super::sitting_ticket_text(issue, title);
+        let (due, _) =
+            super::sitting_due_text(issue, &ticket, std::slice::from_ref(&atom), now, "ada");
+        assert!(
+            !due.contains(oil),
+            "due kept a project-only lesson:\n{due}\nticket:\n{ticket}"
+        );
+    }
+
+    /// The project name still counts when the title itself says it.
+    /// `Fix the kiln draft` and `The kiln damper needs oil.` share `kiln`.
+    #[test]
+    fn a_project_name_in_the_title_is_not_a_subject_word() {
+        let now = "2026-11-20T12:00:00Z";
+        let issue = "kiln-lk1e";
+        let title = "Fix the kiln draft";
+        let oil = "The kiln damper needs oil.";
+        let draft = "The draft pulls cold air in.";
+        let row = |id: &str, text: &str| {
+            serde_json::json!({
+                "id": id,
+                "kind": "lesson",
+                "text": text,
+                "ts": "2026-11-18T12:00:00Z",
+                "due_at": "2026-11-19T12:00:00Z",
+                "origin": "user-declared",
+                "source": {"seat": "ada", "basis": "person"},
+                "entities": ["seat:ada"],
+            })
+        };
+        let ticket = super::sitting_ticket_text(issue, title);
+        let oil_atom = row("oil", oil);
+        let (due, _) =
+            super::sitting_due_text(issue, &ticket, std::slice::from_ref(&oil_atom), now, "ada");
+        assert!(
+            !due.contains(oil),
+            "due kept a lesson that shares the project name in the title:\n{due}\nticket:\n{ticket}"
+        );
+        let draft_atom = row("draft", draft);
+        let (kept, _) = super::sitting_due_text(
+            issue,
+            &ticket,
+            std::slice::from_ref(&draft_atom),
+            now,
+            "ada",
+        );
+        assert!(
+            kept.contains(draft),
+            "due dropped a lesson that shares the title's other word:\n{kept}"
+        );
+    }
+
+    /// A tombstone is not a due card, a timeline row or a recall hit, even
+    /// when the `issue` field and the `issue:ID` tag name this sitting.
+    #[test]
+    fn a_tombstone_is_not_a_card_for_this_issue() {
+        let now = "2026-11-20T12:00:00Z";
+        let issue = "ljos-lk1e";
+        let text = "The kiln damper needs oil.";
+        let atom = serde_json::json!({
+            "id": "dead",
+            "kind": "lesson",
+            "text": text,
+            "tombstone": true,
+            "issue": issue,
+            "ts": "2026-11-18T12:00:00Z",
+            "due_at": "2026-11-19T12:00:00Z",
+            "origin": "user-declared",
+            "source": {"seat": "ada", "basis": "person"},
+            "entities": ["seat:ada", format!("issue:{issue}")],
+        });
+        let ticket = super::sitting_ticket_text(issue, "Fix the kiln damper");
+        let (due, _) =
+            super::sitting_due_text(issue, &ticket, std::slice::from_ref(&atom), now, "ada");
+        let timeline =
+            super::related_memory_events(issue, "Fix the kiln damper", std::slice::from_ref(&atom))
+                .into_iter()
+                .map(|event| event.text)
+                .collect::<Vec<_>>()
+                .join("\n");
+        let own = super::tagged_with_issue(std::slice::from_ref(&atom), issue);
+        let recall = super::recall_lines(
+            &own,
+            super::sitting_recall_hits(
+                issue,
+                &ticket,
+                std::slice::from_ref(&atom),
+                true,
+                &ticket,
+                now,
+                "ada",
+            ),
+            &ticket,
+            now,
+            false,
+            true,
+        );
+        assert!(!due.contains(text), "due kept a tombstone:\n{due}");
+        assert!(
+            !timeline.contains(text),
+            "timeline kept a tombstone:\n{timeline}"
+        );
+        assert!(own.is_empty(), "own memories kept a tombstone");
+        assert!(!recall.contains(text), "recall kept a tombstone:\n{recall}");
+    }
+
+    /// The `issue` field names this sitting even with no `issue:ID` entity.
+    /// A different issue's field does not.
+    #[test]
+    fn an_issue_field_names_this_sitting() {
+        let now = "2026-11-20T12:00:00Z";
+        let issue = "ljos-lk1e";
+        let text = "Please review the catalog order.";
+        let row = |id: &str, filed: &str| {
+            serde_json::json!({
+                "id": id,
+                "kind": "lesson",
+                "text": text,
+                "issue": filed,
+                "ts": "2026-11-18T12:00:00Z",
+                "due_at": "2026-11-19T12:00:00Z",
+                "origin": "user-declared",
+                "source": {"seat": "ada", "basis": "person"},
+                "entities": ["seat:ada"],
+            })
+        };
+        let ticket = super::sitting_ticket_text(issue, "Fix the kiln damper");
+        let shown = |atom: &serde_json::Value| {
+            let (due, _) =
+                super::sitting_due_text(issue, &ticket, std::slice::from_ref(atom), now, "ada");
+            let timeline = super::related_memory_events(
+                issue,
+                "Fix the kiln damper",
+                std::slice::from_ref(atom),
+            )
+            .into_iter()
+            .map(|event| event.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+            due.contains(text) && timeline.contains(text)
+        };
+        assert!(
+            shown(&row("mine", issue)),
+            "the issue field did not keep the lesson"
+        );
+        assert!(
+            !shown(&row("other", "ljos-9999")),
+            "another issue's field kept the lesson"
+        );
+    }
+
+    /// A pack read that failed still filters the slot's word matches.
+    #[test]
+    fn a_failed_pack_read_keeps_the_subject_rule_on_recall() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("Software")).unwrap();
+        let root_s = root.to_str().unwrap();
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root_s),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "off"),
+            ("LJOS_SEAT", "ada"),
+        ]);
+        let layout = vissue_core::Layout::new(root, "Software");
+        vissue_core::ops::create(
+            &layout,
+            "kiln",
+            "Review the kiln",
+            vissue_core::ops::CreateOpts {
+                body: Some("The anneal damper sticks when the glaze schedule drifts."),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let doc =
+            vissue_core::IssueDoc::parse_file("kiln", &layout.project_issues_path("kiln")).unwrap();
+        let issue = doc.headings[0].id.clone();
+        let kept = root.join(".ljos/memory/kept");
+        std::fs::create_dir_all(&kept).unwrap();
+        let row = |id: &str, text: &str| {
+            serde_json::json!({
+                "id": id,
+                "text": text,
+                "kind": "lesson",
+                "entities": ["seat:ada"],
+                "seat": "ada",
+            })
+            .to_string()
+        };
+        std::fs::write(
+            kept.join("damper.json"),
+            row("damper", "The kiln damper sticks during anneal."),
+        )
+        .unwrap();
+        std::fs::write(
+            kept.join("slipped.json"),
+            row(
+                "slipped",
+                "The kiln invoice was paid from the catalog account.",
+            ),
+        )
+        .unwrap();
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                super::clear_sitting_listing();
+            }
+        }
+        let _clear = Clear;
+        super::fail_sitting_listing();
+        let recall = super::recall_memories_with(&issue, false).unwrap();
+        assert!(
+            recall.contains("The kiln damper sticks during anneal."),
+            "{recall}"
+        );
+        assert!(
+            !recall.contains("The kiln invoice was paid from the catalog account."),
+            "{recall}"
+        );
+    }
+
+    /// The project is part of the cue. A `playbook:` note is the sitting's
+    /// binding, so it is not.
+    #[test]
+    fn a_sitting_cue_keeps_the_project_and_drops_a_playbook_note() {
+        let notes = vec![
+            "playbook: land".to_string(),
+            "lever geometry changed after the anneal swap".to_string(),
+        ];
+        let cue = super::sitting_cue_parts(
+            "Fix the stuck lever",
+            "The lever binds after the swap.",
+            &notes,
+            "kiln",
+        );
+        assert!(cue.contains("kiln"), "{cue}");
+        assert!(cue.contains("anneal swap"), "{cue}");
+        assert!(cue.contains("binds after the swap"), "{cue}");
+        assert!(!cue.contains("playbook"), "{cue}");
+        let titled = super::sitting_ticket_text("kiln-zz99", "Fix the stuck lever");
+        assert!(
+            titled.contains("kiln") && !titled.contains("playbook"),
+            "{titled}"
         );
     }
 
