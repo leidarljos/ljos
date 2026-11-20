@@ -35754,6 +35754,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
                 if let Some(line) = admission {
                     where_.push_str("; ");
                     where_.push_str(&line);
+                    where_.push_str(doctor_fix::pack_admission_doctor_hint(&line));
                 }
                 match health {
                     Ok(body) if pack_warming(&body) => Habitat {
@@ -82952,13 +82953,22 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         ));
         assert!(is_deadline_miss(&late));
         assert!(!is_pack_busy(&late));
+        let admission = "busy, retrying";
+        let state = format!(
+            "http://127.0.0.1:9 workspace seat; pack responded in 4ms; {admission}{}",
+            crate::doctor_fix::pack_admission_doctor_hint(admission)
+        );
         let row = Habitat {
             name: "pack",
-            state: "http://127.0.0.1:9 workspace seat; pack responded in 4ms; busy, retrying"
-                .into(),
+            state,
             ok: true,
         };
         assert_eq!(doctor_word(&row), "warn");
+        let line = format_doctor(std::slice::from_ref(&row));
+        assert!(
+            line.contains("so run `ljos doctor`"),
+            "busy pack row must name a next command:\n{line}"
+        );
     }
 
     #[test]

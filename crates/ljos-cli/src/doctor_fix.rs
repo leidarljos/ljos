@@ -29,6 +29,17 @@ const CONFIG_TEXT: &str = "\
 /// The ending of a pack row whose one repair is `packset ensure`.
 const ENSURE_TAIL: &str = ", so run `packset ensure`.";
 
+/// When pack admission is shedding, the memory row is a warning. Name one
+/// command so plain-output checks and a loaded host both get a next step.
+#[must_use]
+pub(crate) fn pack_admission_doctor_hint(admission: &str) -> &'static str {
+    if admission.contains("busy, retrying") {
+        ". so run `ljos doctor`"
+    } else {
+        ""
+    }
+}
+
 /// Point a pack row at `ljos doctor --fix` when that command makes the
 /// repair. The row names one command: `--fix` runs `packset ensure` itself,
 /// so the row does not also name `packset ensure`. A row whose repair needs
