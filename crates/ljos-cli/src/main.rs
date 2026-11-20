@@ -4209,22 +4209,14 @@ fn queued_lesson_may_go(cmd: &Cmd) -> bool {
 fn mcp_serve_args(raw: &[std::ffi::OsString]) -> Option<Vec<std::ffi::OsString>> {
     let (_, args) = take_seat_flag(raw).ok()?;
     let args = &args[1..];
-    let index = 0;
-    while index < args.len() {
-        let word = args[index].to_string_lossy();
-        if word == "--" {
-            return None;
-        }
-        if word.starts_with('-') {
-            return None;
-        }
-        break;
+    let word = args.first()?.to_string_lossy();
+    if word == "--" || word.starts_with('-') {
+        return None;
     }
-    match args.get(index) {
-        Some(arg) if arg == "mcp" => {}
-        _ => return None,
+    if word != "mcp" {
+        return None;
     }
-    let rest = &args[index + 1..];
+    let rest = &args[1..];
     if rest.iter().any(|arg| arg == "--help" || arg == "-h") {
         return None;
     }
@@ -5079,9 +5071,7 @@ fn count_from_zero(cmd: &str, flag: &str, n: i64) -> u64 {
     if n < 0 {
         refuse_range(format!("{cmd}: {flag} takes a number from 0 up, not {n}."));
     }
-    u64::try_from(n).unwrap_or_else(|_| {
-        refuse_range(format!("{cmd}: {flag} takes a number from 0 up, not {n}."))
-    })
+    n.unsigned_abs()
 }
 
 fn count_usize_flag(cmd: &str, flag: &str, n: i64) -> usize {

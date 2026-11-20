@@ -24,18 +24,6 @@ impl fmt::Display for PolicyLabel {
 
 impl std::error::Error for PolicyLabel {}
 
-/// Store `detail` under `label` and return it as a policy result.
-/// Callers that use `?` stop before the effect. The CLI prints the label.
-pub fn labelled(label: &'static str, detail: impl Into<String>) -> anyhow::Error {
-    let detail = detail.into();
-    crate::memory_port::record_label(label, &detail, "labelled");
-    anyhow::Error::new(PolicyLabel {
-        label,
-        detail,
-        status: 0,
-    })
-}
-
 /// Store `detail` under `label` and return it with `status`.
 /// The CLI prints the label and exits with that status.
 pub fn refused(label: &'static str, detail: impl Into<String>, status: u8) -> anyhow::Error {
@@ -68,9 +56,10 @@ mod tests {
 
     #[test]
     fn a_policy_label_keeps_its_sentence_and_its_name() {
-        let err = labelled("seat-unresolved", "pass seat, your own bot name");
+        let err = refused("seat-unresolved", "pass seat, your own bot name", 1);
         let label = as_policy(&err).expect("label");
         assert_eq!(label.label, "seat-unresolved");
+        assert_eq!(label.status, 1);
         assert!(err.to_string().contains("pass seat"), "{err}");
     }
 
