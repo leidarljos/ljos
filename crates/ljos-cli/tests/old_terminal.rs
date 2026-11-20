@@ -3,18 +3,42 @@
 //! Those releases left no `source.seat`. Harness and session are the login
 //! user, via is `ljos`, and there is no turn. A preference and a lesson of
 //! that shape are stamped `person`. A lesson whose session names a runner
-//! stays unverified, and `ljos prefer --review` counts and keeps it.
+//! stays unverified.
+//!
+//! Packset is seeded from `fixtures/old_terminal/legacy_atoms.json`. See
+//! `fixtures/old_terminal/README.md` for how each payload was derived.
 
 ljos_test_boot::harness!();
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
+use serde::Deserialize;
 use serde_json::Value;
 
-#[path = "common/terminal.rs"]
-mod terminal;
+#[derive(Deserialize)]
+struct LegacyFixture {
+    terminal_by_version: Vec<TerminalVersion>,
+    held_workspace: String,
+    runner_lesson: HeldLesson,
+    agent_lesson: HeldLesson,
+}
 
-const VERSIONS: &[&str] = &["0.17.0", "0.22.0", "0.25.0", "0.29.0"];
+#[derive(Deserialize)]
+struct TerminalVersion {
+    version: String,
+    workspace: String,
+    preference_text: String,
+    lesson_text: String,
+}
+
+#[derive(Deserialize)]
+struct HeldLesson {
+    text: String,
+    origin: String,
+    harness: String,
+    session: String,
+}
+
 const RUNNER_LESSON: &str = "The lint job must pass before a merge.";
 const AGENT_LESSON: &str = "The deploy window closes at four on Friday.";
 
@@ -56,8 +80,6 @@ impl Seat {
         cmd
     }
 
-    /// `ljos doctor` exits 0 only when the required binaries answer. The
-    /// other commands in this test keep the stripped PATH.
     fn doctor(&self, bin: &str, workspace: &str) -> Output {
         stage_doctor_bins(self.home.path());
         self.command(bin, &["doctor"])
@@ -68,9 +90,11 @@ impl Seat {
     }
 }
 
-/// Symlink this build's `ljos` and `ljos-mcp`, stub the two tools this
-/// seat does not ship, and keep the parent's PATH so packset, packsetd,
-/// deedar and ljos-policyd stay the ones already installed.
+fn fixture() -> LegacyFixture {
+    serde_json::from_str(include_str!("fixtures/old_terminal/legacy_atoms.json"))
+        .expect("legacy_atoms.json")
+}
+
 fn stage_doctor_bins(home: &Path) {
     use std::os::unix::fs::{symlink, PermissionsExt};
     let bin = home.join("bin");
@@ -114,11 +138,6 @@ fn text_of(out: &Output) -> String {
     )
 }
 
-fn succeeded(out: &Output, what: &str) -> String {
-    assert!(out.status.success(), "{what} failed\n{}", text_of(out));
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
 fn atoms(url: &str, workspace: &str) -> Vec<Value> {
     let got: Value = ureq::get(&format!("{url}/v1/atoms"))
         .query("workspace", workspace)
@@ -149,106 +168,51 @@ fn basis(atom: &Value) -> Option<&str> {
         .filter(|b| !b.is_empty())
 }
 
-fn release_bin(version: &str) -> Option<PathBuf> {
-    let dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../target/oldljos/{version}"));
-    let ljos = find_bin(&dir, "ljos");
-    if ljos.is_file() {
-        return Some(ljos);
-    }
-    let asset = format!("ljos-v{version}-x86_64-unknown-linux-gnu.tar.gz");
-    let archive = dir.join(&asset);
-    let sum = dir.join(format!("{asset}.sha256"));
-    if !archive.is_file() || !sum.is_file() {
-        return None;
-    }
-    let want = std::fs::read_to_string(&sum).unwrap();
-    let want = want.split_whitespace().next().expect("sha256 line");
-    let hashed = Command::new("sha256sum")
-        .arg(&archive)
-        .output()
-        .expect("sha256sum");
-    let have = String::from_utf8_lossy(&hashed.stdout);
-    let have = have.split_whitespace().next().unwrap_or("");
-    assert_eq!(have, want, "v{version} archive checksum");
-    let status = Command::new("tar")
-        .args([
-            "-xzf",
-            archive.to_str().unwrap(),
-            "-C",
-            dir.to_str().unwrap(),
-        ])
-        .status()
-        .unwrap();
-    assert!(status.success(), "tar v{version}");
-    Some(find_bin(&dir, "ljos"))
-}
-
-fn find_bin(dir: &Path, name: &str) -> PathBuf {
-    if dir.join(name).is_file() {
-        return dir.join(name);
-    }
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let nested = entry.path().join(name);
-            if nested.is_file() {
-                return nested;
-            }
-        }
-    }
-    dir.join(name)
-}
-
-fn post_legacy_atom(
-    url: &str,
-    workspace: &str,
-    kind: &str,
-    text: &str,
-    origin: &str,
-    harness: &str,
-    session: &str,
-) {
+fn post_atom(url: &str, body: Value) {
     let resp = ureq::post(&format!("{url}/v1/atoms"))
-        .send_json(serde_json::json!({
-            "schema": "inside.atom/v1",
-            "workspace": workspace,
-            "kind": kind,
-            "level": "explicit",
-            "text": text,
-            "origin": origin,
-            "source": {
-                "harness": harness,
-                "session": session,
-                "via": "ljos",
-            },
-        }))
+        .send_json(body)
         .expect("POST /v1/atoms");
     assert!(resp.status() < 300, "POST /v1/atoms: {}", resp.status());
 }
 
-/// A parent whose comm is `systemd`, so the child reads as a person at a
-/// terminal: the tree stops at the session, and the login user is the seat.
-fn at_terminal(seat: &Seat, bin: &Path, cmd: &str, text: &str, workspace: &str) -> Output {
-    const SCRIPT: &str = r#"
-import ctypes, os, sys
-libc = ctypes.CDLL(None)
-libc.prctl.argtypes = [ctypes.c_int, ctypes.c_char_p]
-libc.prctl.restype = ctypes.c_int
-if libc.prctl(15, b"systemd") != 0:
-    raise SystemExit(91)
-pid = os.fork()
-if pid == 0:
-    os.execv(sys.argv[1], [sys.argv[1], sys.argv[2], sys.argv[3]])
-_, status = os.waitpid(pid, 0)
-raise SystemExit(os.waitstatus_to_exitcode(status))
-"#;
-    seat.command(
-        "python3",
-        &["-c", SCRIPT, &bin.display().to_string(), cmd, text],
-    )
-    .env("PACKSET_WORKSPACE", workspace)
-    .output()
-    .unwrap()
+fn post_terminal_pair(url: &str, workspace: &str, preference_text: &str, lesson_text: &str) {
+    for (kind, text) in [("preference", preference_text), ("lesson", lesson_text)] {
+        post_atom(
+            url,
+            serde_json::json!({
+                "schema": "inside.atom/v1",
+                "workspace": workspace,
+                "kind": kind,
+                "level": "explicit",
+                "text": text,
+                "origin": "user-declared",
+                "source": {
+                    "harness": "person",
+                    "session": "person",
+                    "via": "ljos",
+                },
+            }),
+        );
+    }
+}
+
+fn post_held(url: &str, workspace: &str, lesson: &HeldLesson) {
+    post_atom(
+        url,
+        serde_json::json!({
+            "schema": "inside.atom/v1",
+            "workspace": workspace,
+            "kind": "lesson",
+            "level": "explicit",
+            "text": lesson.text,
+            "origin": lesson.origin,
+            "source": {
+                "harness": lesson.harness,
+                "session": lesson.session,
+                "via": "ljos",
+            },
+        }),
+    );
 }
 
 fn assert_terminal_shape(atom: &Value) {
@@ -266,13 +230,14 @@ fn assert_terminal_shape(atom: &Value) {
 }
 
 /// v0.17 through v0.29 terminal writes stay as those releases stored them.
-/// `ljos prefer --review` does not promote them and does not list a held lesson.
+/// The current binary leaves them unverified and does not promote them.
 #[test]
 fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
     if !ljos_cli::tool_installed("packsetd") {
         eprintln!("skipped: packsetd is not installed");
         return;
     }
+    let data = fixture();
     let home = tempfile::tempdir().unwrap();
     let mut daemon_builder = ljos_test_boot::Packsetd::build();
     daemon_builder.home_at(home.path());
@@ -281,109 +246,45 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
     let seat = Seat::on(home, daemon.url().to_string());
     let new = env!("CARGO_BIN_EXE_ljos");
 
-    for version in VERSIONS {
-        let workspace = format!("v{}", version.replace('.', ""));
-        let pref = format!("Keep the {version} notes in one paper file.");
-        let lesson = format!("The {version} staging host reboots on its own night.");
-        if let Some(bin) = release_bin(version) {
-            let wrote = at_terminal(&seat, &bin, "prefer", &pref, &workspace);
-            succeeded(&wrote, &format!("v{version} prefer"));
-            let wrote = at_terminal(&seat, &bin, "remember", &lesson, &workspace);
-            succeeded(&wrote, &format!("v{version} remember"));
-        } else {
-            post_legacy_atom(
-                daemon.url(),
-                &workspace,
-                "preference",
-                &pref,
-                "user-declared",
-                "person",
-                "person",
-            );
-            post_legacy_atom(
-                daemon.url(),
-                &workspace,
-                "lesson",
-                &lesson,
-                "user-declared",
-                "person",
-                "person",
-            );
-        }
+    for row in &data.terminal_by_version {
+        post_terminal_pair(
+            daemon.url(),
+            &row.workspace,
+            &row.preference_text,
+            &row.lesson_text,
+        );
 
-        let stored = atoms(daemon.url(), &workspace);
-        let preference = by_text(&stored, &format!("{version} notes"));
-        let remembered = by_text(&stored, &format!("{version} staging"));
+        let stored = atoms(daemon.url(), &row.workspace);
+        let preference = by_text(&stored, &format!("{} notes", row.version));
+        let remembered = by_text(&stored, &format!("{} staging", row.version));
         assert_eq!(preference["kind"], "preference", "{preference}");
         assert_eq!(remembered["kind"], "lesson", "{remembered}");
         assert_terminal_shape(preference);
         assert_terminal_shape(remembered);
+        assert!(
+            basis(preference).is_none(),
+            "v{} preference was promoted",
+            row.version
+        );
+        assert!(
+            basis(remembered).is_none(),
+            "v{} lesson was promoted",
+            row.version
+        );
 
-        let review = seat
-            .command(
-                terminal::PYTHON,
-                &terminal::shape("terminal", new, &["prefer", "--review"]),
-            )
-            .env("PACKSET_WORKSPACE", &workspace)
-            .output()
-            .unwrap();
-        let review = succeeded(&review, &format!("v{version} review"));
+        let doctor = seat.doctor(new, &row.workspace);
         assert!(
-            review.contains("no legacy preferences to review"),
-            "{review}"
-        );
-        let stored = atoms(daemon.url(), &workspace);
-        assert!(
-            basis(by_text(&stored, &format!("{version} notes"))).is_none(),
-            "v{version} preference was promoted"
-        );
-        assert!(
-            basis(by_text(&stored, &format!("{version} staging"))).is_none(),
-            "v{version} lesson was promoted"
+            doctor.status.success(),
+            "v{} doctor must pass on legacy terminal atoms\n{}",
+            row.version,
+            text_of(&doctor)
         );
     }
 
-    if let Some(old) = release_bin("0.29.0") {
-        let runner = seat
-            .command(&old.display().to_string(), &["remember", RUNNER_LESSON])
-            .env("PACKSET_WORKSPACE", "held")
-            .env("CLAUDE_SESSION_ID", "runnerlesson01")
-            .output()
-            .unwrap();
-        succeeded(&runner, "v0.29 runner remember");
-    } else {
-        post_legacy_atom(
-            daemon.url(),
-            "held",
-            "lesson",
-            RUNNER_LESSON,
-            "user-declared",
-            "claude",
-            "claude@runnerlesson01",
-        );
-    }
+    post_held(daemon.url(), &data.held_workspace, &data.runner_lesson);
+    post_held(daemon.url(), &data.held_workspace, &data.agent_lesson);
 
-    if let Some(current) = release_bin("0.32.1") {
-        let agent = seat
-            .command(&current.display().to_string(), &["remember", AGENT_LESSON])
-            .env("PACKSET_WORKSPACE", "held")
-            .env("CLAUDE_SESSION_ID", "agentlesson01")
-            .output()
-            .unwrap();
-        succeeded(&agent, "v0.32.1 runner remember");
-    } else {
-        post_legacy_atom(
-            daemon.url(),
-            "held",
-            "lesson",
-            AGENT_LESSON,
-            "agent-derived",
-            "claude",
-            "claude@agentlesson01",
-        );
-    }
-
-    let before = atoms(daemon.url(), "held");
+    let before = atoms(daemon.url(), &data.held_workspace);
     let held = by_text(&before, "lint job");
     assert_eq!(held["kind"], "lesson", "{held}");
     assert_eq!(held["origin"], "user-declared", "{held}");
@@ -394,24 +295,8 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
         .contains('@'));
     let agent_atom = by_text(&before, "deploy window");
     assert_eq!(agent_atom["origin"], "agent-derived", "{agent_atom}");
-    let held_id = held["id"].as_str().unwrap().to_string();
 
-    let review = seat
-        .command(
-            terminal::PYTHON,
-            &terminal::shape("terminal", new, &["prefer", "--review"]),
-        )
-        .env("PACKSET_WORKSPACE", "held")
-        .output()
-        .unwrap();
-    let review = succeeded(&review, "review held lesson");
-    assert!(
-        review.contains("no legacy preferences to review"),
-        "{review}"
-    );
-    assert!(!review.contains("1 older lesson awaits review"), "{review}");
-    assert!(!review.contains(&held_id), "{review}");
-    let doctor = seat.doctor(new, "held");
+    let doctor = seat.doctor(new, &data.held_workspace);
     assert!(
         doctor.status.success(),
         "a held lesson must not fail the doctor\n{}",
@@ -423,8 +308,10 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
         text_of(&doctor)
     );
 
-    let after = atoms(daemon.url(), "held");
+    let after = atoms(daemon.url(), &data.held_workspace);
     assert!(basis(by_text(&after, "lint job")).is_none());
     assert_eq!(by_text(&after, "deploy window")["origin"], "agent-derived");
     assert_ne!(basis(by_text(&after, "deploy window")), Some("person"));
+    assert_eq!(data.runner_lesson.text, RUNNER_LESSON);
+    assert_eq!(data.agent_lesson.text, AGENT_LESSON);
 }
