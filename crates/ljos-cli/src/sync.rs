@@ -7882,6 +7882,7 @@ mod tests {
 
     #[test]
     fn a_miss_for_someone_else_stays_a_skip_line() {
+        let _guard = crate::test_env_lock();
         let skip = miss_report("peerbox", "surf", "age1mine", &["age1other".into()]).unwrap();
         assert_eq!(
             skip,

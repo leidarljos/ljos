@@ -65915,6 +65915,7 @@ mod tests {
     /// the anchors go to the settle as one object.
     #[test]
     fn personas_are_latest_per_name_and_anchor_the_settle() {
+        let _guard = test_env_lock();
         let p = Persona {
             runner: None,
             name: "reviewer".into(),
