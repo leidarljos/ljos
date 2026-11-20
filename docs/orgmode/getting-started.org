@@ -62,6 +62,7 @@ The script names the cause and the command that fixes it.
   The Next line puts that directory on PATH and names the following command.
   With =--no-onboard= that command is =ljos onboard=.
   An install that already ran =ljos onboard= names =ljos doctor=.
+  The command guard and shell completion hints print separate POSIX and fish lines.
 - An older =ljos= is earlier on =PATH=. The script names both binaries and prints the =export PATH= line that puts the new one first.
 - Running the script again over the same version says it reinstalled that version. An older install says it updated, and names both versions.
 - =--version VER= or =--pin REPO=VER= for a release that does not exist says so, names the releases page, and the command =sh install.sh --version VER= or =sh install.sh --pin REPO=VER=. A version the script itself names, when that release is not published and Rust is not installed, installs the latest release of that program and says so. With Rust installed, it builds that version from source.
