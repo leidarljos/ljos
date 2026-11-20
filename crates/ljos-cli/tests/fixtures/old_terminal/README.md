@@ -6,25 +6,35 @@ repository.
 
 ## `legacy_atoms.json`
 
-### `terminal_by_version` (preference and lesson per row)
+### `terminal_by_version`
 
-Each pair is a hand-written atom record shaped like the bodies built by
-`post_terminal_pair` in the integration test. The expected stored shape and
-the session literals (`harness` equals `session`, value `person`, `via` `ljos`,
-no `turn`, no `@` in `session`) are asserted in
-`git show 4e8daa4:crates/ljos-cli/tests/old_terminal.rs`
-(`assert_terminal_shape` about lines 255–265 and the post calls about 294–311),
-not in the v0.41.0 module comment.
+Each row is one workspace (`v0170`, `v0220`, `v0250`, `v0290`) with the
+preference and lesson texts that `4e8daa4` posted when release archives were
+missing. In `git show 4e8daa4:crates/ljos-cli/tests/old_terminal.rs` the
+`VERSIONS` array and the loop over it build:
 
-`post_terminal_pair` and `post_held` add `schema`, `kind`, `level`, `origin`,
-`source`, `workspace`, and `via`, so each JSON row is the atom fields only, not
-a full `POST /v1/atoms` body.
+- `Keep the {version} notes in one paper file.`
+- `The {version} staging host reboots on its own night.`
 
-The `preference_text` and `lesson_text` strings match the literals in the
-fixture file, which replaced inline `VERSIONS` entries.
+The JSON `preference_text` and `lesson_text` fields are those four pairs with
+each `{version}` filled in.
+
+Each stored atom must match `assert_terminal_shape` in the integration test:
+`user-declared`, no `source.basis`, `source.seat` absent or empty, no `turn`,
+`harness` equals `session`, `via` `ljos`, no `@` in `session`. The module
+comment at the top of `old_terminal.rs` describes the same v0.17–v0.29 shape.
+
+When archives are missing, `4e8daa4` posts through `post_legacy_atom` with
+`origin` `user-declared`, `harness` and `session` `person`. The current test
+builds the same objects in `post_terminal_pair`, which adds `schema`, `kind`,
+`level`, `origin`, `source`, `workspace`, and `via`. Each JSON row lists only
+the variable fields, not a full `POST /v1/atoms` body.
 
 ### `runner_lesson` and `agent_lesson`
 
-Hand-written records for workspace `held`, matching the two `post_held` calls in
-the same test: lesson text, `origin`, `harness`, and `session` fields as in
-those calls.
+These match the held-lesson fallbacks in `4e8daa4` when binaries are missing:
+`RUNNER_LESSON` (`The lint job must pass before a merge.`, `user-declared`,
+`claude`, `claude@runnerlesson01`) and `AGENT_LESSON` (`The deploy window
+closes at four on Friday.`, `agent-derived`, `claude`, `claude@agentlesson01`).
+`post_held` in the integration test supplies the same envelope fields as
+`post_terminal_pair`.
