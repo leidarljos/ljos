@@ -87,6 +87,7 @@ pub fn git_at(program: impl AsRef<OsStr>) -> Command {
 /// the directory is made with `create_dir`, which fails when it exists,
 /// and a name already taken moves on to the next `n`. Nothing is removed,
 /// so a test never deletes a tree another test is still building.
+/// A root that another test removed once it was empty is made again.
 ///
 /// # Panics
 ///
@@ -110,6 +111,11 @@ pub fn fresh_dir(root: &Path, prefix: &str) -> PathBuf {
                 return dir;
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            // A test removing the root once it is empty can race this call.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir_all(root)
+                    .unwrap_or_else(|err| panic!("scratch root {}: {err}", root.display()));
+            }
             Err(err) => panic!("scratch dir {}: {err}", dir.display()),
         }
     }
