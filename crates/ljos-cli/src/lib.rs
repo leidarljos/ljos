@@ -62618,6 +62618,9 @@ mod tests {
             std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
+        // Another test may point XDG_DATA_HOME at its own directory between
+        // these reads of the default root.
+        let env = super::test_env_lock();
         let absent = super::habitat_down_state(
             "tracker",
             &anyhow::anyhow!("vissue failed (exit 1): not inside a tracker"),
@@ -62633,6 +62636,7 @@ mod tests {
                 "vissue failed (exit 1): /tmp/seat is not a tracker: it holds neither vissue.toml nor Software/. Name one with --root, or set VISSUE_ROOT"
             ),
         );
+        drop(env);
         assert_eq!(named, want);
         assert_eq!(
             super::doctor_word(&super::Habitat {
