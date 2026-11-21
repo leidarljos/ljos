@@ -2,8 +2,9 @@
 # Run a test command against clean non-/tmp HOME, TMPDIR, and XDG_RUNTIME_DIR
 # scratch directories with XDG_*_HOME unset. Scan HOME, ljos-owned locations
 # under the runner's real HOME (hashing regular files and walking pre-existing
-# symlinks), and suite-writable /tmp entries (/tmp/ljos-$UID and uid-owned
-# ljos-*, .tmp*, tmp.*), ignoring concurrent foreign host activity.
+# symlinks that resolve inside it), and suite-writable /tmp entries
+# (/tmp/ljos-$UID and uid-owned ljos-*, .tmp*, tmp.*), ignoring concurrent
+# foreign host activity.
 set -eu
 
 if [ "$#" -lt 1 ]; then
@@ -154,6 +155,12 @@ except OSError as exc:
     errors.append(f"{root}: {exc.strerror}")
     root_st = None
 
+root_real = os.path.realpath(root)
+root_prefix = root_real.rstrip(os.sep) + os.sep
+
+def inside_root(path):
+    return os.path.realpath(path).startswith(root_prefix)
+
 visited_dirs = set()
 queue = []
 
@@ -173,6 +180,10 @@ def record_path(p, rel):
         except OSError as exc:
             errors.append(f"{p}: {exc.strerror}")
         entries[rel] = ["l", mode, st.st_ino, st.st_size, st.st_mtime_ns, target]
+        # A link to the root itself or out of it is recorded by its target
+        # string only.
+        if not inside_root(p):
+            return
 
         target_key = rel + " -> target"
         try:
@@ -259,7 +270,10 @@ while queue:
     try:
         it = sorted(os.scandir(cur_dir), key=lambda e: e.name)
     except OSError as exc:
-        errors.append(f"{cur_dir}: {exc.strerror}")
+        if exc.errno in (errno.EACCES, errno.EPERM):
+            entries[cur_rel + " -> unreadable"] = ["unresolved", exc.errno, None, None, None, None]
+        else:
+            errors.append(f"{cur_dir}: {exc.strerror}")
         continue
 
     for entry in it:
@@ -340,8 +354,12 @@ errors = []
 
 uid = os.geteuid()
 rt_name = f"ljos-{uid}"
+root_prefix = os.path.realpath(tmp_root).rstrip(os.sep) + os.sep
 visited_dirs = set()
 queue = []
+
+def inside_root(path):
+    return os.path.realpath(path).startswith(root_prefix)
 
 def record_tmp(path, rel, walk_children):
     try:
@@ -357,6 +375,10 @@ def record_tmp(path, rel, walk_children):
         except OSError as exc:
             errors.append(f"{path}: {exc.strerror}")
         entries[rel] = ["l", mode, st.st_uid, st.st_ino, st.st_size, st.st_mtime_ns, target]
+        # A link to the root itself or out of it is recorded by its target
+        # string only, so foreign trees are never walked.
+        if not inside_root(path):
+            return
         target_key = rel + " -> target"
         try:
             tst = os.stat(path)
@@ -419,7 +441,10 @@ while queue:
     try:
         it = sorted(os.scandir(cur_dir), key=lambda e: e.name)
     except OSError as exc:
-        errors.append(f"{cur_dir}: {exc.strerror}")
+        if exc.errno in (errno.EACCES, errno.EPERM):
+            entries[cur_rel + " -> unreadable"] = ["unresolved", exc.errno, None, None, None, None, None]
+        else:
+            errors.append(f"{cur_dir}: {exc.strerror}")
         continue
     for entry in it:
         rel = os.path.join(cur_rel, entry.name)

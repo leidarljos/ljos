@@ -369,8 +369,9 @@ fn ci_test_hermetic_catches_real_home_writes_find_errors_and_keeps_exit() {
         assert!(err.contains(rel), "stderr missing {rel}: {err}");
     }
 
-    // 9. Pre-existing symlinks (file, dir, dangling, and cycle) are walked safely
-    // and writes through them fail.
+    // 9. Pre-existing symlinks (file, dir, dangling, and cycle) into HOME are
+    // walked safely and writes through them fail. `ext` is not a scanned
+    // name, so only the links reach it.
     #[cfg(unix)]
     {
         let h_sym_root = tempfile::Builder::new()
@@ -378,7 +379,7 @@ fn ci_test_hermetic_catches_real_home_writes_find_errors_and_keeps_exit() {
             .tempdir_in(&target)
             .unwrap();
         let h_sym = h_sym_root.path().join("home");
-        let ext = h_sym_root.path().join("ext");
+        let ext = h_sym.join("ext");
         let ext_sub = ext.join("dir/sub");
         std::fs::create_dir_all(&h_sym).unwrap();
         std::fs::create_dir_all(&ext_sub).unwrap();
@@ -833,6 +834,120 @@ fn ci_test_hermetic_catches_real_home_writes_find_errors_and_keeps_exit() {
         assert!(
             err_sym_write.contains("via-symlink"),
             "stderr missing write through ljos-$UID symlink: {err_sym_write}"
+        );
+    }
+}
+
+/// A scratch directory under the target dir for one wrapper case.
+fn hermetic_case_dir(prefix: &str) -> tempfile::TempDir {
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().join("target"))
+        .join("test-roots");
+    std::fs::create_dir_all(&target).unwrap();
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(&target)
+        .unwrap()
+}
+
+/// Runs `sh -c sh_cmd` under the wrapper with `home` as the real HOME and
+/// `tmp_root` in place of `/tmp`.
+fn run_hermetic(home: &Path, tmp_root: &Path, sh_cmd: &str) -> std::process::Output {
+    let root = repo_root();
+    Command::new("sh")
+        .arg(root.join("scripts/ci-test-hermetic.sh"))
+        .args(["sh", "-c", sh_cmd])
+        .current_dir(&root)
+        .env("HOME", home)
+        .env("LJOS_HERMETIC_TMP_ROOT", tmp_root)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn ci_test_hermetic_bounds_symlink_walks_to_scan_root() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    struct Unlock(PathBuf);
+    impl Drop for Unlock {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    // SAFETY: geteuid is always safe to call and has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    let case = hermetic_case_dir("ci-herm-bound-");
+    let home = case.path().join("home");
+    let tmp = case.path().join("tmp");
+    let outside = case.path().join("outside");
+    let locked = case.path().join("locked");
+    for d in [&home, &tmp, &outside, &locked.join("inner")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let _unlock = Unlock(locked.clone());
+    let home_link = home.join(".ljos");
+    let rt_link = tmp.join(format!("ljos-{uid}"));
+
+    // A. Links out of the root to an unreadable directory leave a clean run
+    // passing.
+    symlink(&locked, &home_link).unwrap();
+    symlink(&locked, &rt_link).unwrap();
+    let out_locked = run_hermetic(&home, &tmp, "true");
+    assert!(
+        out_locked.status.success(),
+        "links to an unreadable outside dir failed a clean run: {}",
+        String::from_utf8_lossy(&out_locked.stderr)
+    );
+
+    // B. Foreign writes beyond a link to an outside dir or to the root itself
+    // are not reported.
+    std::fs::remove_file(&home_link).unwrap();
+    std::fs::remove_file(&rt_link).unwrap();
+    symlink(&outside, &home_link).unwrap();
+    symlink(&tmp, &rt_link).unwrap();
+    let out_foreign = run_hermetic(
+        &home,
+        &tmp,
+        &format!(
+            ": > '{}' && : > '{}'",
+            outside.join("foreign.txt").display(),
+            tmp.join("foreign-name.txt").display()
+        ),
+    );
+    assert!(
+        out_foreign.status.success(),
+        "foreign writes beyond out-of-root links were reported: {}",
+        String::from_utf8_lossy(&out_foreign.stderr)
+    );
+
+    // C. Retargeting a recorded link still fails.
+    let out_retarget = run_hermetic(
+        &home,
+        &tmp,
+        &format!(
+            "ln -sfn '{}' '{}' && ln -sfn '{}' '{}'",
+            locked.display(),
+            home_link.display(),
+            outside.display(),
+            rt_link.display()
+        ),
+    );
+    assert_eq!(
+        out_retarget.status.code(),
+        Some(1),
+        "retargeted links must fail"
+    );
+    let err_retarget = String::from_utf8_lossy(&out_retarget.stderr);
+    for needle in ["home/.ljos (", &format!("tmp/ljos-{uid} (")] {
+        assert!(
+            err_retarget.contains(needle),
+            "stderr missing {needle}: {err_retarget}"
         );
     }
 }
