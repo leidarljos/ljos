@@ -48293,7 +48293,7 @@ pub fn finish(
     };
     let closing = closed_as.is_some();
     let ended = {
-        // The claim graph gets about two seconds. Past that the tracker is
+        // The claim graph gets three seconds. Past that the tracker is
         // handed back locally, and a later call reconciles the graph.
         let bound = arm_wall_budget_for(std::time::Duration::from_secs(3));
         let ended = if closing {
