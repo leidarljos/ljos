@@ -50,6 +50,7 @@ fn server(home: &std::path::Path) -> Command {
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"probe\"]\n").unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -444,6 +445,7 @@ fn python_client(home: &std::path::Path, script: &str) -> std::process::Child {
     Command::new("python3")
         .args(["-c", script, env!("CARGO_BIN_EXE_ljos-mcp")])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .envs(template.get_envs().filter_map(|(k, v)| Some((k, v?))))
         .current_dir(home)
         .stdin(Stdio::piped())

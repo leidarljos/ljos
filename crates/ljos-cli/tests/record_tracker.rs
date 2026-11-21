@@ -139,6 +139,7 @@ impl Tracker {
             .args(["record", "check", "--tracker"])
             .arg(&self.root)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.home)
             .env("PACKSET_URL", "off")

@@ -51,6 +51,7 @@ impl Run {
         cmd.arg("doctor")
             .args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("HOME", root.join("home"))
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .env("XDG_RUNTIME_DIR", root.join("run"))

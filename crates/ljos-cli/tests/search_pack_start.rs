@@ -125,6 +125,7 @@ fn run(seat: &Seat, args: &[&str], env: &[(&str, &str)]) -> (Output, Duration) {
     cmd.args(args)
         .current_dir(home)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join("config"))

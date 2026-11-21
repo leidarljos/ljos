@@ -29,6 +29,7 @@ fn filing_a_ticket_does_not_print_the_tracker_file_path() {
     let path = format!("{}:{}:/usr/bin:/bin", ljos.display(), vissue.display());
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", path)
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))

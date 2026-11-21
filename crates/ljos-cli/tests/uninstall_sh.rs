@@ -276,6 +276,7 @@ fn the_script_hands_over_to_a_ljos_that_knows_uninstall() {
         .arg(script())
         .arg("--dry-run")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin")
         .env("XDG_RUNTIME_DIR", home.join("run"))

@@ -117,6 +117,7 @@ impl Place {
         let mut cmd = Command::new(program);
         cmd.current_dir(&self.product)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env(
                 "PATH",
                 format!(

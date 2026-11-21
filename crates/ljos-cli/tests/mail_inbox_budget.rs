@@ -200,6 +200,7 @@ fn ljos_env(
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .current_dir(home)
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin")
@@ -371,6 +372,7 @@ fn a_stalled_pack_returns_inside_the_budget() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(["hook"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .current_dir(home.path())
         .env("HOME", home.path())
         .env("PATH", "/usr/bin:/bin")
@@ -442,6 +444,7 @@ fn a_token_proof_does_not_restart_when_the_writer_stays_silent() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(["hook"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .current_dir(home.path())
         .env("HOME", home.path())
         .env("PATH", "/usr/bin:/bin")

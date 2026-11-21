@@ -141,6 +141,7 @@ impl World {
         cmd.args(args)
             .current_dir(self.path("home"))
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self.path("bin").display()),

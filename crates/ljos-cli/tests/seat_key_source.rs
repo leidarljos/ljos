@@ -185,6 +185,7 @@ fn hook(h: &Hab, launch: &Launch) -> Command {
 
 fn apply_env(cmd: &mut Command, h: &Hab, launch: &Launch) {
     cmd.env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &h.home)
         .env("XDG_CONFIG_HOME", h.home.join(".config"))

@@ -60,6 +60,7 @@ impl Seat {
     fn env(&self, cmd: &mut Command, workspace: &str, root: &Path) {
         let home = self.home.path();
         cmd.env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("HOME", home)
             .env("PATH", &self.path)
             .env("LANG", "C.UTF-8")

@@ -35,6 +35,7 @@ fn statusline_on_a_tty_prints_a_hint_and_exits() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("statusline")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", root.path())
         .env("TMPDIR", root.path())
@@ -61,6 +62,7 @@ fn statusline_on_a_closed_stdin_prints_the_line() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("statusline")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", root.path())
         .env("TMPDIR", root.path())

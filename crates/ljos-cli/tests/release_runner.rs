@@ -119,6 +119,7 @@ fn cgroup_while_hook_blocks(bin: &Path) -> String {
     let mut child = Command::new(bin)
         .arg("hook")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &home)
         .stdin(Stdio::piped())

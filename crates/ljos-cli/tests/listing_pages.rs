@@ -64,6 +64,7 @@ impl Home {
             .args(args)
             .current_dir(self.root.join("work"))
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", path)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

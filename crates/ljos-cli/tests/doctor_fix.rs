@@ -91,6 +91,7 @@ impl Seat {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .env("HOME", &self.home)
             .env("USER", "ada")
@@ -345,6 +346,7 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", format!("{}:/usr/bin:/bin", seat.bin.display()))
             .env("HOME", &seat.home)
             .env("USER", "ada")
@@ -457,6 +459,7 @@ fn doctor_fix_leaves_a_missing_packset_with_one_command() {
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["doctor", "--fix"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", format!("{}:/usr/bin:/bin", seat.bin.display()))
         .env("HOME", &seat.home)
         .env("USER", "ada")

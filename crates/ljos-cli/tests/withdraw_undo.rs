@@ -76,6 +76,7 @@ exit 0
             .arg("withdraw")
             .args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", &path)
             .env("HOME", self.dir.path().join("home"))
             .env(

@@ -64,6 +64,7 @@ impl Hab {
         let path = format!("{}:/usr/bin:/bin", self.dir.path().display());
         let mut cmd = Command::new(bin);
         cmd.env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", &path)
             .env("HOME", self.dir.path().join("home"))
             .env(

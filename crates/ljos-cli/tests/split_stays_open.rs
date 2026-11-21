@@ -206,6 +206,7 @@ else:
             .args(["consensus", &self.id, "--json"])
             .current_dir(&self.bin)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", path)
             .env("HOME", &self.home)
             .env("XDG_DATA_HOME", self.home.join(".local/share"))

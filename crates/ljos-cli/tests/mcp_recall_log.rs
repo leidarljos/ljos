@@ -47,6 +47,7 @@ fn mcp_search_appends_one_recall_line_for_the_call_seat() {
     let url = pack();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))

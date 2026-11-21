@@ -29,6 +29,7 @@ fn run(flag: &str) -> (bool, String, Duration) {
     let out = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .arg(flag)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HOME", &home)
         .stdin(Stdio::null())

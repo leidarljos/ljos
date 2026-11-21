@@ -153,6 +153,7 @@ impl Board {
     fn env(&self, cmd: &mut Command, root: &Path) {
         let home = self.root.join("home");
         cmd.env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", &self.path)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

@@ -1,7 +1,7 @@
 //! Where a test puts a seat home. ljos stays out of a temp HOME, so the
 //! root has to sit outside the temp roots. It also sits outside the
-//! checkout when it can, so a git walk from a scratch tree whose `.git`
-//! is missing never reaches the checkout's `.git`.
+//! checkout, so a git walk from a scratch tree whose `.git` is missing
+//! never reaches the checkout's `.git`.
 
 use std::path::{Path, PathBuf};
 
@@ -11,18 +11,44 @@ use std::path::{Path, PathBuf};
 /// macOS.
 const ROOM: usize = 44;
 
-/// A cache under `HOME`, or the checkout's `crates/target` when `HOME` is
-/// a temp root or its path leaves a nested socket no room. A git call in
-/// the checkout fallback is held back by `ljos_test_boot::git_ceiling`.
-/// `is_temp` is `bookkeep::path_is_temp`.
+/// The cache under `HOME`. There is no fallback inside the checkout: a
+/// `HOME` that is unset, a temp root, or too long for a nested socket
+/// stops the test with the reason. `is_temp` is `bookkeep::path_is_temp`.
+///
+/// # Panics
+///
+/// See [`pick_seat_root`].
 pub fn seat_root(is_temp: fn(Option<&Path>) -> bool) -> PathBuf {
-    let target = ljos_test_boot::checkout_seats();
-    let fits = |root: &Path| root.as_os_str().len() <= ROOM;
-    let cache = ljos_test_boot::home_seats().filter(|root| !is_temp(Some(root)));
-    match cache {
-        Some(cache) if fits(&cache) || is_temp(Some(&target)) => cache,
-        _ => target,
-    }
+    pick_seat_root(ljos_test_boot::home_seats(), is_temp).unwrap_or_else(|why| panic!("{why}"))
+}
+
+/// `cache` when a seat home may go there, else why not.
+///
+/// # Errors
+///
+/// `cache` is missing, a temp root, longer than [`ROOM`] bytes, or
+/// inside the checkout.
+pub fn pick_seat_root(
+    cache: Option<PathBuf>,
+    is_temp: fn(Option<&Path>) -> bool,
+) -> Result<PathBuf, String> {
+    let Some(cache) = cache else {
+        return Err("seat root: HOME is unset or empty; set HOME to a real home".into());
+    };
+    let why = if is_temp(Some(&cache)) {
+        "is a temp root, and ljos stays out of a temp HOME"
+    } else if cache.as_os_str().len() > ROOM {
+        "leaves a nested socket path no room"
+    } else if cache.starts_with(ljos_test_boot::checkout()) {
+        "is inside the ljos checkout"
+    } else {
+        return Ok(cache);
+    };
+    Err(format!(
+        "seat root: {} {why}; set HOME to a real home of at most {} bytes",
+        cache.display(),
+        ROOM - ".cache/ljos-test-seats".len() - 1
+    ))
 }
 
 /// A new seat directory under [`seat_root`] that no other test shares.
