@@ -197,6 +197,8 @@ fn the_git_scan_sees_variables_paths_and_a_later_env_clear() {
         r#"let out = CMD::new(which::which("git").unwrap()).output();"#,
         "let mut c = ljos_test_boot::git();\nc.CLEAR();\nlet out = c.output();",
         "let mut c = CMD::new(ljos);\nc.CLEAR();\nlet out = c.output();",
+        "fn a() -> Output {\nCMD::new(\"git\").output().unwrap()\n}\nfn b() { fence_git(&mut c); }",
+        "fn a(c: &mut CMD) {\nc.CLEAR()\n}\nfn b() { let g = git_ceiling(); }",
     ];
     let passed = [
         "let out = ljos_test_boot::git().CLEAR()\n.env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling()).output();",
@@ -378,13 +380,24 @@ fn clears(code: &str) -> Vec<usize> {
 }
 
 /// Whether the ceiling is set after `at`, in its statement or the next.
+/// The reach stops at the `}` that closes the block `at` is in.
 fn fenced(code: &str, at: usize) -> bool {
-    let end = |from: usize| {
-        code[from..]
-            .find(';')
-            .map_or(code.len(), |end| from + end + 1)
-    };
-    let reach = &code[at..end(end(at))];
+    let mut depth = 0i64;
+    let mut ends = 0;
+    let mut stop = code.len();
+    for (j, c) in code[at..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            ';' if depth == 0 => ends += 1,
+            _ => {}
+        }
+        if depth < 0 || ends == 2 {
+            stop = at + j;
+            break;
+        }
+    }
+    let reach = &code[at..stop];
     CEILING.iter().any(|token| reach.contains(token))
 }
 
