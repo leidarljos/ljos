@@ -25568,7 +25568,7 @@ A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook
 2. Grade due claims (`ljos graded ID`).
 3. Do the work on this claim only. Artefacts are deeds, then `ljos deed ISSUE --add ACCESSION`. Under a runner `ljos remember` is stored at once as an unreviewed lesson that the person reviews; keep it to two sentences.
 4. One playbook step is the whole sitting. A subagent takes this recipe and this issue; it does not resume a later phase.
-5. Close with `ljos finish ISSUE --lesson \"...\"`. Completing the node does not close the ticket. A person closes it when the work is accepted.
+5. End with `ljos finish ISSUE --lesson \"...\"`. It hands the session node back and leaves the ticket open. A person closes the ticket with `ljos finish ISSUE --close` when the work is accepted.
 ";
 
 const ARENA_BODY: &str = "\
@@ -25588,7 +25588,7 @@ Land a chosen design on the real surface.
 2. Prove on the real surface: the host the users run, the crate they install. A cheaper substitute is not the result.
 3. Keep A's fence: no 47 skills, no poteto-mode, no Benny, musl iced-free, `ljos vote --as` and DeGroot stay.
 4. One step per subagent. Open a sibling first when a second implementer is in flight.
-5. Close with finish. Do not ship a count as consensus.
+5. End with `ljos finish`. It leaves the ticket open. Do not ship a count as consensus.
 ";
 
 const COMPANY_PANEL_BODY: &str = "\
