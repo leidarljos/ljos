@@ -412,14 +412,16 @@ pub fn guard_off_reason() -> Option<String> {
 /// Whether `path` is a temporary directory or sits inside one.
 #[must_use]
 pub fn path_is_temp(path: Option<&Path>) -> bool {
-    let Some(path) = path else {
-        return false;
-    };
+    path.is_some_and(|path| path_is_temp_in(path, &temp_roots()))
+}
+
+/// [`path_is_temp`] against the given temp roots.
+fn path_is_temp_in(path: &Path, roots: &[PathBuf]) -> bool {
     if path.as_os_str().is_empty() {
         return false;
     }
     let path = canonical_existing_prefix(path);
-    resolved_path_is_temp(&path)
+    roots.iter().any(|root| path.starts_with(root))
 }
 
 /// `path` with the longest existing prefix resolved, and the missing
@@ -432,14 +434,24 @@ fn canonical_existing_prefix(path: &Path) -> PathBuf {
     loop {
         if let Ok(mut real) = std::fs::canonicalize(&cur) {
             for name in missing.iter().rev() {
-                real.push(name);
+                if name == "." {
+                    continue;
+                }
+                if name == ".." {
+                    real.pop();
+                } else {
+                    real.push(name);
+                }
             }
             return real;
         }
-        let Some(name) = cur.file_name().map(|name| name.to_os_string()) else {
-            return path.to_path_buf();
+        let seg = match cur.components().next_back() {
+            Some(std::path::Component::Normal(name)) => name.to_os_string(),
+            Some(std::path::Component::ParentDir) => std::ffi::OsString::from(".."),
+            Some(std::path::Component::CurDir) => std::ffi::OsString::from("."),
+            _ => return path.to_path_buf(),
         };
-        missing.push(name);
+        missing.push(seg);
         if !cur.pop() {
             return path.to_path_buf();
         }
@@ -459,20 +471,50 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+fn per_session_tmpdir(raw: &std::ffi::OsStr, passwd_home: Option<&Path>) -> Option<PathBuf> {
+    if raw.is_empty() {
+        return None;
+    }
+    let candidate = Path::new(raw);
+    if !candidate.is_absolute() {
+        return None;
+    }
+    let resolved = canonical_existing_prefix(candidate);
+    if resolved.components().count() < 3 {
+        return None;
+    }
+    if let Some(pw) = passwd_home {
+        let pw = canonical_existing_prefix(pw);
+        if pw.starts_with(&resolved) {
+            return None;
+        }
+    }
+    Some(resolved)
+}
+
 pub(crate) fn temp_roots() -> Vec<PathBuf> {
     #[cfg(test)]
     if let Some(roots) = TEST_TEMP_ROOTS.with(|r| r.borrow().clone()) {
         return roots;
     }
+    temp_roots_for(
+        std::env::var_os("TMPDIR").as_deref(),
+        crate::proc_tree::own_home().as_deref(),
+    )
+}
+
+/// The temp roots for a `TMPDIR` value and a passwd home.
+fn temp_roots_for(tmpdir: Option<&std::ffi::OsStr>, passwd_home: Option<&Path>) -> Vec<PathBuf> {
     let mut roots = vec![
+        #[cfg(not(unix))]
         std::env::temp_dir(),
         PathBuf::from("/tmp"),
         PathBuf::from("/var/tmp"),
         PathBuf::from("/private/tmp"),
         PathBuf::from("/dev/shm"),
     ];
-    if let Some(tmp) = std::env::var_os("TMPDIR").filter(|t| !t.is_empty()) {
-        roots.push(PathBuf::from(tmp));
+    if let Some(tmp) = tmpdir.and_then(|t| per_session_tmpdir(t, passwd_home)) {
+        roots.push(tmp);
     }
     roots
         .into_iter()

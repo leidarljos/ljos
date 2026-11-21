@@ -7720,27 +7720,10 @@ if [ -z "$real" ]; then echo "ljos guard: no $me found on PATH" >&2; exit 127; f
 case ",1,true,TRUE,yes,YES,on,ON," in
   *,"${LJOS_OFF:-}",*) exec "$real" "$@" ;;
 esac
-under_temp() {
-  p=$1
-  [ -n "$p" ] || return 1
-  for root in /tmp /var/tmp /private/tmp /dev/shm ${TMPDIR-}; do
-    [ -n "$root" ] || continue
-    root=${root%/}
-    [ -n "$root" ] || continue
-    case $p in
-      "$root"|"$root"/*) return 0 ;;
-    esac
-  done
-  return 1
-}
-case ",1,true,TRUE,yes,YES,on,ON," in
-  *,"${LJOS_GUARD:-}",*) ;;
-  *) if under_temp "$(cd -- "$HOME" 2>/dev/null && pwd -P)"; then exec "$real" "$@"; fi ;;
-esac
 # A uid with no passwd entry, as in some containers, is not a reason to
 # refuse rm, git or find. The passwd home wins; $HOME is the fallback.
 # With neither, there is no home to limit the command to, and it runs.
-guard_home=
+pw_home=
 if command -v getent >/dev/null 2>&1 && command -v id >/dev/null 2>&1; then
   pw=$(getent passwd "$(id -u)" 2>/dev/null || true)
   rest=$pw
@@ -7749,8 +7732,82 @@ if command -v getent >/dev/null 2>&1 && command -v id >/dev/null 2>&1; then
     rest=${rest#*:}
     i=$((i + 1))
   done
-  guard_home=${rest%%:*}
+  pw_home=${rest%%:*}
 fi
+resolve_path() {
+  rp_in=$1
+  [ -n "$rp_in" ] || return 0
+  rp_out=$(cd -P -- "$rp_in" 2>/dev/null && pwd -P || printf '')
+  if [ -z "$rp_out" ]; then
+    case $rp_in in
+      /*) rp_cur=$rp_in ;;
+      *) rp_cur=$PWD/$rp_in ;;
+    esac
+    rp_tail=
+    while [ ! -d "$rp_cur" ] && [ -n "$rp_cur" ] && [ "$rp_cur" != / ]; do
+      rp_base=${rp_cur##*/}
+      rp_cur=${rp_cur%/*}
+      [ -n "$rp_cur" ] || rp_cur=/
+      rp_tail=$rp_base${rp_tail:+/$rp_tail}
+    done
+    rp_out=$(cd -P -- "$rp_cur" 2>/dev/null && pwd -P || printf '%s' "$rp_cur")
+    rp_ifs=$IFS
+    IFS=/
+    set -f
+    for rp_seg in $rp_tail; do
+      case $rp_seg in
+        ""|".") ;;
+        "..")
+          case $rp_out in
+            /|/*/*) rp_out=${rp_out%/*}; [ -n "$rp_out" ] || rp_out=/ ;;
+            /*) rp_out=/ ;;
+          esac
+          ;;
+        *) rp_out=${rp_out%/}/$rp_seg ;;
+      esac
+    done
+    set +f
+    IFS=$rp_ifs
+  fi
+  while [ "${rp_out%/}" != "$rp_out" ] && [ -n "${rp_out%/}" ]; do rp_out=${rp_out%/}; done
+  printf '%s' "$rp_out"
+}
+pw_real=$(resolve_path "$pw_home")
+under_temp() {
+  p=$1
+  [ -n "$p" ] || return 1
+  for root in /tmp /var/tmp /private/tmp /dev/shm; do
+    case $p in
+      "$root"|"$root"/*) return 0 ;;
+    esac
+  done
+  case ${TMPDIR-} in
+    /*)
+      t=$(resolve_path "$TMPDIR")
+      case $t in
+        /*/*)
+          case ${pw_real-} in
+            "$t"|"$t"/*) ;;
+            *)
+              case $p in
+                "$t"|"$t"/*) return 0 ;;
+              esac
+              ;;
+          esac
+          ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+case ",1,true,TRUE,yes,YES,on,ON," in
+  *,"${LJOS_GUARD:-}",*) ;;
+  *)
+    home_real=$(resolve_path "${HOME-}")
+    if under_temp "$home_real"; then exec "$real" "$@"; fi
+    ;;
+esac
+guard_home=$pw_home
 if [ -z "$guard_home" ]; then
   case ${HOME-} in
     /*) guard_home=$HOME ;;
