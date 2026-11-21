@@ -38532,6 +38532,12 @@ fn plain_write_line(line: &str) -> String {
                 .into(),
         );
     }
+    if body.contains("rolled the split back") {
+        return say(
+            "The tracker board could not be split into one file per issue in one commit, so it stays one file."
+                .into(),
+        );
+    }
     if body.contains("not a git") {
         return say("The tracker is not a git checkout, so run `ljos doctor`.".into());
     }
@@ -51022,63 +51028,317 @@ fn board_wants_split(path: &Path, limit: u64) -> bool {
         && std::fs::metadata(path).is_ok_and(|meta| meta.len() >= limit)
 }
 
-/// Split the board at `path`, and every unsplit board beside it, into
-/// per-issue files (`vissue migrate-ledger`), and commit the new files with
-/// the board in one commit. Later writes append to one small file and
-/// leave `issues.org` as it was at the split. Never an error: the line
-/// says what did not happen, and the write goes on to the board.
-fn split_board(path: &Path) -> String {
-    let (Some(dir), Some(projects)) = (path.parent(), path.parent().and_then(Path::parent)) else {
-        return String::new();
+/// What a write does about its board's split before it commits.
+enum SplitStep {
+    /// The board is not due a split, or its split is in HEAD.
+    WriteOn,
+    /// The tracker lock this write took for the split, kept for the write's
+    /// own commit so no other writer lands between them. `carried` when a
+    /// split commit may already hold this write's change, so the seat line
+    /// is stamped on a clean file too.
+    Held {
+        lock: CommitLock,
+        line: String,
+        carried: bool,
+    },
+    /// The write's seat line is stamped and the write is on disk and on the
+    /// pending list. The line says why it did not commit.
+    Deferred(String),
+}
+
+/// Whether the split marker of `board` is in HEAD. A marker on disk only is
+/// a split that never landed: a clone of HEAD reads `issues.org`.
+fn split_landed(board: &Path) -> bool {
+    let Some(dir) = board.parent() else {
+        return false;
     };
-    let (Some(root), Some(prefix)) = (projects.parent(), projects.file_name()) else {
-        return String::new();
-    };
-    let Some(top) = git_ok_stdout(dir, &["rev-parse", "--show-toplevel"]) else {
-        return String::new();
-    };
-    let top = PathBuf::from(top.trim());
-    let Some(_held) = tracker_commit_lock_by(dir, std::time::Instant::now() + tracker_lock_wait())
-    else {
-        return String::new();
-    };
-    if vissue_core::ledger::is_ledger(path) {
-        return String::new();
+    git_ok_stdout(dir, &["cat-file", "-e", "HEAD:./issues/.ledger"]).is_some()
+}
+
+/// Stamp each write's seat line on the file at `path`, for a write whose
+/// commit waits.
+fn stamp_waiting_writes(path: &Path, writes: &[(String, String)]) {
+    let seat = tracker_seat();
+    for (issue, verb) in writes {
+        stamp_seat_logbook(path, issue, verb, &seat);
     }
-    let layout = vissue_core::Layout::new(root, prefix.to_string_lossy());
-    let said = match vissue_core::ledger::migrate(&layout, false) {
-        Ok(said) => said,
-        Err(e) => {
-            return format!(
-                "tracker git: could not split {} into per-issue files: {e}\n",
-                path.display()
-            )
+}
+
+/// The per-issue directory of `board`.
+fn board_issues_dir(board: &Path) -> PathBuf {
+    board
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("issues")
+}
+
+/// The `.org` files under the issues directory of `board` that git does
+/// not track.
+fn untracked_issue_files(board: &Path) -> Vec<PathBuf> {
+    let Some(dir) = board.parent() else {
+        return Vec::new();
+    };
+    let Some(out) = git_ok_stdout(dir, &["ls-files", "-o", "-z", "--", "issues"]) else {
+        return Vec::new();
+    };
+    out.split('\0')
+        .filter(|rel| rel.ends_with(".org"))
+        .map(|rel| dir.join(rel))
+        .collect()
+}
+
+/// Remove what a split of `board` that never landed left under its issues
+/// directory. Only for a board with no marker: no vissue write reads those
+/// files then. A short file a killed migrate left makes the next migrate
+/// stop with `partial ledger file`, and a whole one would be kept by it
+/// with the board as it was then.
+fn clear_unlanded_split(board: &Path) -> vissue_core::Result<()> {
+    with_wall_bounded_issues_lock(board, || {
+        if vissue_core::ledger::is_ledger(board) {
+            return Ok(());
+        }
+        for file in untracked_issue_files(board) {
+            std::fs::remove_file(&file)
+                .map_err(|e| anyhow::anyhow!("remove {}: {e}", file.display()))?;
+        }
+        let _ = std::fs::remove_dir(board_issues_dir(board));
+        Ok(())
+    })
+}
+
+/// The files of the issues directory of `board` and their bytes.
+fn issue_dir_files(board: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let Ok(entries) = std::fs::read_dir(board_issues_dir(board)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(PathBuf, Vec<u8>)> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(tracker_tmp::is_temp_name)
+        })
+        .filter_map(|path| std::fs::read(&path).ok().map(|bytes| (path, bytes)))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Undo the split of `board` that migrate just wrote (`made`, the files
+/// and bytes it left): the marker first, so a reader goes back to
+/// `issues.org` at once, then each file, then what the refused commit's
+/// add left staged. A file that changed since, or one that appeared, is a
+/// write that went to the split, and the split is kept. Returns whether it
+/// went.
+fn roll_back_split(board: &Path, made: &[(PathBuf, Vec<u8>)]) -> bool {
+    with_wall_bounded_issues_lock(board, || {
+        if issue_dir_files(board) != made {
+            return Ok(false);
+        }
+        let marker = board_issues_dir(board).join(".ledger");
+        std::fs::remove_file(&marker)
+            .map_err(|e| anyhow::anyhow!("remove {}: {e}", marker.display()))?;
+        for (file, _) in made {
+            if file != &marker {
+                let _ = std::fs::remove_file(file);
+            }
+        }
+        let _ = std::fs::remove_dir(board_issues_dir(board));
+        if let Some(dir) = board.parent() {
+            let _ = git_ok_stdout(dir, &["reset", "-q", "--", "issues"]);
+        }
+        Ok(true)
+    })
+    .unwrap_or(false)
+}
+
+/// Split the board at `path` when it is due, or land a split of it that is
+/// on disk and not in HEAD, before the write commits.
+///
+/// The split is one commit of every board it split and each whole issues
+/// directory, marker included, under the tracker lock this write then
+/// commits under. When that commit does not land, the split is rolled back
+/// and the write goes to `issues.org`; when it cannot be rolled back, the
+/// write waits with it. A split that never landed is not committed one
+/// issue file at a time.
+fn prepare_split(path: &Path, writes: &[(String, String)]) -> SplitStep {
+    let wants = board_wants_split(path, tracker_split_bytes());
+    let board = if wants {
+        path.to_path_buf()
+    } else {
+        match ledger_board(path) {
+            Some(board) if !split_landed(&board) => board,
+            _ => return SplitStep::WriteOn,
         }
     };
+    let Some(dir) = board.parent() else {
+        return SplitStep::WriteOn;
+    };
+    if tracker_place::product_checkout(dir).is_some() {
+        return SplitStep::WriteOn;
+    }
+    let Some(top) = git_ok_stdout(dir, &["rev-parse", "--show-toplevel"]) else {
+        return SplitStep::WriteOn;
+    };
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let top = canon(&top);
+    let top = canon(Path::new(top.trim()));
     let rel = |p: &Path| {
         canon(p)
             .strip_prefix(&top)
             .ok()
             .map(|r| r.to_string_lossy().into_owned())
     };
-    let Some(board) = rel(path) else {
-        return format!(
-            "tracker git: split {}; it is outside {}, so nothing was committed\n",
-            path.display(),
-            top.display()
-        );
+    let lock_wait = tracker_lock_budget();
+    let Some(lock) = tracker_commit_lock_by(dir, std::time::Instant::now() + lock_wait.wait) else {
+        stamp_waiting_writes(path, writes);
+        let mut rels = vec!["issues.org"];
+        if vissue_core::ledger::is_ledger(&board) {
+            rels.push("issues");
+        }
+        note_deferred_paths(dir, &rels);
+        return SplitStep::Deferred(tracker_lock_busy(dir, lock_wait));
     };
-    let mut rels = vec![board.clone()];
+    let Some(board_rel) = rel(&board) else {
+        return SplitStep::Held {
+            lock,
+            line: String::new(),
+            carried: false,
+        };
+    };
+    if vissue_core::ledger::is_ledger(&board) {
+        if split_landed(&board) {
+            return SplitStep::Held {
+                lock,
+                line: String::new(),
+                carried: wants,
+            };
+        }
+        let Some(issues_rel) = rel(&board_issues_dir(&board)) else {
+            return SplitStep::WriteOn;
+        };
+        let rels = vec![board_rel.clone(), issues_rel];
+        let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
+        let message = format!(
+            "chore(issues): split {board_rel} into per-issue files by {}",
+            tracker_seat()
+        );
+        return match commit_paths(&top, &refs, &message) {
+            PathCommit::Made | PathCommit::AlreadyIn => SplitStep::Held {
+                lock,
+                line: format!(
+                    "tracker git: split {board_rel} into per-issue files and committed the split\n"
+                ),
+                carried: true,
+            },
+            PathCommit::Refused(why) | PathCommit::Deferred(why) => {
+                let _ = pending_add(&top, &rels);
+                stamp_waiting_writes(path, writes);
+                SplitStep::Deferred(format!(
+                    "tracker git: the split of {board_rel} into per-issue files is not in a commit ({why}); {}\n",
+                    deferred_commit_line("this write")
+                ))
+            }
+        };
+    }
+    if !board_wants_split(&board, tracker_split_bytes()) {
+        return SplitStep::Held {
+            lock,
+            line: String::new(),
+            carried: false,
+        };
+    }
+    split_board(&top, &board, &board_rel, lock, &rel)
+}
+
+/// Split every unsplit board beside `board` into per-issue files
+/// (`vissue migrate-ledger`) and commit them with their boards in one
+/// commit. The caller holds the tracker lock, `lock`.
+fn split_board(
+    top: &Path,
+    board: &Path,
+    board_rel: &str,
+    lock: CommitLock,
+    rel: &dyn Fn(&Path) -> Option<String>,
+) -> SplitStep {
+    let held = |lock, line: String, carried| SplitStep::Held {
+        lock,
+        line,
+        carried,
+    };
+    let (Some(projects), Some(root), Some(prefix)) = (
+        board.parent().and_then(Path::parent),
+        board.parent().and_then(Path::parent).and_then(Path::parent),
+        board
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name),
+    ) else {
+        return held(lock, String::new(), false);
+    };
+    let mut boards: Vec<(PathBuf, String, String)> = Vec::new();
+    for entry in std::fs::read_dir(projects).into_iter().flatten().flatten() {
+        let candidate = entry.path().join("issues.org");
+        if !candidate.is_file() || vissue_core::ledger::is_ledger(&candidate) {
+            continue;
+        }
+        if let (Some(b), Some(i)) = (rel(&candidate), rel(&board_issues_dir(&candidate))) {
+            boards.push((candidate, b, i));
+        }
+    }
+    let could_not = |e: &dyn std::fmt::Display| {
+        format!("tracker git: could not split {board_rel} into per-issue files: {e}\n")
+    };
+    for (candidate, _, _) in &boards {
+        if let Err(e) = clear_unlanded_split(candidate) {
+            return held(lock, could_not(&e), false);
+        }
+    }
+    let all: Vec<String> = boards
+        .iter()
+        .flat_map(|(_, b, i)| [b.clone(), i.clone()])
+        .collect();
+    if let Err(e) = pending_add(top, &all) {
+        return held(lock, could_not(&format!("the pending list: {e}")), false);
+    }
+    let layout = vissue_core::Layout::new(root, prefix.to_string_lossy());
+    let migrated = vissue_core::ledger::migrate(&layout, false);
+    let split: Vec<&(PathBuf, String, String)> = boards
+        .iter()
+        .filter(|(candidate, _, _)| vissue_core::ledger::is_ledger(candidate))
+        .collect();
+    let unsplit: Vec<String> = boards
+        .iter()
+        .filter(|(candidate, _, _)| !vissue_core::ledger::is_ledger(candidate))
+        .map(|(candidate, _, issues)| {
+            let _ = clear_unlanded_split(candidate);
+            issues.clone()
+        })
+        .collect();
+    pending_remove(top, &unsplit);
+    let failed = match &migrated {
+        Ok(_) => String::new(),
+        Err(e) => could_not(e),
+    };
+    if split.is_empty() {
+        return held(lock, failed, false);
+    }
+    let made: Vec<Vec<(PathBuf, Vec<u8>)>> = split
+        .iter()
+        .map(|(candidate, _, _)| issue_dir_files(candidate))
+        .collect();
+    let mut rels = Vec::new();
+    for (_, b, i) in &split {
+        rels.push(b.clone());
+        rels.push(i.clone());
+    }
     let mut body = Vec::new();
-    for line in said.lines() {
+    for line in migrated.as_deref().unwrap_or_default().lines() {
         match line.rsplit_once(" -> ") {
-            Some((head, split)) => match rel(Path::new(split)) {
-                Some(split) => {
-                    body.push(format!("{head} -> {split}"));
-                    rels.push(split);
-                }
+            Some((head, at)) => match rel(Path::new(at)) {
+                Some(at) => body.push(format!("{head} -> {at}")),
                 None => body.push(head.to_string()),
             },
             None => body.push(line.to_string()),
@@ -51086,21 +51346,46 @@ fn split_board(path: &Path) -> String {
     }
     let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
     let message = format!(
-        "chore(issues): split {board} into per-issue files by {}\n\n{}",
+        "chore(issues): split {board_rel} into per-issue files by {}\n\n{}",
         tracker_seat(),
         body.join("\n")
     );
-    match commit_paths(&top, &refs, &message) {
+    let why = match commit_paths(top, &refs, &message) {
         PathCommit::Made | PathCommit::AlreadyIn => {
-            format!("tracker git: split {board} into per-issue files and committed the split\n")
+            return held(
+                lock,
+                format!(
+                    "{failed}tracker git: split {board_rel} into per-issue files and committed the split\n"
+                ),
+                true,
+            );
         }
-        PathCommit::Refused(why) => {
-            format!("tracker git: split {board} into per-issue files; commit refused: {why}\n")
-        }
-        PathCommit::Deferred(why) => {
-            format!("tracker git: split {board} into per-issue files; {why}\n")
+        PathCommit::Refused(why) | PathCommit::Deferred(why) => why,
+    };
+    let mut kept = false;
+    for ((candidate, _, issues), made) in split.iter().zip(&made) {
+        if roll_back_split(candidate, made) {
+            pending_remove(top, std::slice::from_ref(issues));
+        } else {
+            let _ = pending_add(top, std::slice::from_ref(issues));
+            if candidate.as_path() == board {
+                kept = true;
+            }
         }
     }
+    if kept {
+        return SplitStep::Deferred(format!(
+            "{failed}tracker git: the split of {board_rel} into per-issue files is not in a commit ({why}); {}\n",
+            deferred_commit_line("this write")
+        ));
+    }
+    held(
+        lock,
+        format!(
+            "{failed}tracker git: could not commit the split of {board_rel} into per-issue files ({why}), so it rolled the split back and the board stays one file\n"
+        ),
+        false,
+    )
 }
 
 /// [`persist_tracker_paths`] for several writes to the one file at
@@ -51118,15 +51403,21 @@ fn persist_tracker_writes(
     message: Option<&str>,
 ) -> String {
     let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
-    let split = if !matches!(mode.as_str(), "off" | "0" | "false")
-        && board_wants_split(path, tracker_split_bytes())
-        && path
-            .parent()
-            .is_some_and(|dir| tracker_place::product_checkout(dir).is_none())
-    {
-        split_board(path)
+    let (mut lock, split, carried) = if matches!(mode.as_str(), "off" | "0" | "false") {
+        (None, String::new(), false)
     } else {
-        String::new()
+        // A write across projects stamps no project until it holds the
+        // lock, so a split that makes it wait stamps none.
+        let waiting = if others.is_empty() { writes } else { &[] };
+        match prepare_split(path, waiting) {
+            SplitStep::WriteOn => (None, String::new(), false),
+            SplitStep::Held {
+                lock,
+                line,
+                carried,
+            } => (Some(lock), line, carried),
+            SplitStep::Deferred(line) => return line,
+        }
     };
     if vissue_core::ledger::is_ledger(path) {
         let mut groups: Vec<(PathBuf, Vec<(String, String)>)> = Vec::new();
@@ -51151,7 +51442,9 @@ fn persist_tracker_writes(
                     also,
                     others,
                     message,
-                    may_hold_tracker_writes(list, also),
+                    !carried && may_hold_tracker_writes(list, also),
+                    lock.take(),
+                    carried,
                 ));
             }
             return out;
@@ -51165,7 +51458,9 @@ fn persist_tracker_writes(
             also,
             others,
             message,
-            may_hold_tracker_writes(writes, also)
+            !carried && may_hold_tracker_writes(writes, also),
+            lock,
+            carried,
         )
     )
 }
@@ -51395,7 +51690,7 @@ fn flush_held_tracker_writes_in(root: &Path) -> String {
         if !path.exists() {
             continue;
         }
-        let said = persist_one_tracker_file(&path, &[], &[], &[], None, false);
+        let said = persist_one_tracker_file(&path, &[], &[], &[], None, false, None, false);
         if !said.contains("nothing to commit") {
             return said;
         }
@@ -51416,6 +51711,10 @@ fn flush_held_tracker_writes_in(root: &Path) -> String {
     String::new()
 }
 
+/// Commit the writes to the one file at `path`. `lock` is the tracker lock
+/// when the caller already took it. `stamp_clean` stamps the seat lines on
+/// a file git sees as clean too: a split commit that carried the change
+/// did not name the seat.
 fn persist_one_tracker_file(
     path: &Path,
     writes: &[(String, String)],
@@ -51423,6 +51722,8 @@ fn persist_one_tracker_file(
     others: &[(PathBuf, Vec<(String, String)>)],
     message: Option<&str>,
     may_hold: bool,
+    lock: Option<CommitLock>,
+    stamp_clean: bool,
 ) -> String {
     sweep_tracker_temps(path);
     let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
@@ -51477,7 +51778,9 @@ fn persist_one_tracker_file(
     // outside ljos that holds the index is waited out a few times before
     // the line says so.
     let lock_wait = tracker_lock_budget();
-    let Some(held) = tracker_commit_lock_by(dir, std::time::Instant::now() + lock_wait.wait) else {
+    let Some(held) =
+        lock.or_else(|| tracker_commit_lock_by(dir, std::time::Instant::now() + lock_wait.wait))
+    else {
         let refs: Vec<&str> = specs.iter().map(String::as_str).collect();
         note_deferred_paths(dir, &refs);
         return tracker_lock_busy(dir, lock_wait);
@@ -51508,7 +51811,23 @@ fn persist_one_tracker_file(
     }
     let mut status_args = vec!["status", "--porcelain", "--"];
     status_args.extend(live.iter().copied());
-    match git(&status_args) {
+    let seat = tracker_seat();
+    let mut stamped = false;
+    let mut status = git(&status_args);
+    if stamp_clean
+        && also.is_empty()
+        && !writes.is_empty()
+        && status
+            .as_ref()
+            .is_ok_and(|o| o.status.success() && o.stdout.is_empty())
+    {
+        for (issue, verb) in writes {
+            stamp_seat_logbook(path, issue, verb, &seat);
+        }
+        stamped = true;
+        status = git(&status_args);
+    }
+    match status {
         Ok(o) if o.status.success() && o.stdout.is_empty() => {
             // An ignored file has an empty status, the same shape as a
             // clean tracked file. The ignore rule is what keeps the write
@@ -51536,9 +51855,10 @@ fn persist_one_tracker_file(
         Ok(o) => return format!("tracker git: {}\n", tracker_git_said(dir, &o)),
         Err(e) => return format!("tracker git: {e}\n"),
     }
-    let seat = tracker_seat();
-    for (issue, verb) in writes {
-        stamp_seat_logbook(path, issue, verb, &seat);
+    if !stamped {
+        for (issue, verb) in writes {
+            stamp_seat_logbook(path, issue, verb, &seat);
+        }
     }
     for (other, list) in others {
         for (issue, verb) in list {
@@ -60853,6 +61173,13 @@ mod tests {
             .as_deref(),
             Some("The tracker board was split into one file per issue and the split was committed.")
         );
+        assert_eq!(
+            super::present_write_line(
+                "tracker git: could not commit the split of Software/probe/issues.org into per-issue files (no split here), so it rolled the split back and the board stays one file"
+            )
+            .as_deref(),
+            Some("The tracker board could not be split into one file per issue in one commit, so it stays one file.")
+        );
     }
 
     fn commit_count(root: &Path) -> usize {
@@ -61139,6 +61466,212 @@ mod tests {
             &one("noted"),
             &["bag".to_string()]
         ));
+    }
+
+    /// Point `root` at a pre-commit hook that refuses any commit holding a
+    /// split marker, as a refusing hook or a full disk would.
+    fn refuse_split_commits(root: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let hooks = root.join(".git/refuse-split");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nif git diff --cached --name-only | grep -q 'issues/\\.ledger$'; then\n  echo 'no split here' >&2\n  exit 1\nfi\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git_text(root, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    }
+
+    /// A split whose commit is refused is rolled back: no marker and no
+    /// issue file is left, readers read `issues.org`, and the write commits
+    /// the board. No commit ever holds an issue file without the marker.
+    #[test]
+    fn a_split_whose_commit_is_refused_is_rolled_back_and_the_board_commits() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let issues = big_board(root, 300);
+        refuse_split_commits(root);
+        probe_env(root);
+        let layout = vissue_core::Layout::new(root, "Software");
+        for (id, note) in [("probe-b007", "first look"), ("probe-b123", "second look")] {
+            vissue_core::ops::note(&layout, id, note).unwrap();
+            let said = persist_tracker(id, "noted");
+            assert!(said.contains("rolled the split back"), "{said}");
+            assert!(said.contains("committed"), "{said}");
+            assert!(!vissue_core::ledger::is_ledger(&issues));
+            assert!(!root.join("Software/probe/issues").exists(), "{said}");
+            assert!(
+                git_text(root, &["ls-files", "Software/probe/issues"]).is_empty(),
+                "{said}"
+            );
+            let shown = git_text(root, &["show", "HEAD:Software/probe/issues.org"]);
+            assert!(shown.contains(note), "{shown}");
+            let left = board_left(root);
+            assert!(left.is_empty(), "{said}\n{left}");
+            let card = vissue_core::agent::show_json(&layout, id).unwrap();
+            assert!(card.to_string().contains(note), "{card}");
+        }
+        clear_probe_env();
+    }
+
+    /// A split on disk whose commit never ran, as a writer killed between
+    /// the migrate and the commit leaves it, lands whole, marker included,
+    /// before the next write commits its issue file.
+    #[test]
+    fn a_split_left_out_of_a_commit_lands_whole_before_the_next_write() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let issues = big_board(root, 300);
+        probe_env(root);
+        let layout = vissue_core::Layout::new(root, "Software");
+        vissue_core::ledger::migrate(&layout, false).unwrap();
+        assert!(vissue_core::ledger::is_ledger(&issues));
+        vissue_core::ops::note(&layout, "probe-b123", "after the crash").unwrap();
+        let said = persist_tracker("probe-b123", "noted");
+        assert!(said.contains("committed the split"), "{said}");
+        let tracked = git_text(root, &["ls-files", "Software/probe/issues"]);
+        assert!(
+            tracked.contains("Software/probe/issues/.ledger"),
+            "{tracked}"
+        );
+        assert_eq!(tracked.lines().filter(|l| l.ends_with(".org")).count(), 300);
+        let shown = git_text(root, &["show", "HEAD:Software/probe/issues/probe-b123.org"]);
+        assert!(shown.contains("after the crash"), "{shown}");
+        assert!(shown.contains("Noted by saddle"), "{shown}");
+        let left = board_left(root);
+        assert!(left.is_empty(), "{left}");
+        clear_probe_env();
+    }
+
+    /// A short file a killed split left, and a whole stale one, are not
+    /// what the next split keeps: it starts over from the board.
+    #[test]
+    fn files_a_killed_split_left_do_not_stop_or_stale_the_next_split() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let issues = big_board(root, 300);
+        let left = root.join("Software/probe/issues");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::write(
+            left.join("probe-b001.org"),
+            "#+VISSUE_LEDGER:\n* TODO [#C] Pro",
+        )
+        .unwrap();
+        std::fs::write(
+            left.join("probe-b002.org"),
+            "#+VISSUE_LEDGER:\n#+VISSUE_LINES: 1 4\n* TODO [#C] Stale\n:PROPERTIES:\n:ID:         probe-b002\n:END:\n#+VISSUE_LEDGER_LOG:\n",
+        )
+        .unwrap();
+        probe_env(root);
+        let layout = vissue_core::Layout::new(root, "Software");
+        vissue_core::ops::note(&layout, "probe-b007", "first look").unwrap();
+        let said = persist_tracker("probe-b007", "noted");
+        assert!(said.contains("committed the split"), "{said}");
+        assert!(vissue_core::ledger::is_ledger(&issues));
+        let card = vissue_core::agent::show_json(&layout, "probe-b001").unwrap();
+        assert_eq!(card["title"], "Probe 1");
+        let card = vissue_core::agent::show_json(&layout, "probe-b002").unwrap();
+        assert_eq!(card["title"], "Probe 2");
+        let tracked = git_text(root, &["ls-files", "Software/probe/issues"]);
+        assert_eq!(tracked.lines().filter(|l| l.ends_with(".org")).count(), 300);
+        clear_probe_env();
+    }
+
+    /// A write that misses the tracker lock at the split still stamps its
+    /// seat line. The next write splits and commits it with that line.
+    #[test]
+    fn a_write_that_misses_the_lock_at_the_split_keeps_its_seat_line() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let issues = big_board(root, 300);
+        probe_env(root);
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "0");
+        let layout = vissue_core::Layout::new(root, "Software");
+        vissue_core::ops::note(&layout, "probe-b007", "first look").unwrap();
+        let held = super::tracker_commit_lock(&root.join("Software/probe"));
+        let said = persist_tracker("probe-b007", "noted");
+        drop(held);
+        assert!(said.contains("another writer held"), "{said}");
+        assert!(!vissue_core::ledger::is_ledger(&issues));
+        let text = std::fs::read_to_string(&issues).unwrap();
+        assert!(text.contains("- Noted by saddle"), "{text}");
+        std::env::remove_var("LJOS_TRACKER_LOCK_WAIT");
+        vissue_core::ops::note(&layout, "probe-b123", "second look").unwrap();
+        let said = persist_tracker("probe-b123", "noted");
+        assert!(said.contains("committed the split"), "{said}");
+        let shown = git_text(root, &["show", "HEAD:Software/probe/issues/probe-b007.org"]);
+        assert!(
+            shown.contains("first look") && shown.contains("- Noted by saddle"),
+            "{shown}"
+        );
+        clear_probe_env();
+    }
+
+    /// How many descriptors this process holds on `path`.
+    fn open_count(path: &Path) -> usize {
+        let want = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        std::fs::read_dir("/proc/self/fd")
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| std::fs::read_link(entry.path()).is_ok_and(|at| at == want))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// A write that waited on the lock while another writer split its board
+    /// finds the split in HEAD, carrying its change, and still commits its
+    /// seat line.
+    #[test]
+    fn a_write_that_waits_out_another_writers_split_keeps_its_seat_line() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let issues = big_board(&root, 300);
+        probe_env(&root);
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        let layout = vissue_core::Layout::new(&root, "Software");
+        vissue_core::ops::note(&layout, "probe-b007", "first look").unwrap();
+        let held = super::tracker_commit_lock(&root.join("Software/probe"));
+        let lock = root.join(super::TRACKER_LOCK);
+        let mine = open_count(&lock);
+        let waiter = {
+            let issues = issues.clone();
+            std::thread::spawn(move || persist_tracker_file(&issues, "probe-b007", "noted"))
+        };
+        let start = std::time::Instant::now();
+        while open_count(&lock) <= mine {
+            assert!(
+                start.elapsed().as_secs() < 50,
+                "the writer never took the lock"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        vissue_core::ledger::migrate(&layout, false).unwrap();
+        let made = super::commit_paths(
+            &root,
+            &["Software/probe/issues.org", "Software/probe/issues"],
+            "chore(issues): split by another writer",
+        );
+        assert_eq!(made, super::PathCommit::Made);
+        drop(held);
+        let said = waiter.join().unwrap();
+        assert!(said.contains("committed"), "{said}");
+        let subject = git_text(&root, &["log", "-1", "--format=%s"]);
+        assert_eq!(subject.trim(), "chore(issues): probe-b007 noted by saddle");
+        let shown = git_text(
+            &root,
+            &["show", "HEAD:Software/probe/issues/probe-b007.org"],
+        );
+        assert!(shown.contains("- Noted by saddle"), "{shown}");
+        clear_probe_env();
     }
 
     fn drop_pack_index(root: &Path) {
