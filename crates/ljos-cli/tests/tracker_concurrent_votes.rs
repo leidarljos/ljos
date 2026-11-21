@@ -96,7 +96,6 @@ struct Box {
 
 impl Box {
     fn new(issues: &[&str]) -> Self {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         let home = dir.path().join("home");
@@ -105,7 +104,7 @@ impl Box {
             std::fs::create_dir_all(d).unwrap();
         }
         let shim = bin.join("vissue");
-        std::fs::write(
+        ljos_cli::install_executable(
             &shim,
             format!(
                 "#!/bin/sh\nout=\"$(mktemp)\"\nLJOS_SHIM_OUT=\"$out\" LJOS_SHIM_ARGS=\"$(printf '%s\\037' \"$@\")\" '{}' --exact vissue_shim --ignored --test-threads=1 --nocapture >\"$out.log\" 2>&1\ncode=$?\ncat \"$out\"\n[ $code -eq 0 ] || cat \"$out.log\" >&2\nrm -f \"$out\" \"$out.log\"\nexit $code\n",
@@ -113,7 +112,6 @@ impl Box {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         git(&tracker, &["init", "-q"]);
         git(&tracker, &["config", "user.email", "seat@example.invalid"]);

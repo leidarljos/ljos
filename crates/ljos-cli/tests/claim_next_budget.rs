@@ -25,10 +25,8 @@ const READY_SLEEP_SECS: u64 = 30;
 const READY_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn ljos(dir: &Path, claim_wait: Option<u64>, args: &[&str]) -> (Output, Duration) {

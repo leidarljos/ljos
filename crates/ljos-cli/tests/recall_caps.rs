@@ -52,16 +52,11 @@ fn recall_of_ufuv_kiln_lists_ten_own_memories_and_says_how_many_remain() {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let stub = bin.join("vissue");
-    std::fs::write(
+    ljos_cli::install_executable(
         &stub,
         "#!/bin/sh\nif [ \"$1\" = recall ]; then printf 'tracker row\\n'; fi\nexit 0\n",
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
     let output = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("recall")
         .arg("ufuv-kiln")

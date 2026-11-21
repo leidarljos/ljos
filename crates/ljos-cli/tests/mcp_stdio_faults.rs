@@ -337,11 +337,7 @@ fn a_word_search_with_only_curl_points_at_the_install_page() {
     let url = lexical_hits();
     let tools = tempfile::tempdir().unwrap();
     let curl = tools.path().join("curl");
-    std::fs::write(&curl, "#!/bin/sh\nexit 0\n").unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    ljos_cli::install_executable(&curl, "#!/bin/sh\nexit 0\n").unwrap();
     let path = tools.path().display().to_string();
     let mut session = Session::open(&[("PACKSET_URL", &url), ("PATH", &path)]);
     let search = call(

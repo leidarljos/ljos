@@ -14,12 +14,7 @@ fn write_exe(path: &Path, body: &str) {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).unwrap();
     }
-    std::fs::write(path, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 /// Habitat stubs. `vissue identity` prints `VISSUE_ROOT` when it is set.

@@ -2,27 +2,11 @@
 //! `mcp_forward`; this drives that exchange against the built binary.
 
 ljos_test_boot::harness!();
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-/// Write the script, sync it, and close the handle before anything execs it.
+/// Publish the script through [`ljos_cli::install_executable_mode`].
 fn write_program(path: &Path, body: &str) {
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)
-        .unwrap();
-    file.write_all(body.as_bytes()).unwrap();
-    file.sync_all().unwrap();
-    drop(file);
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
-    }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    ljos_cli::install_executable_mode(path, body, 0o700).unwrap();
 }
 
 #[test]

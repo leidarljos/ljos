@@ -17,9 +17,7 @@ const SESSION: &str = "5b0c2a71-9d1e-4f3a-8c6b-2e7f1a0d9c43";
 const ISSUE: &str = "proj-gate";
 
 fn script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 fn text_of(out: &Output) -> String {

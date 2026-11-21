@@ -4,7 +4,6 @@
 
 ljos_test_boot::harness!();
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -107,10 +106,7 @@ fn write_embed_stub(path: &Path, delay: &str, hold_marker: &str) {
          \telse:\n\
          \t\tprint(json.dumps({{\"v\": [0.2, 0.4, 0.1]}}), flush=True)\n"
     );
-    std::fs::write(path, body).unwrap();
-    let mut perm = std::fs::metadata(path).unwrap().permissions();
-    perm.set_mode(0o755);
-    std::fs::set_permissions(path, perm).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 fn local_rows(home: &Path, n: usize) {

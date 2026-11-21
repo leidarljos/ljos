@@ -3,7 +3,6 @@
 //! checkout gains no new text.
 
 ljos_test_boot::harness!();
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -103,8 +102,8 @@ fn doctor_names_a_broken_tracker_and_leaves_a_healthy_one_unchanged() {
         .find(|path| path.is_file())
         .expect("git on PATH");
     let git_log = dir.path().join("git.log");
-    std::fs::write(
-        bin.join("git"),
+    ljos_cli::install_executable(
+        &bin.join("git"),
         format!(
             "#!/bin/sh\n\
              printf '%s\\n' \"$*\" >> \"$GIT_LOG\"\n\
@@ -121,16 +120,14 @@ fn doctor_names_a_broken_tracker_and_leaves_a_healthy_one_unchanged() {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::write(
-        bin.join("vissue"),
+    ljos_cli::install_executable(
+        &bin.join("vissue"),
         format!(
             "#!/bin/sh\n[ \"$1\" = identity ] && printf 'vissue 0.16.2\\nprotocol: 1\\nroot={}\\nprefix=Software\\n'\nexit 0\n",
             tracker.display()
         ),
     )
     .unwrap();
-    std::fs::set_permissions(bin.join("vissue"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let home = dir.path().join("home");
     std::fs::create_dir_all(home.join("run")).unwrap();
     let path = format!(

@@ -12,9 +12,7 @@ fn write(path: &Path, text: &str) {
 }
 
 fn executable(path: &Path, text: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    write(path, text);
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, text).unwrap();
 }
 
 /// A home with a copy of this ljos in `bin`, a fake `the terminal harness` that answers
@@ -24,7 +22,7 @@ fn seat_home() -> (tempfile::TempDir, PathBuf) {
     let home = temp.path().to_path_buf();
     let bin = home.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_ljos"), bin.join("ljos")).unwrap();
+    ljos_cli::copy_executable(Path::new(env!("CARGO_BIN_EXE_ljos")), &bin.join("ljos")).unwrap();
     executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
     executable(&bin.join("packset"), "#!/bin/sh\nexit 0\n");
     executable(

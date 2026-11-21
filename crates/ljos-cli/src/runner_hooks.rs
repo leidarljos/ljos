@@ -948,7 +948,7 @@ pub fn hook_step(runner: &str, file: &Path, base_command: &str, dry: bool) -> St
         .and_then(|()| serde_json::to_string_pretty(&root).map_err(std::io::Error::other))
         .and_then(|text| std::fs::write(file, text + "\n"))
         .and_then(|()| match &script {
-            Some(p) => std::fs::write(p, &script_text).and_then(|()| set_executable(p)),
+            Some(p) => crate::install_executable(p, script_text),
             None => Ok(()),
         })
         .and_then(|()| match &manifest {
@@ -1011,9 +1011,8 @@ fn cline_step(dir: &Path, command: &str, dry: bool) -> Step {
         };
     }
     for path in &todo {
-        let written = std::fs::create_dir_all(dir)
-            .and_then(|()| std::fs::write(path, &text))
-            .and_then(|()| set_executable(path));
+        let written =
+            std::fs::create_dir_all(dir).and_then(|()| crate::install_executable(path, &text));
         if let Err(e) = written {
             return Step {
                 what,
@@ -1027,17 +1026,6 @@ fn cline_step(dir: &Path, command: &str, dry: bool) -> Step {
         detail: format!("wrote the seat's cline hooks to {}", dir.display()),
         ok: true,
     }
-}
-
-#[cfg(unix)]
-fn set_executable(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-}
-
-#[cfg(not(unix))]
-fn set_executable(_path: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

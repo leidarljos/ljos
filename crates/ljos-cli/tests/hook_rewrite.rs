@@ -4,7 +4,6 @@
 
 ljos_test_boot::harness!();
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt as _;
 use std::process::{Command, Stdio};
 
 const POLICYD: &str = r#"#!/bin/sh
@@ -19,8 +18,7 @@ fn hook(payload: &str) -> serde_json::Value {
     let work = home.path().join("w");
     std::fs::create_dir_all(&work).unwrap();
     let policyd = home.path().join("ljos-policyd");
-    std::fs::write(&policyd, POLICYD).unwrap();
-    std::fs::set_permissions(&policyd, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&policyd, POLICYD).unwrap();
     let payload = payload.replace("@W@", work.to_str().unwrap());
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("hook")

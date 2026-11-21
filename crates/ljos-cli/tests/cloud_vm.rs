@@ -230,9 +230,7 @@ fn state_of(text: &str, id: &str) -> String {
 }
 
 fn executable(path: &Path, body: &str) {
-    fs::write(path, body).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 fn sha256(path: &Path) -> String {
@@ -372,7 +370,7 @@ fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
         .output()
         .unwrap();
     assert!(init.status.success(), "{init:?}");
-    fs::copy(env!("CARGO_BIN_EXE_ljos"), rel.join("ljos")).unwrap();
+    ljos_cli::copy_executable(Path::new(env!("CARGO_BIN_EXE_ljos")), &rel.join("ljos")).unwrap();
     executable(&rel.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
     executable(&rel.join("ljos-policyd"), "#!/bin/sh\nexit 0\n");
     let names = ["ljos", "ljos-mcp", "ljos-policyd"];
@@ -741,9 +739,7 @@ fn a_failed_first_encoder_install_leaves_no_runtime() {
     let bin_dir = home.join(".local/bin");
     fs::create_dir_all(&bin_dir).unwrap();
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
-        fs::copy(rel.join(name), bin_dir.join(name)).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(bin_dir.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::copy_executable(&rel.join(name), &bin_dir.join(name)).unwrap();
     }
     lock_bin_dir(&home);
     let err = ljos_cli::cloud::up(false).unwrap_err().to_string();
@@ -809,9 +805,7 @@ fn an_encoder_directory_is_not_already_installed() {
     let bin_dir = home.join(".local/bin");
     fs::create_dir_all(&bin_dir).unwrap();
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
-        fs::copy(rel.join(name), bin_dir.join(name)).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(bin_dir.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::copy_executable(&rel.join(name), &bin_dir.join(name)).unwrap();
     }
     let encoder = bin_dir.join("packset-embed");
     fs::create_dir(&encoder).unwrap();

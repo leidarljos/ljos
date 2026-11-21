@@ -13,6 +13,7 @@ use anyhow::{bail, Context, Result};
 use packset_client::Hit;
 use serde_json::Value;
 
+pub use exe_publish::{copy_executable, install_executable, install_executable_mode};
 pub use pack_link::PacksetClient;
 
 pub mod admit;
@@ -39,6 +40,7 @@ mod deedbag;
 pub mod degraded;
 pub mod digest;
 mod doctor_fix;
+mod exe_publish;
 pub mod extract;
 pub mod gates;
 pub mod git_hooks;
@@ -117,6 +119,10 @@ pub mod word_rank;
 
 #[cfg(test)]
 mod cursor_event_scan;
+/// The helpers under `tests/common` name this crate `ljos_cli`, as an
+/// integration test does.
+#[cfg(test)]
+extern crate self as ljos_cli;
 #[cfg(test)]
 #[path = "../tests/common/sibling.rs"]
 mod sibling_bin;
@@ -8073,12 +8079,7 @@ fn guard_step(dry: bool, guard_dir: Option<&Path>) -> Step {
         std::fs::create_dir_all(&dir)?;
         for c in GUARD_SHIMMED {
             let p = dir.join(c);
-            std::fs::write(&p, GUARD_SHIM)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755))?;
-            }
+            crate::install_executable(&p, GUARD_SHIM)?;
         }
         Ok(())
     })();
@@ -20217,18 +20218,11 @@ mod seat_signature_tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
         let vissue = bin.join("vissue");
-        std::fs::write(
+        crate::install_executable(
             &vissue,
             "#!/bin/sh\ncase \"$1\" in\n  show) printf '{\"id\":\"%s\",\"logbook\":[]}' \"$2\" ;;\n  *) exit 1 ;;\nesac\n",
         )
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut mode = std::fs::metadata(&vissue).unwrap().permissions();
-            mode.set_mode(0o755);
-            std::fs::set_permissions(&vissue, mode).unwrap();
-        }
         let path = std::env::var_os("PATH").unwrap_or_default();
         let joined =
             std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path)))
@@ -56860,9 +56854,7 @@ mod tests {
 
     /// A pre-push hook blocks on `gate` until the test writes a line.
     fn blocking_hook(hook: &std::path::Path, body: &str) {
-        std::fs::write(hook, body).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(hook, body).unwrap();
     }
 
     fn make_gate(path: &std::path::Path) {
@@ -56892,64 +56884,9 @@ mod tests {
         }
     }
 
-    /// Install `text` at `path` and return only after no write descriptor
-    /// remains on that inode.
-    ///
-    /// `std::fs::write` opens the file in this process. A sibling test's
-    /// fork inherits that descriptor until the child execs, and the kernel
-    /// answers ETXTBSY. The bytes are written by a short-lived process to
-    /// a temporary name, synced, and renamed into place only after that
-    /// process has exited, so this process never holds the write side.
+    /// Install `text` at `path` through [`crate::install_executable`].
     fn publish_exe(path: &std::path::Path, text: &str) {
-        let dir = path.parent().unwrap();
-        let file_name = path.file_name().unwrap();
-        let n = {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        };
-        let tmp = dir.join(format!(
-            ".{}.{}.{}",
-            file_name.to_string_lossy(),
-            std::process::id(),
-            n
-        ));
-        let mut child = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("/bin/cat > \"$1\" && /bin/chmod 755 \"$1\"")
-            .arg("publish-exe")
-            .arg(&tmp)
-            .env("PATH", "/usr/bin:/bin")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        {
-            use std::io::Write;
-            child
-                .stdin
-                .as_mut()
-                .unwrap()
-                .write_all(text.as_bytes())
-                .unwrap();
-        }
-        drop(child.stdin.take());
-        let out = child.wait_with_output().unwrap();
-        assert!(
-            out.status.success(),
-            "publish {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        {
-            let file = std::fs::File::open(&tmp).unwrap();
-            file.sync_all().unwrap();
-        }
-        std::fs::rename(&tmp, path).unwrap();
-        if let Ok(dir_file) = std::fs::File::open(dir) {
-            let _ = dir_file.sync_all();
-        }
+        crate::install_executable(path, text).unwrap();
     }
 
     /// A guard shim runs the real command whatever ljos-policyd answers. A
@@ -57498,7 +57435,7 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         let marker = dir.path().join("started");
         let policyd = bin.join("deny-policyd");
-        std::fs::write(
+        crate::install_executable(
             &policyd,
             format!(
                 "#!/bin/sh\ntouch '{}'\nprintf 'deny\\tgit-branch-delete\\n'\nexit 2\n",
@@ -57506,16 +57443,11 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::write(
-            bin.join("packset"),
+        crate::install_executable(
+            &bin.join("packset"),
             format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        for name in ["deny-policyd", "packset"] {
-            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
-        }
         let _bins = super::prepend_path(&bin);
         let keys = [
             "HOME",
@@ -57534,7 +57466,11 @@ mod tests {
         let outside_home = outside.path().join("home");
         let outside_proj = outside.path().join("proj");
         std::fs::create_dir_all(&outside_home).unwrap();
-        std::fs::set_permissions(&outside_home, std::fs::Permissions::from_mode(0o755)).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&outside_home, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
         unsafe {
             std::env::set_var("POLICYD_BIN", &policyd);
             std::env::remove_var("PACKSET_URL");
@@ -58745,7 +58681,7 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let git_bin = bin.join("git");
-        std::fs::write(
+        crate::install_executable(
             &git_bin,
             format!(
                 "#!/bin/sh\n\
@@ -58762,8 +58698,6 @@ mod tests {
             ),
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&git_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{path}", bin.display()));
         std::env::set_var("LC_ALL", "fr_FR.UTF-8");
@@ -58792,9 +58726,7 @@ mod tests {
         let log = dir.path().join("calls.log");
         let write = |name: &str, body: &str| {
             let path = bin.join(name);
-            std::fs::write(&path, body).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::install_executable(&path, body).unwrap();
         };
         write("git", "#!/bin/sh\nexit 0\n");
         write(
@@ -60350,15 +60282,13 @@ mod tests {
     /// `commit refused: `.
     #[test]
     fn a_commit_killed_by_a_signal_says_so() {
-        use std::os::unix::fs::PermissionsExt as _;
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let issues = seeded_tracker(dir.path());
         let hooks = dir.path().join("hooks");
         std::fs::create_dir_all(&hooks).unwrap();
         let hook = hooks.join("pre-commit");
-        std::fs::write(&hook, "#!/bin/sh\nkill -9 $PPID\n").unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&hook, "#!/bin/sh\nkill -9 $PPID\n").unwrap();
         let set = git_cmd()
             .arg("-C")
             .arg(dir.path())
@@ -61963,12 +61893,7 @@ mod tests {
         // after the probe that spawned it was already gone.
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("hold");
-        std::fs::write(&script, "#!/bin/sh\nsleep 30 >&1 &\nexit 0\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&script, "#!/bin/sh\nsleep 30 >&1 &\nexit 0\n").unwrap();
         let held = std::process::Command::new(&script);
         let started = std::time::Instant::now();
         let _ = output_within(held, None, std::time::Duration::from_secs(2));
@@ -63029,7 +62954,6 @@ mod tests {
 
     #[test]
     fn a_failed_ps_on_macos_leaves_a_live_hold_alone_and_an_unreadable_git_cwd_holds_the_lock() {
-        use std::os::unix::fs::PermissionsExt as _;
         // A spent hook budget makes every `ps` an error, and an error is a
         // live hold. This test is about the `ps` line, so it starts clean.
         super::disarm_wall();
@@ -63037,8 +62961,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = |name: &str, body: &str| -> PathBuf {
             let p = dir.path().join(name);
-            std::fs::write(&p, body).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::install_executable(&p, body).unwrap();
             p
         };
         let failing_ps = script("ps-fail", "#!/bin/sh\nexit 1\n");
@@ -67730,9 +67653,7 @@ mod tests {
         std::fs::write(&ballots, format!("[{}]", rows.join(","))).unwrap();
         let script = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$LOG\"\ncase \"$1\" in\n  children) cat \"$CHILDREN\" ;;\n  vote) cat \"$BALLOTS\" ;;\n  q) echo proj-f001 ;;\n  note|update|append) exit 0 ;;\n  *) echo \"unexpected vissue $*\" >&2; exit 3 ;;\nesac\n".to_string();
         let fake = bin.join("vissue");
-        std::fs::write(&fake, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&fake, script).unwrap();
         let save = |key: &str| std::env::var_os(key);
         let saved = [
             save("PATH"),
@@ -67881,9 +67802,7 @@ mod tests {
             ballots.join(",")
         );
         let fake = bin.join("vissue");
-        std::fs::write(&fake, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&fake, script).unwrap();
         let _bins = super::prepend_path(&bin);
         std::env::set_var("VISSUE_ROOT", &root);
         std::env::set_var("VISSUE_NO_ROUTE", "1");
@@ -67992,13 +67911,11 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let fake = bin.join("vissue");
-        std::fs::write(
+        crate::install_executable(
             &fake,
             "#!/bin/sh\ncase \"$1\" in\n  children) printf '%s' '[{\"id\":\"demo-c001\",\"state\":\"TODO\",\"title\":\"Name the index in the notes\"}]' ;;\n  *) exit 0 ;;\nesac\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _bins = super::prepend_path(&bin);
         std::env::set_var("VISSUE_ROOT", &root);
         std::env::set_var("VISSUE_NO_ROUTE", "1");
@@ -68030,7 +67947,7 @@ mod tests {
             Some(before),
             "a refused close leaves the pending claim untried"
         );
-        std::fs::write(
+        crate::install_executable(
             &fake,
             "#!/bin/sh\ncase \"$1\" in\n  children) printf '%s' '[{\"id\":\"demo-c001\",\"state\":\"DONE\",\"title\":\"Name the index in the notes\"}]' ;;\n  *) exit 0 ;;\nesac\n",
         )
@@ -68779,13 +68696,11 @@ mod tests {
         assert!(child.contains("Do not ssh"), "{child}");
         unsafe { std::env::remove_var("LJOS_PANEL_CHILD") };
         let opener = dir.path().join("opener.sh");
-        std::fs::write(
+        crate::install_executable(
             &opener,
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$LJOS_TEST_ARGV\"\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
         let argv_path = dir.path().join("argv.txt");
         unsafe { std::env::set_var("LJOS_PANEL_BIN", &opener) };
         unsafe { std::env::set_var("LJOS_TEST_ARGV", &argv_path) };
@@ -68826,26 +68741,23 @@ mod tests {
 
     #[test]
     fn detach_starts_a_new_session_without_gnu_setsid() {
-        use std::os::unix::fs::PermissionsExt as _;
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let setsid_called = dir.path().join("setsid-called");
         let fake_setsid = dir.path().join("setsid");
-        std::fs::write(
+        crate::install_executable(
             &fake_setsid,
             format!("#!/bin/sh\ntouch '{}'\nexit 2\n", setsid_called.display()),
         )
         .unwrap();
-        std::fs::set_permissions(&fake_setsid, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let probe_out = dir.path().join("probe.txt");
         let probe_bin = dir.path().join("probe.sh");
-        std::fs::write(
+        crate::install_executable(
             &probe_bin,
             "#!/usr/bin/env python3\nimport os, sys\nwith open(sys.argv[1], 'w') as f:\n    f.write(f'{os.getpid()} {os.getsid(0)}\\n')\n",
         )
         .unwrap();
-        std::fs::set_permissions(&probe_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let old_path = std::env::var_os("PATH");
         unsafe {
@@ -69351,7 +69263,6 @@ mod tests {
     /// writes this install's path there unless that PATH runs it.
     #[test]
     fn a_launchd_app_gets_the_absolute_server_unless_its_path_runs_it() {
-        use std::os::unix::fs::PermissionsExt;
         let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
         let find = |name: &str| all.harness.iter().find(|h| h.name == name).expect(name);
         let desktop = find("claude-desktop");
@@ -69365,8 +69276,7 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&empty).unwrap();
         let server = bin.join("ljos-mcp");
-        std::fs::write(&server, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&server, "#!/bin/sh\n").unwrap();
         let elsewhere = empty.to_str().unwrap();
         let plan = super::server_command_plan_in(&server, "onboard", Some(elsewhere), false);
         assert_eq!(plan.command, server.display().to_string());
@@ -70026,16 +69936,8 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let claimdag = bin.join("claimdag");
-        std::fs::write(&claimdag, script).unwrap();
-        std::fs::write(bin.join("vissue"), "#!/bin/sh\nexit 1\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            for name in ["claimdag", "vissue"] {
-                std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
-                    .unwrap();
-            }
-        }
+        crate::install_executable(&claimdag, script).unwrap();
+        crate::install_executable(&bin.join("vissue"), "#!/bin/sh\nexit 1\n").unwrap();
         std::env::set_var("XDG_RUNTIME_DIR", dir.path());
         std::env::set_var("LJOS_SEAT", "saddle");
         std::env::set_var("VISSUE_ROOT", dir.path().join("tracker"));
@@ -71965,13 +71867,11 @@ mod tests {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("ljos-policyd");
-        std::fs::write(
+        crate::install_executable(
             &bin,
             "#!/bin/sh\ncase \"$*\" in\n*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let home = SeatDir::new("force-push-hook");
         let _env = HoldEnv::set(&[
             ("POLICYD_BIN", bin.to_str().unwrap()),
@@ -72022,13 +71922,11 @@ mod tests {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("ljos-policyd");
-        std::fs::write(
+        crate::install_executable(
             &bin,
             "#!/bin/sh\ncase \"$*\" in\n*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let home = SeatDir::new("force-push-check");
         let _env = HoldEnv::set(&[
             ("POLICYD_BIN", bin.to_str().unwrap()),
@@ -77556,14 +77454,8 @@ lesson, due yesterday, seat ada
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("called");
         let fake = dir.path().join("ps");
-        std::fs::write(&fake, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perm = std::fs::metadata(&fake).unwrap().permissions();
-            perm.set_mode(0o755);
-            std::fs::set_permissions(&fake, perm).unwrap();
-        }
+        crate::install_executable(&fake, format!("#!/bin/sh\ntouch '{}'\n", marker.display()))
+            .unwrap();
         assert_eq!(super::ps_bin(), "/bin/ps");
         let out = std::process::Command::new(super::ps_bin())
             .args(["-o", "comm=", "-p", &std::process::id().to_string()])
@@ -80027,10 +79919,8 @@ lesson, due yesterday, seat ada
 
     /// A fake `ljos-policyd`: a shell script that does what `body` says.
     fn fake_policyd(dir: &Path, name: &str, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         path
     }
 
@@ -85668,12 +85558,7 @@ lesson, due yesterday, seat ada
         let _env = env_guard();
         let bin = tempfile::tempdir().unwrap();
         let cargo = bin.path().join("cargo");
-        std::fs::write(&cargo, "#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&cargo, "#!/bin/sh\nexit 0\n").unwrap();
         unsafe { std::env::set_var("PATH", bin.path()) };
         assert_eq!(
             encoder_install_command(),
@@ -85691,12 +85576,7 @@ lesson, due yesterday, seat ada
         for tool in ["curl", "wget"] {
             let bin = tempfile::tempdir().unwrap();
             let stub = bin.path().join(tool);
-            std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            crate::install_executable(&stub, "#!/bin/sh\nexit 0\n").unwrap();
             unsafe { std::env::set_var("PATH", bin.path()) };
             let line = encoder_missing_search_line();
             assert_eq!(
@@ -86125,14 +86005,12 @@ lesson, due yesterday, seat ada
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        use std::os::unix::fs::PermissionsExt;
         for (name, body) in [
             ("deedar", "#!/bin/sh\nexit 0\n"),
             ("vissue", "#!/bin/sh\nexit 1\n"),
         ] {
             let path = bin.join(name);
-            std::fs::write(&path, body).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::install_executable(&path, body).unwrap();
         }
         let tracker = dir.path().join("tracker");
         std::fs::create_dir_all(&tracker).unwrap();
@@ -87031,12 +86909,7 @@ lesson, due yesterday, seat ada
             vissue_log.display()
         );
         let vissue = bin.join("vissue");
-        std::fs::write(&vissue, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&vissue, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&vissue, script).unwrap();
         let path = std::env::join_paths([
             bin.as_path(),
             std::path::Path::new("/usr/bin"),
@@ -87231,12 +87104,7 @@ lesson, due yesterday, seat ada
             if claim_ok { "echo claimed" } else { "echo refused >&2; exit 1" },
         );
         let path = dir.join("vissue");
-        std::fs::write(&path, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&path, script).unwrap();
         log
     }
 
@@ -87248,12 +87116,7 @@ lesson, due yesterday, seat ada
             log.display()
         );
         let path = dir.join("deedar");
-        std::fs::write(&path, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&path, script).unwrap();
         log
     }
 
@@ -87368,12 +87231,7 @@ lesson, due yesterday, seat ada
             log = log.display()
         );
         let path = dir.path().join("vissue");
-        std::fs::write(&path, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&path, script).unwrap();
         let said = with_fake_on_path(dir.path(), || stamp_tracker("proj-1a2b", "alice")).unwrap();
         assert_eq!(
             said.as_deref(),
@@ -87413,12 +87271,7 @@ lesson, due yesterday, seat ada
             other = "f".repeat(32),
         );
         let fake = dir.join("claimdag");
-        std::fs::write(&fake, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&fake, script).unwrap();
     }
 
     /// A background worker of this seat holds the node, and is gone. The
@@ -87435,12 +87288,7 @@ lesson, due yesterday, seat ada
             log = log.display(),
         );
         let fake = dir.path().join("claimdag");
-        std::fs::write(&fake, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&fake, script).unwrap();
         let saved: Vec<_> = ["XDG_RUNTIME_DIR", "LJOS_SEAT", "CLAIMDAG_DIR"]
             .into_iter()
             .map(|k| (k, std::env::var_os(k)))
@@ -87570,11 +87418,7 @@ lesson, due yesterday, seat ada
         .unwrap();
         let script = "#!/bin/sh\ncase \"$1\" in\n  recall) echo 'probe-l0g0  TODO  Logo legibility review' ;;\nesac\nexit 0\n";
         let fake = dir.path().join("vissue");
-        std::fs::write(&fake, script).unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&fake, script).unwrap();
         let (url, _seen) = serve_http(|req| {
             let line = req.lines().next().unwrap_or("");
             if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
@@ -87633,11 +87477,7 @@ lesson, due yesterday, seat ada
         .unwrap();
         let script = "#!/bin/sh\ncase \"$1\" in\n  recall) echo 'probe-l0g0  TODO  Logo legibility review' ;;\nesac\nexit 0\n";
         let fake = dir.path().join("vissue");
-        std::fs::write(&fake, script).unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&fake, script).unwrap();
         let (url, _seen) = serve_http(|req| {
             let line = req.lines().next().unwrap_or("");
             if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
@@ -87701,11 +87541,7 @@ lesson, due yesterday, seat ada
         .unwrap();
         let script = "#!/bin/sh\ncase \"$1\" in\n  recall) echo 'probe-l0g0  TODO  Logo legibility review' ;;\nesac\nexit 0\n";
         let fake = dir.path().join("vissue");
-        std::fs::write(&fake, script).unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&fake, script).unwrap();
         let mut hits: Vec<Value> = (0..6)
             .map(|i| {
                 serde_json::json!({"id": format!("fresh{i}"), "kind": "lesson", "score": 2.0,
@@ -87775,11 +87611,7 @@ lesson, due yesterday, seat ada
         .unwrap();
         let script = "#!/bin/sh\ncase \"$1\" in\n  recall) echo 'probe-ship  TODO  Ship the search index' ;;\nesac\nexit 0\n";
         let fake = dir.path().join("vissue");
-        std::fs::write(&fake, script).unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&fake, script).unwrap();
         let personas = r#"{"atoms":[
             {"id":"p-rel","kind":"persona","name":"release-engineer","anchor":0.4,"text":"Reads a ship for what the release train cannot take back.","entities":["release"],"ts":"2026-10-11T10:00:00Z"},
             {"id":"p-doc","kind":"persona","name":"docs-reader","anchor":0.8,"text":"Reads the notes the way a newcomer does.","entities":["docs"],"ts":"2026-10-11T10:00:00Z"},
@@ -87877,11 +87709,7 @@ lesson, due yesterday, seat ada
         )
         .unwrap();
         let fake = dir.path().join("vissue");
-        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&fake, "#!/bin/sh\nexit 0\n").unwrap();
         let (url, _seen) = serve_http(move |req| {
             let line = req.lines().next().unwrap_or("");
             if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
@@ -88378,12 +88206,7 @@ lesson, due yesterday, seat ada
         .unwrap();
         let calls = dir.path().join("claimdag.log");
         let fake = dir.path().join("claimdag");
-        std::fs::write(&fake, claimdag_for(&calls, release_ok)).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&fake, claimdag_for(&calls, release_ok)).unwrap();
         let (url, _seen) = serve_http({
             let atoms = atoms.to_string();
             move |req| {
@@ -89112,12 +88935,7 @@ lesson, due yesterday, seat ada
             n3 = "3".repeat(32),
         );
         let fake = dir.path().join("claimdag");
-        std::fs::write(&fake, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&fake, script).unwrap();
         let runtime = std::env::var_os("XDG_RUNTIME_DIR");
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
         let holds = dir.path().join("ljos");
@@ -90054,11 +89872,7 @@ lesson, due yesterday, seat ada
         let script =
             "#!/bin/sh\ncase \"$1\" in\n  recall) echo 'probe-l0g0 TODO Logo' ;;\nesac\nexit 0\n";
         let fake = dir.path().join("vissue");
-        std::fs::write(&fake, script).unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&fake, script).unwrap();
         let (url, _seen) = serve_http(|req| {
             let line = req.lines().next().unwrap_or("");
             if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
@@ -90525,12 +90339,7 @@ lesson, due yesterday, seat ada
             real = real.display()
         );
         let wrap = wrap_dir.join("deedar");
-        std::fs::write(&wrap, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&wrap, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::install_executable(&wrap, script).unwrap();
         let _wrap_path = super::prepend_path(&wrap_dir);
         let (said, paths) = deedbag::on_finish("probe-imp1");
         drop(_wrap_path);
@@ -91081,12 +90890,8 @@ lesson, due yesterday, seat ada
         // Copied beside and renamed in, so no process ever runs a binary
         // that is still open for writing.
         let staged = bin_dir.join(".deedar.new");
-        std::fs::copy(&produced, &staged).unwrap_or_else(|e| panic!("install deedar: {e}"));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::copy_executable(&produced, &staged)
+            .unwrap_or_else(|e| panic!("install deedar: {e}"));
         std::fs::rename(&staged, &bin).unwrap_or_else(|e| panic!("install deedar: {e}"));
         std::fs::write(&stamp, &sha).unwrap();
         drop(lock);

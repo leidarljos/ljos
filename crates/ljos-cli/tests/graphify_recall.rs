@@ -43,12 +43,7 @@ fn tracker(root: &Path) {
 fn stub_vissue(bin: &Path) {
     std::fs::create_dir_all(bin).expect("bin");
     let path = bin.join("vissue");
-    std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("vissue stub");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    }
+    ljos_cli::install_executable(&path, "#!/bin/sh\nexit 0\n").expect("vissue stub");
 }
 
 fn write_graph(dir: &Path) {

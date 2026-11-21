@@ -18,12 +18,7 @@ fn rows(home: &Path, cwd: &Path) -> Vec<Value> {
     let stub = home.join("stub");
     std::fs::create_dir_all(&stub).unwrap();
     let curl = stub.join("curl");
-    std::fs::write(&curl, "#!/bin/sh\nexit 0\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    ljos_cli::install_executable(&curl, "#!/bin/sh\nexit 0\n").unwrap();
     let gitconfig = home.join("gitconfig");
     std::fs::write(&gitconfig, "").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))

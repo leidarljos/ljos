@@ -1301,30 +1301,25 @@ int main(void) {
     #[test]
     fn a_startup_failure_leaves_no_writer() {
         let dir = unique_dir();
-        let script = dir.join("sleep.sh");
         let pidfile = dir.join("pid");
-        // The script ignores the `--port 0 --home` the helper appends.
-        // `sleep 60` is longer than the two-second ready budget below, so
-        // the process is still alive when the helper gives up. A process
-        // that exited on its own would not show that the guard stopped it.
-        std::fs::write(&script, "#!/bin/sh\necho $$ > \"$1\"\nexec sleep 60\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script, perms).unwrap();
-        }
-        let script_text = script.to_string_lossy().into_owned();
+        // `sh -c` takes the script as text, so no file of this process is
+        // started. `$1` is the pidfile, and the script ignores the
+        // `--port 0 --home` the helper appends. `sleep 60` is longer than
+        // the two-second ready budget below, so the process is still alive
+        // when the helper gives up. A process that exited on its own would
+        // not show that the guard stopped it.
         let pidfile_text = pidfile.to_string_lossy().into_owned();
         // Two seconds is long enough for the script to write its pid on
         // a loaded CPU, and short of the 15s the real writer is given.
         // This stand-in never listens, so the wait ends in the panic.
         let caught = std::panic::catch_unwind(|| {
             let mut started = Packsetd::build();
-            started.bin(&script_text);
+            started.bin("/bin/sh");
             started.ready_for(Duration::from_secs(2));
-            started.command().arg(&pidfile_text);
+            started
+                .command()
+                .args(["-c", "echo $$ > \"$1\"; exec sleep 60", "sleep.sh"])
+                .arg(&pidfile_text);
             let daemon = started.spawn();
             panic!(
                 "a writer that never listens was returned on port {}",

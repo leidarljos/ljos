@@ -317,10 +317,10 @@ fn a_scope_with_no_recipients_writes_no_atoms() {
 /// cannot carry it. An export that cannot be removed stops the handover.
 #[test]
 fn a_plaintext_export_that_cannot_be_removed_stops_the_handover() {
+    use std::os::unix::fs::PermissionsExt;
     if tools::halt(tools::Tool::Packsetd) {
         return;
     }
-    use std::os::unix::fs::PermissionsExt;
     let w = World::new();
     let wrap = w.root.path().join("wrap");
     std::fs::create_dir_all(&wrap).unwrap();
@@ -334,8 +334,7 @@ fn a_plaintext_export_that_cannot_be_removed_stops_the_handover() {
         w.tools.join("packset").display(),
         seen.display()
     );
-    std::fs::write(wrap.join("packset"), script).unwrap();
-    std::fs::set_permissions(wrap.join("packset"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&wrap.join("packset"), script).unwrap();
     let bag = w.bag("stuck");
     let bag_arg = bag.display().to_string();
     let out = w.ljos_with(

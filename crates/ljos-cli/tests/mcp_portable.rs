@@ -17,9 +17,7 @@ fn install_pair(dir: &Path) {
     fs::create_dir_all(dir).unwrap();
     for name in ["ljos", "ljos-mcp"] {
         let dest = dir.join(name);
-        fs::copy(exe(name), &dest).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::copy_executable(&exe(name), &dest).unwrap();
     }
 }
 
@@ -27,9 +25,7 @@ fn stub(path: &Path) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
-    fs::write(path, "#!/bin/sh\nprintf ran > \"$1\"\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, "#!/bin/sh\nprintf ran > \"$1\"\n").unwrap();
 }
 
 fn onboard_with_path(ljos: &Path, home: &Path, path: &str, args: &[&str]) -> std::process::Output {

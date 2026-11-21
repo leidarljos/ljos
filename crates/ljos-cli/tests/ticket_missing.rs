@@ -5,7 +5,6 @@
 
 ljos_test_boot::harness!();
 
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 struct Home {
@@ -86,12 +85,11 @@ fn finish_of_an_unknown_id_names_ready() {
 fn file_parent_of_an_unknown_id_names_ready() {
     let home = Home::new();
     let stub = home.dir.path().join("vissue");
-    std::fs::write(
+    ljos_cli::install_executable(
         &stub,
         "#!/bin/sh\necho '--parent demo-none does not refer to any known id' >&2\nexit 1\n",
     )
     .unwrap();
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
     names_ready(&home.ljos(&[
         "file",
         "Name the child",

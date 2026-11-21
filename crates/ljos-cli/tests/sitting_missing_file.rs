@@ -11,7 +11,6 @@ ljos_test_boot::harness!();
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write as _};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
@@ -45,8 +44,7 @@ fn snapshot(dir: &Path) -> Snapshot {
 
 fn script(dir: &Path, name: &str, body: &str) {
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn git(dir: &Path, args: &[&str]) {

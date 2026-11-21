@@ -29,12 +29,14 @@ impl Scratch {
         for sub in ["home", "run"] {
             std::fs::create_dir_all(dir.path().join(sub)).unwrap();
         }
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(
-            dir.path().join("run"),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                dir.path().join("run"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
         Self { dir, gitconfig }
     }
 
@@ -244,11 +246,10 @@ const HOOKS: &[&str] = &[
 
 /// Hooks in `dir` that append `who NAME` to `marks` and refuse.
 fn refusing_hooks(dir: &Path, marks: &Path, who: &str, names: &[&str]) {
-    use std::os::unix::fs::PermissionsExt as _;
     std::fs::create_dir_all(dir).unwrap();
     for name in names {
         let hook = dir.join(name);
-        std::fs::write(
+        ljos_cli::install_executable(
             &hook,
             format!(
                 "#!/bin/sh\necho '{who} {name}' >> '{}'\nexit 1\n",
@@ -256,7 +257,6 @@ fn refusing_hooks(dir: &Path, marks: &Path, who: &str, names: &[&str]) {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
 

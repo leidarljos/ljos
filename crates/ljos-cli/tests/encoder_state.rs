@@ -94,13 +94,7 @@ fn run(seat: &Seat, args: &[&str]) -> (i32, String, String, Duration) {
     let home = seat.home.path();
     // cargo is on PATH and cargo-binstall is not, so doctor names
     // `cargo install` rather than `cargo binstall`.
-    std::fs::write(home.join("cargo"), "#!/bin/sh\nexit 0\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(home.join("cargo"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-    }
+    ljos_cli::install_executable(&home.join("cargo"), "#!/bin/sh\nexit 0\n").unwrap();
     let started = Instant::now();
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
@@ -393,12 +387,7 @@ fn a_loading_search_with_no_rows_says_to_rerun() {
 }
 
 fn exe(dir: &std::path::Path, name: &str) {
-    std::fs::write(dir.join(name), "#!/bin/sh\nexit 1\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    ljos_cli::install_executable(&dir.join(name), "#!/bin/sh\nexit 1\n").unwrap();
 }
 
 fn packset_embed_line(path: &str, cwd: &std::path::Path) -> String {

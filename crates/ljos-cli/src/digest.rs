@@ -1562,8 +1562,6 @@ mod tests {
         assert!(blank.chars().count() <= crate::scan::COLS, "{blank}");
     }
 
-    use std::os::unix::fs::PermissionsExt;
-
     fn git(dir: &std::path::Path, args: &[&str], date: &str) {
         let out = crate::git_cmd()
             .arg("-C")
@@ -1656,12 +1654,11 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let stub = bin.join("deedar");
-        std::fs::write(
+        crate::install_executable(
             &stub,
             "#!/bin/sh\nprintf 'time=1760000000\\nproducedBy=ada\\n'\n",
         )
         .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
         let org = "\
 * DONE [#C] Close the probe
 :PROPERTIES:
@@ -1927,12 +1924,11 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let stub = bin.join("deedar");
-        std::fs::write(
+        crate::install_executable(
             &stub,
             "#!/bin/sh\nsleep 0.6\nprintf 'time=1760000000\\nproducedBy=ada\\n'\n",
         )
         .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(
             root.join("Software/probe/issues.org"),
             "\
@@ -2115,12 +2111,11 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let stub = bin.join("deedar");
-        std::fs::write(
+        crate::install_executable(
             &stub,
             "#!/bin/sh\nsleep 0.45\nprintf 'time=1760000000\\nproducedBy=ada\\n'\n",
         )
         .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
         let (url, stored) = crate::serve_sync_pack(crate::SyncPack::Keep);
         for i in 0..40 {
             stored.lock().unwrap().push(serde_json::json!({

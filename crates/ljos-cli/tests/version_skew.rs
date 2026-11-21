@@ -3,7 +3,6 @@
 
 ljos_test_boot::harness!();
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -11,12 +10,11 @@ fn script(path: &Path, version: &str) {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).unwrap();
     }
-    std::fs::write(
+    ljos_cli::install_executable(
         path,
         format!("#!/bin/sh\nprintf '%s\\n' 'ljos {version}'\n"),
     )
     .unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 fn real_version() -> String {

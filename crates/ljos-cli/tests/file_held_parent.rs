@@ -4,7 +4,6 @@
 //! either, the ticket goes in Software. Nothing is asked.
 
 ljos_test_boot::harness!();
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 struct Seat {
@@ -16,7 +15,7 @@ impl Seat {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("calls.log");
         let stub = dir.path().join("vissue");
-        std::fs::write(
+        ljos_cli::install_executable(
             &stub,
             format!(
                 "#!/bin/sh\necho \"vissue $*\" >> '{log}'\ncase \"$1\" in\n  identity) printf '%s\\n' {identity} ;;\n  create) echo ljos-new1 ;;\nesac\nexit 0\n",
@@ -25,7 +24,6 @@ impl Seat {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
         let home = dir.path().join("home");
         std::fs::create_dir_all(home.join("run")).unwrap();
         Self { dir }

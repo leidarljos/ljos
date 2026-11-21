@@ -11,9 +11,7 @@ fn write(path: &Path, text: &str) {
 }
 
 fn executable(path: &Path, text: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    write(path, text);
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, text).unwrap();
 }
 
 fn script() -> PathBuf {
@@ -270,7 +268,7 @@ fn the_script_hands_over_to_a_ljos_that_knows_uninstall() {
     let home = temp.path();
     let bin = home.join(".local/bin");
     std::fs::create_dir_all(&bin).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_ljos"), bin.join("ljos")).unwrap();
+    ljos_cli::copy_executable(Path::new(env!("CARGO_BIN_EXE_ljos")), &bin.join("ljos")).unwrap();
     let out = Command::new("sh")
         .arg(script())
         .arg("--dry-run")

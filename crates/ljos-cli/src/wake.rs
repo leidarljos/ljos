@@ -1382,16 +1382,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_send_starts_the_prefix_wake_for_a_run_seat() {
-        use std::os::unix::fs::PermissionsExt;
         let (_lock, dir) = isolated();
         let marker = dir.path().join("spawn.log");
         let script = dir.path().join("record-wake");
-        std::fs::write(
+        crate::install_executable(
             &script,
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$WAKE_RECORD\"\n",
         )
         .expect("script");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         // SAFETY: test_env_lock holds the environment and restores it.
         unsafe {
             std::env::set_var("LJOS_WAKE_BIN", &script);

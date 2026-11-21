@@ -22,10 +22,8 @@ const MARK: &str = "# Added by the ljos installer: its programs on PATH.";
 const SOURCE_CMD: &str = "cargo install --locked ljos packset vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus";
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn install_sh() -> PathBuf {
@@ -2015,7 +2013,7 @@ fn upgrading_over_a_running_mcp_server_names_the_pid() {
         .map(PathBuf::from)
         .find(|p| p.is_file())
         .unwrap();
-    std::fs::copy(&sleep, bin.join("ljos-mcp")).unwrap();
+    ljos_cli::copy_executable(&sleep, &bin.join("ljos-mcp")).unwrap();
     let mut child = Command::new(bin.join("ljos-mcp"))
         .arg("60")
         .stdin(std::process::Stdio::null())

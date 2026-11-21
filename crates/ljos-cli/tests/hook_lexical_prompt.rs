@@ -124,12 +124,7 @@ fn lexical_store(lessons: Value) -> String {
 }
 
 fn executable(path: &Path, text: &str) {
-    std::fs::write(path, text).expect("script");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    }
+    ljos_cli::install_executable(path, text).expect("script");
 }
 
 /// `echo PROMPT | ljos hook --prompt` against the fixture store.

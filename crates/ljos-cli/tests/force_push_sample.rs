@@ -52,15 +52,11 @@ fn hook(payload: &str) -> String {
     git(&repo, &["init", "-q", "-b", "topic"]);
     sit(&tracker, &run);
     let policyd = home.path().join("ljos-policyd");
-    std::fs::write(
+    ljos_cli::install_executable(
         &policyd,
         "#!/bin/sh\nprintf 'allow\\twarn\\tgit-force-push\\ta force push rewrites a published branch\\n'\n",
     )
     .unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&policyd, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("hook")
         .current_dir(&repo)

@@ -799,8 +799,7 @@ fn write_hook(path: &Path, body: &str) {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).unwrap();
     }
-    fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, format!("#!/bin/sh\n{body}")).unwrap();
 }
 
 fn git_status(hab: &Hab, args: &[&str]) -> Output {
@@ -1095,8 +1094,7 @@ fn git_hooks_keep_a_user_hooks_path_and_chain_post_commit() {
     fs::create_dir_all(&saved).unwrap();
     let marker = hab.root.join("repo-hook");
     let user = format!("#!/bin/sh\nprintf ran >> {}\n", shellish(&marker));
-    fs::write(saved.join("post-commit"), &user).unwrap();
-    fs::set_permissions(saved.join("post-commit"), fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&saved.join("post-commit"), &user).unwrap();
     hab.git(
         &hab.repo,
         &[
@@ -1182,12 +1180,11 @@ fn owned_hooks_pass_post_rewrite_stdin_to_the_repo_hook() {
     let rewrite_in = hab.root.join("rewrite-stdin");
     let rewrite_hook = hab.repo.join(".git/hooks/post-rewrite");
     fs::create_dir_all(hab.repo.join(".git/hooks")).unwrap();
-    fs::write(
+    ljos_cli::install_executable(
         &rewrite_hook,
         format!("#!/bin/sh\ncat > {}\n", shellish(&rewrite_in)),
     )
     .unwrap();
-    fs::set_permissions(&rewrite_hook, fs::Permissions::from_mode(0o755)).unwrap();
     hab.git(
         &hab.repo,
         &["commit", "--amend", "-q", "-m", "book the readme again"],
