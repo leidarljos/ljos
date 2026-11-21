@@ -104,6 +104,7 @@ pub mod tracker_place;
 mod tracker_push;
 mod tracker_repair;
 pub mod tracker_sync;
+mod tracker_tmp;
 pub mod tree_cleanup;
 pub mod turn_record;
 pub mod undo;
@@ -49652,6 +49653,7 @@ fn insert_logbook_line(text: &str, issue: &str, entry: &str) -> Option<String> {
 /// ballot another seat wrote between the read and the write, and a `git
 /// add` hashing the file meanwhile dies on unstable object data.
 pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> bool {
+    sweep_tracker_temps(path);
     let entry = format!(
         "- {} by {} {}",
         verb_heading(verb),
@@ -49663,10 +49665,30 @@ pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> b
         let Some(next) = insert_logbook_line(&text, issue, &entry) else {
             return Ok(false);
         };
-        vissue_core::store::replace_file_atomically(path, &next)?;
+        tracker_tmp::replace_file(path, &next)?;
         Ok(true)
     })
     .unwrap_or(false)
+}
+
+/// Remove the stale whole-file temporaries beside the tracker file at
+/// `path`: its own directory, the per-issue `issues/` directory under it,
+/// and the board's directory when `path` is a per-issue file. Once per
+/// directory per process.
+fn sweep_tracker_temps(path: &Path) {
+    let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return;
+    };
+    tracker_tmp::sweep_stale_once(dir);
+    let below = dir.join("issues");
+    if below.is_dir() {
+        tracker_tmp::sweep_stale_once(&below);
+    }
+    if dir.file_name().is_some_and(|name| name == "issues") {
+        if let Some(board_dir) = dir.parent() {
+            tracker_tmp::sweep_stale_once(board_dir);
+        }
+    }
 }
 
 /// Name the seat on a note when the tracker commit did not.
@@ -50869,6 +50891,7 @@ fn persist_tracker_writes(
     others: &[(PathBuf, Vec<(String, String)>)],
     message: Option<&str>,
 ) -> String {
+    sweep_tracker_temps(path);
     let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
     if matches!(mode.as_str(), "off" | "0" | "false") {
         return "tracker git: off (LJOS_TRACKER_GIT)\n".into();
@@ -60006,6 +60029,46 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// A tracker write sweeps whole-file temporaries an interrupted writer
+    /// left beside the board an hour or more ago, and leaves a young one
+    /// that may still be a live writer's.
+    #[test]
+    fn a_tracker_write_sweeps_stale_temporaries() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        let probe = issues.parent().unwrap();
+        let old = probe.join(".issues.org.tmp.77-1-0");
+        let young = probe.join(".issues.org.tmp.77-2-1");
+        for path in [&old, &young] {
+            std::fs::write(path, "half a board").unwrap();
+        }
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(
+                std::time::SystemTime::now()
+                    - tracker_tmp::STALE_AFTER
+                    - std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        std::fs::write(
+            &issues,
+            "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        assert!(said.contains("committed"), "{said}");
+        assert!(!old.exists(), "the stale temporary is still there");
+        assert!(young.exists(), "a young temporary was swept");
         for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
             std::env::remove_var(var);
         }

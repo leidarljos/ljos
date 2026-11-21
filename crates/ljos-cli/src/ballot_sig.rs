@@ -1357,7 +1357,7 @@ fn pin_first(path: &Path, voter: &str, mine: &str) -> Result<BTreeMap<String, St
     if !pinned.contains_key(voter) {
         pinned.insert(voter.to_string(), mine.to_string());
         let text: String = pinned.iter().map(|(v, k)| format!("{v} {k}\n")).collect();
-        vissue_core::store::replace_file_atomically(path, &text)?;
+        crate::tracker_tmp::replace_file(path, &text)?;
     }
     Ok(pinned)
 }
