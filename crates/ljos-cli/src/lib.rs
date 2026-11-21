@@ -87413,9 +87413,8 @@ lesson, due yesterday, seat ada
         assert!(line.contains("The door thermocouple reads low."), "{line}");
     }
 
-    /// A pack that refuses the lesson after the work is done leaves the
-    /// node completed. Finish says why the lesson was not kept and how to
-    /// keep it, and it does not fail.
+    /// A lesson longer than two sentences is kept as claims of two
+    /// sentences each. A blank lesson is no claim.
     #[test]
     fn a_long_lesson_is_kept_as_two_sentence_claims() {
         let three = "gvfsd reads XDG_DATA_HOME when it starts. Set the scratch folder first. \
