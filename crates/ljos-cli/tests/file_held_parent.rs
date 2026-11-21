@@ -1,7 +1,7 @@
 //! `ljos file` with no `--parent` says where the ticket went.
 //! A hold is the parent, and stderr names it. With no hold and no `-p`,
-//! the project is the `prefix=` line of `vissue identity`. With no prefix
-//! either, the ticket goes in Software. Nothing is asked.
+//! the `prefix=` line of `vissue identity` is not a project: the command
+//! exits 1 and names `-p PROJECT`. Nothing is asked.
 
 ljos_test_boot::harness!();
 use std::os::unix::fs::PermissionsExt;
@@ -144,7 +144,7 @@ fn a_prefix_outside_a_checkout_names_p() {
     let out = seat.file(&["x"]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{err}");
-    assert!(err.contains("name one with -p NAME"), "{err}");
+    assert!(err.contains("name one with -p PROJECT"), "{err}");
     assert!(seat.creates().is_empty(), "{:?}", seat.creates());
 }
 
@@ -154,7 +154,7 @@ fn a_checkout_with_no_prefix_names_p() {
     let out = seat.file(&["x"]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{err}");
-    assert!(err.contains("name one with -p NAME"), "{err}");
+    assert!(err.contains("name one with -p PROJECT"), "{err}");
     assert!(seat.creates().is_empty(), "{:?}", seat.creates());
 }
 
@@ -173,7 +173,7 @@ fn a_scratch_checkout_without_a_project_names_p() {
     let out = seat.file_in(&checkout, &["x"], &[]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{err}");
-    assert!(err.contains("name one with -p NAME"), "{err}");
+    assert!(err.contains("name one with -p PROJECT"), "{err}");
     assert!(seat.creates().is_empty(), "{:?}", seat.creates());
 }
 

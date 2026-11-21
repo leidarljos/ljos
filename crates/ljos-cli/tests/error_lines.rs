@@ -615,7 +615,7 @@ fn file_without_a_project_names_the_command_to_run() {
     assert!(out.stdout.is_empty(), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "no project: name one with -p NAME, so run `ljos file \"TITLE\" -p NAME`."
+        "no project: name one with -p PROJECT or set project under [seats.alice] in the tracker's vissue.toml, so run `ljos file \"TITLE\" -p PROJECT`."
     );
 }
 

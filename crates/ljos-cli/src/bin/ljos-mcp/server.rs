@@ -2515,13 +2515,16 @@ impl LjosServer {
         }
         let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         habitat("ljos", &refs).map_err(|e| {
-            if e.message.contains("no project: name one with -p") {
-                refused(anyhow::anyhow!(
-                    "ljos_file: no project to file in, so pass `project`, or `parent` to file under that issue"
-                ))
-            } else {
-                e
-            }
+            let Some(at) = e.message.find("no project: name one with -p") else {
+                return e;
+            };
+            // The sentence that names a gone hold stays in front.
+            let gone = e.message[..at]
+                .find("held issue ")
+                .map_or("", |start| &e.message[start..at]);
+            refused(anyhow::anyhow!(
+                "ljos_file: {gone}no project to file in, so pass `project`, or `parent` to file under that issue, or set project under this seat's row in the tracker's vissue.toml"
+            ))
         })
     }
 

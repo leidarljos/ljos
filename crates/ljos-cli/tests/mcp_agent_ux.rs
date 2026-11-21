@@ -656,7 +656,7 @@ fn filing_with_no_project_says_which_argument_to_pass() {
     ));
     assert_eq!(
         said[0],
-        "ljos_file: no project to file in, so pass `project`, or `parent` to file under that issue",
+        "ljos_file: no project to file in, so pass `project`, or `parent` to file under that issue, or set project under this seat's row in the tracker's vissue.toml",
         "{said:?}"
     );
     assert!(!said[0].contains("-p NAME"), "{said:?}");

@@ -58,6 +58,15 @@ struct Seat {
 }
 
 impl Seat {
+    /// A seat whose tracker's `vissue.toml` is `config`.
+    fn with_config(identity: &str, config: &str) -> Self {
+        let seat = Self::new(identity);
+        let tracker = seat.dir.path().join("tracker");
+        std::fs::create_dir_all(&tracker).unwrap();
+        std::fs::write(tracker.join("vissue.toml"), config).unwrap();
+        seat
+    }
+
     fn new(identity: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("calls.log");
@@ -93,6 +102,7 @@ impl Seat {
             .env("XDG_STATE_HOME", home.join(".state"))
             .env("XDG_RUNTIME_DIR", home.join("run"))
             .env("LJOS_SEAT", "ada")
+            .env("VISSUE_ROOT", self.dir.path().join("tracker"))
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off")
             .current_dir(self.dir.path())
@@ -103,7 +113,10 @@ impl Seat {
 
 #[test]
 fn file_top_defaults_to_the_seat_project() {
-    let seat = Seat::new("prefix=demo");
+    let seat = Seat::with_config(
+        "prefix=Software",
+        "prefix = \"Software\"\n\n[seats.ada]\nproject = \"demo\"\n",
+    );
     let out = seat.ljos(&["file", "a ticket", "--top"]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{err}");
@@ -115,13 +128,15 @@ fn file_top_defaults_to_the_seat_project() {
 
 #[test]
 fn file_top_without_a_seat_project_names_p() {
-    let seat = Seat::new("'vissue test'");
-    let out = seat.ljos(&["file", "a ticket", "--top"]);
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("no project"), "{err}");
-    assert!(err.contains("-p"), "{err}");
-    assert!(String::from_utf8_lossy(&out.stdout).trim().is_empty());
+    for identity in ["'vissue test'", "prefix=demo"] {
+        let seat = Seat::new(identity);
+        let out = seat.ljos(&["file", "a ticket", "--top"]);
+        assert!(!out.status.success(), "{identity}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("no project"), "{identity}: {err}");
+        assert!(err.contains("-p PROJECT"), "{identity}: {err}");
+        assert!(String::from_utf8_lossy(&out.stdout).trim().is_empty());
+    }
 }
 
 #[test]

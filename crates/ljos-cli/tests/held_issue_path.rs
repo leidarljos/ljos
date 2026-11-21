@@ -241,6 +241,8 @@ fn a_hold_on_this_tracker_is_still_the_parent() {
     );
 }
 
+/// A gone hold is cleared only once a ticket is filed, so a failed file
+/// leaves it for the next try.
 #[test]
 fn a_failed_file_does_not_say_it_filed() {
     let seat = Seat::new("1");
@@ -251,7 +253,22 @@ fn a_failed_file_does_not_say_it_filed() {
     assert!(!said.contains("filed under"), "{said}");
     assert!(!said.contains("is gone"), "{said}");
     assert!(!said.contains("filed at the top"), "{said}");
-    assert!(!seat.hold_path().exists(), "the hold file stayed");
+    assert!(seat.hold_path().exists(), "a failed file cleared the hold");
+}
+
+#[test]
+fn a_gone_hold_with_no_project_is_named_and_kept() {
+    let seat = Seat::new("0");
+    seat.hold("gone-zzzz");
+    let out = seat.file(&["a ticket"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(out.stdout.is_empty(), "{}", text(&out));
+    assert_eq!(err.trim_end().lines().count(), 1, "{err}");
+    assert!(err.contains("held issue gone-zzzz is gone"), "{err}");
+    assert!(err.contains("-p PROJECT"), "{err}");
+    assert!(seat.hold_path().exists(), "a refused file cleared the hold");
+    assert!(seat.creates().is_empty(), "{:?}", seat.creates());
 }
 
 #[test]

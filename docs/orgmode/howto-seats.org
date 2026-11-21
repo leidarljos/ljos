@@ -14,6 +14,17 @@ $ ljos seat add alice
 $ ljos seat add carol
 #+end_src
 
+A seat's row can name its home project with a =project= key, which
+=ljos seat add= keeps when it rewrites the file. A new ticket that no =-p=,
+=--parent=, held issue, checkout config or =LJOS_PROJECT= places goes there.
+Without one, =ljos file= exits 1 and names =-p PROJECT=, so a shared tracker
+does not fill a project named after its prefix:
+
+#+begin_src toml
+[seats.alice]
+project = "demo"
+#+end_src
+
 =ljos seat= prints the name in use, or =none= when no seat is set and reads use every seat.
 A write with no name set uses the login name, or a short stable name when that login is missing, and the first write says so.
 The recent-write fallback applies only to a session id recorded with that write; it does not give the seat to a later session with another id.

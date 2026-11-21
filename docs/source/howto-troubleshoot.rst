@@ -279,11 +279,12 @@ File without a project
 ======================
 
 ``ljos file`` needs a project when there is no sitting and no seat default.
-The refusal names the exact command shape:
+The tracker's prefix is not a project. The refusal names the exact command
+shape and the seat's row in ``vissue.toml``:
 
 .. code:: text
 
-   no project: name one with -p NAME, so run `ljos file "TITLE" -p NAME`.
+   no project: name one with -p PROJECT or set project under [seats.alice] in the tracker's vissue.toml, so run `ljos file "TITLE" -p PROJECT`.
 
 Corrupt tracker config
 ======================
