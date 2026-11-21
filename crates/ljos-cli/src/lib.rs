@@ -48754,16 +48754,11 @@ pub fn tracker_commit_lock(dir: &Path) -> CommitLock {
     tracker_lock_path(dir).map_or(CommitLock(None), |path| CommitLock::acquire(&path))
 }
 
-/// How long a background push waits for `.ljos-commit.lock`, in whole
-/// seconds. Long enough for a hook to finish a normal push. When the wait
-/// ends, the push runs without the lock. An interactive writer does not
-/// use this: it waits [`TRACKER_WRITER_WAIT_SECS`] and defers.
+/// How long a background push, or a tracker writer, waits for
+/// `.ljos-commit.lock`, in whole seconds. Long enough for a hook to finish
+/// a normal push, which keeps the lock until git exits. When the wait ends,
+/// the push runs without the lock and the writer defers its commit.
 pub const TRACKER_FLOCK_WAIT_SECS: u64 = 20;
-
-/// How long a tracker writer waits for another writer's commit lock
-/// before it defers the commit. Short on purpose: a herd must not sit
-/// for [`TRACKER_FLOCK_WAIT_SECS`] each.
-pub const TRACKER_WRITER_WAIT_SECS: u64 = 2;
 
 /// Pause between non-blocking `flock(2)` tries while a background push
 /// waits for [`TRACKER_LOCK`].
@@ -48771,13 +48766,14 @@ const FLOCK_POLL_MS: u64 = 200;
 
 /// How long a tracker write waits for another writer's commit lock before
 /// it says so and leaves the write uncommitted: `LJOS_TRACKER_LOCK_WAIT`
-/// seconds, else [`TRACKER_WRITER_WAIT_SECS`].
+/// seconds, else [`TRACKER_FLOCK_WAIT_SECS`]. A caller with a wall budget
+/// stops at that budget.
 #[must_use]
 pub fn tracker_lock_wait() -> std::time::Duration {
     let secs = std::env::var("LJOS_TRACKER_LOCK_WAIT")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(TRACKER_WRITER_WAIT_SECS);
+        .unwrap_or(TRACKER_FLOCK_WAIT_SECS);
     std::time::Duration::from_secs(secs)
 }
 
@@ -58580,6 +58576,44 @@ mod tests {
         assert!(busy.contains("not committed"), "{busy}");
         drop(held);
         assert!(tracker_commit_lock_by(repo, std::time::Instant::now()).is_some());
+    }
+
+    /// Another writer keeps the commit lock for three seconds, about as long
+    /// as a push and its hook. A tracker write with no wait of its own set
+    /// waits it out and commits, so no later write or sync has to.
+    #[test]
+    fn a_tracker_lock_held_for_a_push_is_waited_out() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        std::env::remove_var("LJOS_TRACKER_LOCK_WAIT");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let held = tracker_commit_lock(dir.path());
+        assert!(held.0.is_some(), "the other writer took the lock");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            drop(held);
+        });
+        let body = "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+        std::fs::write(&issues, body).unwrap();
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        release.join().unwrap();
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+        assert!(!said.contains("another writer held"), "{said}");
+        assert!(said.contains("committed"), "{said}");
+        let shown = git_cmd()
+            .arg("-C")
+            .arg(dir.path())
+            .args(["show", "HEAD:Software/probe/issues.org"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&shown.stdout).contains("STARTED"),
+            "{said}"
+        );
     }
 
     /// A bare `GIT_DIR` plus `GIT_WORK_TREE` checkout still commits and
