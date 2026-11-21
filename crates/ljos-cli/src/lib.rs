@@ -41799,7 +41799,7 @@ fn gone_same_seat_hold(id: &str, assignee: &str) -> Option<(String, Hold)> {
 
 /// The holder and hold record of node `id` when another conversation of
 /// this seat holds it and that conversation is gone on this host. The seat
-/// owns its conversations, so it may finish or hand back what an exited
+/// owns its conversations, so it may complete or hand back what an exited
 /// conversation or worker left. `None` when `actor` holds it, when the
 /// conversation is still running on this host, when no record on this host
 /// names the holder, or when the record names another seat or another
@@ -47109,8 +47109,11 @@ fn reclaim_expired(lease: u64) -> String {
 /// one is given, only if `gen` is still the live lease. The claim graph
 /// frees the node, and the tracker drops `assignee`'s claim and keeps the
 /// issue's state, so the ticket stays open. A node a gone conversation of
-/// this seat holds is completed under that conversation's name. It stores
-/// no lesson, fires no island and learns nothing. `ljos finish` runs this
+/// this seat holds is completed under that conversation's name, with no
+/// new claim, when its hold record names no claim graph or this one. When
+/// the record names another claim graph, the node is claimed first and
+/// then completed under `assignee`. It stores no lesson, fires no island
+/// and learns nothing. `ljos finish` runs this
 /// completion only with `--close` and a status of `done` or `cancelled`,
 /// and then closes the ticket itself. A finish that ends a sitting any
 /// other way calls [`release`].
@@ -47255,7 +47258,7 @@ fn complete_with_grant(
         Ok(said) => said,
         Err(e) if e.to_string().contains("not assignee") => {
             // A worker or older conversation of this seat holds it, and is gone:
-            // the seat finishes its own work.
+            // the seat completes its own work.
             if let Some((holder, hold)) = same_seat_hold(&id, &actor, assignee) {
                 let said = run(&holder)?;
                 drop_hold(&holder);
@@ -47276,7 +47279,7 @@ fn complete_with_grant(
             }
             // Another conversation of this seat holds the node, and `ljos
             // claim` would take it over: the conversation is gone, or the
-            // holder is this seat under its other name. Finish does that
+            // holder is this seat under its other name. This path does that
             // takeover, then completes. `--assignee <seat>` does not, because
             // the claim graph names the conversation.
             if let Some((_, hold)) = gone_same_seat_hold(&id, assignee) {
@@ -47330,7 +47333,7 @@ fn complete_with_grant(
                 }
                 // The name the tracker or the hold record gives is the seat this
                 // shell asked for: the claim was taken under a conversation or
-                // host-suffixed holder of the same seat, so finish under it.
+                // host-suffixed holder of the same seat, so complete under it.
                 let named: Vec<&str> = hold
                     .as_ref()
                     .map(|h| h.assignee.as_str())
@@ -47399,7 +47402,7 @@ pub fn bare_seat(name: &str, node: &str) -> String {
 }
 
 /// Whether `assignee` names the same seat as any of `named`, the holder
-/// names the hold record and the tracker give, so `complete` may finish
+/// names the hold record and the tracker give, so `complete` may complete
 /// under the claim graph's holder.
 pub fn adopts_holder<'a>(
     node: &str,
