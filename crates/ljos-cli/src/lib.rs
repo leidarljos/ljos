@@ -51255,18 +51255,20 @@ fn prepare_split(path: &Path, writes: &[(String, String)]) -> SplitStep {
             carried: false,
         };
     }
-    split_board(&top, &board, &board_rel, lock, &rel)
+    split_board(&top, &board, &board_rel, lock, &rel, (path, writes))
 }
 
 /// Split every unsplit board beside `board` into per-issue files
 /// (`vissue migrate-ledger`) and commit them with their boards in one
-/// commit. The caller holds the tracker lock, `lock`.
+/// commit. The caller holds the tracker lock, `lock`. `write` is the file
+/// and the writes the caller persists, stamped when the split waits.
 fn split_board(
     top: &Path,
     board: &Path,
     board_rel: &str,
     lock: CommitLock,
     rel: &dyn Fn(&Path) -> Option<String>,
+    write: (&Path, &[(String, String)]),
 ) -> SplitStep {
     let held = |lock, line: String, carried| SplitStep::Held {
         lock,
@@ -51379,6 +51381,7 @@ fn split_board(
         }
     }
     if kept {
+        stamp_write_seats(write.0, write.1);
         return SplitStep::Deferred(format!(
             "{failed}tracker git: the split of {board_rel} into per-issue files is not in a commit ({why}); {}\n",
             deferred_commit_line("this write")
@@ -61723,6 +61726,50 @@ mod tests {
             &["show", "HEAD:Software/probe/issues/probe-b007.org"],
         );
         assert_eq!(shown.matches("- Noted by saddle").count(), 1, "{shown}");
+        clear_probe_env();
+    }
+
+    /// A split whose commit is refused and that cannot be rolled back,
+    /// because a file in it changed meanwhile, is kept, and the write waits
+    /// with it. The write's seat line is in the kept issue file, and the
+    /// commit that later lands the split carries it.
+    #[test]
+    fn a_kept_split_that_waits_keeps_the_writes_seat_line() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let issues = big_board(root, 300);
+        refuse_split_commits(root);
+        let hook = root.join(".git/refuse-split/pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nif git diff --cached --name-only | grep -q 'issues/\\.ledger$'; then\n  echo meanwhile > Software/probe/issues/.meanwhile\n  echo 'no split here' >&2\n  exit 1\nfi\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        probe_env(root);
+        let layout = vissue_core::Layout::new(root, "Software");
+        let head = git_text(root, &["rev-parse", "HEAD"]);
+        vissue_core::ops::note(&layout, "probe-b007", "first look").unwrap();
+        let said = persist_tracker("probe-b007", "noted");
+        assert!(said.contains("is not in a commit"), "{said}");
+        assert!(vissue_core::ledger::is_ledger(&issues), "{said}");
+        assert_eq!(git_text(root, &["rev-parse", "HEAD"]), head, "{said}");
+        let kept =
+            std::fs::read_to_string(root.join("Software/probe/issues/probe-b007.org")).unwrap();
+        assert!(kept.contains("first look"), "{kept}");
+        assert!(kept.contains("- Noted by saddle"), "{said}\n{kept}");
+
+        git_text(root, &["config", "core.hooksPath", "/dev/null"]);
+        vissue_core::ops::note(&layout, "probe-b123", "second look").unwrap();
+        let said = persist_tracker("probe-b123", "noted");
+        assert!(said.contains("committed the split"), "{said}");
+        let shown = git_text(root, &["show", "HEAD:Software/probe/issues/probe-b007.org"]);
+        assert!(
+            shown.contains("first look") && shown.contains("- Noted by saddle"),
+            "{shown}"
+        );
         clear_probe_env();
     }
 
