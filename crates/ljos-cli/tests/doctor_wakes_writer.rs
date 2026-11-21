@@ -56,6 +56,7 @@ fn doctor_runs_packset_ensure_when_no_writer_answers() {
     let _ = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("doctor")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", home.path())
         .env("XDG_RUNTIME_DIR", home.path().join("run"))
         .env("PATH", path)

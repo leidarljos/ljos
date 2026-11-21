@@ -382,6 +382,7 @@ fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
             .args(["cloud", "up"])
             .current_dir(&seat)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("GIT_CONFIG_GLOBAL", &gitconfig)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("HOME", &home)
@@ -967,6 +968,7 @@ fn ljos_seat(home: &Path) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("seat")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("PATH", "/usr/bin:/bin")
@@ -1712,6 +1714,7 @@ fn cloud_up_writes_the_absolute_server_whatever_path_it_found() {
         );
         let client = Command::new(&command)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", format!("{}:/usr/bin:/bin", stale.display()))
             .env("HOME", root.path().join("elsewhere"))
             .output()
@@ -1849,6 +1852,7 @@ fn assert_path_before_guard(rc: &str, guard: &str) {
         .arg("-c")
         .arg(". \"$HOME/.bashrc\"; command -v ljos-mcp")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", &home)
         .env("PATH", "/usr/bin:/bin")
         .output()

@@ -115,6 +115,7 @@ fn inbox(port: u16) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(["inbox"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .current_dir(home.path())
         .env("HOME", home.path())
         .env("PATH", "/usr/bin:/bin")

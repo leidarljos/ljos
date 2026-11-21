@@ -110,6 +110,7 @@ impl Session {
         let home = tempfile::tempdir().unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", home.path())
             .env("XDG_CONFIG_HOME", home.path().join(".config"))
@@ -644,6 +645,7 @@ fn show_over_mcp_prints_the_ticket() {
             "The door needs a codec.\n\nSecond paragraph on condensation.",
         ])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", &path)
         .env("HOME", home.path())
         .env("VISSUE_ROOT", &root)
@@ -667,6 +669,7 @@ fn show_over_mcp_prints_the_ticket() {
     let noted = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["note", &id, "measured cold damper clearance"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", &path)
         .env("HOME", home.path())
         .env("VISSUE_ROOT", &root)
@@ -684,6 +687,7 @@ fn show_over_mcp_prints_the_ticket() {
     let cli_out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["show", &id])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", &path)
         .env("HOME", home.path())
         .env("VISSUE_ROOT", &root)
@@ -698,6 +702,7 @@ fn show_over_mcp_prints_the_ticket() {
     let cli_page = String::from_utf8_lossy(&cli_out.stdout).into_owned();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", &path)
         .env("HOME", home.path())
         .env("VISSUE_ROOT", &root)

@@ -33,8 +33,8 @@ fn local_config(checkout: &Path) -> Option<Vec<u8>> {
     std::fs::read(checkout.join(".git/config")).ok()
 }
 
-/// A directory with no `.git` inside the checkout's `target`, the root a
-/// seat falls back to, is not a repository to a test's git.
+/// A directory with no `.git` inside the checkout's `crates/target` is
+/// not a repository to a test's git.
 #[test]
 fn a_test_git_in_a_dir_without_git_does_not_reach_the_checkout() {
     let checkout = ljos_test_boot::checkout();
@@ -96,18 +96,33 @@ fn a_test_git_in_a_dir_without_git_does_not_reach_the_checkout() {
     );
 }
 
-/// Seat homes sit outside the checkout whenever `HOME` has room for them.
+/// A `HOME` with no room for seat homes is refused. No seat goes under
+/// the checkout's `crates/target` in its place.
+#[test]
+fn a_seat_root_never_falls_back_to_the_checkout() {
+    let is_temp = ljos_cli::bookkeep::path_is_temp;
+    let temp = std::env::temp_dir().join("ljos-test-seats");
+    let long = PathBuf::from(format!("/{}/.cache/ljos-test-seats", "h".repeat(40)));
+    for cache in [
+        None,
+        Some(temp),
+        Some(long),
+        Some(ljos_test_boot::checkout_seats()),
+    ] {
+        let picked = seat_root::pick_seat_root(cache.clone(), is_temp);
+        assert!(picked.is_err(), "{cache:?} gave {picked:?}");
+    }
+    let fine = PathBuf::from("/home/u/.cache/ljos-test-seats");
+    assert_eq!(
+        seat_root::pick_seat_root(Some(fine.clone()), |_| false),
+        Ok(fine)
+    );
+}
+
+/// Seat homes sit outside the checkout.
 #[test]
 fn a_seat_root_sits_outside_the_checkout() {
     let is_temp = ljos_cli::bookkeep::path_is_temp;
-    let Some(cache) = ljos_test_boot::home_seats() else {
-        eprintln!("skip: HOME is unset");
-        return;
-    };
-    if is_temp(Some(&cache)) || cache.as_os_str().len() > 44 {
-        eprintln!("skip: {} is a temp root or too long", cache.display());
-        return;
-    }
     let checkout = ljos_test_boot::checkout();
     let root = seat_root::seat_root(is_temp);
     assert!(

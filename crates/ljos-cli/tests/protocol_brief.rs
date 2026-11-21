@@ -12,6 +12,7 @@ fn protocol(home: &std::path::Path, full: bool) -> String {
     }
     let out = cmd
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin")
         .env("PACKSET_URL", "off")

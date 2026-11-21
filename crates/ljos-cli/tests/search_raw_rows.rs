@@ -167,6 +167,7 @@ impl World {
         cmd.args(args)
             .current_dir(self.root.join("work"))
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", &self.path)
             .env("HOME", &home)
             .env("USER", "anneal")
@@ -365,6 +366,7 @@ fn mcp_search_query(world: &World, query: &str) -> (String, String) {
     let home = world.root.join("home");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", &world.path)
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

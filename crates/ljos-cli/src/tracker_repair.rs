@@ -234,11 +234,10 @@ fn git(dir: &Path, args: &[&str]) -> Option<Output> {
 mod tests {
     use super::{doctor_note, git_text_is_object_damage, plain_failure, MARK};
     use std::path::Path;
-    use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) {
         // `GIT_DIR` overrides `-C`. A sibling test exports it for a moment.
-        let out = Command::new("git")
+        let out = ljos_test_boot::git()
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -297,7 +296,7 @@ mod tests {
     }
 
     fn point_head_at_missing(root: &Path) {
-        let out = Command::new("git")
+        let out = ljos_test_boot::git()
             .arg("-C")
             .arg(root)
             .args(["symbolic-ref", "HEAD"])

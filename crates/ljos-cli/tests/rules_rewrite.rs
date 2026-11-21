@@ -55,6 +55,7 @@ fn hook(hab: &Hab, pack: Option<u16>) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &hab.home)
         .env("XDG_CONFIG_HOME", hab.home.join(".config"))

@@ -41,6 +41,7 @@ impl Home {
         cmd.args(args)
             .current_dir(self.root.join("work"))
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -636,6 +637,7 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", home.join("bin").display()),

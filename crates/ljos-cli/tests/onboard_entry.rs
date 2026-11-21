@@ -79,6 +79,7 @@ impl Seat {
             .args(args)
             .current_dir(home)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("HOME", home)
             .env("PATH", path)
             .env("LANG", "C.UTF-8")

@@ -55,6 +55,7 @@ fn finish_of_another_seats_ticket_says_send() {
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["finish", "demo-uqy6"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", &path)
         .env("HOME", &home)
         .env("XDG_RUNTIME_DIR", home.join("run"))

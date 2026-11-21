@@ -75,6 +75,7 @@ impl Hab {
         cmd.args(args)
             .current_dir(cwd)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .envs(self.base_env())
             .stdin(std::process::Stdio::piped());
         for (key, value) in extra {
@@ -548,6 +549,7 @@ fn ljos_seat_and_doctor_keep_an_exported_seat() {
         .args(["90", env!("CARGO_BIN_EXE_ljos"), "doctor", "--all"])
         .current_dir(&hab.repo)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .envs(hab.base_env())
         .envs(extra)
         .output()
@@ -632,6 +634,7 @@ fn under_exec_daemon(hab: &Hab, extra: &[(&str, &str)]) -> Output {
         .args(["hook", "--git-commit"])
         .current_dir(&hab.repo)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .envs(env_without_seat(hab));
     for (key, value) in extra {
         cmd.env(key, value);
@@ -706,6 +709,7 @@ fn a_subagent_commit_is_not_booked_and_says_why() {
         .arg("seat")
         .current_dir(&hab.repo)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .envs(hab.base_env())
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CODEX_THREAD_ID")
@@ -750,6 +754,7 @@ fn repeated_subagent_claim_on_parent_is_idempotent() {
             .args(["claim", id])
             .current_dir(&hab.repo)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .envs(hab.base_env())
             .env("CURSOR_CONVERSATION_ID", "sand-subagent-0001cccc")
             .output()
@@ -1207,6 +1212,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
             .args(["doctor", "--all"])
             .current_dir(&hab.repo)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .envs(hab.base_env())
             .output()
             .unwrap();
@@ -1421,6 +1427,7 @@ fn doctor_all_formats_unset_git_hooks_with_backticks_and_so_run() {
         .args(["doctor", "--all"])
         .current_dir(&home)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

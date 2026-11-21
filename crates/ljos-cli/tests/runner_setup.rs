@@ -81,6 +81,7 @@ impl Home {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("HOME", home)
             .env("PATH", path)
             .env("PACKSET_PORT", port.to_string())

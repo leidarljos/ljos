@@ -74,6 +74,7 @@ impl Seat {
         cmd.args(args)
             .current_dir(self.home.path())
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self.home.path().join("bin").display()),
@@ -204,6 +205,7 @@ fn mcp_recall_includes_the_same_section() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .current_dir(seat.home.path())
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env(
             "PATH",
             format!("{}:/usr/bin:/bin", seat.home.path().join("bin").display()),

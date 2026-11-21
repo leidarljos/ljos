@@ -339,6 +339,7 @@ fn start_server(dir: &Path) -> Option<std::fs::File> {
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("hookd")
         .env_clear()
+        .env("GIT_CEILING_DIRECTORIES", crate::git_ceilings())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());

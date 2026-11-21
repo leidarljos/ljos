@@ -17,6 +17,7 @@ fn run(args: &[&str], extra: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
@@ -110,6 +111,7 @@ fn file_without_a_tracker_names_onboard() {
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["file", "Print hello only when GREET is yes", "-p", "greet"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -186,6 +188,7 @@ fn cards_name_the_directory_when_both_files_are_missing() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["cards"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", home.path())
         .env("XDG_RUNTIME_DIR", home.path().join("run"))
@@ -285,6 +288,7 @@ fn a_failed_wake_shows_the_command_output() {
     }
     let mut base = Command::new(env!("CARGO_BIN_EXE_ljos"));
     base.env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
@@ -313,6 +317,7 @@ fn a_failed_wake_shows_the_command_output() {
     let fired = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["wake", "seat-a", "--fire"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
@@ -364,6 +369,7 @@ fn a_question_is_not_read_from_stdin() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["note", "left on the bench"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", home.path())
         .env("XDG_STATE_HOME", home.path().join(".local/state"))

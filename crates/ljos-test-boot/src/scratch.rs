@@ -29,7 +29,8 @@ pub fn home_seats() -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join(".cache/ljos-test-seats"))
 }
 
-/// Seat roots inside the checkout. Used only when `HOME` has no room.
+/// The checkout's `crates/target`. No seat goes here; it stays a git
+/// ceiling for scratch trees older runs left in it.
 #[must_use]
 pub fn checkout_seats() -> PathBuf {
     checkout().join("crates/target")

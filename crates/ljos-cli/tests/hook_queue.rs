@@ -163,6 +163,7 @@ fn ljos_under(hab: &Hab, wrapper: Option<&[&str]>, args: &[&str]) -> Command {
     };
     cmd.args(args)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", format!("{}:/usr/bin:/bin", hab.bin.display()))
         .env("HOME", &hab.home)
         .env("XDG_CONFIG_HOME", hab.home.join(".config"))
@@ -845,6 +846,7 @@ fn a_large_cursor_read_does_not_break_the_writer_pipe() {
         .arg("-lc")
         .arg(shell)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &hab.home)
         .env("XDG_CONFIG_HOME", hab.home.join(".config"))

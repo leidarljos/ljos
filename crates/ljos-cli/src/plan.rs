@@ -475,7 +475,7 @@ mod tests {
     use super::*;
 
     fn git(root: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
+        let out = ljos_test_boot::git()
             .arg("-C")
             .arg(root)
             .args(args)
@@ -489,7 +489,7 @@ mod tests {
     }
 
     fn log_subjects(root: &Path) -> Vec<String> {
-        let out = std::process::Command::new("git")
+        let out = ljos_test_boot::git()
             .arg("-C")
             .arg(root)
             .args(["log", "--format=%s"])

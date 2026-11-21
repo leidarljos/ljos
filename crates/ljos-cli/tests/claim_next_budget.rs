@@ -41,6 +41,7 @@ fn ljos(dir: &Path, claim_wait: Option<u64>, args: &[&str]) -> (Output, Duration
     cmd.args(args)
         .current_dir(dir)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", &path)
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

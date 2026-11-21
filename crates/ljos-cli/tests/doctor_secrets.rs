@@ -25,6 +25,7 @@ fn command(home: &Path) -> Command {
     let gitconfig = home.join("gitconfig");
     std::fs::write(&gitconfig, "").unwrap();
     cmd.env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home)
         .env("XDG_RUNTIME_DIR", home.join("run"))

@@ -63,6 +63,7 @@ impl Scratch {
         let mut cmd = Command::new(bin);
         cmd.current_dir(self.dir.path())
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

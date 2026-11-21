@@ -39,6 +39,7 @@ impl Seat {
         ])
         .current_dir(cwd)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", self.home())
         .env("XDG_RUNTIME_DIR", self.root.path().join("run"))

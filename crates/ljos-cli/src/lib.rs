@@ -56119,7 +56119,52 @@ pub(crate) fn git_cmd() -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
     strip_guard_bin(&mut cmd);
     no_git_prompt(&mut cmd);
+    fence_git(&mut cmd);
     cmd
+}
+
+/// Set `GIT_CEILING_DIRECTORIES` on `cmd` to [`git_ceilings`]. A caller
+/// that runs `env_clear` after this calls it again.
+pub(crate) fn fence_git(cmd: &mut std::process::Command) {
+    cmd.env("GIT_CEILING_DIRECTORIES", git_ceilings());
+}
+
+/// The ceilings this process inherited, plus the build tree ljos runs
+/// from: the `target` directory above the executable and the
+/// `crates/target` beside it. A directory there whose `.git` is missing
+/// is not a repository, so git does not walk up into the checkout that
+/// built ljos. An installed ljos has no `target` above it and adds none.
+pub(crate) fn git_ceilings() -> std::ffi::OsString {
+    static BUILD: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    let build = BUILD.get_or_init(|| {
+        let Some(exe) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| std::fs::canonicalize(exe).ok())
+        else {
+            return Vec::new();
+        };
+        let Some(target) = exe
+            .ancestors()
+            .find(|dir| dir.file_name().is_some_and(|name| name == "target"))
+        else {
+            return Vec::new();
+        };
+        let mut found = vec![target.to_path_buf()];
+        if let Some(checkout) = target.parent() {
+            let crates = checkout.join("crates/target");
+            found.push(std::fs::canonicalize(&crates).unwrap_or(crates));
+        }
+        found
+    });
+    let mut roots: Vec<PathBuf> = std::env::var_os("GIT_CEILING_DIRECTORIES")
+        .map(|v| std::env::split_paths(&v).collect())
+        .unwrap_or_default();
+    for root in build {
+        if !roots.contains(root) {
+            roots.push(root.clone());
+        }
+    }
+    std::env::join_paths(&roots).unwrap_or_default()
 }
 
 /// No terminal prompt and no askpass program for the git `cmd` runs. A
@@ -56696,6 +56741,43 @@ mod tests {
         );
     }
 
+    /// A git ljos starts in a directory under the checkout's
+    /// `crates/target` that has no `.git` finds no repository, so a
+    /// `git config --local` there cannot rewrite the checkout's `[user]`.
+    #[test]
+    fn a_git_under_crates_target_cannot_rewrite_the_checkout_user() {
+        struct PutBack(std::path::PathBuf, Vec<u8>, std::path::PathBuf);
+        impl Drop for PutBack {
+            fn drop(&mut self) {
+                if std::fs::read(&self.0).ok().as_ref() != Some(&self.1) {
+                    let _ = std::fs::write(&self.0, &self.1);
+                }
+                let _ = std::fs::remove_dir_all(&self.2);
+            }
+        }
+        let _g = env_guard();
+        let checkout = ljos_test_boot::checkout();
+        let config = checkout.join(".git/config");
+        let Ok(before) = std::fs::read(&config) else {
+            eprintln!("skip: {} is not a git checkout", checkout.display());
+            return;
+        };
+        let probe = ljos_test_boot::fresh_dir(&ljos_test_boot::checkout_seats(), "ljos-user-probe");
+        let put_back = PutBack(config, before, probe.clone());
+        let out = crate::git_at(&probe)
+            .args(["config", "--local", "user.name", "ljos-probe"])
+            .output()
+            .unwrap();
+        let after = std::fs::read(&put_back.0).unwrap_or_default();
+        assert_eq!(
+            String::from_utf8_lossy(&after),
+            String::from_utf8_lossy(&put_back.1),
+            "git config in {} rewrote the checkout config: {out:?}",
+            probe.display()
+        );
+        assert!(!out.status.success(), "{out:?}");
+    }
+
     /// A temp home or LJOS_OFF runs the real binary. A temp working
     /// directory under a real home is judged, and so is a temp home with
     /// `LJOS_GUARD=on`.
@@ -56857,7 +56939,7 @@ mod tests {
         // A parallel test may set GIT_DIR on this process. These git
         // commands have to see this checkout, not that one.
         fn plain(&self, args: &[&str]) {
-            let out = std::process::Command::new(&self.real_git)
+            let out = ljos_test_boot::git_at(&self.real_git)
                 .arg("-C")
                 .arg(self.repo())
                 .args(args)
@@ -56880,7 +56962,7 @@ mod tests {
         /// exit 0 and said the `git-force-push` line once.
         fn runs_with_the_line(&self, args: &[&str]) {
             let root = self.root.path();
-            let out = std::process::Command::new(root.join("guard-bin/git"))
+            let out = ljos_test_boot::git_at(root.join("guard-bin/git"))
                 .args(args)
                 .current_dir(self.repo())
                 .env("HOME", root.join("home"))
@@ -58777,7 +58859,7 @@ mod tests {
     fn a_held_tracker_lock_is_waited_out_only_until_the_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
-        let out = std::process::Command::new("git")
+        let out = ljos_test_boot::git()
             .args(["init", "-q", "-b", "main"])
             .current_dir(repo)
             .output()
@@ -60694,7 +60776,7 @@ mod tests {
         let repo = away.path().join("leidarljos");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = ljos_test_boot::git()
                 .arg("-C")
                 .arg(&repo)
                 .args(args)
@@ -60758,7 +60840,7 @@ mod tests {
         let repo = away.path().join("obchk");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = ljos_test_boot::git()
                 .arg("-C")
                 .arg(&repo)
                 .args(args)
@@ -69016,6 +69098,7 @@ mod tests {
                     env.display()
                 ))
                 .env_clear()
+                .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .output()
                 .unwrap();
@@ -69032,6 +69115,7 @@ mod tests {
                     env.display()
                 ))
                 .env_clear()
+                .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .output()
                 .unwrap();

@@ -65,6 +65,7 @@ fn seat_env(cmd: &mut Command, home: &Path, path: &str, port: Option<u16>) {
     // when a read without the token is refused; the daemon and the
     // client share the token file under this home.
     cmd.env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .current_dir(home)
         .env("HOME", home)
         .env("PATH", path)

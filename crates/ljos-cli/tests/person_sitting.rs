@@ -76,6 +76,7 @@ fn sit(shape: &str) -> std::process::Output {
         cmd.arg("-w").arg(env!("CARGO_BIN_EXE_ljos")).args(args);
     }
     cmd.env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

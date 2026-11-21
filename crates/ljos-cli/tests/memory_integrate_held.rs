@@ -106,6 +106,7 @@ fn ljos(home: &Path, root: &Path, url: &str, args: &[&str]) -> std::process::Out
         .args(args)
         .current_dir(root)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin")
         .env("TMPDIR", home.join("tmp"))

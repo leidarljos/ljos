@@ -90,6 +90,7 @@ impl Home {
             .port();
         let mut cmd = Command::new(program);
         cmd.env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("HOME", home)
             .env("PATH", path)
             .env("PACKSET_PORT", port.to_string())

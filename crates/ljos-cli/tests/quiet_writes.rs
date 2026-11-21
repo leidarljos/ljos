@@ -99,6 +99,7 @@ impl Board {
             .args(args)
             .current_dir(&self.root)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", &self.path)
             .env("HOME", &self.home)
             .env("GIT_CONFIG_GLOBAL", &self.gitconfig)

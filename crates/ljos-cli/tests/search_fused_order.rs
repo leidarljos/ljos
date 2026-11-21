@@ -114,6 +114,7 @@ fn the_page_follows_fused_order_when_dense_rank_disagrees() {
         .args(["search", "kiln", "schedule"])
         .current_dir(home)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join("config"))

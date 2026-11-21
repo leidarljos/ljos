@@ -79,6 +79,7 @@ fn session(program: &str, args: &[&str]) -> (String, String, Duration) {
     let mut child = Command::new(program)
         .args(args)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HOME", &home)
         .env("TMPDIR", &home)

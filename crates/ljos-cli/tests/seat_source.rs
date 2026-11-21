@@ -44,6 +44,7 @@ fn seat_out(daemon: &Path, config: &Path, extra: &[(&str, &str)]) -> String {
     cmd.arg(env!("CARGO_BIN_EXE_ljos"))
         .arg("seat")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", config)
         .env("XDG_CONFIG_HOME", config)

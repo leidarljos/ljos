@@ -150,6 +150,7 @@ esac
             .args(["sitting", &self.issue, "--verbose"])
             .current_dir(self._dir.path())
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self._dir.path().display()),

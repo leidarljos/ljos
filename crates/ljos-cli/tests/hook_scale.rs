@@ -91,6 +91,7 @@ impl Seat {
 
 fn env_for(cmd: &mut Command, home: &Path, path: &str, port: Option<u16>) {
     cmd.env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .current_dir(home)
         .env("HOME", home)
         .env("PATH", path)
