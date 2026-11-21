@@ -31,13 +31,13 @@
 //! its own, in a session it keeps (see `persona_session`).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
 
 /// Which judge answers the questions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
     /// Jev over TypeSafe's API or OpenRouter's Decisions API.
@@ -69,7 +69,7 @@ impl Backend {
 }
 
 /// One judge: where a decision is sent and how.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Judge {
     #[serde(default)]
     pub backend: Backend,
@@ -110,7 +110,7 @@ pub const DECISIONS: &[(&str, &str)] = &[
 ];
 
 /// `~/.config/ljos/jev.toml`.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     /// Off unless set: the call sends the prompt and claims off the machine.
     #[serde(default)]
@@ -435,7 +435,7 @@ pub fn config() -> Option<(Config, String)> {
 }
 
 /// What Jev said about one prompt.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Judgment {
     /// Probability that each candidate, by its index, bears on the prompt.
     pub bears: Vec<f64>,
@@ -570,7 +570,7 @@ fn judge_name(j: &Judge) -> String {
 
 /// A claim the prompt judge saw, by id and kind. The log keeps these and
 /// not the claim text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LoggedClaim {
     pub id: String,
     pub kind: String,
@@ -609,7 +609,7 @@ struct Attempt {
 
 /// One judge's reply to `body`, from the cache or inside its budget.
 /// A miss is still an attempt, so the log can score a timeout.
-fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64) -> Attempt {
+fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64, cache: Option<&Path>) -> Attempt {
     let started = std::time::Instant::now();
     let backend = j.backend.name();
     let model = j.model.clone();
@@ -634,7 +634,7 @@ fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64) -> Attempt {
     let mut body = body.clone();
     body["model"] = Value::String(j.model.clone());
     let request = format!("{}\n{body}", judge_name(j));
-    if let Some(reply) = cached(&request, cache_days) {
+    if let Some(reply) = cached_in(cache, &request, cache_days) {
         let latency_ms = started.elapsed().as_millis();
         return Attempt {
             name: String::new(),
@@ -659,7 +659,7 @@ fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64) -> Attempt {
     if answered {
         if let Some(reply) = reply.as_ref() {
             if cache_days > 0 {
-                keep(&request, reply);
+                keep_in(cache, &request, reply);
             }
         }
     }
@@ -691,6 +691,17 @@ fn post(
     about: Value,
     claims: &[LoggedClaim],
 ) -> Option<Value> {
+    post_in(cfg, body, kind, about, claims, &Dirs::from_env())
+}
+
+fn post_in(
+    cfg: &Config,
+    body: Value,
+    kind: &str,
+    about: Value,
+    claims: &[LoggedClaim],
+    dirs: &Dirs,
+) -> Option<Value> {
     let decision = DECISIONS
         .iter()
         .find(|(_, k)| *k == kind)
@@ -699,19 +710,24 @@ fn post(
     if judges.is_empty() {
         return None;
     }
-    let replies = ask_all(&judges, &body, cfg.cache_days);
-    finish_post(&body, kind, about, claims, replies)
+    let replies = ask_all(&judges, &body, cfg.cache_days, dirs.cache.as_deref());
+    finish_post_in(&body, kind, about, claims, replies, dirs.state.as_deref())
 }
 
 /// Ask each judge at once, each inside its own budget.
-fn ask_all(judges: &[(String, Judge, String)], body: &Value, cache_days: u64) -> Vec<Attempt> {
+fn ask_all(
+    judges: &[(String, Judge, String)],
+    body: &Value,
+    cache_days: u64,
+    cache: Option<&Path>,
+) -> Vec<Attempt> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = judges
             .iter()
             .map(|(name, j, key)| {
                 let name = name.clone();
                 scope.spawn(move || {
-                    let mut attempt = ask_one(j, key, body, cache_days);
+                    let mut attempt = ask_one(j, key, body, cache_days, cache);
                     attempt.name = name;
                     attempt
                 })
@@ -745,12 +761,13 @@ fn stamp_confidence(answers: &mut Value) {
 
 /// Pool the replies, record the cost and log every attempt, including a
 /// timeout or a failure. `None` when no judge answered.
-fn finish_post(
+fn finish_post_in(
     body: &Value,
     kind: &str,
     about: Value,
     claims: &[LoggedClaim],
     replies: Vec<Attempt>,
+    state: Option<&Path>,
 ) -> Option<Value> {
     if replies.is_empty() {
         return None;
@@ -762,9 +779,9 @@ fn finish_post(
     let cost: f64 = ok.iter().map(|r| r.cost).sum();
     if !ok.is_empty() {
         if ok.iter().all(|r| r.cached) {
-            count("cached");
+            count_in(state, "cached");
         } else {
-            record_cost(cost);
+            record_cost_in(state, cost);
         }
     }
     let weighted: Vec<(f64, Value)> = ok
@@ -806,22 +823,25 @@ fn finish_post(
         .iter()
         .map(|c| serde_json::json!({"id": c.id, "kind": c.kind}))
         .collect();
-    log(&serde_json::json!({
-        "ts": crate::now_utc(),
-        "kind": kind,
-        "judges": replies.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
-        "about": about,
-        "answers": answers.clone(),
-        "per_judge": per,
-        "why": why,
-        "cost": cost,
-        "prompt_hash": prompt_hash,
-        "claims": claims,
-        "latency_ms": latency_ms,
-        "status": status,
-        "backend": replies.first().map(|r| r.backend).unwrap_or(""),
-        "model": replies.first().map(|r| r.model.clone()).unwrap_or_default(),
-    }));
+    log_in(
+        state,
+        &serde_json::json!({
+            "ts": crate::now_utc(),
+            "kind": kind,
+            "judges": replies.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+            "about": about,
+            "answers": answers.clone(),
+            "per_judge": per,
+            "why": why,
+            "cost": cost,
+            "prompt_hash": prompt_hash,
+            "claims": claims,
+            "latency_ms": latency_ms,
+            "status": status,
+            "backend": replies.first().map(|r| r.backend).unwrap_or(""),
+            "model": replies.first().map(|r| r.model.clone()).unwrap_or_default(),
+        }),
+    );
     if ok.is_empty() {
         None
     } else {
@@ -1099,14 +1119,44 @@ fn command_post(cfg: &Judge, body: &Value) -> Option<Value> {
     (!answers.as_object()?.is_empty()).then(|| serde_json::json!({"answers": answers}))
 }
 
+/// State and cache directories resolved once on the calling thread before
+/// spawning a background judge, so a late reply writes into the `HOME`
+/// and XDG directories that were current at spawn.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Dirs {
+    pub state: Option<PathBuf>,
+    pub cache: Option<PathBuf>,
+}
+
+impl Dirs {
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            state: state_dir(),
+            cache: cache_dir_path(),
+        }
+    }
+}
+
 /// Ask Jev about one prompt, inside the configured budget. `claims` are
 /// the ids and kinds that line up with `candidates`; the log keeps those
 /// and a hash of the prompt, not the text.
 #[must_use]
 pub fn judge(prompt: &str, candidates: &[&str], claims: &[LoggedClaim]) -> Option<Judgment> {
     let (cfg, _) = config()?;
+    judge_with(&cfg, prompt, candidates, claims, &Dirs::from_env())
+}
+
+#[must_use]
+pub fn judge_with(
+    cfg: &Config,
+    prompt: &str,
+    candidates: &[&str],
+    claims: &[LoggedClaim],
+    dirs: &Dirs,
+) -> Option<Judgment> {
     let body = request(&cfg.model, prompt, candidates);
-    let reply = post(&cfg, body, "hook", Value::Null, claims)?;
+    let reply = post_in(cfg, body, "hook", Value::Null, claims, dirs)?;
     let mut judged = parse(&reply, candidates.len())?;
     judged.cost = price_in(cfg.backend, cfg.usd_per_mtok_in)
         .map(|p| cost_of(&reply, p))
@@ -1337,36 +1387,41 @@ pub fn sha256_hex(data: &[u8]) -> String {
     h.iter().map(|x| format!("{x:08x}")).collect()
 }
 
-/// `$XDG_CACHE_HOME/ljos/jev`, mode 0700, one file per request hash.
-fn cache_dir() -> Option<PathBuf> {
-    let dir = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?
-        .join("ljos")
-        .join("jev");
-    std::fs::create_dir_all(&dir).ok()?;
+/// `$XDG_CACHE_HOME/ljos/jev` without creating it yet.
+fn cache_dir_path() -> Option<PathBuf> {
+    Some(
+        std::env::var_os("XDG_CACHE_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?
+            .join("ljos")
+            .join("jev"),
+    )
+}
+
+fn ensure_cache_dir(dir: &Path) -> Option<()> {
+    std::fs::create_dir_all(dir).ok()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
     }
-    Some(dir)
+    Some(())
 }
 
 /// The file an identical request lands in. The name is the hash. The file
 /// holds the hash and the reply, not the request.
-fn cache_file(request: &str) -> Option<PathBuf> {
-    Some(cache_dir()?.join(sha256_hex(request.as_bytes())))
+fn cache_file_in(cache: Option<&Path>, request: &str) -> Option<PathBuf> {
+    Some(cache?.join(sha256_hex(request.as_bytes())))
 }
 
 /// The answer to an identical request made within `days`.
-fn cached(request: &str, days: u64) -> Option<Value> {
+fn cached_in(cache: Option<&Path>, request: &str, days: u64) -> Option<Value> {
     if days == 0 {
         return None;
     }
     let hash = sha256_hex(request.as_bytes());
-    let path = cache_file(request)?;
+    let path = cache_file_in(cache, request)?;
     let age = std::fs::metadata(&path)
         .ok()?
         .modified()
@@ -1381,11 +1436,20 @@ fn cached(request: &str, days: u64) -> Option<Value> {
     (entry["hash"].as_str() == Some(hash.as_str())).then(|| entry["reply"].clone())
 }
 
-fn keep(request: &str, reply: &Value) {
+#[cfg(test)]
+fn cached(request: &str, days: u64) -> Option<Value> {
+    cached_in(cache_dir_path().as_deref(), request, days)
+}
+
+fn keep_in(cache: Option<&Path>, request: &str, reply: &Value) {
     let hash = sha256_hex(request.as_bytes());
-    let Some(path) = cache_file(request) else {
+    let Some(dir) = cache else {
         return;
     };
+    if ensure_cache_dir(dir).is_none() {
+        return;
+    }
+    let path = dir.join(&hash);
     let entry = serde_json::json!({"hash": hash, "reply": reply});
     #[cfg(unix)]
     {
@@ -1409,10 +1473,15 @@ fn keep(request: &str, reply: &Value) {
     }
 }
 
+#[cfg(test)]
+fn keep(request: &str, reply: &Value) {
+    keep_in(cache_dir_path().as_deref(), request, reply);
+}
+
 /// Add one to this month's tally named `what` (`calls`, `cached`).
-fn count(what: &str) {
-    let Some(dir) = state_dir() else { return };
-    let _ = std::fs::create_dir_all(&dir);
+fn count_in(state: Option<&Path>, what: &str) {
+    let Some(dir) = state else { return };
+    let _ = std::fs::create_dir_all(dir);
     let path = dir.join("jev-cost.toml");
     let mut totals: BTreeMap<String, f64> = std::fs::read_to_string(&path)
         .ok()
@@ -1674,9 +1743,9 @@ pub fn score_log(entries: &[Value], outcomes: &BTreeMap<String, String>) -> Stri
 
 /// Every answer Jev gave, one JSON line each in the state directory, so
 /// its probabilities can be scored once the outcomes are known.
-fn log(entry: &Value) {
-    let Some(dir) = state_dir() else { return };
-    let _ = std::fs::create_dir_all(&dir);
+fn log_in(state: Option<&Path>, entry: &Value) {
+    let Some(dir) = state else { return };
+    let _ = std::fs::create_dir_all(dir);
     let Ok(mut line) = serde_json::to_string(entry) else {
         return;
     };
@@ -1688,11 +1757,16 @@ fn log(entry: &Value) {
     );
 }
 
+#[cfg(test)]
+fn log(entry: &Value) {
+    log_in(state_dir().as_deref(), entry);
+}
+
 /// Add a call's cost to this month's running total in the state directory,
 /// so `ljos doctor` can say what Jev has cost.
-fn record_cost(cost: f64) {
-    let Some(dir) = state_dir() else { return };
-    let _ = std::fs::create_dir_all(&dir);
+fn record_cost_in(state: Option<&Path>, cost: f64) {
+    let Some(dir) = state else { return };
+    let _ = std::fs::create_dir_all(dir);
     let month = crate::now_utc().chars().take(7).collect::<String>();
     let path = dir.join("jev-cost.toml");
     let mut totals: BTreeMap<String, f64> = std::fs::read_to_string(&path)

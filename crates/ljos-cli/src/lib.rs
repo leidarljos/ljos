@@ -12410,12 +12410,12 @@ type Pool = Option<Vec<(Hit, DenseSignal)>>;
 
 /// Jev's judgment of the prompt, and the local search that answers when
 /// Jev does not. With Jev on, the pack is searched once, here, and the
-/// judge reads those hits on its own thread. The wait is
-/// [`JEV_HOOK_BUDGET_MS`] from when that thread starts. The search time
-/// stays on the search budget. The local search comes back as `Some`
-/// when it ran, so the caller does not repeat it. Two searches of one
-/// cue at once cost the hook the slower of the two, about 190 ms against
-/// 115 ms for one.
+/// judge reads those hits in a detached worker process (or on its own
+/// thread if the worker cannot spawn). The wait is [`JEV_HOOK_BUDGET_MS`]
+/// from when that wait starts. The search time stays on the search
+/// budget. The local search comes back as `Some` when it ran, so the
+/// caller does not repeat it. Two searches of one cue at once cost the
+/// hook the slower of the two, about 190 ms against 115 ms for one.
 fn judged_with_local(
     call: &HookCall,
     cue: &str,
@@ -12432,12 +12432,53 @@ fn judged_with_local(
     let hits: Option<Vec<Hit>> = local
         .as_ref()
         .map(|pool| pool.iter().map(|(h, _)| h.clone()).collect());
+    let dirs = jev::Dirs::from_env();
+    let cfg = jev::config().map(|(c, _)| c);
+    let seen = seen_ids(call.session.as_deref());
+    if let Some(hits) = hits {
+        let Some(cfg) = cfg else {
+            return (None, Some(local));
+        };
+        let Some((candidates, texts, claims)) = prepare_prompt_candidates(cue, hits, &seen, &cfg)
+        else {
+            return (None, Some(local));
+        };
+        let job = JudgeWorkerJob {
+            cfg,
+            cue: cue.to_string(),
+            candidates: texts,
+            claims,
+            dirs,
+        };
+        let rx = match spawn_judge_worker(&job) {
+            Some(rx) => rx,
+            None => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let refs: Vec<&str> = job.candidates.iter().map(String::as_str).collect();
+                    let judged = hook_timed("jev_judge", || {
+                        jev::judge_with(&job.cfg, &job.cue, &refs, &job.claims, &job.dirs)
+                    });
+                    let _ = tx.send(judged);
+                });
+                rx
+            }
+        };
+        let judged = rx
+            .recv_timeout(std::time::Duration::from_millis(jev_hook_budget_ms()))
+            .ok()
+            .flatten()
+            .map(|j| (candidates, j));
+        return (judged, Some(local));
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     {
         let call = call.clone();
         let cue = cue.to_string();
         std::thread::spawn(move || {
-            let _ = tx.send(judged_prompt_over(&call, &cue, hits));
+            let _ = tx.send(judged_prompt_over_with(
+                &call, &cue, None, cfg, &seen, &dirs,
+            ));
         });
     }
     let judged = rx
@@ -12447,36 +12488,40 @@ fn judged_with_local(
     (judged, Some(local))
 }
 
-/// The prompt's candidates and Jev's judgment of them, when this machine
-/// turned Jev on and the prompt is worth a call: enough words to judge,
-/// at least `min_candidates` claims to choose between after the local
-/// kind, refresher and seen filters, and the month's spend under its cap.
-/// Candidates come from the search without the local cross-encoder, which
-/// Jev replaces.
-fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)> {
-    judged_prompt_over(call, cue, None)
+#[derive(serde::Serialize, serde::Deserialize)]
+struct JudgeWorkerJob {
+    cfg: jev::Config,
+    cue: String,
+    candidates: Vec<String>,
+    claims: Vec<jev::LoggedClaim>,
+    dirs: jev::Dirs,
 }
 
-/// [`judged_prompt`] over `hits` already found for `cue`, searching the
-/// pack only when none are given. A search does not count as a recall.
-/// The memories the prompt is handed are counted where the note is built.
-fn judged_prompt_over(
-    call: &HookCall,
-    cue: &str,
-    hits: Option<Vec<Hit>>,
-) -> Option<(Vec<Hit>, jev::Judgment)> {
-    if call.event != "UserPromptSubmit" {
-        return None;
+/// Run one prompt judgment in a detached worker started by `ljos hook`.
+pub fn run_jev_judge_worker() -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    let mut raw = String::new();
+    std::io::stdin().read_to_string(&mut raw)?;
+    let job: JudgeWorkerJob = serde_json::from_str(&raw)?;
+    let texts: Vec<&str> = job.candidates.iter().map(String::as_str).collect();
+    let judged = jev::judge_with(&job.cfg, &job.cue, &texts, &job.claims, &job.dirs);
+    if let Ok(line) = serde_json::to_string(&judged) {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
     }
-    let (cfg, _) = jev::config()?;
+    Ok(())
+}
+
+fn prepare_prompt_candidates(
+    cue: &str,
+    hits: Vec<Hit>,
+    seen: &std::collections::BTreeSet<String>,
+    cfg: &jev::Config,
+) -> Option<(Vec<Hit>, Vec<String>, Vec<jev::LoggedClaim>)> {
     if cue.split_whitespace().count() < cfg.min_words {
         return None;
     }
-    let seen = seen_ids(call.session.as_deref());
-    let hits = match hits {
-        Some(hits) => hits,
-        None => hook_timed("judge_search", || packset_search_relevant(cue, RERANK_POOL)).ok()?,
-    };
     let pool: Vec<Hit> = hits
         .into_iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
@@ -12491,7 +12536,7 @@ fn judged_prompt_over(
     if candidates.len() < cfg.min_candidates {
         return None;
     }
-    let texts: Vec<&str> = candidates.iter().map(|h| h.text.as_str()).collect();
+    let texts: Vec<String> = candidates.iter().map(|h| h.text.clone()).collect();
     let claims: Vec<jev::LoggedClaim> = candidates
         .iter()
         .map(|h| jev::LoggedClaim {
@@ -12499,7 +12544,109 @@ fn judged_prompt_over(
             kind: h.kind.clone(),
         })
         .collect();
-    let judged = hook_timed("jev_judge", || jev::judge(cue, &texts, &claims))?;
+    Some((candidates, texts, claims))
+}
+
+#[cfg(unix)]
+fn spawn_judge_worker(
+    job: &JudgeWorkerJob,
+) -> Option<std::sync::mpsc::Receiver<Option<jev::Judgment>>> {
+    use std::io::{BufRead, Write};
+    use std::os::unix::process::CommandExt as _;
+    let exe = std::env::current_exe()
+        .ok()
+        .filter(|p| p.file_name().is_some_and(|n| n == "ljos"))?;
+    let payload = serde_json::to_vec(job).ok()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["hook", "--judge-worker"])
+        .env_remove("LJOS_IN_HOOK")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: setsid is async-signal-safe and detaches the worker from the
+    // hook's session so a late reply finishes after `ljos hook` exits.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(&payload).is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    }
+    let stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        let parsed = if reader.read_line(&mut line).is_ok() {
+            serde_json::from_str::<Option<jev::Judgment>>(line.trim())
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let _ = tx.send(parsed);
+        let _ = child.wait();
+    });
+    Some(rx)
+}
+
+#[cfg(not(unix))]
+fn spawn_judge_worker(
+    _job: &JudgeWorkerJob,
+) -> Option<std::sync::mpsc::Receiver<Option<jev::Judgment>>> {
+    None
+}
+
+/// The prompt's candidates and Jev's judgment of them, when this machine
+/// turned Jev on and the prompt is worth a call: enough words to judge,
+/// at least `min_candidates` claims to choose between after the local
+/// kind, refresher and seen filters, and the month's spend under its cap.
+/// Candidates come from the search without the local cross-encoder, which
+/// Jev replaces.
+fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)> {
+    if call.event != "UserPromptSubmit" {
+        return None;
+    }
+    let dirs = jev::Dirs::from_env();
+    let cfg = jev::config().map(|(c, _)| c);
+    let seen = seen_ids(call.session.as_deref());
+    judged_prompt_over_with(call, cue, None, cfg, &seen, &dirs)
+}
+
+/// [`judged_prompt`] over `hits` already found for `cue`, searching the
+/// pack only when none are given. A search does not count as a recall.
+/// The memories the prompt is handed are counted where the note is built.
+fn judged_prompt_over_with(
+    call: &HookCall,
+    cue: &str,
+    hits: Option<Vec<Hit>>,
+    cfg: Option<jev::Config>,
+    seen: &std::collections::BTreeSet<String>,
+    dirs: &jev::Dirs,
+) -> Option<(Vec<Hit>, jev::Judgment)> {
+    if call.event != "UserPromptSubmit" {
+        return None;
+    }
+    let cfg = cfg?;
+    if cue.split_whitespace().count() < cfg.min_words {
+        return None;
+    }
+    let hits = match hits {
+        Some(hits) => hits,
+        None => hook_timed("judge_search", || packset_search_relevant(cue, RERANK_POOL)).ok()?,
+    };
+    let (candidates, texts, claims) = prepare_prompt_candidates(cue, hits, seen, &cfg)?;
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let judged = hook_timed("jev_judge", || {
+        jev::judge_with(&cfg, cue, &refs, &claims, dirs)
+    })?;
     Some((candidates, judged))
 }
 
