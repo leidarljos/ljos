@@ -1,0 +1,2 @@
+The protocol, the seat skill, the MCP reference, the environment reference and the ljos-mcp instructions and tool descriptions now say which calls claim a ticket: `ljos_start`, `ljos_sitting` and `ljos_claim`, plus `ljos_finish` and `ljos_complete` when they recover this seat's own claim.
+They also say that no hook files a claim or cites a commit as a deed, that a git commit is only logged as a note, and that Stop, session end, shutdown and idle finish no claim.

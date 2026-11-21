@@ -33,15 +33,15 @@ fails, run `doctor` before drawing any conclusion.
 
 ## The seat keeps the book
 
-A harness hook files the claim, the deed and the finish. You do not have to call them.
-At session start and on each prompt the hook injects recall. The first edit
-(Edit, Write, MultiEdit, apply_patch) files a vissue titled from the prompt
-and claims it, when this session has no claim on this repository. A git commit
-the tool hook sees is cited as a deed. Stop and the end of the session finish
-the claim, or extract what the session learned and release it. The same loop runs
-inside ljos-mcp for a client with no hooks: the first tool that writes claims,
-and the server finishes when it shuts down. Call claim, deed or finish
-yourself only to name an issue, an accession or a lesson.
+No hook files a claim, cites a deed or finishes a claim. Call them yourself.
+At session start and on each prompt the hook injects recall. An edit files
+no vissue and takes no claim. A git commit the hooks see is written as one
+`note:` line to the book log; it is not cited as a deed. Stop and the end
+of the session do not finish or release the claim: the end of the session
+fires the session's memories, writes its notes and drains a queued tracker
+push. In ljos-mcp, a write tool takes no claim, and shutdown or an idle
+session leaves the claim in place. Claim with `sitting`, `start` or
+`claim`, cite with `deed`, and free the claim with `finish` or `release`.
 
 A bot with no harness hooks passes its own name as `seat` on every call.
 Before any repo work it calls `ljos sitting ISSUE`. `ljos start ISSUE` is
@@ -68,8 +68,12 @@ already has it. `ljos recall` lists those working notes apart from the
 facts, under an `unverified logbook notes` heading, each labelled by its
 agent-derived origin.
 `finish` takes the lesson, releases the claim, syncs, and pushes the
-tracker. The server also claims on the first write and finishes on
-shutdown or when the session goes idle.
+tracker. In ljos-mcp, `ljos_start`, `ljos_sitting` and `ljos_claim`
+claim. `ljos_finish` also claims once to retry a claim its sitting could
+not record, and `ljos_finish` and `ljos_complete` take over a node a gone
+conversation of the same seat holds before they complete it. No other
+tool claims, and the server finishes nothing on shutdown or when the
+session goes idle.
 On a cloud seat, the one `ljos cloud up` marked, finish exports the deeds
 that seat cited on the issue into `.ljos/deeds/<seat>/`, and the tracker
 commit takes the bag.
