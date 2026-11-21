@@ -45,6 +45,7 @@ fn the_help_for_search_and_remember_has_whole_code_spans() {
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args([command, "--help"])
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", "/usr/bin:/bin")
             .output()
             .unwrap();

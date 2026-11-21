@@ -78,6 +78,7 @@ fn the_health_wait_and_the_search_wait_share_one_budget() {
         .args(["search", "kiln"])
         .current_dir(root)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", root)
         .env("XDG_CONFIG_HOME", root.join("config"))
