@@ -68,13 +68,8 @@ impl Seat {
         paths.push(PathBuf::from("/usr/bin"));
         paths.push(PathBuf::from("/bin"));
         let path = std::env::join_paths(paths).unwrap();
-        // A writer another test left on 8761 answers 401 for this home.
-        // A free port makes the step run the stub `packset ensure`.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        // No pack address or port: naming one keeps memory on in this
+        // temporary home, and the onboard lines here are the memory-off ones.
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(home)
@@ -90,7 +85,6 @@ impl Seat {
             .env("XDG_RUNTIME_DIR", home.join("run"))
             .env("LJOS_TRACKER_GIT", "off")
             .env("LJOS_SEAT", "ada")
-            .env("PACKSET_PORT", port.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
