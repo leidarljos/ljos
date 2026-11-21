@@ -23934,6 +23934,66 @@ fn note_queue_row() -> Habitat {
     }
 }
 
+/// How the seal queue row opens when rows of seal-queue.jsonl do not
+/// parse. The row is `warn`: those tickets are not sealed until a drain
+/// moves the bad rows aside and the person runs `ljos sync`.
+const SEAL_QUEUE_DAMAGED: &str = "damaged: ";
+
+/// The doctor row for the ticket seals finish queued, beside the note
+/// queue row. It only reads, without the queue lock. `None` when no seal
+/// waits, no row is damaged and no damaged file is left, so a seat that
+/// never queued a seal shows no row.
+fn seal_queue_row() -> Option<Habitat> {
+    let dir = note_queue::state_dir();
+    let queue = dir.join("seal-queue.jsonl");
+    let row = |state: String| Habitat {
+        name: "seal queue",
+        state,
+        ok: true,
+    };
+    let opened = match open_state_dir(&queue) {
+        Ok(opened) => opened,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            let state = doctor_state_read("seal queue", &queue, Err(err)).unwrap_err();
+            return Some(row(format!("{SEAL_QUEUE_DAMAGED}{state}")));
+        }
+    };
+    let read = read_state_file_dated_at(&opened.0, &opened.1, &queue, DOCTOR_READ_LIMIT);
+    let bytes = match doctor_state_read("seal queue", &queue, read) {
+        Ok(bytes) => bytes,
+        Err(state) => return Some(row(format!("{SEAL_QUEUE_DAMAGED}{state}"))),
+    };
+    let (seals, unread): (Vec<note_queue::QueuedSeal>, usize) = complete_rows_counted(&bytes);
+    let waiting = seals.len();
+    if unread > 0 {
+        return Some(row(format!(
+            "{SEAL_QUEUE_DAMAGED}the seal queue at {} has {unread} row(s) that are not a seal and {waiting} seal(s) wait; the next drain moves the bad rows aside, so run `ljos sync`.",
+            queue.display()
+        )));
+    }
+    let set_aside = note_queue::seal_set_aside_at(&opened.0, &dir);
+    if !set_aside.is_empty() {
+        let bytes: u64 = set_aside.iter().map(|(_, len)| len).sum();
+        let files: Vec<String> = set_aside
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect();
+        return Some(row(format!(
+            "{QUEUE_SET_ASIDE}a drain moved {bytes} byte(s) of the seal queue that are not a seal to {}. Read the file, then delete it. {waiting} seal(s) wait, and the tickets in it were not sealed, so run `ljos sync`.",
+            files.join(", ")
+        )));
+    }
+    if waiting == 0 {
+        return None;
+    }
+    let tickets: Vec<&str> = seals.iter().map(|seal| seal.issue.trim()).collect();
+    Some(row(format!(
+        "{waiting} ticket seal(s) wait ({}); each runs on the next call that reaches the pack after its lesson leaves the note queue",
+        tickets.join(", ")
+    )))
+}
+
 /// Whether a pack refused a note for its kind, as a pack before 0.15.2
 /// does. Any other refusal stays the answer.
 fn note_kind_unknown(err: &anyhow::Error) -> bool {
@@ -34499,6 +34559,7 @@ pub fn doctor() -> Vec<Habitat> {
         config_diag::doctor_rows(std::env::current_dir().ok().as_deref()),
     );
     doctor_push(&mut out, note_queue_row());
+    doctor_extend(&mut out, seal_queue_row());
     if let Some(state) = sync::legacy_doctor_state() {
         doctor_push(
             &mut out,
@@ -37245,6 +37306,12 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.ok
         && row.name == "note queue"
         && (row.state.starts_with(QUEUE_BUSY) || row.state.starts_with(QUEUE_SET_ASIDE))
+    {
+        return "warn";
+    }
+    if row.ok
+        && row.name == "seal queue"
+        && (row.state.starts_with(SEAL_QUEUE_DAMAGED) || row.state.starts_with(QUEUE_SET_ASIDE))
     {
         return "warn";
     }
@@ -69682,6 +69749,65 @@ mod tests {
             std::fs::read(&queue).unwrap(),
             b"{\"issue\":\"ljos-abc\",\"te"
         );
+    }
+
+    /// The seal queue row says nothing when no seal was queued, counts
+    /// waiting seals, and warns on a row that is not a seal and on a file
+    /// a drain moved aside.
+    #[test]
+    fn doctor_reports_the_seal_queue_beside_the_note_queue() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let home = dir.path().join("home");
+        for path in [&state.join("ljos"), &home] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let _env = HoldEnv::set(&[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+        ]);
+        assert!(bounded("doctor seal queue", seal_queue_row).is_none());
+
+        let queue = note_queue::state_dir().join("seal-queue.jsonl");
+        std::fs::write(&queue, b"{\"issue\":\"demo-1\",\"root\":\"/t\",\"at\":1}\n").unwrap();
+        let row = bounded("doctor seal queue", seal_queue_row).expect("a waiting seal");
+        assert_eq!(row.name, "seal queue");
+        assert!(
+            row.state.starts_with("1 ticket seal(s) wait (demo-1)"),
+            "{}",
+            row.state
+        );
+        assert_eq!(doctor_word(&row), "ok");
+
+        std::fs::write(
+            &queue,
+            b"{\"issue\":\"demo-1\",\"root\":\"/t\",\"at\":1}\n{\"issue\":\"bro\n",
+        )
+        .unwrap();
+        let row = bounded("doctor seal queue", seal_queue_row).expect("a damaged row");
+        assert!(row.state.starts_with(SEAL_QUEUE_DAMAGED), "{}", row.state);
+        assert!(
+            row.state.contains("1 row(s) that are not a seal"),
+            "{}",
+            row.state
+        );
+        assert_eq!(doctor_word(&row), "warn");
+
+        std::fs::write(&queue, b"").unwrap();
+        std::fs::write(
+            note_queue::state_dir().join("seal-queue.jsonl.2026-11-21.damaged"),
+            b"{\"issue\":\"bro\n",
+        )
+        .unwrap();
+        let row = bounded("doctor seal queue", seal_queue_row).expect("a set-aside file");
+        assert!(row.state.starts_with(QUEUE_SET_ASIDE), "{}", row.state);
+        assert!(
+            row.state.contains("seal-queue.jsonl.2026-11-21.damaged"),
+            "{}",
+            row.state
+        );
+        assert_eq!(doctor_word(&row), "warn");
     }
 
     fn age_by(path: &std::path::Path, by: std::time::Duration) {
