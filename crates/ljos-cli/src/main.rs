@@ -2525,7 +2525,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Finish work on a ticket: remember the lesson and hand the claim back. The ticket stays open.
+    /// Finish work on a ticket: remember the lesson and hand the claim back. Without `--close` the ticket stays open.
     ///
     /// A sitting is one conversation's claim on an issue.
     /// With no id, this finishes that issue.
@@ -2535,7 +2535,7 @@ enum Cmd {
     /// that id and the issue this conversation holds.
     /// `--quiet` leaves that line off.
     /// Another conversation of this seat is not that issue.
-    /// With no lesson, a ticket that is still TODO and that nobody has claimed is left as it is.
+    /// Without `--close` and with no lesson, a ticket that is still TODO and that nobody has claimed is left as it is.
     /// The line names `ljos sitting ISSUE`.
     ///
     /// Example: `ljos finish --lesson "Cold metal seats."`
@@ -2543,7 +2543,7 @@ enum Cmd {
     Finish {
         /// The tracker id of the issue. Absent: the issue this conversation holds.
         issue: Option<String>,
-        /// Status to record: done, failed, or cancelled.
+        /// Status: done, failed, or cancelled. Only `--close` with done or cancelled records it. Any other finish checks it and records nothing.
         #[arg(long, default_value = "done")]
         status: String,
         /// The lesson this work taught, two sentences at most.
@@ -2567,7 +2567,7 @@ enum Cmd {
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
-        /// Complete the claim and close the tracker ticket. A runner is refused. CANCELLED with `--status cancelled`. With `--status failed` the claim is handed back and the ticket stays open. Only when the work is accepted or dropped, not when the work session ends.
+        /// Complete the claim and close the tracker ticket. A runner is refused unless a standing grant covers this seat and this ticket. CANCELLED with `--status cancelled`. With `--status failed` the claim is handed back and the ticket stays open. Only when the work is accepted or dropped, not when the work session ends.
         #[arg(long)]
         close: bool,
         /// Link the memories the ticket's title activates, say whether they

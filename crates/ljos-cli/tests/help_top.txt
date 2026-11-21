@@ -10,7 +10,7 @@ Start:
   remember     Remember one lesson, stored as written
   search       Show what ljos remembers about a topic, best match first
   sitting      Start work on a ticket, or file a plan and sit it
-  finish       Finish work on a ticket: remember the lesson and hand the claim back. The ticket stays open
+  finish       Finish work on a ticket: remember the lesson and hand the claim back. Without `--close` the ticket stays open
   due          List the memories due for review soonest
   help         Print this message, or the help of one command
 
