@@ -589,19 +589,31 @@ status of `done` or `cancelled` it completes the node instead. It links
 related memories only with `--verbose`, and learns from an outcome only
 when `--outcome` names one. Without
 `--lesson` it says so;
-a sitting that taught nothing worth two sentences is rare. By hand, the
-same four steps are:
+a sitting that taught nothing worth two sentences is rare. By hand, a
+plain `finish` is two steps:
 
-1. `ljos remember "..."` when the sitting taught a lesson.
-2. `ljos island TASK --fire` when the island served: the strongest memories
-   fire together and their links gain weight.
-3. `ljos complete ISSUE --status done` (`failed`, `cancelled`). Completing
-   the session node does not close the ticket, nor does a plain `finish`.
-   A person closes the ticket when the work is accepted.
-4. `ljos learn ISSUE --outcome OPTION` when the world says which option was
-   right. Every voter's record takes the outcome; the record moves a
-   voter's weight once it sets the voter apart from the panel, which a first
-   outcome cannot. A persona it refuted weighs less on its next ballot.
+1. `ljos remember "..."` when the sitting taught a lesson. `finish` files
+   its lesson tagged with the ticket's id.
+2. `ljos release ISSUE`. The session node goes back to ready and the
+   ticket stays open, whatever the status.
+
+Each flag adds a step:
+
+- `--verbose` runs `ljos island "TITLE" --fire` on the ticket's title: the
+  strongest memories fire together and their links gain weight. A plain
+  `finish` does not.
+- `--outcome OPTION` runs `ljos learn ISSUE --outcome OPTION`, for when the
+  world says which option was right. Every voter's record takes the
+  outcome; the record moves a voter's weight once it sets the voter apart
+  from the panel, which a first outcome cannot. A persona it refuted
+  weighs less on its next ballot.
+- `--close` with a status of `done` or `cancelled` completes the node, as
+  `ljos complete ISSUE --status done` (`cancelled`) does, in place of the
+  release, and then closes the ticket as `DONE` or `CANCELLED`.
+  `ljos complete` alone leaves the ticket open. With `failed`, `--close`
+  still releases the node and leaves the ticket open.
+
+A person closes the ticket when the work is accepted.
 
 Whatever the outcome, the claim and the finish commit the ticket when the tracker is a git checkout.
 `ljos claim` commits that claim, `sitting` commits after its claim and `finish` at the end of the work.
