@@ -112,6 +112,7 @@ impl Seat {
         let mut cmd = Command::new(program);
         cmd.args(args)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))

@@ -68,6 +68,7 @@ impl Seat {
         cmd.arg("file")
             .args(args)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", &path)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

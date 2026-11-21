@@ -88,6 +88,7 @@ fn invoke(home: &Path, dir: &Path, rel: Option<&Path>, args: &[&str]) -> Output 
         .arg("--dir")
         .arg(dir)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home)
         .env("XDG_CACHE_HOME", home.join("cache"))

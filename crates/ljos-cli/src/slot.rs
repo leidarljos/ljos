@@ -2484,6 +2484,7 @@ mod tests {
     /// count: a pin has to be in every one of those parents.
     #[test]
     fn slot_notes_introduced_on_two_branches_are_both_read() {
+        let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("repo");
         init_repo(&repo);

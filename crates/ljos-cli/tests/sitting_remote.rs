@@ -174,6 +174,7 @@ fn a_sitting_claims_when_the_tracker_remote_cannot_be_reached() {
         .args(["sitting", &issue])
         .current_dir(root.path())
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", path)
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

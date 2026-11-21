@@ -94,6 +94,7 @@ fn a_sitting_on_a_missing_issue_names_it_and_writes_nothing() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .current_dir(&product)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -248,6 +249,7 @@ impl Probe {
         let mut cmd = Command::new(program);
         cmd.current_dir(&self.product)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))

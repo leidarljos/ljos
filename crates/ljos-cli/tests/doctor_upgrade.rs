@@ -80,6 +80,7 @@ impl Home {
             .arg(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .envs(self.env())
             .output()
             .unwrap();
@@ -317,6 +318,7 @@ fn the_mcp_server_refreshes_a_stale_skill_on_start() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .envs(home.env())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -563,6 +565,7 @@ fn the_mcp_server_refreshes_a_stale_env_on_start() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .envs(home.env())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

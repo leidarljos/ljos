@@ -205,6 +205,7 @@ mod tests {
 
     #[test]
     fn a_half_recorded_yes_is_refused() {
+        let _lock = crate::test_env_lock();
         let at = an_hour_ago();
         let err = read(Some(WORDS), None, None).unwrap_err().to_string();
         assert!(err.contains("--at and --via"), "{err}");
@@ -215,6 +216,7 @@ mod tests {
 
     #[test]
     fn a_bare_yes_is_not_kept_as_a_yes() {
+        let _lock = crate::test_env_lock();
         let at = an_hour_ago();
         let err = read(Some("yes"), Some(&at), Some("inky"))
             .unwrap_err()
@@ -233,6 +235,7 @@ mod tests {
 
     #[test]
     fn a_time_nobody_has_reached_is_refused() {
+        let _lock = crate::test_env_lock();
         let soon = crate::utc_at(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -252,6 +255,7 @@ mod tests {
 
     #[test]
     fn a_carrier_is_one_seat_name() {
+        let _lock = crate::test_env_lock();
         let at = an_hour_ago();
         for bad in ["", "two seats", &"s".repeat(VIA_MAX + 1)] {
             assert!(

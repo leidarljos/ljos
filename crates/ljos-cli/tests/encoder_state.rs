@@ -407,6 +407,7 @@ fn packset_embed_line(path: &str, cwd: &std::path::Path) -> String {
         .args(["doctor", "--all"])
         .current_dir(cwd)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", path)
         .env("HOME", home.path())
         .env("PACKSET_URL", "off")

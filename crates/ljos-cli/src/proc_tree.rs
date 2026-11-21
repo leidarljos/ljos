@@ -722,10 +722,42 @@ fn hook_name(component: &str) -> Option<&'static str> {
         .map(|(_, runner)| *runner)
 }
 
+#[cfg(test)]
+static TEST_OWN_HOME: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) struct HoldOwnHome(Option<std::path::PathBuf>);
+
+#[cfg(test)]
+impl HoldOwnHome {
+    pub(crate) fn set(path: &std::path::Path) -> Self {
+        crate::require_env_lock();
+        let mut guard = TEST_OWN_HOME.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = guard.replace(path.to_path_buf());
+        Self(prev)
+    }
+}
+
+#[cfg(test)]
+impl Drop for HoldOwnHome {
+    fn drop(&mut self) {
+        let mut guard = TEST_OWN_HOME.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = self.0.take();
+    }
+}
+
 /// The home this user's passwd entry names. A tool call sets `HOME` for
 /// whatever it starts, but cannot change this.
 #[must_use]
 pub fn own_home() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = TEST_OWN_HOME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return Some(home);
+    }
     use std::os::unix::ffi::OsStrExt as _;
     let mut buf = vec![0u8; 1024];
     loop {
@@ -2075,6 +2107,49 @@ pub fn prompt_not_person_label(why: &str) -> String {
 }
 
 #[cfg(test)]
+pub(crate) fn test_non_temp_root() -> std::path::PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+        .join("test-roots");
+    if !crate::bookkeep::path_is_temp(Some(&target)) && std::fs::create_dir_all(&target).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
+        }
+        return std::fs::canonicalize(&target).unwrap_or(target);
+    }
+    if let Some(home) = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(std::path::PathBuf::from)
+    {
+        let canon_home = std::fs::canonicalize(&home).unwrap_or(home);
+        let canon_pw = own_home().map(|pw| std::fs::canonicalize(&pw).unwrap_or(pw));
+        let touches_pw = canon_pw
+            .as_ref()
+            .is_some_and(|pw| canon_home == *pw || pw.starts_with(&canon_home));
+        if !touches_pw && !crate::bookkeep::path_is_temp(Some(&canon_home)) {
+            let root = canon_home.join(".ljos-test-roots");
+            if std::fs::create_dir_all(&root).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755));
+                }
+                return std::fs::canonicalize(&root).unwrap_or(root);
+            }
+        }
+    }
+    panic!(
+        "cannot place non-temp test root without touching real passwd home: target {} and HOME {:?} are temporary, missing, or equal to the passwd home",
+        target.display(),
+        std::env::var_os("HOME")
+    );
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2186,7 +2261,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-roots-")
-            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .tempdir_in(test_non_temp_root())
             .unwrap();
         let home = base.path().join("u");
         let person = Person::new(&SystemAccounts);
@@ -2239,7 +2314,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-above-")
-            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .tempdir_in(test_non_temp_root())
             .unwrap();
         let home = base.path().join("u");
         let store = PathBuf::from(NIX_STORE);
@@ -2307,7 +2382,7 @@ mod tests {
         use std::os::unix::fs::MetadataExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-swap-")
-            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .tempdir_in(test_non_temp_root())
             .unwrap();
         let home = std::fs::canonicalize(base.path()).unwrap().join("u");
         let person = Person::new(&SystemAccounts);
@@ -2346,7 +2421,7 @@ mod tests {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         let base = tempfile::Builder::new()
             .prefix(".ljos-exe-")
-            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .tempdir_in(test_non_temp_root())
             .unwrap();
         let home = base.path().join("u");
         let bin = home.join(".local/bin");
@@ -2372,7 +2447,7 @@ mod tests {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         let base = tempfile::Builder::new()
             .prefix(".ljos-runtime-")
-            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .tempdir_in(test_non_temp_root())
             .unwrap();
         let home = base.path().join("u");
         let away = tempfile::tempdir().unwrap();
@@ -2434,7 +2509,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-store-")
-            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .tempdir_in(test_non_temp_root())
             .unwrap();
         let store = base.path().join("store");
         let bin = store.join("0c9yapqd0b8y4mj5xj7mrpmhy3l5ykh8-claude-code-2.0.1/bin");
@@ -2573,7 +2648,7 @@ mod tests {
 
         let base = tempfile::Builder::new()
             .prefix(".ljos-group-")
-            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .tempdir_in(test_non_temp_root())
             .unwrap();
         let home = base.path().join("u");
         let bin = home.join(".local/bin");
@@ -3082,6 +3157,66 @@ mod tests {
         assert!(
             chain.len() == DEPTH || top.ppid == 0 || hidden_parent,
             "{chain:?}"
+        );
+    }
+
+    #[test]
+    fn test_non_temp_root_never_falls_back_to_passwd_home() {
+        let _env = crate::test_env_lock_without_home();
+        let _own = HoldOwnHome::set(Path::new("/ljos-passwd-sentinel/person"));
+        let base = tempfile::tempdir().unwrap();
+        let target_base = base.path().join("target");
+        let test_roots = target_base.join("test-roots");
+        std::fs::create_dir_all(&test_roots).unwrap();
+        let canon_target = std::fs::canonicalize(&target_base).unwrap_or(target_base);
+        let canon_roots = std::fs::canonicalize(&test_roots).unwrap_or(test_roots);
+        struct ResetRoots;
+        impl Drop for ResetRoots {
+            fn drop(&mut self) {
+                crate::bookkeep::TEST_TEMP_ROOTS.with(|roots| roots.replace(None));
+            }
+        }
+        let _reset = ResetRoots;
+        crate::with_env_mutation(|| unsafe {
+            std::env::set_var("CARGO_TARGET_DIR", &canon_target);
+        });
+        crate::bookkeep::TEST_TEMP_ROOTS.with(|roots| {
+            roots.replace(Some(vec![
+                canon_roots.clone(),
+                std::fs::canonicalize("/tmp").unwrap_or_else(|_| PathBuf::from("/tmp")),
+            ]));
+        });
+        for bad_home in [
+            "/tmp/sandbox",
+            "/ljos-passwd-sentinel/person",
+            "/ljos-passwd-sentinel",
+        ] {
+            crate::with_env_mutation(|| unsafe {
+                std::env::set_var("HOME", bad_home);
+            });
+            let caught = std::panic::catch_unwind(test_non_temp_root);
+            assert!(
+                caught.is_err(),
+                "test_non_temp_root fell back instead of failing loudly for HOME={bad_home}: {caught:?}"
+            );
+        }
+        // Keep only target/test-roots marked temporary so a sibling directory
+        // stays non-temp even when the checkout or TMPDIR lives under /tmp.
+        crate::bookkeep::TEST_TEMP_ROOTS.with(|roots| {
+            roots.replace(Some(vec![canon_roots]));
+        });
+        let isolated = tempfile::Builder::new()
+            .prefix("isolated-home-")
+            .tempdir_in(&canon_target)
+            .unwrap();
+        crate::with_env_mutation(|| unsafe {
+            std::env::set_var("HOME", isolated.path());
+        });
+        let got = test_non_temp_root();
+        assert!(
+            got.starts_with(isolated.path()),
+            "expected isolated HOME fallback, got {}",
+            got.display()
         );
     }
 }

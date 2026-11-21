@@ -125,7 +125,9 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
     let installed = runner::install_dir();
     let runner = installed.path().join("claude");
     runner::runner_at(&runner);
-    let mut noted = Command::new(&runner)
+    let mut noted = Command::new(&runner);
+    installed.env(&mut noted);
+    let mut noted = noted
         .args([
             "-c",
             "\"$@\"; exit $?",
@@ -163,7 +165,9 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
         "prompt hook failed: {}",
         String::from_utf8_lossy(&noted.stderr)
     );
-    let mut child = Command::new(&runner)
+    let mut child = Command::new(&runner);
+    installed.env(&mut child);
+    let mut child = child
         .args([
             "-c",
             "\"$@\"; exit $?",

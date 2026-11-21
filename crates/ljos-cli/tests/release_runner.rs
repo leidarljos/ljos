@@ -119,6 +119,7 @@ fn cgroup_while_hook_blocks(bin: &Path) -> String {
     let mut child = Command::new(bin)
         .arg("hook")
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &home)
         .stdin(Stdio::piped())
@@ -185,7 +186,7 @@ rm -f "$fifo"
 mkfifo "$fifo"
 sleep 30 > "$fifo" &
 writer=$!
-env -i PATH=/usr/bin:/bin HOME="$home" "$copy" hook >"$out/hook.out" 2>"$out/hook.err" < "$fifo" &
+env -i PATH=/usr/bin:/bin TMPDIR="${TMPDIR:-/tmp}" HOME="$home" "$copy" hook >"$out/hook.out" 2>"$out/hook.err" < "$fifo" &
 hp=$!
 ok=0
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
@@ -215,7 +216,7 @@ kill "$writer" 2>/dev/null || true
 wait "$hp" 2>/dev/null || true
 wait "$writer" 2>/dev/null || true
 set +e
-env -i PATH=/usr/bin:/bin HOME="$home" "$copy" prefer --review --keep deadbeef >"$out/keep.out" 2>"$out/keep.err"
+env -i PATH=/usr/bin:/bin TMPDIR="${TMPDIR:-/tmp}" HOME="$home" "$copy" prefer --review --keep deadbeef >"$out/keep.out" 2>"$out/keep.err"
 echo $? > "$out/keep.code"
 exit 0
 "#;

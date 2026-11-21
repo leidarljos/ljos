@@ -77,6 +77,7 @@ fn this_seat_and_the_queries_project_lead_without_hiding_a_strong_other_seat() {
         .args(["search", QUERY, "-n", "5"])
         .current_dir(root.path())
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

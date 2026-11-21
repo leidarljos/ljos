@@ -85,6 +85,7 @@ fn launch(home: &Path, rel: &Path, fetch: &str, shims: Option<&Path>) -> Command
     cmd.arg(launcher())
         .args(["ljos-mcp", "--probe"])
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("HOME", home)
         .env("PATH", path)
         .env("LJOS_RELEASE_DIR", rel)

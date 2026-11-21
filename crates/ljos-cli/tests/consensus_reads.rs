@@ -41,6 +41,7 @@ fn a_consensus_reads_each_ticket_once() {
         .args(["consensus", "demo-1", "--no-file"])
         .current_dir(dir.path())
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", path)
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

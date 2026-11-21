@@ -3,8 +3,11 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/hold_env.rs"]
+mod hold_env;
 #[path = "common/seat_env.rs"]
 mod seat_env;
+use hold_env::HoldEnv;
 
 use std::io::Write;
 use std::os::unix::process::CommandExt;
@@ -140,6 +143,7 @@ impl World {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", &self.path)
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
@@ -200,6 +204,7 @@ fn runner_cmd(w: &World, args: &[&str]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", &w.path)
         .env("HOME", &w.home)
         .env("XDG_CONFIG_HOME", w.home.join(".config"))
@@ -737,7 +742,10 @@ fn a_granted_close_passes_the_hook_and_an_ungranted_close_stays_open() {
     assert!(said.contains("a person closes a ticket"), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
-    let mcp_err = ljos_cli::seat_roster::close_note("proj-clerk").unwrap_err();
+    let mcp_err = {
+        let _env = HoldEnv::in_paths(&w.home, &w.root.join("run"), &w.tracker);
+        ljos_cli::seat_roster::close_note("proj-clerk").unwrap_err()
+    };
     let label = ljos_cli::policy_label::as_policy(&mcp_err).expect("close-unverified label");
     assert_eq!(label.label, "close-unverified");
     assert!(

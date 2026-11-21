@@ -33,6 +33,7 @@ fn the_guard_answers_for_a_seat_the_tracker_does_not_know() {
     .unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))

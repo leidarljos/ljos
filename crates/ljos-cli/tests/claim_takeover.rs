@@ -83,6 +83,7 @@ impl World {
     fn cmd(&self, home: &Path, runtime: &Path, seat: &str, extra: &[(&str, &str)]) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", &self.path)
             .env("HOME", home)
             .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -124,6 +125,7 @@ impl World {
     fn bob_mcp(&self, name: &str, arguments: serde_json::Value) -> serde_json::Value {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", &self.path)
             .env("HOME", &self.bob_home)
             .env("XDG_CONFIG_HOME", self.bob_home.join(".config"))
@@ -409,6 +411,7 @@ fn ljos_mcp_claim_describes_takeover() {
     let world = World::new(&[("demo-tk10", None)]);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", &world.path)
         .env("HOME", &world.bob_home)
         .env("XDG_CONFIG_HOME", world.bob_home.join(".config"))

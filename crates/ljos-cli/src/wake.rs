@@ -929,6 +929,7 @@ mod tests {
 
     #[test]
     fn a_wake_that_runs_past_its_timeout_is_stopped() {
+        let _lock = crate::test_env_lock();
         let event = Event {
             seat: "slow".into(),
             ..Event::default()

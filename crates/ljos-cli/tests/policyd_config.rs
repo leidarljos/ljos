@@ -507,3 +507,55 @@ fn the_doctor_warns_of_a_named_policyd_config_that_is_not_there() {
     seat.write(".config/ljos/gone.conf", BLOCK_ON_WARNING_SET);
     assert_eq!(seat.doctor(), (code, Vec::new()), "the file is there");
 }
+
+#[test]
+fn tcb_check_in_with_env_passes_extra_env_in_non_test_build() {
+    if std::env::var_os("LJOS_TCB_ENV_PROBE").is_some() {
+        let argv = vec!["true".to_string()];
+        let out =
+            ljos_cli::tcb_check_in_with_env(&argv, None, &[("LJOS_TCB_EXTRA", "from-extra-env")])
+                .expect("tcb_check_in_with_env verdict");
+        assert!(
+            out.contains("from-extra-env"),
+            "non-test tcb_check_in_with_env dropped extra_env: {out:?}"
+        );
+        assert!(
+            std::env::var_os("LJOS_TCB_EXTRA").is_none(),
+            "extra_env leaked into caller environment"
+        );
+        return;
+    }
+
+    let seat = Seat::new();
+    seat.executable(
+        "bin/env-policyd",
+        "#!/bin/sh\nprintf 'allow\\twarn\\tenv-probe\\t%s\\n' \"${LJOS_TCB_EXTRA:-missing}\"\n",
+    );
+    let home = seat.home.path();
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tcb_check_in_with_env_passes_extra_env_in_non_test_build",
+            "--nocapture",
+        ])
+        .current_dir(home.join("work"))
+        .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", home.join("run"))
+        .env("POLICYD_BIN", seat.path("bin/env-policyd"))
+        .env("LJOS_TCB_ENV_PROBE", "1")
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+}

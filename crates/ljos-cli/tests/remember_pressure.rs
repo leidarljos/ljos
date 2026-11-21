@@ -66,6 +66,7 @@ fn remember(port: u16, text: &str) -> std::process::Output {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["remember", text])
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)

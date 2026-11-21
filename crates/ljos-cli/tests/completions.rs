@@ -10,6 +10,7 @@ fn run(root: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", root)
         .env("XDG_DATA_HOME", root.join("data"))

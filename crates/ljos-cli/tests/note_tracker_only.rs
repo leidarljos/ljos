@@ -76,6 +76,7 @@ impl Hab {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["note", "proj-aaaa", text])
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", &path)
             .env("HOME", self.dir.path().join("home"))
             .env(

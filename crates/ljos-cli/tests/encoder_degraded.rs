@@ -108,6 +108,7 @@ fn run(home: &Path, path: &str, port: &str, args: &[&str]) -> std::process::Outp
     Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("HOME", home)
         .env("XDG_RUNTIME_DIR", home.join("run"))
         .env("XDG_CACHE_HOME", home.join("cache"))

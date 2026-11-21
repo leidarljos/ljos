@@ -439,6 +439,7 @@ fn run_batch(head: &Job, batch: &[PathBuf]) -> bool {
         .arg("--apply-book")
         .args(batch)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .envs(head.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .current_dir(dir)
         .stdin(std::process::Stdio::null())

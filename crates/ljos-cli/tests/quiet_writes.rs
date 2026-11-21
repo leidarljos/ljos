@@ -99,6 +99,7 @@ impl Board {
             .args(args)
             .current_dir(&self.root)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", &self.path)
             .env("HOME", &self.home)
             .env("GIT_CONFIG_GLOBAL", &self.gitconfig)

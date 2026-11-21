@@ -76,6 +76,7 @@ exit 0
             .arg("withdraw")
             .args(args)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", &path)
             .env("HOME", self.dir.path().join("home"))
             .env(

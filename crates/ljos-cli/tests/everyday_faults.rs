@@ -8,6 +8,10 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/hold_env.rs"]
+mod hold_env;
+use hold_env::HoldEnv;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -577,6 +581,8 @@ fn a_half_written_note_queue_names_finish() {
 /// person uses instead. An agent is still not a person.
 #[test]
 fn a_close_without_a_login_terminal_names_the_terminal() {
+    let home = Home::new();
+    let _env = HoldEnv::in_home(&home.root);
     let err = ljos_cli::seat_roster::close_note("proj-aaaa")
         .expect_err("a process with no login terminal does not close")
         .to_string();
@@ -655,6 +661,17 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
             .output()
             .unwrap()
     };
+    let expected_tmp = if root.path().starts_with("/tmp") {
+        "/tmp".to_string()
+    } else {
+        std::fs::canonicalize(root.path())
+            .unwrap_or_else(|_| root.path().to_path_buf())
+            .display()
+            .to_string()
+    };
+    let off_msg =
+        format!("memory and the command guard are off because the home is under {expected_tmp}");
+    let outside_msg = format!("set HOME to a directory outside {expected_tmp}");
     let remembered = run(&["remember", "A lesson typed in a sandbox."]);
     let said = text(&remembered);
     let joined = format!(
@@ -662,19 +679,11 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
         String::from_utf8_lossy(&remembered.stdout),
         String::from_utf8_lossy(&remembered.stderr)
     );
-    assert!(
-        joined.contains("memory and the command guard are off because the home is under /tmp"),
-        "{said}"
-    );
-    assert!(
-        joined.contains("set HOME to a directory outside /tmp"),
-        "{said}"
-    );
+    assert!(joined.contains(&off_msg), "{said}");
+    assert!(joined.contains(&outside_msg), "{said}");
     let reasons: Vec<_> = joined
         .lines()
-        .filter(|line| {
-            line.contains("memory and the command guard are off because the home is under /tmp")
-        })
+        .filter(|line| line.contains(&off_msg))
         .collect();
     assert_eq!(reasons.len(), 1, "{said}");
     assert!(joined.contains("command guard"), "{said}");
@@ -695,10 +704,7 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
         String::from_utf8_lossy(&searched.stderr)
     );
     assert_eq!(searched.status.code(), Some(1), "{said}");
-    assert!(
-        joined.contains("memory and the command guard are off because the home is under /tmp"),
-        "{said}"
-    );
+    assert!(joined.contains(&off_msg), "{said}");
     assert!(!joined.contains("Nothing matched"), "{said}");
 
     let settled = run(&["consensus", "demo-kiln"]);
@@ -709,10 +715,7 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
         String::from_utf8_lossy(&settled.stderr)
     );
     assert_eq!(settled.status.code(), Some(1), "{said}");
-    assert!(
-        joined.contains("memory and the command guard are off because the home is under /tmp"),
-        "{said}"
-    );
+    assert!(joined.contains(&off_msg), "{said}");
     assert!(
         !joined.contains("no option") && !joined.contains("no ballots"),
         "{said}"
@@ -725,31 +728,21 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
         String::from_utf8_lossy(&doctor.stdout),
         String::from_utf8_lossy(&doctor.stderr)
     );
-    assert!(
-        joined.contains("memory and the command guard are off because the home is under /tmp"),
-        "{said}"
-    );
-    assert!(
-        joined.contains("set HOME to a directory outside /tmp"),
-        "{said}"
-    );
+    assert!(joined.contains(&off_msg), "{said}");
+    assert!(joined.contains(&outside_msg), "{said}");
     let memory = joined
         .lines()
         .find(|line| line.split('\t').nth(1) == Some("memory"))
         .unwrap_or_else(|| panic!("no memory row:\n{said}"));
     assert!(
-        memory.contains("memory and the command guard are off because the home is under /tmp")
-            && !memory.contains("does not answer"),
+        memory.contains(&off_msg) && !memory.contains("does not answer"),
         "{memory}"
     );
     let guard = joined
         .lines()
         .find(|line| line.split('\t').nth(1) == Some("guard"))
         .unwrap_or_else(|| panic!("no guard row:\n{said}"));
-    assert!(
-        guard.contains("memory and the command guard are off because the home is under /tmp"),
-        "{guard}"
-    );
+    assert!(guard.contains(&off_msg), "{guard}");
     assert_eq!(doctor.status.code(), Some(1), "{said}");
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
@@ -764,10 +757,7 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
         String::from_utf8_lossy(&fixed.stdout),
         String::from_utf8_lossy(&fixed.stderr)
     );
-    assert!(
-        joined.contains("memory and the command guard are off because the home is under /tmp"),
-        "{said}"
-    );
+    assert!(joined.contains(&off_msg), "{said}");
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
         !calls.contains("ensure"),

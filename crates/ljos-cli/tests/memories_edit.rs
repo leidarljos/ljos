@@ -46,6 +46,7 @@ impl Seat {
         cmd.args(args)
             .current_dir(self.home.path())
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", path)
             .env("HOME", self.home.path())
             .env("USER", "person")

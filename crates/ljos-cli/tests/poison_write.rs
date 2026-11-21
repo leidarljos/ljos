@@ -113,7 +113,7 @@ fn serve(atoms: Arc<Mutex<Vec<serde_json::Value>>>, asks: bool) -> String {
 struct Seat {
     home: tempfile::TempDir,
     run: tempfile::TempDir,
-    installed: tempfile::TempDir,
+    installed: runner::RunnerDir,
     url: String,
     atoms: Arc<Mutex<Vec<serde_json::Value>>>,
     asks: bool,
@@ -224,6 +224,7 @@ impl Seat {
         // A seat's tracker file lands where ljos stands, not the crate.
         cmd.current_dir(self.home.path());
         cmd.env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", self.home.path())
             .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
@@ -241,6 +242,7 @@ impl Seat {
         if self.asks {
             cmd.env("PACKSET_TOKEN", TOKEN);
         }
+        self.installed.env(cmd);
     }
 }
 
@@ -401,6 +403,7 @@ fn mcp_user_prefer_of_a_plant_is_the_agents() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .current_dir(seat.home.path())
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", seat.home.path())
         .env("XDG_CONFIG_HOME", seat.home.path().join(".config"))

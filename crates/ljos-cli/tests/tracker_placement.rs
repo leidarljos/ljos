@@ -46,6 +46,7 @@ fn onboard(product: &Path, args: &[&str]) -> Output {
         .args(args)
         .current_dir(product)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -165,6 +166,7 @@ impl Seat {
             .args(["note", "proj-aaaa", "The parser kept the hyphen."])
             .current_dir(from)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env(
                 "PATH",
                 format!(
@@ -257,6 +259,7 @@ fn a_file_does_not_commit_into_the_product_when_vissue_root_is_unset() {
         .args(["file", "-p", "app", "crash on start"])
         .current_dir(&product)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env(
             "PATH",
             format!(

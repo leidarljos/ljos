@@ -10,6 +10,7 @@ fn call_doctor(server: &Path, bin_dir: &Path) -> serde_json::Value {
     let home = tempfile::tempdir().unwrap();
     let mut cmd = Command::new(server);
     cmd.env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
         .env("XDG_DATA_HOME", home.path().join(".local/share"))

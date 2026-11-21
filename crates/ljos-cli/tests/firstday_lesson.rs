@@ -68,6 +68,7 @@ impl Seat {
         cmd.args(args)
             .current_dir(root)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", format!("{}:{path}", root.join("bin").display()))
             .env("HOME", &home)
             .env("USER", "ada")

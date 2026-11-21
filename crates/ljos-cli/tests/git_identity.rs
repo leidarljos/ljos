@@ -95,6 +95,7 @@ impl Seat {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.current_dir(self.home())
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("PATH", path)
             .env("HOME", self.home())
             .env("XDG_CONFIG_HOME", self.home().join(".config"))

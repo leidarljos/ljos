@@ -44,6 +44,7 @@ impl Home {
             .arg("doctor")
             .args(args)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env("HOME", root)
             .env("XDG_STATE_HOME", root.join("state"))
             .env("XDG_DATA_HOME", root.join("data"))

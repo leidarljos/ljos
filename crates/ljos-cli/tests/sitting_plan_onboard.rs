@@ -39,6 +39,7 @@ impl Seat {
         ])
         .current_dir(cwd)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", self.home())
         .env("XDG_RUNTIME_DIR", self.root.path().join("run"))

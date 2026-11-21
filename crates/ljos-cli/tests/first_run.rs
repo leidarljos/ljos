@@ -159,6 +159,7 @@ impl Seat {
         cmd.arg("-c").arg(line);
         cmd.current_dir(cwd);
         cmd.env_clear();
+        cmd.env("TMPDIR", std::env::temp_dir());
         cmd.envs(&self.env);
         cmd.stdin(Stdio::null());
         term.attach_output(&mut cmd);
@@ -200,6 +201,7 @@ impl Seat {
             .arg(&script)
             .current_dir(&self.work)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .envs(&self.env)
             .stdin(Stdio::null())
             .output()
@@ -232,6 +234,7 @@ impl Drop for Seat {
         let _ = Command::new("packset")
             .arg("stop")
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .envs(&self.env)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

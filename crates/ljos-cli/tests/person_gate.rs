@@ -54,6 +54,7 @@ fn gate_child() {
 
 struct Case {
     home: tempfile::TempDir,
+    installed: runner::RunnerDir,
     keys: PathBuf,
     repo: PathBuf,
     /// A real commit on both sides, so the message check has nothing new to read.
@@ -112,6 +113,7 @@ impl Case {
         let push = format!("refs/heads/develop {sha} refs/heads/develop {sha}\n");
         Self {
             home,
+            installed: runner::install_dir(),
             keys,
             repo,
             push,
@@ -129,6 +131,7 @@ impl Case {
             }
             None => Command::new(&exe),
         };
+        self.installed.env(&mut cmd);
         cmd.args(["--exact", "gate_child", "--nocapture", "--test-threads=1"])
             .current_dir(&self.repo)
             .env(CHILD_DIR, &self.keys)
@@ -236,8 +239,7 @@ fn nothing_typed_is_refused() {
 #[test]
 fn a_hard_runner_is_never_asked() {
     let case = Case::new(true);
-    let installed = runner::install_dir();
-    let claude = installed.path().join("claude");
+    let claude = case.installed.path().join("claude");
     runner::runner_at(&claude);
     let (out, shown) = run_hook(
         &mut case.command(Some(&claude), Some("CURSOR_AGENT")),

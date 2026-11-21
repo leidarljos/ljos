@@ -74,6 +74,7 @@ impl Seat {
             .args(args)
             .current_dir(&home)
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self.dir.path().join("bin").display()),

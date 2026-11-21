@@ -179,6 +179,7 @@ impl Seat {
             .args(["recall", issue])
             .current_dir(self.home.path())
             .env_clear()
+            .env("TMPDIR", std::env::temp_dir())
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self.home.path().join("bin").display()),

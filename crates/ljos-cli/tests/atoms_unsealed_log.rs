@@ -90,6 +90,7 @@ fn a_large_log_for_another_machine_is_skipped() {
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["sync", "--import"])
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env(
             "PATH",
             std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),

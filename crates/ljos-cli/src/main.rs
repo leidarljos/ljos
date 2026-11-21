@@ -557,6 +557,13 @@ struct HookArgs {
         conflicts_with_all = ["prompt", "runner", "git_commit", "brief_once", "drain"]
     )]
     finish_session: Option<std::path::PathBuf>,
+    /// Evaluate one prompt judgment off the hook process so a late reply persists after exit.
+    #[arg(
+        long,
+        hide = true,
+        conflicts_with_all = ["prompt", "runner", "git_commit", "brief_once", "drain", "finish_session"]
+    )]
+    judge_worker: bool,
 }
 
 /// `ljos hook` on its own, so the process does not build every other command.
@@ -4240,7 +4247,11 @@ fn run_hook(hook: HookArgs) -> Result<()> {
         no_wait,
         apply_book,
         finish_session,
+        judge_worker,
     } = hook;
+    if judge_worker {
+        return ljos_cli::run_jev_judge_worker();
+    }
     if !brief_once {
         ljos_cli::config_diag::emit();
     }
@@ -4929,6 +4940,7 @@ fn hook_parsed_alone(args: &[std::ffi::OsString]) -> Option<HookArgs> {
             no_wait: false,
             apply_book: Vec::new(),
             finish_session: None,
+            judge_worker: false,
         });
     }
     match HookFast::try_parse_from(args) {
@@ -4941,6 +4953,9 @@ fn hook_parsed_alone(args: &[std::ffi::OsString]) -> Option<HookArgs> {
 
 /// The seat setup `run_command` does before it reaches a hook, then the hook.
 fn dispatch_hook(seat_flag: Option<String>, hook: HookArgs) -> Result<()> {
+    if hook.judge_worker {
+        return ljos_cli::run_jev_judge_worker();
+    }
     ljos_cli::seat_resolve::prepare(seat_flag, ljos_cli::seat_resolve::Kind::Keep);
     ljos_cli::runner_skills::refresh_on_new_version();
     ljos_cli::runner_env::refresh_on_new_version();
@@ -4993,8 +5008,13 @@ fn run_command() -> Result<()> {
     let cmd = match Cli::try_parse_from(args) {
         Ok(cli) => cli.cmd,
         Err(err) => {
-            let args: Vec<String> = std::env::args().skip(1).collect();
-            ljos_cli::memory_port::record_memory_error(&args, &err.to_string());
+            if !matches!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                ljos_cli::memory_port::record_memory_error(&args, &err.to_string());
+            }
             if let Some(line) = usage_sentence(&err) {
                 eprintln!("{line}");
                 std::process::exit(USAGE_STATUS);

@@ -57,6 +57,7 @@ fn ljos_on(dir: &Path, home: &Path, args: &[&str], pack: &str) -> Output {
         .args(args)
         .current_dir(dir)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .env("PATH", path)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

@@ -3,12 +3,23 @@
 ljos_test_boot::harness!();
 use std::process::Command;
 
-fn run(args: &[&str]) -> std::process::Output {
+fn run_in(home: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_RUNTIME_DIR", home.join("run"))
         .env("LJOS_OFF", "1")
         .output()
         .unwrap()
+}
+
+fn run(args: &[&str]) -> std::process::Output {
+    let home = tempfile::tempdir().unwrap();
+    run_in(home.path(), args)
 }
 
 fn text(out: &std::process::Output) -> String {
@@ -118,12 +129,20 @@ fn common_commands_include_an_example() {
         (&["receive", "--help"][..], "ljos receive"),
         (&["memory", "integrate", "--help"][..], "does not post"),
     ] {
-        let out = run(args);
+        let home = tempfile::tempdir().unwrap();
+        let out = run_in(home.path(), args);
         let help = String::from_utf8_lossy(&out.stdout);
         assert!(
             out.status.success() && help.contains(needle),
             "{args:?}\n{help}{}",
             String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !home
+                .path()
+                .join(".local/state/ljos/memory/attempts")
+                .exists(),
+            "{args:?} wrote a memory attempt on --help"
         );
     }
 }

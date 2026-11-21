@@ -59,6 +59,7 @@ fn session(program: &str, args: &[&str]) -> (String, String, Duration) {
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &home)
+        .env("TMPDIR", std::env::temp_dir())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .output()
