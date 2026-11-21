@@ -167,6 +167,8 @@ pub struct Drained {
     pub seals_left: usize,
     /// Why the first waiting seal did not run, when one did not.
     pub seal_waiting_on: Option<String>,
+    /// Seal queue bytes that were not a seal, moved out before a rewrite.
+    pub seals_set_aside: Vec<SetAside>,
 }
 
 /// Bytes of the queue a rewrite moved to a file beside it rather than
@@ -239,18 +241,31 @@ fn read(dir: &Path) -> Vec<Queued> {
 }
 
 fn read_seals(dir: &Path) -> Vec<QueuedSeal> {
-    let bytes = crate::read_state_file(&seal_queue_file(dir)).unwrap_or_default();
-    let mut seals = Vec::new();
-    for line in bytes.split_inclusive(|&b| b == b'\n') {
-        if let Some(Ok(seal)) = line.strip_suffix(b"\n").map(serde_json::from_slice) {
-            seals.push(seal);
-        }
-    }
-    seals
+    read_seals_split(dir).0
 }
 
-fn write_seals(dir: &Path, seals: &[QueuedSeal]) -> Result<()> {
+/// The seal queue's rows, and its bytes that are not one, as
+/// [`read_split`] reads the note queue. Every append holds the lock, so
+/// a torn last row seen under it is damage, not a write in progress.
+fn read_seals_split(dir: &Path) -> (Vec<QueuedSeal>, Vec<u8>) {
+    let bytes = crate::read_state_file(&seal_queue_file(dir)).unwrap_or_default();
+    let mut seals = Vec::new();
+    let mut unread = Vec::new();
+    for line in bytes.split_inclusive(|&b| b == b'\n') {
+        match line.strip_suffix(b"\n").map(serde_json::from_slice) {
+            Some(Ok(seal)) => seals.push(seal),
+            _ if line == b"\n" => {}
+            _ => unread.extend_from_slice(line),
+        }
+    }
+    (seals, unread)
+}
+
+/// Rewrite the seal queue to `seals`. `unread` is set aside first, so a
+/// rewrite drops no row it could not parse.
+fn write_seals(dir: &Path, seals: &[QueuedSeal], unread: &[u8]) -> Result<Option<SetAside>> {
     let _durable = crate::bookkeep::durable_write();
+    let aside = set_aside_as(&seal_damaged_file(dir), unread)?;
     let path = seal_queue_file(dir);
     if seals.is_empty() {
         let present = crate::open_state_dir(&path)
@@ -261,7 +276,7 @@ fn write_seals(dir: &Path, seals: &[QueuedSeal]) -> Result<()> {
             Err(err) if err.raw_os_error() == Some(libc::ENOENT) => {}
             Err(err) => return Err(err).with_context(|| format!("empty {}", path.display())),
         }
-        return Ok(());
+        return Ok(aside);
     }
     let mut body = String::new();
     for seal in seals {
@@ -270,7 +285,7 @@ fn write_seals(dir: &Path, seals: &[QueuedSeal]) -> Result<()> {
     }
     crate::rewrite_state_file(&path, body.as_bytes())
         .with_context(|| format!("replace {}", path.display()))?;
-    Ok(())
+    Ok(aside)
 }
 
 /// The queue's notes, and its bytes that are not one: each complete line
@@ -299,6 +314,14 @@ fn damaged_file(dir: &Path) -> PathBuf {
     ))
 }
 
+/// Where a rewrite on this day puts the seal queue bytes it could not read.
+fn seal_damaged_file(dir: &Path) -> PathBuf {
+    dir.join(format!(
+        "seal-queue.jsonl.{}.damaged",
+        chrono::Utc::now().format("%Y-%m-%d")
+    ))
+}
+
 /// [`set_aside_at`] for `dir`, opened the way every state-log open is: a
 /// link in place of `dir` is refused and lists nothing.
 #[must_use]
@@ -317,6 +340,16 @@ pub fn set_aside_in(dir: &Path) -> Vec<(PathBuf, u64)> {
 /// never writes through one.
 #[must_use]
 pub fn set_aside_at(fd: &std::fs::File, dir: &Path) -> Vec<(PathBuf, u64)> {
+    damaged_at(fd, dir, "note-queue.jsonl.")
+}
+
+/// [`set_aside_at`] for the files a seal queue rewrite left.
+#[must_use]
+pub fn seal_set_aside_at(fd: &std::fs::File, dir: &Path) -> Vec<(PathBuf, u64)> {
+    damaged_at(fd, dir, "seal-queue.jsonl.")
+}
+
+fn damaged_at(fd: &std::fs::File, dir: &Path, prefix: &str) -> Vec<(PathBuf, u64)> {
     let Ok(names) = crate::deedbag::list_names(fd) else {
         return Vec::new();
     };
@@ -324,8 +357,7 @@ pub fn set_aside_at(fd: &std::fs::File, dir: &Path) -> Vec<(PathBuf, u64)> {
         .iter()
         .filter_map(|name| {
             let text = name.to_str().ok()?;
-            text.strip_prefix("note-queue.jsonl.")?
-                .strip_suffix(".damaged")?;
+            text.strip_prefix(prefix)?.strip_suffix(".damaged")?;
             let st = crate::deedbag::stat_at(fd, name).ok()??;
             let size = u64::try_from(st.st_size).ok()?;
             ((st.st_mode & libc::S_IFMT) == libc::S_IFREG).then(|| (dir.join(text), size))
@@ -338,10 +370,14 @@ pub fn set_aside_at(fd: &std::fs::File, dir: &Path) -> Vec<(PathBuf, u64)> {
 /// Add `unread` to the day's damaged file and put it on disk, before the
 /// rewrite that leaves those bytes out of the queue.
 fn set_aside(dir: &Path, unread: &[u8]) -> Result<Option<SetAside>> {
+    set_aside_as(&damaged_file(dir), unread)
+}
+
+fn set_aside_as(path: &Path, unread: &[u8]) -> Result<Option<SetAside>> {
     if unread.is_empty() {
         return Ok(None);
     }
-    let path = damaged_file(dir);
+    let path = path.to_path_buf();
     crate::append_locked_row(&path, unread, crate::Durability::Durable)
         .and_then(|()| crate::sync_state_file(&path))
         .with_context(|| format!("set aside unreadable queue bytes in {}", path.display()))?;
@@ -594,7 +630,7 @@ pub fn drain_seals_in(
     let mut visited: Vec<QueuedSeal> = Vec::new();
     loop {
         let held = lock(dir);
-        let mut seals = read_seals(dir);
+        let (mut seals, unread) = read_seals_split(dir);
         let now = now_secs();
         let mut pick = None;
         for (idx, row) in seals.iter().enumerate() {
@@ -619,6 +655,10 @@ pub fn drain_seals_in(
         }
         let Some(idx) = pick else {
             done.seals_left = seals.len();
+            if !unread.is_empty() {
+                done.seals_set_aside
+                    .extend(write_seals(dir, &seals, &unread)?);
+            }
             return Ok(());
         };
         let claim = SealClaim {
@@ -627,7 +667,8 @@ pub fn drain_seals_in(
         };
         seals[idx].claim = Some(claim.clone());
         let claimed = seals[idx].clone();
-        write_seals(dir, &seals)?;
+        done.seals_set_aside
+            .extend(write_seals(dir, &seals, &unread)?);
         drop(held);
 
         let gate = SealGate {
@@ -638,7 +679,7 @@ pub fn drain_seals_in(
         let outcome = run(&claimed, &gate);
 
         let _held = lock(dir);
-        let mut rest = read_seals(dir);
+        let (mut rest, unread) = read_seals_split(dir);
         let Some(at) = rest.iter().position(|row| {
             row.same(&claimed)
                 && row
@@ -687,7 +728,8 @@ pub fn drain_seals_in(
             }
         }
         done.seals_left = rest.len();
-        write_seals(dir, &rest)?;
+        done.seals_set_aside
+            .extend(write_seals(dir, &rest, &unread)?);
     }
 }
 
@@ -733,6 +775,13 @@ pub fn drained_lines(done: &Drained) -> String {
     for aside in &done.set_aside {
         out.push_str(&format!(
             "memory: moved {} byte(s) of the note queue that are not a note to {}; they were not sent\n",
+            aside.bytes,
+            aside.path.display()
+        ));
+    }
+    for aside in &done.seals_set_aside {
+        out.push_str(&format!(
+            "sync: moved {} byte(s) of the seal queue that are not a seal to {}; they were not run, so run `ljos sync`.\n",
             aside.bytes,
             aside.path.display()
         ));
@@ -1235,6 +1284,41 @@ mod tests {
         assert!(pending_seals_in(&dir).is_empty());
     }
 
+    /// A seal row the drain cannot read is moved to a dated file and named
+    /// in the drain's lines, not lost in the rewrite.
+    #[test]
+    fn a_torn_seal_row_is_set_aside_and_reported() {
+        let dir = dir("seals-torn-aside");
+        let torn = "{\"issue\":\"broken\n";
+        let tail = "{\"issue\":\"p-3\",\"root\":\"/tmp/t\"";
+        std::fs::write(
+            seal_queue_file(&dir),
+            format!("{torn}{{\"issue\":\"p-2\",\"root\":\"/tmp/t\",\"at\":2}}\n{tail}"),
+        )
+        .unwrap();
+        let mut done = Drained::default();
+        drain_seals_in(&dir, &mut done, |s, _| {
+            SealOutcome::Sealed(format!("sealed {}\n", s.issue))
+        })
+        .unwrap();
+        assert_eq!(done.sealed.len(), 1);
+        let bytes: usize = done.seals_set_aside.iter().map(|a| a.bytes).sum();
+        assert_eq!(bytes, torn.len() + tail.len(), "{:?}", done.seals_set_aside);
+        let aside = &done.seals_set_aside[0].path;
+        assert_eq!(aside, &seal_damaged_file(&dir));
+        let kept = std::fs::read_to_string(aside).unwrap();
+        assert!(kept.contains("broken") && kept.contains("p-3"), "{kept:?}");
+        let lines = drained_lines(&done);
+        assert!(
+            lines.contains("byte(s) of the seal queue that are not a seal"),
+            "{lines}"
+        );
+        assert_eq!(std::fs::read_to_string(seal_queue_file(&dir)).unwrap(), "");
+        let fd = std::fs::File::open(&dir).unwrap();
+        assert_eq!(seal_set_aside_at(&fd, &dir).len(), 1);
+        assert!(set_aside_at(&fd, &dir).is_empty());
+    }
+
     #[test]
     fn a_note_queued_before_claim_defers_the_seal() {
         let dir = dir("seals-pending-note");
@@ -1307,7 +1391,7 @@ mod tests {
             let mut seals = read_seals(&dir);
             let owner = seals[0].claim.as_ref().unwrap().owner.clone();
             seals[0].claim.as_mut().unwrap().at = 1;
-            write_seals(&dir, &seals).unwrap();
+            write_seals(&dir, &seals, b"").unwrap();
             owner
         };
 
@@ -1442,7 +1526,7 @@ mod tests {
                 let mut seals = read_seals(&dir_at);
                 let cur = seals[0].claim.as_mut().unwrap();
                 cur.at = cur.at.saturating_add(10);
-                write_seals(&dir_at, &seals).unwrap();
+                write_seals(&dir_at, &seals, b"").unwrap();
             }
             assert!(
                 matches!(
@@ -1487,7 +1571,7 @@ mod tests {
                     let cur = seals[0].claim.as_mut().unwrap();
                     cur.at = cur.at.saturating_add(5);
                     cur.owner = "other-owner".into();
-                    write_seals(&d, &seals).unwrap();
+                    write_seals(&d, &seals, b"").unwrap();
                 }
                 if outcome_kind == "drop" {
                     SealOutcome::Drop("stale drop".into())
