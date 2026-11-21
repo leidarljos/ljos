@@ -7,3 +7,5 @@ The rustdoc on `complete`, the `complete` entry in the command reference and the
 The sit and land recipes, the explanation and the finish slash command say a plain finish hands the node back and leaves the ticket open, and that `--close` with `failed` still hands it back.
 The finish lesson rustdoc says the lesson is filed before the node is released or completed, and the release rustdoc says a completed node is left as it is.
 `ljos finish --help` and the command reference say a runner is refused only on `--close` and only without a standing grant, that `--status` is recorded only by `--close` with `done` or `cancelled`, and that the unclaimed TODO check runs only without `--close`.
+The getting started page says a runner's close is refused only without a standing grant that covers this seat and this ticket, and the explanation says only a close that uses the grant cites the record.
+The seat skill says a conversation of the seat completes, finishes or releases another conversation's claim only once that conversation has exited, and the finish rustdoc says the wall bound is three seconds.
