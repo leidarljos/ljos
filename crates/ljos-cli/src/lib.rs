@@ -48963,17 +48963,63 @@ pub fn tracker_verb_wait() -> std::time::Duration {
     tracker_lock_wait().min(std::time::Duration::from_secs(4))
 }
 
-/// The line a tracker write prints when another writer kept the commit
-/// lock of `dir` past [`tracker_lock_wait`].
+/// The wait a tracker write gives another writer's commit lock.
+#[derive(Clone, Copy, Debug)]
+pub struct LockWait {
+    /// How long the write waits.
+    pub wait: std::time::Duration,
+    /// The budget that made `wait` shorter than [`tracker_lock_wait`].
+    pub cut_by: Option<&'static str>,
+}
+
+/// [`tracker_lock_wait`], cut to what is left of an armed hook wall
+/// budget or tool budget, whichever ends first.
 #[must_use]
-pub fn tracker_lock_busy(dir: &Path) -> String {
+pub fn tracker_lock_budget() -> LockWait {
+    let mut out = LockWait {
+        wait: tracker_lock_wait(),
+        cut_by: None,
+    };
+    let thread = WALL_DEADLINE.with(|cell| {
+        cell.get()
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+    });
+    for (left, name) in [
+        (thread, "hook wall budget"),
+        (tool_bound::remaining(), "tool budget"),
+    ] {
+        if let Some(left) = left.filter(|left| *left < out.wait) {
+            out = LockWait {
+                wait: left,
+                cut_by: Some(name),
+            };
+        }
+    }
+    out
+}
+
+/// The line a tracker write prints when another writer kept the commit
+/// lock of `dir` through the whole of `waited`.
+#[must_use]
+pub fn tracker_lock_busy(dir: &Path, waited: LockWait) -> String {
     let lock = tracker_lock_path(dir).map_or_else(
         || dir.display().to_string(),
         |path| path.display().to_string(),
     );
+    let wait = waited.wait;
+    let secs = if wait.subsec_millis() == 0 {
+        format!("{}s", wait.as_secs())
+    } else {
+        format!("{}.{}s", wait.as_secs(), wait.subsec_millis() / 100)
+    };
+    let cut = waited.cut_by.map_or_else(String::new, |budget| {
+        format!(
+            ", all that was left of the {budget}, short of the {}s LJOS_TRACKER_LOCK_WAIT",
+            tracker_lock_wait().as_secs()
+        )
+    });
     format!(
-        "tracker git: another writer held {lock} for {}s, so this write is on disk and not committed; the commit is deferred to the next write or push\n",
-        tracker_lock_wait().as_secs()
+        "tracker git: another writer held {lock} for {secs}{cut}, so this write is on disk and not committed; the commit is deferred to the next write or push\n"
     )
 }
 
@@ -50509,12 +50555,11 @@ fn persist_tracker_writes(
     // that another seat's commit is about to make stale. A git process
     // outside ljos that holds the index is waited out a few times before
     // the line says so.
-    let lock_wait =
-        wall_left().map_or_else(tracker_lock_wait, |left| left.min(tracker_lock_wait()));
-    let Some(held) = tracker_commit_lock_by(dir, std::time::Instant::now() + lock_wait) else {
+    let lock_wait = tracker_lock_budget();
+    let Some(held) = tracker_commit_lock_by(dir, std::time::Instant::now() + lock_wait.wait) else {
         let refs: Vec<&str> = specs.iter().map(String::as_str).collect();
         note_deferred_paths(dir, &refs);
-        return tracker_lock_busy(dir);
+        return tracker_lock_busy(dir, lock_wait);
     };
     let mut live: Vec<&str> = Vec::new();
     let mut ignored_note = String::new();
@@ -58800,8 +58845,15 @@ mod tests {
             waited < std::time::Duration::from_secs(5),
             "waited past the deadline: {waited:?}"
         );
-        let busy = tracker_lock_busy(repo);
+        let busy = tracker_lock_busy(
+            repo,
+            LockWait {
+                wait: std::time::Duration::from_millis(300),
+                cut_by: None,
+            },
+        );
         assert!(busy.contains(TRACKER_LOCK), "{busy}");
+        assert!(busy.contains(" for 0.3s,"), "{busy}");
         assert!(busy.contains("not committed"), "{busy}");
         drop(held);
         assert!(tracker_commit_lock_by(repo, std::time::Instant::now()).is_some());
@@ -58841,6 +58893,60 @@ mod tests {
             .unwrap();
         assert!(
             String::from_utf8_lossy(&shown.stdout).contains("STARTED"),
+            "{said}"
+        );
+    }
+
+    /// `LJOS_TRACKER_LOCK_WAIT` asks for a minute, but the call's wall
+    /// budget ends in three seconds. The write gives up at the budget, and
+    /// the line names the wait it made and the budget that cut it short,
+    /// not the minute it never waited.
+    #[test]
+    fn a_lock_wait_cut_short_by_the_wall_budget_names_the_real_wait() {
+        let _env = env_guard();
+        disarm_wall();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let held = tracker_commit_lock(dir.path());
+        assert!(held.0.is_some(), "the other writer took the lock");
+        let body = "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+        std::fs::write(&issues, body).unwrap();
+        let started = std::time::Instant::now();
+        let said = {
+            let _wall = arm_wall_budget_for(std::time::Duration::from_secs(3));
+            persist_tracker_file(&issues, "probe-a1b2", "claimed")
+        };
+        let took = started.elapsed();
+        drop(held);
+        for var in ["LJOS_TRACKER_LOCK_WAIT", "LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "waited {took:?}: {said}"
+        );
+        assert!(said.contains("another writer held"), "{said}");
+        assert!(!said.contains(" for 60s"), "{said}");
+        let waited: f64 = said
+            .split(" for ")
+            .nth(1)
+            .and_then(|rest| rest.split('s').next())
+            .and_then(|secs| secs.parse().ok())
+            .unwrap_or_else(|| panic!("no wait in {said}"));
+        assert!(
+            waited > 1.0 && waited <= 3.0,
+            "named a {waited}s wait: {said}"
+        );
+        assert!(
+            waited <= took.as_secs_f64() + 0.05,
+            "named {waited}s but waited {took:?}: {said}"
+        );
+        assert!(said.contains("hook wall budget"), "{said}");
+        assert!(
+            said.contains("short of the 60s LJOS_TRACKER_LOCK_WAIT"),
             "{said}"
         );
     }
