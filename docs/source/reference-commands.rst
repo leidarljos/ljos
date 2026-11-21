@@ -85,8 +85,8 @@ A word that is not a command names the verb it was reaching for as a line that r
    Stores: pack. Bind a recipe to the issue and copy its full body; the name is a tracker ``playbook:`` note until finish or release.
 ``playbooks``
    Stores: pack. The closed set sit, arena, land, company-panel, overnight, feature; pack latest per name, the built-in seed when missing.
-``workflow ISSUE [--start NAME] [--round]``
-   Stores: tracker. A parent's workflow: stage, round and next step; ``--start feature`` notes ``workflow: feature`` and files the design child, ``--round`` files the next panel round once every child is closed.
+``workflow ISSUE [--start NAME] [--round] [--var KEY=VALUE] [--file FILE]`` / ``workflow define FILE`` / ``workflow revise NAME [--from PARENT]`` / ``workflow revise NAME [--apply FILE]`` / ``workflow render NAME [--file FILE] [--out FILE] [--check] [--var KEY=VALUE]``
+   Stores: tracker, deed store. A parent's workflow. ``--start feature`` notes ``workflow: feature`` and files the design child; ``--round`` files the next panel round once every child is closed. ``workflow define`` stores an Org skeleton as a deed. ``--start NAME`` files one ticket per step under the parent. ``workflow revise`` gathers a run and stores the next version after consensus settles revise. ``workflow render`` writes a public Org page.
 ``brief NAME ISSUE``
    Stores: pack, tracker. What a subagent playing the persona starts from: view, the bound playbook's full recipe, five named principles, the arena rubric, what the seat knows on its domains, the working set.
 ``panel [run] ISSUE [--out DIR] [--jev] [--harness NAME] [--designers N] [--dry-run] [--cloud]``
@@ -338,7 +338,6 @@ A test fails when this list and the binary differ.
    # proseguard:off
 
 .. BEGIN ljos-help-flags
-
 accept --at --quote --via
 agents --dry-run --harness
 ask
@@ -455,7 +454,10 @@ usage --since
 vote --against --as --child --confidence --expect --for --jev --used --withdraw
 wake --clear --command --fire --from --interrupt --issue --key-env --key-file --msg --timeout --webhook
 withdraw --as --note
-workflow --round --start
+workflow --file --round --start --var
+workflow define
+workflow render --check --file --out --var
+workflow revise --apply --from
 .. END ljos-help-flags
 
 ..

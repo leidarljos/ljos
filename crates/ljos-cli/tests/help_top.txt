@@ -82,7 +82,7 @@ Coordination:
   brief        Print the brief a subagent playing a persona starts from
   playbook     Bind a playbook to an issue and copy its recipe into the working set, before personas enter
   playbooks    List the recipes on offer: sit, arena, land, company-panel, overnight, feature
-  workflow     Show where a parent ticket's workflow stands, and the next step
+  workflow     Show a parent ticket's workflow, or run a versioned skeleton
   predict      Forecast how the others will vote on an issue; two or more forecasts let the settle name the surprisingly popular answer
   trust        Record how much one voter counts another's view
   calibrate    Estimate how often each voter has been right, from the project's past votes

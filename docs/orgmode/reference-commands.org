@@ -51,7 +51,7 @@ A word that is not a command names the verb it was reaching for as a line that r
 - =upgrade [VERSION] [--dir DIR] [--only NAME]= :: Stores: release. Installs the ljos release beside the running =ljos=, then each other seat program from the repository that publishes it. The archive is checked against the sha256 published beside it, each binary is an executable that names the version, and the old one is kept as =NAME.bak-pre-VERSION=. One line a program: =NAME OLD NEW=, or =NAME VERSION current=. A missing release, a failed download or a checksum that does not match is a warning, and the other programs still move. =--only NAME= moves that one program. =VERSION= is the ljos release. This is how an agent moves the seat's binaries, which policyd keeps it from writing.
 - =playbook ISSUE NAME= :: Stores: pack. Bind a recipe to the issue and copy its full body; the name is a tracker =playbook:= note until finish or release.
 - =playbooks= :: Stores: pack. The closed set sit, arena, land, company-panel, overnight, feature; pack latest per name, the built-in seed when missing.
-- =workflow ISSUE [--start NAME] [--round]= :: Stores: tracker. A parent's workflow: stage, round and next step; =--start feature= notes =workflow: feature= and files the design child, =--round= files the next panel round once every child is closed.
+- =workflow ISSUE [--start NAME] [--round] [--var KEY=VALUE] [--file FILE]= / =workflow define FILE= / =workflow revise NAME [--from PARENT]= / =workflow revise NAME [--apply FILE]= / =workflow render NAME [--file FILE] [--out FILE] [--check] [--var KEY=VALUE]= :: Stores: tracker, deed store. A parent's workflow. =--start feature= notes =workflow: feature= and files the design child; =--round= files the next panel round once every child is closed. =workflow define= stores an Org skeleton as a deed. =--start NAME= files one ticket per step under the parent. =workflow revise= gathers a run and stores the next version after consensus settles revise. =workflow render= writes a public Org page.
 - =brief NAME ISSUE= :: Stores: pack, tracker. What a subagent playing the persona starts from: view, the bound playbook's full recipe, five named principles, the arena rubric, what the seat knows on its domains, the working set.
 - =panel [run] ISSUE [--out DIR] [--jev] [--harness NAME] [--designers N] [--dry-run] [--cloud]= :: Stores: pack, tracker. One brief per persona whose domains the issue speaks to as =DIR/<name>.md=, then the settle line; refused until a playbook is bound. =--jev= asks Jev for every ballot first and casts them only when every seat is sure and all agree; otherwise it writes the briefs. =--harness= names the runner that spawns the panel. =--designers= is how many designers =run= spawns. =--dry-run= prints the sessions and does not spawn. =--cloud= writes one prompt file per persona and does not spawn.
 - =open-panel --prompt-file FILE --log FILE [--cwd DIR] [--session ID]= :: Stores: tracker, runner. Open a panel for a decision prompt: file or reuse the issue, sit it, and start one headless member per brief. The prompt is already in the file, so the hook can return. =--session= keeps a second opener from starting a second panel.
@@ -341,7 +341,10 @@ usage --since
 vote --against --as --child --confidence --expect --for --jev --used --withdraw
 wake --clear --command --fire --from --interrupt --issue --key-env --key-file --msg --timeout --webhook
 withdraw --as --note
-workflow --round --start
+workflow --file --round --start --var
+workflow define
+workflow render --check --file --out --var
+workflow revise --apply --from
 # END ljos-help-flags
 # proseguard:on
 

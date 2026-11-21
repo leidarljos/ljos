@@ -31,6 +31,13 @@ export PYTHONDONTWRITEBYTECODE=1
 python3 -m pip install --disable-pip-version-check -q -r docs/requirements.txt
 export VISSUE_DOC_EXPORTER=pandoc
 bash docs/scripts/export_org_to_rst.sh
+# The workflow page is prose, so this pandoc writes it byte for byte.
+# A full-tree compare also moves with cog fences, sample markers and
+# table widths, which this check does not treat as a drift.
+if ! git diff --exit-code -- docs/source/howto-workflow.rst; then
+  echo "check_docs_export: committed docs/source/howto-workflow.rst differs from the pandoc export" >&2
+  exit 1
+fi
 rm -rf docs/build
 sphinx-build -b html -n -W docs/source docs/build >/dev/null
-echo "check_docs_export: pandoc export and sphinx -W ok"
+echo "check_docs_export: pandoc export matches docs/source/howto-workflow.rst and sphinx -W ok"

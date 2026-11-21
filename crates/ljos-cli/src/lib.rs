@@ -80,6 +80,7 @@ pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;
 pub mod scan;
+pub mod scrub;
 #[cfg(test)]
 mod seat_mcp_layout;
 pub mod seat_resolve;
@@ -110,6 +111,7 @@ mod verbatim;
 mod version_skew;
 pub mod wake;
 pub mod word_rank;
+pub mod workflow_skel;
 
 #[cfg(test)]
 mod cursor_event_scan;
@@ -2933,10 +2935,13 @@ pub fn note_tmux_spawn(line: &str, cwd: Option<&str>, session: &str) {
 fn tmux_sock_lock(dir: &Path) -> Option<CommitLock> {
     let left = hookd::left_of(CURSOR_GATE_DEADLINE_MS);
     let wait = std::time::Duration::from_millis(TMUX_LOCK_WAIT_MS).min(left);
-    CommitLock::acquire_by(
+    match CommitLock::acquire_by(
         &dir.join("tmux-sock.lock"),
         std::time::Instant::now() + wait,
-    )
+    ) {
+        Ok(lock) => lock,
+        Err(_) => Some(CommitLock(None)),
+    }
 }
 
 fn tmux_pane_conversation(sock: &str, pane: Option<&str>) -> Option<String> {
@@ -26086,9 +26091,11 @@ pub fn latest_note_value(v: &Value, prefix: &str) -> Option<String> {
         dated.push((ts, live));
     }
     if dated.iter().any(|(ts, _)| !ts.is_empty()) {
+        // The logbook lists the newest note first. A shared minute keeps that
+        // first note. A greater timestamp replaces it.
         dated
             .into_iter()
-            .max_by_key(|(ts, _)| ts.clone())
+            .reduce(|best, next| if next.0 > best.0 { next } else { best })
             .and_then(|(_, n)| n)
     } else {
         dated.into_iter().next().and_then(|(_, n)| n)
@@ -41183,13 +41190,16 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                         {
                             let lock_path = runtime_dir().join("claim.lock");
                             let _lock = match wall_deadline() {
-                                Some(deadline) => CommitLock::acquire_by(&lock_path, deadline)
-                                    .ok_or_else(|| {
-                                        anyhow::anyhow!(
+                                Some(deadline) => {
+                                    match CommitLock::acquire_by(&lock_path, deadline) {
+                                        Ok(Some(lock)) => lock,
+                                        Ok(None) => bail!(
                                             "claim: another writer held {} past the claim budget",
                                             lock_path.display()
-                                        )
-                                    })?,
+                                        ),
+                                        Err(_) => CommitLock(None),
+                                    }
+                                }
                                 None => CommitLock::acquire(&lock_path),
                             };
                             let key = work_id(&format!("subchild:{assignee}:{node}"));
@@ -42357,8 +42367,8 @@ fn adopt_bare_seat_hold(dir: &Path, seat: &str, own: &str, graph: &str) {
         // held lock cannot remain unbounded on this path.
         Err(_) if push_slow() => {
             let lock_path = dir.join("hold-adopt.lock");
-            if CommitLock::acquire_by(&lock_path, std::time::Instant::now() + PUSH_LOCK_WAIT)
-                .is_none()
+            if let Ok(None) =
+                CommitLock::acquire_by(&lock_path, std::time::Instant::now() + PUSH_LOCK_WAIT)
             {
                 note_push_slow();
             }
@@ -42377,11 +42387,12 @@ fn adopt_bare_seat_hold(dir: &Path, seat: &str, own: &str, graph: &str) {
     let lock_path = dir.join("hold-adopt.lock");
     let _lock = if in_push_check() || wall_deadline().is_some() {
         match CommitLock::acquire_by(&lock_path, std::time::Instant::now() + PUSH_LOCK_WAIT) {
-            Some(lock) => lock,
-            None => {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
                 note_push_slow();
                 return;
             }
+            Err(_) => CommitLock(None),
         }
     } else {
         CommitLock::acquire(&lock_path)
@@ -46805,14 +46816,15 @@ fn sitting_budget_left(step: &str, total: std::time::Duration) -> Result<()> {
 
 fn wait_for_sitting_lock(path: &Path, what: &str, total: std::time::Duration) -> Result<()> {
     let left = wall_left().unwrap_or(total).min(tracker_lock_wait());
-    let Some(held) = CommitLock::acquire_by(path, std::time::Instant::now() + left) else {
-        bail!(
+    match CommitLock::acquire_by(path, std::time::Instant::now() + left) {
+        Ok(Some(held)) => drop(held),
+        Ok(None) => bail!(
             "sitting: another tracker writer held the {what} at {} past the {}s claim budget; nothing was claimed",
             path.display(),
             total.as_secs()
-        );
-    };
-    drop(held);
+        ),
+        Err(_) => {}
+    }
     Ok(())
 }
 
@@ -47123,6 +47135,10 @@ pub fn complete(
     if node.trim().is_empty() {
         bail!("complete: the id is empty; pass a tracker id, or a 32-hex claim-graph id");
     }
+    // A signoff step stays open until the run, its blockers, a ship
+    // consensus and any required deed are in place. A claim id that is
+    // not a ticket is left to the claim graph.
+    workflow_skel::signoff_block(node)?;
     complete_as(node, status, assignee, gen, false)
 }
 
@@ -48164,6 +48180,9 @@ pub fn finish(
         }
         return Ok(ticked);
     }
+    // Before the person check, so a signoff that is still missing work
+    // names that work. The same check runs for a finish that does not close.
+    workflow_skel::signoff_block(issue)?;
     let pending = retry_pending_claim(issue);
     // A close asks whether a person is present, before any write. A
     // runner with no terminal is refused unless a standing grant covers
@@ -48554,11 +48573,12 @@ impl CommitLock {
         if let Some(deadline) = tool_bound::deadline_instant() {
             tool_bound::note("lock");
             return match Self::acquire_by(path, deadline) {
-                Some(lock) => lock,
-                None => {
+                Ok(Some(lock)) => lock,
+                Ok(None) => {
                     tool_bound::mark_failed("lock timed out");
                     Self(None)
                 }
+                Err(_) => Self(None),
             };
         }
         let Ok(file) = std::fs::OpenOptions::new()
@@ -48661,21 +48681,24 @@ impl CommitLock {
         }
     }
 
-    /// [`CommitLock::acquire`], given up at `deadline`: `None` when another
-    /// holder still has it then.
-    #[must_use]
-    pub fn acquire_by(path: &std::path::Path, mut deadline: std::time::Instant) -> Option<Self> {
+    /// [`CommitLock::acquire`], given up at `deadline`.
+    ///
+    /// `Ok(Some)` holds the file. `Ok(None)` means another holder still had
+    /// it at `deadline`. `Err` means the file could not be opened, or
+    /// `flock` failed for a reason other than a busy lock. This function
+    /// does not return a lock that holds nothing.
+    pub fn acquire_by(
+        path: &std::path::Path,
+        mut deadline: std::time::Instant,
+    ) -> std::io::Result<Option<Self>> {
         use std::os::unix::io::AsRawFd;
         if let Some(wall) = wall_deadline() {
             deadline = deadline.min(wall);
         }
-        let Ok(file) = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(path)
-        else {
-            return Some(Self(None));
-        };
+            .open(path)?;
         // Ten milliseconds makes a short critical section visible quickly.
         // The 100 ms ceiling keeps a two-second hook budget responsive.
         let mut pause = std::time::Duration::from_millis(10);
@@ -48684,14 +48707,15 @@ impl CommitLock {
             // SAFETY: flock on a descriptor this function owns.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                 admit::note_list_lock();
-                return Some(Self(Some(file)));
+                return Ok(Some(Self(Some(file))));
             }
-            match std::io::Error::last_os_error().raw_os_error() {
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
                 Some(libc::EWOULDBLOCK | libc::EINTR) => {}
-                _ => return Some(Self(None)),
+                _ => return Err(err),
             }
             if std::time::Instant::now() >= deadline {
-                return None;
+                return Ok(None);
             }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             std::thread::sleep(flock_pause(pause, left));
@@ -48974,7 +48998,10 @@ pub fn tracker_lock_busy(dir: &Path) -> String {
 /// another writer still holds the checkout at `deadline`.
 pub fn tracker_commit_lock_by(dir: &Path, deadline: std::time::Instant) -> Option<CommitLock> {
     match tracker_lock_path(dir) {
-        Some(path) => CommitLock::acquire_by(&path, deadline),
+        Some(path) => match CommitLock::acquire_by(&path, deadline) {
+            Ok(lock) => lock,
+            Err(_) => Some(CommitLock(None)),
+        },
         None => Some(CommitLock(None)),
     }
 }
@@ -49339,12 +49366,16 @@ pub(crate) fn with_wall_bounded_issues_lock<R>(
         return vissue_core::store::with_issues_lock(path, write);
     };
     let lock_path = issues_lock_path(path);
-    let Some(_held) = CommitLock::acquire_by(&lock_path, deadline) else {
-        return Err(anyhow::anyhow!(
-            "another tracker writer held {} past the active wall budget",
-            lock_path.display()
-        )
-        .into());
+    let _held = match CommitLock::acquire_by(&lock_path, deadline) {
+        Ok(None) => {
+            return Err(anyhow::anyhow!(
+                "another tracker writer held {} past the active wall budget",
+                lock_path.display()
+            )
+            .into());
+        }
+        Ok(Some(held)) => Some(held),
+        Err(_) => None,
     };
     write()
 }
@@ -66535,6 +66566,18 @@ mod tests {
         assert_eq!(
             playbook_name_from_issue(&playbook_only).as_deref(),
             Some("feature")
+        );
+    }
+
+    #[test]
+    fn the_first_note_wins_when_the_minute_matches() {
+        let v = serde_json::json!({"logbook": [
+            {"note": "skeleton-version: 2", "timestamp": "[2026-11-19 Wed 12:00]"},
+            {"note": "skeleton-version: 1", "timestamp": "[2026-11-19 Wed 12:00]"}
+        ]});
+        assert_eq!(
+            latest_note_value(&v, "skeleton-version: ").as_deref(),
+            Some("2")
         );
     }
 

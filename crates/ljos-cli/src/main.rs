@@ -23,7 +23,7 @@ use ljos_cli::{
     Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
 };
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -603,6 +603,56 @@ struct ReadyArgs {
     /// Print every ticket on the page.
     #[arg(long, conflicts_with_all = ["limit", "mine"])]
     all: bool,
+}
+
+/// `ljos workflow` subcommands for a stored skeleton.
+#[derive(Subcommand)]
+enum WorkflowCmd {
+    /// Check an Org skeleton and store its bytes with the sha256 and the version.
+    ///
+    /// The same bytes are a no-op. A changed body needs a higher `#+version`. A deed is the stored copy of that file.
+    ///
+    /// Example: `ljos workflow define docs/examples/workflows/release.org`
+    Define {
+        /// The Org file. Its file name is the skeleton name.
+        file: PathBuf,
+    },
+    /// Gather a run into a proposal, or store the next skeleton version.
+    ///
+    /// A run is gathered with `--from PARENT`, which files a decision whose options are keep and revise. The next version is stored with `--apply FILE` after consensus settles revise.
+    ///
+    /// Example: `ljos workflow revise release --from proj-1a2b`
+    Revise {
+        /// The skeleton name.
+        name: String,
+        /// The parent ticket of the run to read.
+        #[arg(long, value_name = "PARENT", conflicts_with = "apply")]
+        from: Option<String>,
+        /// The Org file to store as the next version.
+        #[arg(long, value_name = "FILE", conflicts_with = "from")]
+        apply: Option<PathBuf>,
+    },
+    /// Write the public Org page for a skeleton, steps in dependency order.
+    ///
+    /// Author text is written unchanged. Render refuses the page when a detection copy finds a secret, a private path, an address, a private host, an email, an invisible character, a declared seat name, or a product or tool name. Each hit names the source line and the class, and nothing is written. `--check` exits 1 when `--out` differs from a fresh render or the file has a hit.
+    ///
+    /// Example: `ljos workflow render release --out page.org`
+    Render {
+        /// The skeleton name.
+        name: String,
+        /// Read this file instead of the stored skeleton or `.ljos/workflows/NAME.org`.
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// Write the page here. With `--check`, this is the committed file to compare.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// Exit 1 when `--out` differs from a fresh render or the file has a public-text hit.
+        #[arg(long)]
+        check: bool,
+        /// Fill `{{key}}` before rendering. Repeat for each variable.
+        #[arg(long = "var", value_name = "KEY=VALUE")]
+        var: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1886,20 +1936,31 @@ enum Cmd {
     ///
     /// Example: `ljos playbooks`
     Playbooks,
-    /// Show where a parent ticket's workflow stands, and the next step.
+    /// Show a parent ticket's workflow, or run a versioned skeleton.
     ///
-    /// `--start` puts the parent under a workflow and files its design child. `--round` files the next panel round or a blocking fix. A round count does not close the parent.
+    /// The feature workflow files its design child with `--start feature`, and the next panel round with `--round`. A round count does not close the parent. Running `--start feature` again files nothing new.
+    ///
+    /// `define FILE` checks an Org skeleton and stores its bytes. A deed is a stored file of the skeleton. `--start NAME` files one ticket per step under the parent. `revise` gathers notes from a run into a proposal, and `--apply` stores the next version after consensus settles revise. `render` writes a public Org page.
     ///
     /// Example: `ljos workflow proj-1a2b`
+    #[command(subcommand_negates_reqs = true)]
     Workflow {
+        #[command(subcommand)]
+        action: Option<WorkflowCmd>,
         /// The tracker id of the parent issue.
-        issue: String,
-        /// Put the parent under this workflow (feature) and file its design child. Running it again files nothing new.
+        issue: Option<String>,
+        /// Put the parent under this workflow. `feature` files the design child. Any other name files the stored skeleton's steps. Running it again files nothing new.
         #[arg(long, value_name = "NAME", conflicts_with = "round")]
         start: Option<String>,
-        /// File the next panel round, or one `fix:` for a blocking finding. A nit stays a note. The parent stays open. A person closes it.
+        /// File the next panel round of the feature workflow, or one `fix:` for a blocking finding. A nit stays a note. The parent stays open. A person closes it.
         #[arg(long)]
         round: bool,
+        /// Fill `{{key}}` in the skeleton. Repeat for each variable.
+        #[arg(long = "var", value_name = "KEY=VALUE")]
+        var: Vec<String>,
+        /// Read the skeleton from this file. The stored copy is used when this is absent.
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
     },
     /// Take a ticket so this seat is the one working on it.
     ///
@@ -7122,23 +7183,13 @@ fn run_command() -> Result<()> {
             print!("{}", format_playbooks(&playbooks_from_pack()?));
         }
         Cmd::Workflow {
+            action,
             issue,
             start,
             round,
-        } => {
-            if let Some(name) = start {
-                print!("{}", ljos_cli::workflow_start(&issue, &name)?);
-            } else if round {
-                print!("{}", ljos_cli::workflow_round(&issue)?);
-            } else {
-                match ljos_cli::workflow_status(&issue)? {
-                    Some(s) => print!("{}", ljos_cli::format_workflow_status(&s)),
-                    None => bail!(
-                        "workflow: {issue} carries no workflow; `ljos workflow {issue} --start feature` starts one"
-                    ),
-                }
-            }
-        }
+            var,
+            file,
+        } => run_workflow(action, issue, start, round, var, file)?,
         Cmd::Claim {
             node,
             takeover,
@@ -8166,7 +8217,153 @@ fn issue_topic_and_tags(id: &str) -> (Vec<String>, Vec<String>) {
     (topic, tags)
 }
 
-/// The verb of a command that writes the tracker under this seat. Listing
+/// Whether a workflow command writes the tracker under this seat.
+fn workflow_writes(action: &Option<WorkflowCmd>, start: &Option<String>, round: bool) -> bool {
+    match action {
+        Some(WorkflowCmd::Define { .. } | WorkflowCmd::Revise { .. }) => true,
+        Some(WorkflowCmd::Render { .. }) => false,
+        None => start.is_some() || round,
+    }
+}
+
+fn run_workflow(
+    action: Option<WorkflowCmd>,
+    issue: Option<String>,
+    start: Option<String>,
+    round: bool,
+    var: Vec<String>,
+    file: Option<PathBuf>,
+) -> Result<()> {
+    if let Some(action) = action {
+        return run_workflow_cmd(action);
+    }
+    let Some(issue) = issue.filter(|id| !id.trim().is_empty()) else {
+        bail!("workflow: pass a parent ticket, or one of `define`, `revise` and `render`");
+    };
+    if let Some(name) = start {
+        if name == "feature" {
+            if !var.is_empty() {
+                bail!(
+                    "workflow: `--var` fills a skeleton; the feature workflow has no placeholders"
+                );
+            }
+            print!("{}", ljos_cli::workflow_start(&issue, &name)?);
+            return Ok(());
+        }
+        let vars = ljos_cli::workflow_skel::parse_vars(&var)?;
+        print!(
+            "{}",
+            ljos_cli::workflow_skel::start_run(&issue, &name, &vars, file.as_deref())?
+        );
+        return Ok(());
+    }
+    if round {
+        let skeleton = ljos_cli::workflow_status(&issue)?.is_none()
+            && ljos_cli::workflow_skel::status_report(&issue)
+                .ok()
+                .flatten()
+                .is_some();
+        if skeleton {
+            bail!(
+                "workflow: {issue} runs a skeleton, and `--round` is only for the feature workflow"
+            );
+        }
+        print!("{}", ljos_cli::workflow_round(&issue)?);
+        return Ok(());
+    }
+    if !var.is_empty() || file.is_some() {
+        bail!("workflow: `--var` and `--file` belong with `--start` or with `render`");
+    }
+    match ljos_cli::workflow_status(&issue)? {
+        Some(status) => print!("{}", ljos_cli::format_workflow_status(&status)),
+        None => match ljos_cli::workflow_skel::status_report(&issue)? {
+            Some(text) => print!("{text}"),
+            None => bail!(
+                "workflow: {issue} carries no workflow; `ljos workflow {issue} --start feature` starts one"
+            ),
+        },
+    }
+    Ok(())
+}
+
+fn run_workflow_cmd(action: WorkflowCmd) -> Result<()> {
+    match action {
+        WorkflowCmd::Define { file } => {
+            print!("{}", ljos_cli::workflow_skel::define_file(&file)?);
+        }
+        WorkflowCmd::Revise { name, from, apply } => match (from, apply) {
+            (Some(parent), None) => {
+                print!("{}", ljos_cli::workflow_skel::revise_from(&name, &parent)?);
+            }
+            (None, Some(file)) => {
+                print!("{}", ljos_cli::workflow_skel::revise_apply(&name, &file)?);
+            }
+            _ => bail!("workflow: `revise` takes `--from PARENT` or `--apply FILE`"),
+        },
+        WorkflowCmd::Render {
+            name,
+            file,
+            out,
+            check,
+            var,
+        } => render_workflow(&name, file.as_deref(), out.as_deref(), check, &var)?,
+    }
+    Ok(())
+}
+
+fn render_workflow(
+    name: &str,
+    file: Option<&Path>,
+    out: Option<&Path>,
+    check: bool,
+    var: &[String],
+) -> Result<()> {
+    let vars = ljos_cli::workflow_skel::parse_vars(var)?;
+    let mut skel = ljos_cli::workflow_skel::load_skeleton(name, file)?;
+    if !vars.is_empty() {
+        skel = ljos_cli::workflow_skel::fill_vars(&skel, &vars)?;
+    }
+    let page = ljos_cli::workflow_skel::render_skeleton(&skel)?;
+    if check {
+        let Some(path) = out else {
+            bail!("workflow: `--check` compares the file named with `--out`");
+        };
+        let have = std::fs::read_to_string(path)
+            .with_context(|| format!("workflow: read {}", path.display()))?;
+        let mut why = Vec::new();
+        if have != page {
+            why.push("the file differs from a fresh render".to_string());
+        }
+        let have_hits = ljos_cli::scrub::scan_public(&have);
+        if !have_hits.is_empty() {
+            why.push(format!(
+                "the file failed public scan ({})",
+                have_hits.join("; ")
+            ));
+        }
+        if !why.is_empty() {
+            bail!("workflow: {}: {}", path.display(), why.join("; "));
+        }
+        println!("{name} matches {}", path.display());
+        return Ok(());
+    }
+    match out {
+        Some(path) => {
+            if let Some(dir) = path.parent() {
+                if !dir.as_os_str().is_empty() {
+                    std::fs::create_dir_all(dir)
+                        .with_context(|| format!("workflow: create {}", dir.display()))?;
+                }
+            }
+            std::fs::write(path, &page)
+                .with_context(|| format!("workflow: write {}", path.display()))?;
+            println!("wrote {}", path.display());
+        }
+        None => print!("{page}"),
+    }
+    Ok(())
+}
+
 /// a deed's citations, a workflow's status, a consensus read with
 /// `--no-file`, a dry-run reap and a dry-run bump plan are reads; a slot
 /// names its seat on the line.
@@ -8184,7 +8381,12 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         Cmd::File { .. } => "file",
         Cmd::Options { .. } => "options",
         Cmd::Deed { add, remove, .. } if !add.is_empty() || !remove.is_empty() => "deed",
-        Cmd::Workflow { start, round, .. } if start.is_some() || *round => "workflow",
+        Cmd::Workflow {
+            action,
+            start,
+            round,
+            ..
+        } if workflow_writes(action, start, *round) => "workflow",
         Cmd::Consensus {
             no_file, deadline, ..
         } if !no_file || deadline.is_some() => "consensus",

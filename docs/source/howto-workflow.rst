@@ -1,0 +1,76 @@
+:description: Define a versioned Org skeleton, file one ticket per step, and close the release on a deed plus a ship consensus.
+:cover: https://leidarljos.github.io/ljos/_static/og.png
+
+=====================================
+Run a recurring release as a workflow
+=====================================
+
+
+A release is the same DAG every time: changelog, version bump, tests, docs, tag, artifacts, a packaging notice, review, and a sign-off. The skeleton is an Org file in the repository. Each run is a parent ticket and one child per step.
+
+Store the skeleton
+==================
+
+The file name is the skeleton name. ``ljos workflow define docs/examples/workflows/release.org`` checks the DAG and stores the bytes as a deed, with the sha256 and the ``#+version``. The same bytes again change nothing. A changed body needs a higher ``#+version``.
+
+.. code:: console
+
+   $ ljos workflow define docs/examples/workflows/release.org
+
+File a run
+==========
+
+File the parent, then start the skeleton under it. ``--var version=1.2.0`` fills ``{{version}}`` in the step titles and bodies. The tracker records a block edge for each ``:DEPENDS:``. Running the same command again files nothing new and names the tickets already there.
+
+.. code:: console
+
+   $ ljos file "Release 1.2.0" -p demo
+   $ ljos workflow --start release PARENT --var version=1.2.0
+
+``ljos workflow PARENT`` prints each step, the steps whose dependencies are done, the open blockers, and what the sign-off still needs. ``ljos ready`` lists those same unblocked steps, because a step waits on its dependencies.
+
+.. code:: console
+
+   $ ljos workflow PARENT
+   $ ljos ready
+
+A problem found while a step is open is a child of that step, or a ``ljos block`` edge to another ticket inside or outside the run. Both block the step, appear in ``ljos workflow PARENT``, and hold the sign-off until closed. A ``:BLOCKED_BY:`` id that has no ticket is reported as missing but blocks nothing. This matches ``vissue ready``, and both ready lists still include the step. Concurrent ``--start`` calls on the same parent wait up to thirty seconds on a per-run lock so each step is filed once. ``LJOS_WORKFLOW_LOCK_WAIT`` is that wait in seconds when it is a positive integer. A caller that cannot acquire the lock exits with the parent and lock path.
+
+.. code:: console
+
+   $ ljos file "CI failed on the tag step" --parent STEP
+   $ ljos block STEP --on OTHER
+
+Sign off
+========
+
+The sign-off step stays open until every other step is done, no blocker of any step is open, ``ljos consensus STEP --quorum 2`` settles ship, and at least one deed named on the step passes ``ljos evidence``. The quorum is the ``:QUORUM:`` property, and 2 when the skeleton omits it. ``:DEED: yes`` is what asks for the deed. ``ljos complete`` and ``ljos finish`` both refuse, exit 1, and list what is still missing.
+
+.. code:: console
+
+   $ ljos consensus SIGNOFF --quorum 2
+   $ ljos deed SIGNOFF --add ACCESSION
+   $ ljos evidence ACCESSION
+
+Revise the skeleton
+===================
+
+Notes and blockers from a finished run become a proposal. The proposal is a decision whose options are keep and revise. After ``ljos consensus`` settles revise, applying a file stores the next version, notes the proposal and closes it. Applying the same body again does not store another version.
+
+.. code:: console
+
+   $ ljos workflow revise release --from PARENT
+   $ ljos consensus PROPOSAL
+   $ ljos workflow revise release --apply FILE
+
+Publish the page
+================
+
+``ljos workflow render release --file docs/examples/workflows/release.org --out docs/examples/workflows/release-public.org`` writes the steps in dependency order and the edges as plain text. It emits author text unchanged. It normalizes a copy only to detect secrets, private paths, addresses, private hosts, email addresses, declared seat names, and model or tool names. It also detects phrases that identify generated work, Org export constructs, and an invisible character on an author line. A hit names every source line and class, and render writes nothing. A ``--var`` value that contains a line break or a control character is refused before that copy is filled.
+
+An IPv4 address is sensitive, including a public four-part address, a private short form such as 127.1, and the integer and hex forms. A version or a decimal such as 1.89, 3.12.3, 0.5 or 139.1 stays. A four-part version after ships, release, firmware, version or section stays unchanged. An IPv6 address needs at least two explicit groups; bracketed IPv6 with a port is also sensitive. Public Org links to https stay intact. A title or a body whose detection copy starts an Org heading, keyword or drawer is refused, including zero-width and full-width spellings. A ``:ROLE:`` value that names a declared seat is refused. Step keys are checked once when the skeleton is parsed. Renderer-owned properties are not scanned for ordinary prose, and a secret on one of those lines is still a hit. The page is refused when the rendered text contains a babel source block. ``--check`` exits 1 when the file differs from a fresh render or contains a detected line.
+
+.. code:: console
+
+   $ ljos workflow render release --file docs/examples/workflows/release.org --out docs/examples/workflows/release-public.org
+   $ ljos workflow render release --file docs/examples/workflows/release.org --out docs/examples/workflows/release-public.org --check
