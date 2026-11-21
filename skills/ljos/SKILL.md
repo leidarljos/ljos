@@ -550,8 +550,10 @@ lock exists before proceeding": the next seat cannot act on that.
   `index.lock` and does not remove a lock it did not create. When the
   index is still held after that wait, the record stays on disk and the
   line says the commit is deferred to the next write or push, which
-  commits it. An `index.lock` more than a minute old with no git running
-  in the checkout is named, with the `rm` that clears it.
+  commits it. An `index.lock` more than a minute old that
+  `.git/ljos-index.owner` shows a dead ljos process's git left, and that
+  no running process may own, is removed and the commit runs again. Any
+  other old lock is named, with the `rm` that clears it.
   Never wrap a verb in a lock of your own, and never stash, reset or
   check out files another seat is editing to get a commit through.
 

@@ -1,0 +1,2 @@
+A claim whose `vissue show` did not answer in time is no longer taken for a node the tracker does not know, whether the wait ran out or a tool call's bound stopped `vissue` with `vissue timed out`.
+`ljos claim` exits 1 and names the command to run again, and a pending claim that `ljos note` or `ljos finish` retries stays pending, so no `- Claimed by SEAT` line is written for a claim the tracker never recorded.

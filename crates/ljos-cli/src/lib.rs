@@ -40788,7 +40788,15 @@ fn stamp_tracker_claim(node: &str, assignee: &str, force: bool) -> Result<Said> 
 }
 
 fn stamp_tracker(node: &str, assignee: &str) -> Result<Option<String>> {
-    if run_captured("vissue", &["show", node, "--json"]).is_err() {
+    // A node the tracker does not know is not an issue. A tracker that did
+    // not answer may well know it, so that is no claim at all.
+    if let Err(e) = run_captured("vissue", &["show", node, "--json"]) {
+        let text = format!("{e:#}");
+        if capture_timed_out(&e) {
+            bail!(
+                "claim: the claim graph took {node} but the tracker did not answer, so {node} was not recorded under {assignee}; run `ljos claim {node}` again ({text})"
+            );
+        }
         return Ok(None);
     }
     let claimed = match stamp_tracker_claim(node, assignee, false) {
@@ -46646,7 +46654,7 @@ fn wait_for_sitting_lock(path: &Path, what: &str, total: std::time::Duration) ->
     Ok(())
 }
 
-fn issues_lock_path(path: &Path) -> PathBuf {
+pub(crate) fn issues_lock_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".lock");
     PathBuf::from(name)
@@ -47775,14 +47783,12 @@ fn tracker_git_out(dir: &Path, args: &[&str]) -> Option<String> {
 }
 
 fn issue_block_lines(text: &str, issue: &str) -> Option<Vec<String>> {
+    let heading = issue_heading(text, issue)?;
     let lines: Vec<&str> = text.lines().collect();
-    let id_at = lines
-        .iter()
-        .position(|line| line_is_issue_id(line, issue))?;
-    let start = (0..=id_at).rev().find(|i| heading_line(lines[*i]))?;
-    let end = ((id_at + 1)..lines.len())
+    let start = heading.line_start.saturating_sub(1);
+    let end = ((start + 1)..heading.line_end.min(lines.len()))
         .find(|i| heading_line(lines[*i]))
-        .unwrap_or(lines.len());
+        .unwrap_or(heading.line_end.min(lines.len()));
     Some(lines[start..end].iter().map(|s| (*s).to_owned()).collect())
 }
 
@@ -48529,6 +48535,13 @@ impl CommitLock {
         }
     }
 
+    /// Whether this guard has the lock. A file that could not be opened,
+    /// a failed `flock` and a deadline that ran out all leave it empty.
+    #[must_use]
+    pub(crate) fn taken(&self) -> bool {
+        self.0.is_some()
+    }
+
     /// Whether another process holds the private lock at `path` now. It
     /// does not wait and does not create the file: a missing lock is not
     /// held, and one that cannot be opened is no lock to
@@ -49015,50 +49028,103 @@ fn heading_line(line: &str) -> bool {
     rest.is_empty() || rest.starts_with(['*', ' ', '\t'])
 }
 
-fn line_is_issue_id(line: &str, issue: &str) -> bool {
-    let trimmed = line.trim();
-    let Some(rest) = trimmed.strip_prefix(":ID:") else {
-        return false;
-    };
-    rest.trim() == issue
+/// The heading whose own property drawer has `:ID: issue`, parsed the way
+/// the tracker parses it. An `:ID:` line quoted in another heading's body,
+/// or in an example block, is not that heading.
+fn issue_heading(text: &str, issue: &str) -> Option<vissue_core::IssueHeading> {
+    let doc = vissue_core::IssueDoc::parse("", PathBuf::new(), text).ok()?;
+    doc.headings.into_iter().find(|h| h.id == issue)
 }
 
-fn insert_logbook_line(text: &str, issue: &str, entry: &str) -> Option<String> {
+/// Where `issue`'s logbook sits: the index of its first line after
+/// `:LOGBOOK:` with the drawer's lines, or the index to open one at.
+fn logbook_site(
+    lines: &[&str],
+    heading: &vissue_core::IssueHeading,
+) -> (usize, Option<Vec<String>>) {
+    let start = heading.line_start.saturating_sub(1);
+    let end = heading.line_end.min(lines.len());
+    let mut i = start + 1;
+    while i < end && !vissue_core::org::parse_planning_line(lines[i]).is_empty() {
+        i += 1;
+    }
+    let mut open_at = i;
+    while i < end {
+        let trimmed = lines[i].trim();
+        if trimmed.is_empty() {
+            i += 1;
+            continue;
+        }
+        if !vissue_core::org::opens_a_drawer(trimmed) {
+            break;
+        }
+        let logbook = trimmed.eq_ignore_ascii_case(":LOGBOOK:");
+        let first = i + 1;
+        i = first;
+        while i < end && !lines[i].trim().eq_ignore_ascii_case(":END:") {
+            i += 1;
+        }
+        if logbook {
+            let held = lines[first..i]
+                .iter()
+                .map(|l| l.trim().to_string())
+                .collect();
+            return (first, Some(held));
+        }
+        i = (i + 1).min(end);
+        open_at = i;
+    }
+    (open_at, None)
+}
+
+/// Whether the heading's `:CLAIMED_BY:` names a seat other than `seat`.
+fn claimed_by_another_seat(heading: &vissue_core::IssueHeading, seat: &str) -> bool {
+    heading.claimed_by().is_some_and(|held| {
+        let (holder, _) = holder_parts(unscoped_holder(held, &heading.id));
+        seat_slug(&holder) != seat_slug(seat)
+    })
+}
+
+/// `text` with `entry` at the top of `issue`'s logbook, or `None` when the
+/// file does not hold the issue or the drawer already has the line. A
+/// `noted` line counts only above the newest note, so each note gets its
+/// own. A `claimed` line is not written while `:CLAIMED_BY:` names another
+/// seat.
+fn insert_logbook_line(
+    text: &str,
+    issue: &str,
+    verb: &str,
+    seat: &str,
+    entry: &str,
+) -> Option<String> {
+    let heading = issue_heading(text, issue)?;
+    let noted = verb.trim() == "noted";
+    if verb.trim() == "claimed" && claimed_by_another_seat(&heading, seat) {
+        return None;
+    }
     let ends_nl = text.ends_with('\n');
-    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
-    if ends_nl && lines.last().is_some_and(String::is_empty) {
-        lines.pop();
+    let lines: Vec<&str> = text.lines().collect();
+    let (at, held) = logbook_site(&lines, &heading);
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len() + 3);
+    out.extend_from_slice(&lines[..at]);
+    match held {
+        Some(held)
+            if held
+                .iter()
+                .take_while(|line| !(noted && line.starts_with("- Note:")))
+                .any(|line| line == entry.trim()) =>
+        {
+            return None
+        }
+        Some(_) => out.push(entry),
+        None => out.extend([":LOGBOOK:", entry, ":END:"]),
     }
-    let id_at = lines
-        .iter()
-        .position(|line| line_is_issue_id(line, issue))?;
-    let start = (0..=id_at)
-        .rev()
-        .find(|i| heading_line(&lines[*i]))
-        .unwrap_or(0);
-    let end = ((id_at + 1)..lines.len())
-        .find(|i| heading_line(&lines[*i]))
-        .unwrap_or(lines.len());
-    let block_end = end;
-    if let Some(rel) = lines[start..block_end]
-        .iter()
-        .position(|line| line.trim() == ":LOGBOOK:")
-    {
-        lines.insert(start + rel + 1, entry.to_string());
-    } else {
-        let rel = lines[start..block_end]
-            .iter()
-            .rposition(|line| line.trim() == ":END:")?;
-        let at = start + rel + 1;
-        lines.insert(at, ":END:".into());
-        lines.insert(at, entry.to_string());
-        lines.insert(at, ":LOGBOOK:".into());
-    }
-    let mut out = lines.join("\n");
+    out.extend_from_slice(&lines[at..]);
+    let mut next = out.join("\n");
     if ends_nl {
-        out.push('\n');
+        next.push('\n');
     }
-    Some(out)
+    Some(next)
 }
 
 /// Put `- {Verb} by {seat} [timestamp]` at the top of the issue's logbook.
@@ -49069,6 +49135,11 @@ fn insert_logbook_line(text: &str, issue: &str, entry: &str) -> Option<String> {
 /// whole, and so does this. Rewritten in place, the stamp could drop a
 /// ballot another seat wrote between the read and the write, and a `git
 /// add` hashing the file meanwhile dies on unstable object data.
+///
+/// The file is read under that lock and the heading is the one whose own
+/// drawer has the `:ID:`. A rerun in the same minute finds its line and
+/// writes nothing, while a second note gets a second line. `claimed` is
+/// not written over a `:CLAIMED_BY:` that names another seat.
 pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> bool {
     let entry = format!(
         "- {} by {} {}",
@@ -49077,14 +49148,56 @@ pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> b
         chrono::Local::now().format("[%Y-%m-%d %a %H:%M]")
     );
     with_wall_bounded_issues_lock(path, || {
+        sweep_dead_temps(path);
         let text = std::fs::read_to_string(path)?;
-        let Some(next) = insert_logbook_line(&text, issue, &entry) else {
+        let Some(next) = insert_logbook_line(&text, issue, verb, seat, &entry) else {
             return Ok(false);
         };
         vissue_core::store::replace_file_atomically(path, &next)?;
         Ok(true)
     })
     .unwrap_or(false)
+}
+
+/// How old a writer's copy of an issues file must be before a logbook
+/// write removes it.
+const DEAD_TEMP_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Remove the copies a writer killed between its write and its rename left
+/// beside `path`: `.NAME.tmp.PID-N` or `.NAME.tmp.PID-N-N`, a minute old.
+/// The caller has the file's issues lock, and every writer keeps that lock
+/// while its copy exists, so no such copy is a live write's. The pid in the
+/// name is not asked about: it may be another host's, or reused since. The
+/// minute leaves a copy alone while a writer that took no lock may still
+/// rename it.
+fn sweep_dead_temps(path: &Path) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else {
+        return;
+    };
+    let prefix = format!(".{name}.tmp.");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let Some(rest) = file.to_str().and_then(|f| f.strip_prefix(&prefix)) else {
+            continue;
+        };
+        let parts: Vec<&str> = rest.split('-').collect();
+        let digits = |p: &&str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+        if !(2..=3).contains(&parts.len()) || !parts.iter().all(digits) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|at| std::time::SystemTime::now().duration_since(at).ok())
+            .is_some_and(|age| age >= DEAD_TEMP_AFTER);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Name the seat on a note when the tracker commit did not.
@@ -49142,20 +49255,15 @@ fn logbook_opens_with_note_seat(path: &Path, issue: &str, seat: &str) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else {
         return false;
     };
-    let lines: Vec<&str> = text.lines().collect();
-    let Some(id_at) = lines.iter().position(|line| line_is_issue_id(line, issue)) else {
+    let Some(heading) = issue_heading(&text, issue) else {
         return false;
     };
-    let Some(book) = lines[id_at..]
-        .iter()
-        .position(|line| line.trim() == ":LOGBOOK:")
-    else {
+    let lines: Vec<&str> = text.lines().collect();
+    let (_, Some(held)) = logbook_site(&lines, &heading) else {
         return false;
     };
     let want = format!("- Noted by {seat} ");
-    lines
-        .get(id_at + book + 1)
-        .is_some_and(|line| line.trim().starts_with(&want))
+    held.first().is_some_and(|line| line.starts_with(&want))
 }
 
 /// Use vissue's blocking write lock normally, but honor an armed wall
@@ -49418,8 +49526,8 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// The add runs first and its failure stands on its own: a commit named
 /// for a file git never took in reports a pathspec error that hides why
 /// the add failed. An untracked file is added here, that file only.
-/// ljos never removes `index.lock`. That file belongs to the git that
-/// created it.
+/// ljos removes an `index.lock` only when its git was one a dead ljos
+/// process ran ([`clear_orphaned_index_lock`]).
 pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
     if let Err(why) = refuse_ljos_checkout(dir) {
         return PathCommit::Refused(why);
@@ -49460,8 +49568,17 @@ fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         seat_git_child(&mut cmd);
         bounded_output(&mut cmd)
     };
+    let git_dir = git_dir_and_top(dir).map(|(git_dir, _)| git_dir);
+    if git_dir.as_deref().is_some_and(tracker_push::stopped_in) {
+        return PathCommit::Refused(format!(
+            "{} is mid-rebase or mid-merge, so no commit was made there and the edit is only on disk; `git -C {} rebase --abort` (or `merge --abort`) clears it and drops edits made since it stopped",
+            dir.display(),
+            dir.display()
+        ));
+    }
     // `Err` is a busy index, with what git said.
     let attempt = || -> Result<PathCommit, String> {
+        let _owner = git_dir.as_deref().and_then(IndexOwner::record);
         let added = match git(&["add"]) {
             Ok(out) => out,
             Err(e) => return Ok(PathCommit::Refused(format!("git: {e}"))),
@@ -49491,8 +49608,13 @@ fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
     };
     let mut result = attempt();
     if result.is_err() {
-        if let Some(orphan) = orphaned_index_lock(dir) {
-            return PathCommit::Refused(orphan);
+        match clear_orphaned_index_lock(dir) {
+            Some(Ok(line)) => {
+                eprintln!("tracker git: {line}");
+                result = attempt();
+            }
+            Some(Err(orphan)) => return PathCommit::Refused(orphan),
+            None => {}
         }
     }
     // Two short tries, then defer. Five used to hold the advisory lock for
@@ -49757,6 +49879,641 @@ const ORPHAN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 /// git process working in the checkout. A git killed outright leaves one,
 /// and every later commit fails on it until a person removes it.
 pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
+    let (lock, top, age) = orphan_index_lock(dir, ORPHAN_AFTER)?;
+    Some(orphan_line(&lock, &top, age))
+}
+
+fn orphan_line(lock: &Path, top: &Path, age: std::time::Duration) -> String {
+    format!(
+        "{} is {}s old and no git process runs in {}: a git killed while it held the index left it, and every commit here fails until it is removed (`rm {}`)",
+        lock.display(),
+        age.as_secs(),
+        top.display(),
+        lock.display()
+    )
+}
+
+/// Remove an `index.lock` [`orphaned_index_lock`] names, and say so, when
+/// the record an ljos commit wrote beside it shows who made it: an ljos
+/// process on this host, in this boot, that no longer runs, and the lock
+/// is still the file that process last saw ([`LockMark`]). A process scan
+/// sees only this host, and a checkout on shared storage may have a git on
+/// another, so a lock with no such record is named and left. git makes the
+/// lock with `O_EXCL`, so while the old file is there no new git can take
+/// the index. `Err` is the orphan line, with why the lock was left.
+pub(crate) fn clear_orphaned_index_lock(dir: &Path) -> Option<Result<String, String>> {
+    clear_index_lock_older_than(dir, ORPHAN_AFTER)
+}
+
+/// [`clear_orphaned_index_lock`] for a lock at least `min_age` old. A
+/// replay calls it with no age while it has the commit lock and the issues
+/// locks, so no ljos writer of the checkout runs.
+///
+/// Every check reads the lock through one open descriptor, which also
+/// keeps its inode from being given to a new file. The lock is then
+/// renamed aside in the git directory, and only removed when the renamed
+/// path is still that file, unchanged, and no git works on the repository.
+/// Otherwise it is put back, and when a new lock took the path meanwhile,
+/// the checked file stays aside and the line names it.
+pub(crate) fn clear_index_lock_older_than(
+    dir: &Path,
+    min_age: std::time::Duration,
+) -> Option<Result<String, String>> {
+    use std::os::unix::fs::MetadataExt as _;
+    let (git_dir, top) = git_dir_and_top(dir)?;
+    let lock = git_dir.join("index.lock");
+    let file = open_lock(&lock).ok()?;
+    let seen = file.metadata().ok()?;
+    let id = (seen.dev(), seen.ino());
+    let age = seen
+        .modified()
+        .ok()
+        .and_then(|at| std::time::SystemTime::now().duration_since(at).ok())
+        .unwrap_or_default();
+    if age < min_age || git_may_own(&git_dir, &top, Some(&seen)) {
+        return None;
+    }
+    let left = |why: &str| Some(Err(format!("{}; {why}", orphan_line(&lock, &top, age))));
+    if !seen.is_file() {
+        return left("it is not a plain file, so it is left");
+    }
+    let Some(mark) = LockMark::read(&file) else {
+        return left("it changed while it was read, so it is left");
+    };
+    let record = git_dir.join(INDEX_OWNER);
+    let owner = match index_owner_gone(&record, &mark) {
+        Ok(owner) => owner,
+        Err(why) => return left(&why),
+    };
+    lock_pause("checked");
+    let aside = git_dir.join(format!("{INDEX_ASIDE}.{}", std::process::id()));
+    if let Err(e) = std::fs::rename(&lock, &aside) {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            return Some(Ok(format!("{} was already gone", lock.display())));
+        }
+        return left(&format!("it could not be moved aside ({e}), so it is left"));
+    }
+    lock_pause("aside");
+    let same = file_id(&aside) == Some(id)
+        && LockMark::read(&file).is_some_and(|now| now.same_file_and_bytes(&mark));
+    if !same {
+        return left(&put_back(
+            &aside,
+            &lock,
+            "the file moved aside was not the one checked",
+        ));
+    }
+    if git_may_own(&git_dir, &top, Some(&seen)) {
+        return left(&put_back(
+            &aside,
+            &lock,
+            "a process opened it or a git started on the repository while it was checked",
+        ));
+    }
+    if let Err(e) = std::fs::remove_file(&aside) {
+        return left(&put_back(
+            &aside,
+            &lock,
+            &format!("it could not be removed ({e})"),
+        ));
+    }
+    let _ = std::fs::remove_file(&record);
+    Some(Ok(format!(
+        "removed {}, {}s old, which {owner}",
+        lock.display(),
+        age.as_secs(),
+    )))
+}
+
+/// Put the lock moved to `aside` back at `lock` without replacing a file
+/// made there since, and say why it was left. A hard link fails when the
+/// path is taken, and then the moved file stays aside.
+fn put_back(aside: &Path, lock: &Path, why: &str) -> String {
+    match std::fs::hard_link(aside, lock) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(aside);
+            format!("{why}, so it was put back and left")
+        }
+        Err(e) => format!(
+            "{why}, and it could not be put back ({e}), so it is left at {}",
+            aside.display()
+        ),
+    }
+}
+
+/// Open `path` to read, not through a link and without waiting on a pipe.
+fn open_lock(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::File::options()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(test)]
+type LockPause = Box<dyn FnMut(&str)>;
+
+#[cfg(test)]
+thread_local! {
+    static LOCK_PAUSE: std::cell::RefCell<Option<LockPause>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The point in [`clear_index_lock_older_than`] a test on this thread
+/// acts at: `checked` after every check and before the rename, `aside`
+/// after the rename and before the second look.
+#[cfg(test)]
+fn lock_pause(point: &str) {
+    LOCK_PAUSE.with(|slot| {
+        if let Some(pause) = slot.borrow_mut().as_mut() {
+            pause(point);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn lock_pause(_point: &str) {}
+
+/// The record beside `index.lock` of the ljos commit whose git may be
+/// writing the index.
+const INDEX_OWNER: &str = "ljos-index.owner";
+
+/// The name, before `.PID`, a cleared lock has in the git directory
+/// between its rename and its removal.
+const INDEX_ASIDE: &str = "ljos-index.lock.aside";
+
+/// The host name and boot id, together this host's identity. `None` when
+/// either cannot be read, and then no lock counts as this host's.
+fn host_identity() -> Option<(String, String)> {
+    let read = |path: &str| {
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+    };
+    Some((
+        read("/proc/sys/kernel/hostname")?,
+        read("/proc/sys/kernel/random/boot_id")?,
+    ))
+}
+
+/// When process `pid` started, in clock ticks since boot. A pid reused by
+/// a later process has a later start.
+fn process_start(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+fn unix_secs(at: std::time::SystemTime) -> u64 {
+    at.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// This process named as the index writer of a git directory, until the
+/// guard drops. The record names the host, the boot, the pid and its start,
+/// the span in which a git this process runs may make `index.lock`, and the
+/// device and inode of each `index.lock` that appears while the guard
+/// lives, each with a `mark` line of what that file last was
+/// ([`LockMark`]). Another file at that path, even one made in the span, is
+/// not this process's lock. While an `index.lock` is there, the record
+/// beside it is that lock's evidence and is not written over. A git this
+/// process ran that exits and leaves a lock the record names, as one a
+/// timeout killed does, leaves the record too, with that lock's last mark.
+struct IndexOwner {
+    path: PathBuf,
+    lock: PathBuf,
+    at: u64,
+    body: std::sync::Arc<std::sync::Mutex<String>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    watch: Option<std::thread::JoinHandle<()>>,
+}
+
+/// How many `index.lock` files one record names at most.
+const INDEX_OWNER_LOCKS: usize = 256;
+
+impl IndexOwner {
+    fn record(git_dir: &Path) -> Option<Self> {
+        let (host, boot) = host_identity()?;
+        let pid = std::process::id();
+        let start = process_start(pid)?;
+        let at = unix_secs(std::time::SystemTime::now());
+        let until = at + 4 * call_deadline::timeout().as_secs() + 1;
+        let body =
+            format!("host {host}\nboot {boot}\npid {pid}\nstart {start}\nat {at}\nuntil {until}\n");
+        let path = git_dir.join(INDEX_OWNER);
+        let lock = git_dir.join("index.lock");
+        if path.exists() && lock.exists() {
+            return None;
+        }
+        std::fs::write(&path, &body).ok()?;
+        let body = std::sync::Arc::new(std::sync::Mutex::new(body));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watch = {
+            let (body, stop, path, lock) = (body.clone(), stop.clone(), path.clone(), lock.clone());
+            std::thread::spawn(move || watch_index_lock(&lock, &path, at, &body, &stop))
+        };
+        Some(Self {
+            path,
+            lock,
+            at,
+            body,
+            stop,
+            watch: Some(watch),
+        })
+    }
+}
+
+/// Name each `index.lock` made since `at` in the record at `path`, until
+/// `stop` is set.
+fn watch_index_lock(
+    lock: &Path,
+    path: &Path,
+    at: u64,
+    body: &std::sync::Mutex<String>,
+    stop: &std::sync::atomic::AtomicBool,
+) {
+    while !stop.load(std::sync::atomic::Ordering::Acquire) {
+        name_index_lock(lock, path, at, body, |path, text| {
+            std::fs::write(path, text)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Add `lock DEV INO` to the record at `path` for the `index.lock` there,
+/// when it was made since `at` and the record does not name it yet, and
+/// keep its `mark DEV INO ...` line at what the file now is. The record's
+/// own lines are what is already written, so a line whose `write` failed
+/// is tried again on the next call. A record another process wrote over is
+/// left as it is.
+fn name_index_lock(
+    lock: &Path,
+    path: &Path,
+    at: u64,
+    body: &std::sync::Mutex<String>,
+    write: impl Fn(&Path, &str) -> std::io::Result<()>,
+) {
+    use std::os::unix::fs::MetadataExt as _;
+    let Ok(file) = open_lock(lock) else {
+        return;
+    };
+    let Ok(meta) = file.metadata() else {
+        return;
+    };
+    let id = (meta.dev(), meta.ino());
+    let made = meta.modified().map(unix_secs).unwrap_or(0);
+    let mut held = body
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let named = named_locks(&held, "lock");
+    let known = named.contains(&id);
+    if !known && (made + 1 < at || named.len() >= INDEX_OWNER_LOCKS) {
+        return;
+    }
+    let last = lock_marks(&held).into_iter().find(|m| (m.dev, m.ino) == id);
+    if known
+        && last.as_ref().is_some_and(|last| {
+            *last == LockMark::of(&meta, inode_generation(&file), last.sha.clone())
+        })
+    {
+        return;
+    }
+    let Some(mark) = LockMark::read(&file) else {
+        return;
+    };
+    if !std::fs::read_to_string(path).is_ok_and(|now| now == *held) {
+        return;
+    }
+    let old = format!("mark {} {} ", id.0, id.1);
+    let mut next: String = held
+        .lines()
+        .filter(|line| !line.starts_with(&old))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    if !known {
+        next.push_str(&format!("lock {} {}\n", id.0, id.1));
+    }
+    next.push_str(&format!("mark {}\n", mark.line()));
+    if write(path, &next).is_ok() {
+        *held = next;
+    }
+}
+
+impl Drop for IndexOwner {
+    /// A lock made after the watcher's last look is named here, and the
+    /// mark of a named lock is brought up to date, so the record is not
+    /// removed while a lock this process's git may have made is there
+    /// unnamed. A lock made in the span that still cannot be named keeps
+    /// the record, which then does not name it.
+    fn drop(&mut self) {
+        use std::os::unix::fs::MetadataExt as _;
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(watch) = self.watch.take() {
+            let _ = watch.join();
+        }
+        name_index_lock(&self.lock, &self.path, self.at, &self.body, |path, text| {
+            std::fs::write(path, text)
+        });
+        let body = self
+            .body
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !std::fs::read_to_string(&self.path).is_ok_and(|now| now == *body) {
+            return;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&self.lock) else {
+            let _ = std::fs::remove_file(&self.path);
+            return;
+        };
+        if named_locks(&body, "lock").contains(&(meta.dev(), meta.ino())) {
+            return;
+        }
+        let made = meta.modified().map(unix_secs).unwrap_or(0);
+        if made + 1 < self.at {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// What an `index.lock` was when read through one descriptor: device,
+/// inode, size, modify and change times to the nanosecond, the inode
+/// generation where the file system gives one, and the SHA-256 of its
+/// bytes. A file made later on a freed inode can match device, inode,
+/// size and both times: ext4 keeps coarse clock ticks. Its generation
+/// differs, and so do its bytes unless it is empty.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LockMark {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+    generation: Option<u64>,
+    sha: String,
+}
+
+impl LockMark {
+    fn of(meta: &std::fs::Metadata, generation: Option<u64>, sha: String) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            size: meta.size(),
+            mtime: (meta.mtime(), meta.mtime_nsec()),
+            ctime: (meta.ctime(), meta.ctime_nsec()),
+            generation,
+            sha,
+        }
+    }
+
+    /// The mark of `file`, or `None` when it could not be read or changed
+    /// while it was read.
+    fn read(file: &std::fs::File) -> Option<Self> {
+        use sha2::Digest as _;
+        use std::os::unix::fs::FileExt as _;
+        let before = file.metadata().ok()?;
+        let generation = inode_generation(file);
+        let mut hasher = sha2::Sha256::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut at = 0u64;
+        loop {
+            let n = file.read_at(&mut buf, at).ok()?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            at += n as u64;
+        }
+        let mark = Self::of(&before, generation, hex::encode(hasher.finalize()));
+        let after = Self::of(&file.metadata().ok()?, generation, mark.sha.clone());
+        (at == mark.size && after == mark).then_some(mark)
+    }
+
+    /// `DEV INO SIZE MTIME CTIME GENERATION SHA`, the times as
+    /// `SECS.NANOS` and an unknown generation as `-`.
+    fn line(&self) -> String {
+        format!(
+            "{} {} {} {}.{:09} {}.{:09} {} {}",
+            self.dev,
+            self.ino,
+            self.size,
+            self.mtime.0,
+            self.mtime.1,
+            self.ctime.0,
+            self.ctime.1,
+            self.generation
+                .map_or_else(|| "-".to_string(), |g| g.to_string()),
+            self.sha
+        )
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        let time = |word: &str| {
+            let (secs, nanos) = word.split_once('.')?;
+            Some((secs.parse().ok()?, nanos.parse().ok()?))
+        };
+        let mut words = text.split_whitespace();
+        let mark = Self {
+            dev: words.next()?.parse().ok()?,
+            ino: words.next()?.parse().ok()?,
+            size: words.next()?.parse().ok()?,
+            mtime: time(words.next()?)?,
+            ctime: time(words.next()?)?,
+            generation: match words.next()? {
+                "-" => None,
+                word => Some(word.parse().ok()?),
+            },
+            sha: words.next()?.to_string(),
+        };
+        words.next().is_none().then_some(mark)
+    }
+
+    /// The same file with the same bytes. A rename changes the change
+    /// time, so it is not compared.
+    fn same_file_and_bytes(&self, other: &Self) -> bool {
+        (
+            self.dev,
+            self.ino,
+            self.size,
+            self.mtime,
+            self.generation,
+            &self.sha,
+        ) == (
+            other.dev,
+            other.ino,
+            other.size,
+            other.mtime,
+            other.generation,
+            &other.sha,
+        )
+    }
+
+    /// Whether a later file on the same inode would show another mark: its
+    /// bytes differ unless it is empty, and its generation always differs
+    /// where there is one. A generation of 0 is what some file systems
+    /// give every file.
+    fn tells_a_recreate(&self) -> bool {
+        self.size > 0 || self.generation.is_some_and(|g| g != 0)
+    }
+}
+
+/// The `mark` line a record would hold for the file at `path` now.
+#[cfg(test)]
+fn index_mark_line(path: &Path) -> String {
+    let file = open_lock(path).unwrap();
+    format!("mark {}", LockMark::read(&file).unwrap().line())
+}
+
+/// The `mark` lines of a record.
+fn lock_marks(text: &str) -> Vec<LockMark> {
+    text.lines()
+        .filter_map(|line| LockMark::parse(line.strip_prefix("mark ")?))
+        .collect()
+}
+
+/// The inode generation of `file`, which a file system gives anew each
+/// time it hands out an inode. `None` where it cannot be read.
+#[cfg(target_os = "linux")]
+fn inode_generation(file: &std::fs::File) -> Option<u64> {
+    use std::os::fd::AsRawFd as _;
+    let mut generation: libc::c_long = 0;
+    // SAFETY: FS_IOC_GETVERSION writes at most one long through the pointer.
+    let rc = unsafe {
+        libc::ioctl(
+            file.as_raw_fd(),
+            libc::FS_IOC_GETVERSION,
+            &mut generation as *mut libc::c_long,
+        )
+    };
+    (rc == 0).then_some(generation as u64)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn inode_generation(_file: &std::fs::File) -> Option<u64> {
+    None
+}
+
+/// The device and inode pairs on the `KEY DEV INO` lines of a record.
+fn named_locks(text: &str, key: &str) -> Vec<(u64, u64)> {
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line
+                .strip_prefix(key)?
+                .strip_prefix(' ')?
+                .split_whitespace();
+            Some((words.next()?.parse().ok()?, words.next()?.parse().ok()?))
+        })
+        .collect()
+}
+
+/// The device and inode of `path`, a file not followed through a link.
+fn file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
+/// Who made the lock read as `mark`, when `record` shows it was an ljos
+/// process on this host, in this boot, that no longer runs, and the lock
+/// was made in the span the record names. The record must name the lock's
+/// device and inode and hold a mark equal to this one, and that mark must
+/// tell this file from a later one on the same inode. `Err` says why the
+/// lock is not known to be one.
+fn index_owner_gone(record: &Path, mark: &LockMark) -> Result<String, String> {
+    let Ok(text) = std::fs::read_to_string(record) else {
+        return Err(format!(
+            "no ljos commit recorded who made it in {}, so it may be a git's on another host and is left",
+            record.display()
+        ));
+    };
+    let field = |key: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix(' '))
+            .map(str::trim)
+    };
+    let number = |key: &str| field(key).and_then(|value| value.parse::<u64>().ok());
+    let (Some(host), Some(boot), Some(pid), Some(start), Some(at), Some(until)) = (
+        field("host"),
+        field("boot"),
+        number("pid"),
+        number("start"),
+        number("at"),
+        number("until"),
+    ) else {
+        return Err(format!(
+            "{} cannot be read, so the lock is left",
+            record.display()
+        ));
+    };
+    let Some((this_host, this_boot)) = host_identity() else {
+        return Err("this host's name and boot id cannot be read, so the lock is left".into());
+    };
+    if host != this_host || boot != this_boot {
+        return Err(format!(
+            "{} names {host}, not this boot of {this_host}, so the lock is left",
+            record.display()
+        ));
+    }
+    let Ok(pid32) = u32::try_from(pid) else {
+        return Err(format!(
+            "{} cannot be read, so the lock is left",
+            record.display()
+        ));
+    };
+    let id = (mark.dev, mark.ino);
+    if !named_locks(&text, "lock").contains(&id) {
+        return Err(format!(
+            "{} does not name this lock's device and inode, so the lock is left",
+            record.display()
+        ));
+    }
+    if process_start(pid32) == Some(start) {
+        return Err(format!(
+            "ljos process {pid}, which {} names, still runs, so the lock is left",
+            record.display()
+        ));
+    }
+    match lock_marks(&text)
+        .into_iter()
+        .find(|seen| (seen.dev, seen.ino) == id)
+    {
+        Some(seen) if seen == *mark => {}
+        Some(_) => {
+            return Err(format!(
+                "its size, times, inode generation or bytes are not what {} last saw, so it may be a later file on the same inode and is left",
+                record.display()
+            ));
+        }
+        None => {
+            return Err(format!(
+                "{} has no mark for it, so a later file on the same inode cannot be told from it and it is left",
+                record.display()
+            ));
+        }
+    }
+    if !mark.tells_a_recreate() {
+        return Err(
+            "it is empty and this file system gives no inode generation, so a later empty file on the same inode would look the same and it is left"
+                .into(),
+        );
+    }
+    let made = u64::try_from(mark.mtime.0).unwrap_or(0);
+    if made + 1 < at || made > until {
+        return Err(format!(
+            "it was made outside the commit {} names, so the lock is left",
+            record.display()
+        ));
+    }
+    Ok(format!(
+        "ljos process {pid} on {host} made and which no longer runs"
+    ))
+}
+
+/// The absolute git directory and the work tree top of `dir`.
+fn git_dir_and_top(dir: &Path) -> Option<(PathBuf, PathBuf)> {
     let mut cmd = git_at(dir);
     cmd.args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
         .stdin(std::process::Stdio::null())
@@ -49767,53 +50524,386 @@ pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
         .filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines().map(str::trim);
-    let lock = Path::new(lines.next()?).join("index.lock");
-    let top = PathBuf::from(lines.next()?);
-    let age = std::fs::metadata(&lock)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|at| std::time::SystemTime::now().duration_since(at).ok())?;
-    if age < ORPHAN_AFTER || git_runs_in(&top) {
-        return None;
-    }
-    Some(format!(
-        "{} is {}s old and no git process runs in {}: a git killed while it held the index left it, and every commit here fails until it is removed (`rm {}`)",
-        lock.display(),
-        age.as_secs(),
-        top.display(),
-        lock.display()
-    ))
+    Some((PathBuf::from(lines.next()?), PathBuf::from(lines.next()?)))
 }
 
-/// Whether a git process on this machine works in `top`, by its working
-/// directory. One whose directory cannot be read may be the holder, and
-/// counts.
+fn orphan_index_lock(
+    dir: &Path,
+    min_age: std::time::Duration,
+) -> Option<(PathBuf, PathBuf, std::time::Duration)> {
+    let (git_dir, top) = git_dir_and_top(dir)?;
+    let lock = git_dir.join("index.lock");
+    let meta = std::fs::symlink_metadata(&lock).ok()?;
+    let age = meta
+        .modified()
+        .ok()
+        .and_then(|made| std::time::SystemTime::now().duration_since(made).ok())
+        .unwrap_or_default();
+    if age < min_age || git_may_own(&git_dir, &top, Some(&meta)) {
+        return None;
+    }
+    Some((lock, top, age))
+}
+
+/// Whether a live process on this machine may own the index of the
+/// repository at `git_dir` and `top`: any other process with `lock`, the
+/// `index.lock` file, open, or a git whose working directory, `-C`,
+/// `--git-dir` or `--work-tree` argument, or `GIT_DIR`, `GIT_WORK_TREE`,
+/// `GIT_INDEX_FILE` or `GIT_COMMON_DIR` names the repository. Open files
+/// and directories are compared by device and inode through the process's
+/// own links, so another path to them, such as a bind mount or another
+/// mount namespace, counts. A git started elsewhere with `--git-dir` works
+/// on the lock from outside the work tree.
+///
+/// When this process cannot see every process, it says yes: see
+/// [`proc_shows_every_process`]. A git that closed its descriptor still
+/// owns its lock by name, so a no here is never enough to clear a lock.
 #[cfg(target_os = "linux")]
-fn git_runs_in(top: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
+fn git_may_own(git_dir: &Path, top: &Path, lock: Option<&std::fs::Metadata>) -> bool {
+    let (proc, me) = (Path::new("/proc"), std::process::id());
+    let own_tree = own_tree_in_test();
+    if !proc_shows_every_process(proc, me) && !own_tree {
+        return true;
+    }
+    scan_may_own(proc, me, own_tree.then_some(me), git_dir, top, lock)
+}
+
+#[cfg(test)]
+thread_local! {
+    static OWN_TREE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While it lives, [`git_may_own`] on this thread takes `/proc` as
+/// showing every process and reads only the processes this one started.
+/// A test of the rest then runs in a sandbox whose pid namespace is not
+/// the first, and beside agents of the same user that are not dumpable,
+/// such as `ssh-agent` and `gpg-agent`, which refuse every scan outside a
+/// test.
+#[cfg(test)]
+struct OwnTree;
+
+#[cfg(test)]
+impl OwnTree {
+    fn assume() -> Self {
+        OWN_TREE.with(|own| own.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for OwnTree {
+    fn drop(&mut self) {
+        OWN_TREE.with(|own| own.set(false));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn own_tree_in_test() -> bool {
+    OWN_TREE.with(std::cell::Cell::get)
+}
+
+#[cfg(all(not(test), target_os = "linux"))]
+fn own_tree_in_test() -> bool {
+    false
+}
+
+/// Whether the process at `proc_dir` descends from process `root`, by its
+/// parent links in `proc`.
+#[cfg(target_os = "linux")]
+fn descends_from(proc: &Path, proc_dir: &Path, root: u32) -> bool {
+    let mut at = proc_dir.to_path_buf();
+    for _ in 0..64 {
+        let Some(parent) = std::fs::read_to_string(at.join("status"))
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("PPid:"))
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+            })
+        else {
+            return false;
+        };
+        if parent == root {
+            return true;
+        }
+        if parent <= 1 {
+            return false;
+        }
+        at = proc.join(parent.to_string());
+    }
+    false
+}
+
+/// [`git_may_own`] over the process table at `proc`, as process `me`,
+/// reading only descendants of `only_under` when it is given.
+///
+/// A file takes the file system uid of the process that made it, so only
+/// a process with the lock's owner among its uids can be the git that
+/// made it. Each such process must be read in full: its uids, name and
+/// open files, and for a git its directory, arguments and environment. A
+/// read that fails while the process runs, as for a git that is not
+/// dumpable, counts as may own. An exiting process refuses reads too, so
+/// a read is tried again until the process is gone. A process of another
+/// uid is read where it can be, and one with the lock open counts.
+#[cfg(target_os = "linux")]
+fn scan_may_own(
+    proc: &Path,
+    me: u32,
+    only_under: Option<u32>,
+    git_dir: &Path,
+    top: &Path,
+    lock: Option<&std::fs::Metadata>,
+) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let lock = lock.map(|m| ((m.dev(), m.ino()), m.uid()));
+    let roots: Vec<(u64, u64)> = [file_id(git_dir), file_id(top)]
+        .into_iter()
+        .flatten()
+        .collect();
+    let Ok(entries) = std::fs::read_dir(proc) else {
         return true;
     };
-    for entry in entries.flatten() {
-        if !entry
-            .file_name()
-            .to_string_lossy()
-            .bytes()
-            .all(|b| b.is_ascii_digit())
-        {
+    let me = me.to_string();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.bytes().all(|b| b.is_ascii_digit()) || name == me {
             continue;
         }
-        let comm = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
-        let comm = comm.trim();
-        if comm != "git" && !comm.starts_with("git-") {
+        let proc_dir = entry.path();
+        if only_under.is_some_and(|root| !descends_from(proc, &proc_dir, root)) {
             continue;
         }
-        match std::fs::read_link(entry.path().join("cwd")) {
-            Ok(cwd) if cwd.starts_with(top) => return true,
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return true,
-            _ => {}
+        let mut tries = 0;
+        loop {
+            match process_may_own(&proc_dir, lock, &roots) {
+                Some(true) => return true,
+                Some(false) => break,
+                None if !runs(&proc_dir) => break,
+                None if tries >= 10 => return true,
+                None => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
         }
     }
     false
+}
+
+/// Whether the process table at `proc` shows every process on the host
+/// to process `me`: `proc/self` is `me`, so the table is of this pid
+/// namespace; that namespace is the kernel's first, the only one that
+/// has every process, and this process's `NSpid` has one entry; and the
+/// mount at `proc` has no `hidepid`, which hides other users' processes.
+/// Anything that cannot be read counts as hidden. A table mounted inside
+/// a new pid namespace lists one `NSpid` entry too, so the namespace is
+/// also read.
+#[cfg(target_os = "linux")]
+fn proc_shows_every_process(proc: &Path, me: u32) -> bool {
+    let is_me = std::fs::read_link(proc.join("self"))
+        .is_ok_and(|link| link.as_os_str() == me.to_string().as_str());
+    let first = std::fs::read_link(proc.join("self/ns/pid"))
+        .is_ok_and(|link| link.as_os_str() == FIRST_PID_NAMESPACE);
+    let first_namespace = std::fs::read_to_string(proc.join("self/status"))
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("NSpid:"))
+                .map(|pids| pids.split_whitespace().count() == 1)
+        })
+        .unwrap_or(false);
+    let shown = std::fs::read_to_string(proc.join("self/mountinfo"))
+        .ok()
+        .and_then(|info| proc_mount_shows_all(&info, proc))
+        .unwrap_or(false);
+    is_me && first && first_namespace && shown
+}
+
+/// The link the kernel gives its first pid namespace, `PROC_PID_INIT_INO`.
+#[cfg(target_os = "linux")]
+const FIRST_PID_NAMESPACE: &str = "pid:[4026531836]";
+
+/// Whether the proc mount at `at` in `mountinfo` shows every process:
+/// `None` when no proc mount is listed there. Mount points have spaces
+/// and other bytes written as octal escapes.
+#[cfg(target_os = "linux")]
+fn proc_mount_shows_all(mountinfo: &str, at: &Path) -> Option<bool> {
+    let at = at.to_string_lossy();
+    mountinfo.lines().rev().find_map(|line| {
+        let (head, tail) = line.split_once(" - ")?;
+        let point = head.split_whitespace().nth(4)?.replace("\\040", " ");
+        let mut tail = tail.split_whitespace();
+        if point != at || tail.next()? != "proc" {
+            return None;
+        }
+        let options = tail.nth(1).unwrap_or("");
+        Some(options.split(',').all(|option| {
+            option
+                .strip_prefix("hidepid=")
+                .is_none_or(|value| matches!(value, "0" | "off"))
+        }))
+    })
+}
+
+/// Whether the process at `proc_dir` may own the index: `Some(true)` when
+/// it has `lock` open, or is a git that names one of `roots`. `None` is a
+/// process that may have made the lock, by its uids, and could not be
+/// read in full.
+#[cfg(target_os = "linux")]
+fn process_may_own(
+    proc_dir: &Path,
+    lock: Option<((u64, u64), u32)>,
+    roots: &[(u64, u64)],
+) -> Option<bool> {
+    let status = std::fs::read_to_string(proc_dir.join("status")).ok()?;
+    let uids: Vec<u32> = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))?
+        .split_whitespace()
+        .filter_map(|uid| uid.parse().ok())
+        .collect();
+    let maker = lock.is_none_or(|(_, owner)| uids.contains(&owner));
+    let unread = if maker { None } else { Some(false) };
+    let id = lock.map(|(id, _)| id);
+    match std::fs::read_dir(proc_dir.join("fd")) {
+        Ok(fds) => {
+            for fd in fds {
+                let Ok(fd) = fd else {
+                    return unread;
+                };
+                if id.is_some() && followed_id(&fd.path()) == id {
+                    return Some(true);
+                }
+            }
+        }
+        Err(_) => return unread,
+    }
+    let Ok(comm) = std::fs::read_to_string(proc_dir.join("comm")) else {
+        return unread;
+    };
+    let comm = comm.trim();
+    if comm != "git" && !comm.starts_with("git-") {
+        return Some(false);
+    }
+    let cwd = proc_dir.join("cwd");
+    match walks_into(&cwd, roots) {
+        Some(true) => return Some(true),
+        Some(false) => {}
+        None => return unread,
+    }
+    let Ok(cmdline) = std::fs::read(proc_dir.join("cmdline")) else {
+        return unread;
+    };
+    let args: Vec<String> = cmdline
+        .split(|b| *b == 0)
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
+    let at = |base: &Path, word: &str| match word.strip_prefix('/') {
+        Some(rest) => proc_dir.join("root").join(rest),
+        None => base.join(word),
+    };
+    let mut base = cwd.clone();
+    let mut words = args.iter().skip(1);
+    while let Some(word) = words.next() {
+        let named = match word.as_str() {
+            "-C" => {
+                let Some(next) = words.next() else { break };
+                base = at(&base, next);
+                Some(base.clone())
+            }
+            "--git-dir" | "--work-tree" => words.next().map(|next| at(&base, next)),
+            _ => word
+                .strip_prefix("--git-dir=")
+                .or_else(|| word.strip_prefix("--work-tree="))
+                .map(|value| at(&base, value)),
+        };
+        if let Some(named) = named {
+            match walks_into(&named, roots) {
+                Some(true) => return Some(true),
+                Some(false) => {}
+                None => return unread,
+            }
+        }
+    }
+    let Ok(environ) = std::fs::read(proc_dir.join("environ")) else {
+        return unread;
+    };
+    for var in environ.split(|b| *b == 0) {
+        let var = String::from_utf8_lossy(var);
+        let Some((key, value)) = var.split_once('=') else {
+            continue;
+        };
+        if !matches!(
+            key,
+            "GIT_DIR" | "GIT_WORK_TREE" | "GIT_INDEX_FILE" | "GIT_COMMON_DIR"
+        ) || value.is_empty()
+        {
+            continue;
+        }
+        match walks_into(&at(&cwd, value), roots) {
+            Some(true) => return Some(true),
+            Some(false) => {}
+            None => return unread,
+        }
+    }
+    Some(false)
+}
+
+/// The device and inode of what `path` names, through links, so a
+/// process's `cwd` or descriptor link gives the file it has.
+#[cfg(target_os = "linux")]
+fn followed_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
+}
+
+/// Whether `path` or a directory above it, walked up with `..` from the
+/// file it names, is one of `roots`. A walk from a process's `cwd` link
+/// goes up that process's tree, wherever it is mounted. `Some(false)` for
+/// a path that does not exist, `None` for one that cannot be read.
+#[cfg(target_os = "linux")]
+fn walks_into(path: &Path, roots: &[(u64, u64)]) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+    let mut at = path.to_path_buf();
+    let mut last = None;
+    for step in 0..256 {
+        let id = match std::fs::metadata(&at) {
+            Ok(meta) => (meta.dev(), meta.ino()),
+            Err(e) if step == 0 && e.kind() == std::io::ErrorKind::NotFound => return Some(false),
+            Err(_) => return None,
+        };
+        if roots.contains(&id) {
+            return Some(true);
+        }
+        if last == Some(id) {
+            return Some(false);
+        }
+        last = Some(id);
+        at.push("..");
+    }
+    Some(false)
+}
+
+/// Whether the process at `proc_dir` still runs and is not a zombie. One
+/// whose status cannot be read while its directory is there still runs.
+#[cfg(target_os = "linux")]
+fn runs(proc_dir: &Path) -> bool {
+    let Ok(status) = std::fs::read_to_string(proc_dir.join("status")) else {
+        return std::fs::symlink_metadata(proc_dir).is_ok();
+    };
+    !status
+        .lines()
+        .find_map(|line| line.strip_prefix("State:"))
+        .map(str::trim)
+        .is_some_and(|state| state.starts_with('Z') || state.starts_with('X'))
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -49842,7 +50932,7 @@ fn git_runs_in_ps(top: &Path, ps_stdout: &str, cwd_of: impl Fn(u32) -> Option<Pa
 }
 
 #[cfg(target_os = "macos")]
-fn git_runs_in(top: &Path) -> bool {
+fn git_may_own(_git_dir: &Path, top: &Path, _lock: Option<&std::fs::Metadata>) -> bool {
     let Ok(out) = std::process::Command::new(ps_bin())
         .args(["-A", "-o", "pid=,comm="])
         .output()
@@ -49856,7 +50946,7 @@ fn git_runs_in(top: &Path) -> bool {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn git_runs_in(_top: &Path) -> bool {
+fn git_may_own(_git_dir: &Path, _top: &Path, _lock: Option<&std::fs::Metadata>) -> bool {
     true
 }
 
@@ -54558,30 +55648,43 @@ fn tracker_retry_line(retries: usize) -> String {
     }
 }
 
-fn note_landed(issue: &str, text: &str) -> bool {
+/// The note text the way vissue writes it: whitespace folded to one space
+/// and double quotes turned to single ones.
+fn folded_note(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('"', "'")
+}
+
+/// Whether `issue` has a note reading `text` written in the minute `since`
+/// names or later. Other seats note the same issue meanwhile, so the
+/// newest note need not be this one.
+fn note_landed(issue: &str, text: &str, since: &str) -> bool {
     let Ok(card) = tracker_show_json(issue) else {
         return false;
     };
-    let latest = card["logbook"]
+    let want = folded_note(text);
+    card["logbook"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|entry| {
+        .any(|entry| {
+            let at = entry["timestamp"].as_str().unwrap_or("");
             entry["note"]
                 .as_str()
-                .map(|note| (entry["timestamp"].as_str().unwrap_or(""), note))
+                .is_some_and(|note| folded_note(note) == want)
+                && at >= since
         })
-        .max_by_key(|(ts, _)| ts.to_string());
-    latest.is_some_and(|(_, note)| note.trim() == text.trim())
 }
 
-fn tracker_note_already_written(args: &[impl AsRef<str>]) -> bool {
+fn tracker_note_already_written(args: &[impl AsRef<str>], since: &str) -> bool {
     if args.first().map(AsRef::as_ref) != Some("note") || args.len() < 3 {
         return false;
     }
     let issue = args.get(1).map(AsRef::as_ref).unwrap_or_default();
     let text = args.get(2).map(AsRef::as_ref).unwrap_or_default();
-    !issue.trim().is_empty() && !text.trim().is_empty() && note_landed(issue, text)
+    !issue.trim().is_empty() && !text.trim().is_empty() && note_landed(issue, text, since)
 }
 
 /// How long [`run_captured`] waits. A habitat that never exits used to
@@ -54633,9 +55736,22 @@ pub fn run_captured_as(
     Ok(said)
 }
 
+/// A child [`run_captured_within`] stopped at its deadline, or did not
+/// start because the tool budget was already spent. Whatever the child was
+/// asked may or may not have happened, so it is not a refusal.
+#[derive(Debug)]
+pub(crate) struct CallTimedOut(String);
+
+impl std::fmt::Display for CallTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CallTimedOut {}
+
 fn capture_timed_out(err: &anyhow::Error) -> bool {
-    let text = err.to_string();
-    call_deadline::stalled(&text) || text.contains(" timed out")
+    err.chain().any(|cause| cause.is::<CallTimedOut>())
 }
 
 /// Run `cmd` and stop it if it is still going after `deadline`.
@@ -54853,7 +55969,7 @@ fn run_captured_within(
     if tool_bound::armed() {
         tool_bound::note(bin);
         if let Some(line) = tool_bound::failure() {
-            bail!(line);
+            return Err(CallTimedOut(line).into());
         }
     }
     let cap = call_deadline::timeout();
@@ -54892,6 +56008,7 @@ fn run_captured_within(
     let retryable = tracker_retryable_verb(bin, args);
     let retry_budget = tracker_retry_budget();
     let retry_start = std::time::Instant::now();
+    let since = vissue_core::model::LogEntry::now();
     let mut retries = 0usize;
     let words: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
     'attempt: loop {
@@ -54940,15 +56057,15 @@ fn run_captured_within(
                     if tool_bound::armed() {
                         let line = format!("{bin} timed out");
                         tool_bound::mark_failed(line.clone());
-                        bail!(line);
+                        return Err(CallTimedOut(line).into());
+                    }
+                    if retryable && tracker_note_already_written(args, &since) {
+                        return Ok(Said {
+                            stdout: String::new(),
+                            stderr: String::new(),
+                        });
                     }
                     if retryable && retries < 2 {
-                        if tracker_note_already_written(args) {
-                            return Ok(Said {
-                                stdout: String::new(),
-                                stderr: String::new(),
-                            });
-                        }
                         let backoff = std::time::Duration::from_millis(120 * (1u64 << retries));
                         if retry_start
                             .elapsed()
@@ -54979,7 +56096,7 @@ fn run_captured_within(
                     if capped {
                         call_deadline::stop(&line);
                     }
-                    bail!(line);
+                    return Err(CallTimedOut(line).into());
                 }
                 Ok(None) => {
                     call_deadline::note_waiting(&waited, started, &mut noted);
@@ -58601,6 +59718,7 @@ mod tests {
     #[test]
     fn hook_children_ignore_exported_git_dir_for_lock_paths() {
         let _env = env_guard();
+        let _whole = OwnTree::assume();
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real");
         let decoy = dir.path().join("decoy");
@@ -58826,10 +59944,12 @@ mod tests {
     /// An empty index.lock two minutes old, with no git working in the
     /// checkout, is named with its path and age at once, instead of six
     /// seconds of retries ending in git's `File exists`. A fresh one may
-    /// still be a live git's.
+    /// still be a live git's. With no ljos record of who made it, it may be
+    /// a git's on another host sharing the checkout, so it is left.
     #[test]
     fn an_orphaned_index_lock_is_named_plainly() {
         let _env = env_guard();
+        let _whole = OwnTree::assume();
         let dir = tempfile::tempdir().unwrap();
         let issues = seeded_tracker(dir.path());
         let lock = dir.path().join(".git/index.lock");
@@ -58846,13 +59966,15 @@ mod tests {
         std::env::set_var("LJOS_TRACKER_GIT", "commit");
         std::env::set_var("LJOS_SEAT", "saddle");
         let started = std::time::Instant::now();
-        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        let said = persist_tracker_file(&issues, "probe-a1b2", "noted");
         assert!(
             said.contains("index.lock is 1")
                 && said.contains("s old and no git process runs in")
-                && said.contains("`rm "),
+                && said.contains("`rm ")
+                && said.contains("no ljos commit recorded who made it"),
             "{said}"
         );
+        assert!(lock.exists(), "a lock no record names was removed: {said}");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(3),
             "{:?}",
@@ -58861,6 +59983,1038 @@ mod tests {
         for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
             std::env::remove_var(var);
         }
+    }
+
+    /// An index.lock an ljos commit on this host recorded, whose process no
+    /// longer runs, is removed and the write commits. A record naming
+    /// another host, or a process that still runs, leaves the lock.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_index_lock_a_dead_ljos_commit_recorded_is_removed_and_the_write_commits() {
+        let _env = env_guard();
+        let _whole = OwnTree::assume();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        let git_dir = dir.path().join(".git");
+        let lock = git_dir.join("index.lock");
+        let record = git_dir.join(INDEX_OWNER);
+        let made = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        std::fs::write(&lock, "half an index").unwrap();
+        age_lock(&lock, made);
+        let (host, boot) = host_identity().expect("this host's name and boot id");
+        let at = unix_secs(made) - 1;
+        let (dev, ino) = file_id(&lock).unwrap();
+        let mark = index_mark_line(&lock);
+        let write_for = |host: &str, pid: u32, start: u64, ino: u64| {
+            std::fs::write(
+                &record,
+                format!(
+                    "host {host}\nboot {boot}\npid {pid}\nstart {start}\nat {at}\nuntil {}\nlock {dev} {ino}\n{mark}\n",
+                    at + 30
+                ),
+            )
+            .unwrap();
+        };
+        let write = |host: &str, pid: u32, start: u64| write_for(host, pid, start, ino);
+        let me = std::process::id();
+        let mut other = std::process::Command::new("true").spawn().unwrap();
+        let other_pid = other.id();
+        other.wait().unwrap();
+        write_for(&host, other_pid, 1, ino + 1);
+        let said = clear_orphaned_index_lock(dir.path()).unwrap().unwrap_err();
+        assert!(
+            said.contains("does not name this lock's device and inode"),
+            "{said}"
+        );
+        assert!(lock.exists());
+        write("elsewhere", me + 1, 1);
+        let said = clear_orphaned_index_lock(dir.path()).unwrap().unwrap_err();
+        assert!(said.contains("names elsewhere"), "{said}");
+        write(&host, me, process_start(me).unwrap());
+        let said = clear_orphaned_index_lock(dir.path()).unwrap().unwrap_err();
+        assert!(said.contains("still runs"), "{said}");
+        assert!(lock.exists());
+
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let dead = gone.id();
+        gone.wait().unwrap();
+        write(&host, dead, 1);
+        std::fs::write(
+            &issues,
+            "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let said = persist_tracker_file(&issues, "probe-a1b2", "noted");
+        assert!(!lock.exists(), "the recorded lock stays: {said}");
+        assert!(!record.exists(), "{said}");
+        assert!(
+            said.contains("committed chore(issues): probe-a1b2 noted by saddle"),
+            "{said}"
+        );
+        let log = git_at(dir.path())
+            .args(["log", "-1", "--format=%s"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&log.stdout).trim(),
+            "chore(issues): probe-a1b2 noted by saddle"
+        );
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// While the record guard lives, each `index.lock` that appears is named
+    /// in the record by device and inode, and the record goes with the guard.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_index_owner_names_each_lock_made_while_it_lives() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        seeded_tracker(dir.path());
+        let git_dir = dir.path().join(".git");
+        let lock = git_dir.join("index.lock");
+        let owner = IndexOwner::record(&git_dir).expect("a record");
+        std::fs::write(&lock, "").unwrap();
+        let (dev, ino) = file_id(&lock).unwrap();
+        let named = format!("\nlock {dev} {ino}\n");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut text = String::new();
+        while std::time::Instant::now() < until {
+            text = std::fs::read_to_string(git_dir.join(INDEX_OWNER)).unwrap_or_default();
+            if text.contains(&named) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::fs::remove_file(&lock).unwrap();
+        drop(owner);
+        assert!(text.contains(&named), "{text}");
+        assert!(!git_dir.join(INDEX_OWNER).exists());
+    }
+
+    /// A lock made while the watcher sleeps between looks, and still there
+    /// when the guard drops, is named, and the record stays beside it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_lock_made_between_looks_is_named_before_the_guard_drops() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        seeded_tracker(dir.path());
+        let git_dir = dir.path().join(".git");
+        let lock = git_dir.join("index.lock");
+        let record = git_dir.join(INDEX_OWNER);
+        let mut missed = Vec::new();
+        for _ in 0..20 {
+            let owner = IndexOwner::record(&git_dir).expect("a record");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::fs::write(&lock, "").unwrap();
+            drop(owner);
+            let (dev, ino) = file_id(&lock).unwrap();
+            let text = std::fs::read_to_string(&record).unwrap_or_default();
+            if !text.contains(&format!("\nlock {dev} {ino}\n")) {
+                missed.push(text);
+            }
+            std::fs::remove_file(&lock).unwrap();
+            let _ = std::fs::remove_file(&record);
+        }
+        assert!(
+            missed.is_empty(),
+            "{} of 20 unnamed: {missed:?}",
+            missed.len()
+        );
+    }
+
+    /// A record whose process still runs but which names another device
+    /// and inode says so: that pid is not this lock's maker.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_live_record_that_names_another_inode_says_the_inode_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("index.lock");
+        let record = dir.path().join(INDEX_OWNER);
+        std::fs::write(&lock, "").unwrap();
+        let (host, boot) = host_identity().expect("this host's name and boot id");
+        let (dev, ino) = file_id(&lock).unwrap();
+        let me = std::process::id();
+        let at = unix_secs(std::time::SystemTime::now()) - 1;
+        std::fs::write(
+            &record,
+            format!(
+                "host {host}\nboot {boot}\npid {me}\nstart {}\nat {at}\nuntil {}\nlock {dev} {}\n",
+                process_start(me).unwrap(),
+                at + 30,
+                ino + 1
+            ),
+        )
+        .unwrap();
+        let said = index_owner_gone(&record, &mark_of(&lock)).unwrap_err();
+        assert!(
+            said.contains("does not name this lock's device and inode")
+                && !said.contains("still runs"),
+            "{said}"
+        );
+    }
+
+    fn mark_of(path: &Path) -> LockMark {
+        LockMark::read(&open_lock(path).unwrap()).unwrap()
+    }
+
+    pub(crate) fn age_lock(path: &Path, made: std::time::SystemTime) {
+        std::fs::File::options()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .set_modified(made)
+            .unwrap();
+    }
+
+    /// A record whose process still runs never frees its lock, even with a
+    /// line that matches the file at that path in every stored field: on
+    /// ext4 an empty file made at once on the freed inode matches them all.
+    /// The `left` line is the form an earlier record gave a lock its git
+    /// left.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_lock_whose_recorded_process_runs_is_left() {
+        use std::os::unix::fs::MetadataExt as _;
+        let _env = env_guard();
+        let _whole = OwnTree::assume();
+        let dir = tempfile::tempdir().unwrap();
+        seeded_tracker(dir.path());
+        let git_dir = dir.path().join(".git");
+        let lock = git_dir.join("index.lock");
+        let record = git_dir.join(INDEX_OWNER);
+        std::fs::write(&lock, "").unwrap();
+        let meta = std::fs::symlink_metadata(&lock).unwrap();
+        let (host, boot) = host_identity().expect("this host's name and boot id");
+        let me = std::process::id();
+        let at = unix_secs(std::time::SystemTime::now()) - 1;
+        std::fs::write(
+            &record,
+            format!(
+                "host {host}\nboot {boot}\npid {me}\nstart {}\nat {at}\nuntil {}\nlock {dev} {ino}\nleft {dev} {ino} {} {}.{:09} {}.{:09}\n{}\n",
+                process_start(me).unwrap(),
+                at + 30,
+                meta.size(),
+                meta.mtime(),
+                meta.mtime_nsec(),
+                meta.ctime(),
+                meta.ctime_nsec(),
+                index_mark_line(&lock),
+                dev = meta.dev(),
+                ino = meta.ino(),
+            ),
+        )
+        .unwrap();
+        let said = clear_index_lock_older_than(dir.path(), std::time::Duration::ZERO);
+        assert!(
+            lock.exists(),
+            "a running process's lock was removed: {said:?}"
+        );
+        assert!(
+            matches!(&said, Some(Err(line)) if line.contains("still runs")),
+            "{said:?}"
+        );
+    }
+
+    /// An empty lock whose stored mark has no inode generation cannot be
+    /// told from a later empty file on the same inode, so it is left even
+    /// when its process is gone and every field matches.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_empty_lock_with_no_generation_is_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("index.lock");
+        let record = dir.path().join(INDEX_OWNER);
+        std::fs::write(&lock, "").unwrap();
+        let mark = LockMark {
+            generation: None,
+            ..mark_of(&lock)
+        };
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let dead = gone.id();
+        gone.wait().unwrap();
+        let (host, boot) = host_identity().expect("this host's name and boot id");
+        let at = unix_secs(std::time::SystemTime::now()) - 1;
+        std::fs::write(
+            &record,
+            format!(
+                "host {host}\nboot {boot}\npid {dead}\nstart 1\nat {at}\nuntil {}\nlock {} {}\nmark {}\n",
+                at + 30,
+                mark.dev,
+                mark.ino,
+                mark.line()
+            ),
+        )
+        .unwrap();
+        let said = index_owner_gone(&record, &mark).unwrap_err();
+        assert!(said.contains("it is empty"), "{said}");
+        let marked = LockMark {
+            size: 1,
+            ..mark.clone()
+        };
+        assert!(marked.tells_a_recreate() && !mark.tells_a_recreate());
+    }
+
+    /// A dead process's record names a device and inode. A later file on
+    /// that inode with other bytes is not the lock it saw, and is left.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_later_file_on_a_dead_records_inode_is_left() {
+        let _env = env_guard();
+        let _whole = OwnTree::assume();
+        let dir = tempfile::tempdir().unwrap();
+        seeded_tracker(dir.path());
+        let git_dir = dir.path().join(".git");
+        let lock = git_dir.join("index.lock");
+        let made = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        std::fs::write(&lock, "old-bytes").unwrap();
+        age_lock(&lock, made);
+        let id = file_id(&lock).unwrap();
+        dead_owner_record(&git_dir, made);
+        std::fs::write(&lock, "x").unwrap();
+        age_lock(&lock, made);
+        assert_eq!(file_id(&lock).unwrap(), id, "the rewrite moved the inode");
+        let said = clear_orphaned_index_lock(dir.path());
+        assert!(
+            lock.exists(),
+            "a later file on the inode was removed: {said:?}"
+        );
+        assert!(
+            matches!(&said, Some(Err(line)) if line.contains("not what")),
+            "{said:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&lock).unwrap(), "x");
+    }
+
+    /// A lock removed while the checks ran, and taken at once by a live
+    /// git, is not the file that was checked. The rename moves that git's
+    /// lock aside, the second look sees another inode, and the lock is put
+    /// back where its git expects it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_lock_taken_while_it_was_checked_is_put_back() {
+        let _env = env_guard();
+        let _whole = OwnTree::assume();
+        let dir = tempfile::tempdir().unwrap();
+        seeded_tracker(dir.path());
+        let git_dir = dir.path().join(".git");
+        let lock = git_dir.join("index.lock");
+        let made = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        std::fs::write(&lock, "stale").unwrap();
+        age_lock(&lock, made);
+        dead_owner_record(&git_dir, made);
+        let live = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let pause = {
+            let (lock, git_dir, live) = (lock.clone(), git_dir.clone(), live.clone());
+            move |point: &str| {
+                if point != "checked" {
+                    return;
+                }
+                std::fs::remove_file(&lock).unwrap();
+                *live.borrow_mut() = Some(git_holding_index(&git_dir, &lock));
+            }
+        };
+        LOCK_PAUSE.with(|slot| *slot.borrow_mut() = Some(Box::new(pause)));
+        let said = clear_orphaned_index_lock(dir.path());
+        LOCK_PAUSE.with(|slot| *slot.borrow_mut() = None);
+        let mut live = live.borrow_mut().take().expect("the pause ran");
+        let exists = lock.exists();
+        let git_alive = live.try_wait().unwrap().is_none();
+        drop(live.stdin.take());
+        let done = live.wait().unwrap();
+        assert!(
+            exists && git_alive,
+            "exists={exists} git_alive={git_alive}: {said:?}"
+        );
+        assert!(
+            matches!(&said, Some(Err(line)) if line.contains("was not the one checked")),
+            "{said:?}"
+        );
+        assert!(done.success(), "the git lost its lock: {done:?}");
+        assert!(!lock.exists());
+    }
+
+    /// A git that starts in the checkout after the checks, while the lock
+    /// is aside, is seen by the second look, and the lock is put back.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_git_that_starts_while_the_lock_is_aside_keeps_it() {
+        let _env = env_guard();
+        let _whole = OwnTree::assume();
+        let dir = tempfile::tempdir().unwrap();
+        seeded_tracker(dir.path());
+        let git_dir = dir.path().join(".git");
+        let lock = git_dir.join("index.lock");
+        let made = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        std::fs::write(&lock, "stale").unwrap();
+        age_lock(&lock, made);
+        let id = file_id(&lock).unwrap();
+        dead_owner_record(&git_dir, made);
+        let live = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let pause = {
+            let (top, live) = (dir.path().to_path_buf(), live.clone());
+            move |point: &str| {
+                if point != "aside" {
+                    return;
+                }
+                let git = git_cmd()
+                    .args(["cat-file", "--batch"])
+                    .current_dir(&top)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+                let comm = format!("/proc/{}/comm", git.id());
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while std::fs::read_to_string(&comm).unwrap_or_default().trim() != "git"
+                    && std::time::Instant::now() < until
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                *live.borrow_mut() = Some(git);
+            }
+        };
+        LOCK_PAUSE.with(|slot| *slot.borrow_mut() = Some(Box::new(pause)));
+        let said = clear_orphaned_index_lock(dir.path());
+        LOCK_PAUSE.with(|slot| *slot.borrow_mut() = None);
+        let mut live = live.borrow_mut().take().expect("the pause ran");
+        drop(live.stdin.take());
+        let _ = live.wait();
+        assert_eq!(file_id(&lock), Some(id), "{said:?}");
+        assert!(
+            matches!(&said, Some(Err(line)) if line.contains("a git started on the repository")),
+            "{said:?}"
+        );
+        assert!(
+            !std::fs::read_dir(&git_dir)
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(INDEX_ASIDE)),
+            "a file was left aside"
+        );
+    }
+
+    /// A git started with its git directory named and its stdin piped,
+    /// which takes `index.lock` and keeps it until stdin closes.
+    #[cfg(target_os = "linux")]
+    fn git_holding_index(git_dir: &Path, lock: &Path) -> std::process::Child {
+        let live = git_cmd()
+            .arg("--git-dir")
+            .arg(git_dir)
+            .args(["update-index", "--index-info"])
+            .current_dir("/")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !lock.exists() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(lock.exists(), "git did not take the index");
+        live
+    }
+
+    /// A process that opens the checked file after the checks, while it is
+    /// still at its path, is seen by the second look by device and inode,
+    /// and the file is put back. Whether a process has the file open is
+    /// never what clears it: git keeps its lock by name after it closes it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_lock_opened_while_it_was_checked_is_put_back() {
+        let _env = env_guard();
+        let _whole = OwnTree::assume();
+        let dir = tempfile::tempdir().unwrap();
+        seeded_tracker(dir.path());
+        let git_dir = dir.path().join(".git");
+        let lock = git_dir.join("index.lock");
+        let made = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        std::fs::write(&lock, "stale").unwrap();
+        age_lock(&lock, made);
+        let id = file_id(&lock).unwrap();
+        dead_owner_record(&git_dir, made);
+        let opener = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let pause = {
+            let (lock, opener) = (lock.clone(), opener.clone());
+            move |point: &str| {
+                if point != "checked" {
+                    return;
+                }
+                let held = std::process::Command::new("sleep")
+                    .arg("30")
+                    .stdin(std::fs::File::open(&lock).unwrap())
+                    .spawn()
+                    .unwrap();
+                *opener.borrow_mut() = Some(held);
+            }
+        };
+        LOCK_PAUSE.with(|slot| *slot.borrow_mut() = Some(Box::new(pause)));
+        let said = clear_orphaned_index_lock(dir.path());
+        LOCK_PAUSE.with(|slot| *slot.borrow_mut() = None);
+        let mut held = opener.borrow_mut().take().expect("the pause ran");
+        let _ = held.kill();
+        let _ = held.wait();
+        assert_eq!(file_id(&lock), Some(id), "{said:?}");
+        assert!(
+            matches!(&said, Some(Err(line)) if line.contains("a process opened it")),
+            "{said:?}"
+        );
+    }
+
+    /// A process table at `root/proc` as process `me` sees it, with this
+    /// `NSpid`, pid namespace link and proc mount options.
+    #[cfg(target_os = "linux")]
+    fn fake_proc(root: &Path, me: u32, nspid: &str, ns: &str, options: &str) -> PathBuf {
+        let proc = root.join("proc");
+        let mine = proc.join(me.to_string());
+        std::fs::create_dir_all(mine.join("ns")).unwrap();
+        std::os::unix::fs::symlink(me.to_string(), proc.join("self")).unwrap();
+        std::os::unix::fs::symlink(ns, mine.join("ns/pid")).unwrap();
+        std::fs::write(
+            mine.join("status"),
+            format!("Name:\tljos\nNSpid:\t{nspid}\nUid:\t1\t1\t1\t1\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            mine.join("mountinfo"),
+            format!(
+                "22 1 0:5 / {} rw,nosuid - proc proc {options}\n",
+                proc.display()
+            ),
+        )
+        .unwrap();
+        proc
+    }
+
+    /// A table that may leave out a process is not taken as showing every
+    /// process: `hidepid`, a pid namespace below the first, whether its
+    /// `NSpid` says so or not, a table of another namespace, or a mount
+    /// that cannot be read.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_process_table_that_may_hide_a_git_is_not_taken_as_whole() {
+        let me = 4242;
+        let shows = |nspid: &str, ns: &str, options: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            proc_shows_every_process(&fake_proc(dir.path(), me, nspid, ns, options), me)
+        };
+        assert!(shows("4242", FIRST_PID_NAMESPACE, "rw"));
+        assert!(shows("4242", FIRST_PID_NAMESPACE, "rw,hidepid=0"));
+        for options in ["rw,hidepid=1", "rw,hidepid=2", "rw,hidepid=invisible"] {
+            assert!(!shows("4242", FIRST_PID_NAMESPACE, options), "{options}");
+        }
+        assert!(!shows("4242\t7", FIRST_PID_NAMESPACE, "rw"));
+        assert!(!shows("4242", "pid:[4026532202]", "rw"));
+        let dir = tempfile::tempdir().unwrap();
+        let proc = fake_proc(dir.path(), me, "4242", FIRST_PID_NAMESPACE, "rw");
+        assert!(!proc_shows_every_process(&proc, me + 1));
+        std::fs::remove_file(proc.join("4242/mountinfo")).unwrap();
+        assert!(!proc_shows_every_process(&proc, me));
+    }
+
+    /// A process with the lock's owner among its uids may have made the
+    /// lock, and one whose open files or status cannot be read while it is
+    /// listed counts as its owner. A process of another uid cannot have
+    /// made it, and what cannot be read of it is passed over.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_process_that_may_have_made_the_lock_and_cannot_be_read_owns_it() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("root reads a directory of mode 000, so this case does not apply");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let proc = fake_proc(dir.path(), 4242, "4242", FIRST_PID_NAMESPACE, "rw");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let lock = repo.join(".git/index.lock");
+        std::fs::write(&lock, "x").unwrap();
+        let meta = std::fs::symlink_metadata(&lock).unwrap();
+        let process = |pid: u32, uid: u32| {
+            let at = proc.join(pid.to_string());
+            std::fs::create_dir_all(at.join("fd")).unwrap();
+            std::fs::write(
+                at.join("status"),
+                format!("Name:\tsleep\nState:\tS (sleeping)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n"),
+            )
+            .unwrap();
+            std::fs::write(at.join("comm"), "sleep\n").unwrap();
+            at
+        };
+        let mode = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let scan = || scan_may_own(&proc, 4242, None, &repo.join(".git"), &repo, Some(&meta));
+        let maker = process(77, meta.uid());
+        assert!(!scan(), "a readable process with no lock open");
+        mode(&maker.join("fd"), 0o000);
+        let unread_fds = scan();
+        mode(&maker.join("fd"), 0o755);
+        mode(&maker.join("status"), 0o000);
+        let unread_status = scan();
+        mode(&maker.join("status"), 0o644);
+        let other = process(78, meta.uid() + 1);
+        mode(&other.join("fd"), 0o000);
+        let unread_other = scan();
+        mode(&other.join("fd"), 0o755);
+        assert!(
+            unread_fds,
+            "a maker whose open files cannot be read was passed over"
+        );
+        assert!(
+            unread_status,
+            "a maker whose status cannot be read was passed over"
+        );
+        assert!(!unread_other, "another uid's process kept the lock");
+    }
+
+    /// Run inside a new pid namespace by the next test: print what
+    /// [`git_may_own`] says of the lock there. Alone it does nothing.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_scan_from_a_new_pid_namespace() {
+        let Some(repo) = std::env::var_os("LJOS_TEST_PIDNS_REPO") else {
+            return;
+        };
+        let repo = PathBuf::from(repo);
+        let meta = std::fs::symlink_metadata(repo.join(".git/index.lock")).unwrap();
+        println!(
+            "may_own={}",
+            git_may_own(&repo.join(".git"), &repo, Some(&meta))
+        );
+    }
+
+    /// From inside a new pid namespace, with its own proc mount, a git in
+    /// the namespace above cannot be seen, so a lock with no git in sight
+    /// may still be owned. Where unprivileged namespaces are refused, the
+    /// fake tables above cover the same rule.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_git_outside_this_pid_namespace_may_own_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/index.lock"), "x").unwrap();
+        let out = std::process::Command::new("unshare")
+            .args(["-r", "--pid", "--fork", "--mount-proc"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::a_scan_from_a_new_pid_namespace",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("LJOS_TEST_PIDNS_REPO", &repo)
+            .stdin(std::process::Stdio::null())
+            .output();
+        let said = out
+            .as_ref()
+            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+            .unwrap_or_default();
+        if !said.contains("may_own=") {
+            eprintln!("no new pid namespace here: {out:?}");
+            return;
+        }
+        assert!(said.contains("may_own=true"), "{said}");
+    }
+
+    /// A git whose directory is a bind mount of the checkout, in a mount
+    /// namespace where that path is the checkout, is matched by the device
+    /// and inode its `cwd` link names, not by the path it prints.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_git_in_a_bind_mount_of_the_checkout_may_own_the_lock() {
+        let _env = env_guard();
+        let _whole = OwnTree::assume();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let mnt = dir.path().join("mnt");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&mnt).unwrap();
+        seeded_tracker(&repo);
+        let lock = repo.join(".git/index.lock");
+        std::fs::write(&lock, "stale").unwrap();
+        let meta = std::fs::symlink_metadata(&lock).unwrap();
+        let mut git = std::process::Command::new("unshare")
+            .args([
+                "-r",
+                "--mount",
+                "sh",
+                "-c",
+                "mount --bind \"$1\" \"$2\" && cd \"$2\" && exec \"$3\" cat-file --batch",
+                "sh",
+            ])
+            .arg(&repo)
+            .arg(&mnt)
+            .arg(which::which("git").unwrap())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let comm = format!("/proc/{}/comm", git.id());
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::fs::read_to_string(&comm).unwrap_or_default().trim() != "git"
+            && std::time::Instant::now() < until
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let started = std::fs::read_to_string(&comm).unwrap_or_default().trim() == "git";
+        let seen = git_may_own(&repo.join(".git"), &repo, Some(&meta));
+        drop(git.stdin.take());
+        let _ = git.kill();
+        let _ = git.wait();
+        if !started {
+            eprintln!("no mount namespace here, so no bind mount to test");
+            return;
+        }
+        assert!(
+            std::fs::read_dir(&mnt).unwrap().next().is_none(),
+            "the bind mount is visible here"
+        );
+        assert!(
+            seen,
+            "a git working in a bind mount of the checkout was missed"
+        );
+    }
+
+    /// A lock whose `lock` line could not be written is not taken as named:
+    /// the next look writes it.
+    #[test]
+    fn a_lock_whose_record_write_failed_is_named_by_the_next_look() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("index.lock");
+        let record = dir.path().join(INDEX_OWNER);
+        let start = "host h\nboot b\npid 1\nstart 1\nat 0\nuntil 1\n".to_string();
+        std::fs::write(&record, &start).unwrap();
+        std::fs::write(&lock, "").unwrap();
+        let meta = std::fs::symlink_metadata(&lock).unwrap();
+        let named = format!("lock {} {}\n", meta.dev(), meta.ino());
+        let body = std::sync::Mutex::new(start.clone());
+        name_index_lock(&lock, &record, 0, &body, |_, _| {
+            Err(std::io::Error::other("disk full"))
+        });
+        assert_eq!(std::fs::read_to_string(&record).unwrap(), start);
+        name_index_lock(&lock, &record, 0, &body, |path, text| {
+            std::fs::write(path, text)
+        });
+        let text = std::fs::read_to_string(&record).unwrap();
+        assert_eq!(text, format!("{start}{named}{}\n", index_mark_line(&lock)));
+        std::fs::write(&lock, "written since").unwrap();
+        name_index_lock(&lock, &record, 0, &body, |path, text| {
+            std::fs::write(path, text)
+        });
+        let text = std::fs::read_to_string(&record).unwrap();
+        assert_eq!(text, format!("{start}{named}{}\n", index_mark_line(&lock)));
+    }
+
+    /// A git wrapper in a new directory under `root` whose `add` in `dir`
+    /// runs a real git that takes `index.lock` and waits, so only a kill
+    /// ends it. Other calls run git.
+    #[cfg(target_os = "linux")]
+    fn git_that_hangs_on_add(root: &Path, dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let real = which::which("git").unwrap();
+        let bin = root.join("hang-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let wrapper = bin.join("git");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\ncase \" $* \" in *\" add \"*) sleep 60 | '{real}' -C '{dir}' update-index --index-info; exit 1 ;; esac\nexec '{real}' \"$@\"\n",
+                real = real.display(),
+                dir = dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    #[cfg(target_os = "linux")]
+    fn path_with(bin: &Path) -> std::ffi::OsString {
+        let old = std::env::var_os("PATH").unwrap_or_default();
+        std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&old)))
+            .unwrap()
+    }
+
+    /// A git the call bound kills while it has `index.lock` leaves the
+    /// lock and the record that names it, with the lock's last mark. While
+    /// this process runs, the lock is left.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_lock_a_git_the_bound_killed_left_stays_while_ljos_runs() {
+        let _env = env_guard();
+        let _whole = OwnTree::assume();
+        crate::tool_bound::disarm();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let issues = seeded_tracker(&repo);
+        std::fs::write(&issues, "* STARTED [#C] Probe\n").unwrap();
+        let git_dir = repo.join(".git");
+        let lock = git_dir.join("index.lock");
+        let bin = git_that_hangs_on_add(dir.path(), &repo);
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::set_var("PATH", path_with(&bin));
+        let bound = crate::tool_bound::arm(std::time::Duration::from_millis(1500));
+        let made = commit_paths_now(&repo, &["Software/probe/issues.org"], "probe");
+        drop(bound);
+        crate::tool_bound::disarm();
+        std::env::set_var("PATH", &old_path);
+        assert!(matches!(made, PathCommit::Refused(_)), "{made:?}");
+        assert!(lock.exists(), "the killed git left no lock");
+        let (dev, ino) = file_id(&lock).unwrap();
+        let text = std::fs::read_to_string(git_dir.join(INDEX_OWNER)).unwrap_or_default();
+        assert!(
+            text.contains(&format!("\nlock {dev} {ino}\n"))
+                && text.contains(&format!("\n{}\n", index_mark_line(&lock))),
+            "{text}"
+        );
+        let said = clear_index_lock_older_than(&repo, std::time::Duration::ZERO);
+        assert!(
+            matches!(&said, Some(Err(line)) if line.contains("still runs")),
+            "{said:?}"
+        );
+        assert!(lock.exists() && git_dir.join(INDEX_OWNER).exists());
+    }
+
+    /// Run as the ljos process of the next test, which kills it: a commit
+    /// whose git the bound kills, then a wait. Alone it does nothing.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_ljos_child_whose_git_the_bound_kills() {
+        let Some(repo) = std::env::var_os("LJOS_TEST_KILLED_LJOS_REPO") else {
+            return;
+        };
+        let repo = PathBuf::from(repo);
+        let bound = crate::tool_bound::arm(std::time::Duration::from_millis(1500));
+        let made = commit_paths_now(&repo, &["Software/probe/issues.org"], "probe");
+        drop(bound);
+        println!("stopped: {made:?}");
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+
+    /// An ljos process whose git was killed mid call, itself killed with
+    /// SIGKILL after, leaves a lock the next run shows was that process's
+    /// and removes.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_lock_left_by_a_killed_ljos_and_its_git_is_cleared_by_the_next_run() {
+        use std::io::BufRead as _;
+        let _env = env_guard();
+        let _whole = OwnTree::assume();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let issues = seeded_tracker(&repo);
+        std::fs::write(&issues, "* STARTED [#C] Probe\n").unwrap();
+        let git_dir = repo.join(".git");
+        let lock = git_dir.join("index.lock");
+        let bin = git_that_hangs_on_add(dir.path(), &repo);
+        let mut ljos = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::an_ljos_child_whose_git_the_bound_kills",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("LJOS_TEST_KILLED_LJOS_REPO", &repo)
+            .env("PATH", path_with(&bin))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = std::io::BufReader::new(ljos.stdout.take().unwrap());
+        let said: Vec<String> = out
+            .lines()
+            .map_while(Result::ok)
+            .take_while(|line| !line.contains("stopped:"))
+            .collect();
+        let alive = ljos.try_wait().unwrap().is_none();
+        let pid = ljos.id();
+        ljos.kill().unwrap();
+        ljos.wait().unwrap();
+        assert!(alive, "the ljos child ended first: {said:?}");
+        assert!(lock.exists(), "the killed git left no lock: {said:?}");
+        let tells = mark_of(&lock).tells_a_recreate();
+        let said = clear_index_lock_older_than(&repo, std::time::Duration::ZERO);
+        if !tells {
+            assert!(
+                lock.exists() && matches!(&said, Some(Err(line)) if line.contains("it is empty")),
+                "{said:?}"
+            );
+            return;
+        }
+        assert!(
+            matches!(&said, Some(Ok(line)) if line.contains(&format!("ljos process {pid} "))),
+            "{said:?}"
+        );
+        assert!(!lock.exists() && !git_dir.join(INDEX_OWNER).exists());
+        let made = commit_paths_now(&repo, &["Software/probe/issues.org"], "probe");
+        assert!(matches!(made, PathCommit::Made), "{made:?}");
+    }
+
+    /// A live git started outside the work tree with `--git-dir` owns the
+    /// lock it made. A record beside it that names a dead ljos process does
+    /// not make the lock removable.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_index_lock_a_live_git_outside_the_work_tree_made_is_left() {
+        let _env = env_guard();
+        let _whole = OwnTree::assume();
+        let dir = tempfile::tempdir().unwrap();
+        seeded_tracker(dir.path());
+        let git_dir = dir.path().join(".git");
+        let lock = git_dir.join("index.lock");
+        let mut live = git_cmd()
+            .arg("--git-dir")
+            .arg(&git_dir)
+            .args(["update-index", "--index-info"])
+            .current_dir("/")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !lock.exists() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(lock.exists(), "git did not take the index");
+        let made = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        std::fs::File::options()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_modified(made)
+            .unwrap();
+        dead_owner_record(&git_dir, made);
+        let said = clear_orphaned_index_lock(dir.path());
+        let still = lock.exists();
+        drop(live.stdin.take());
+        let _ = live.wait();
+        assert!(
+            said.is_none() && still,
+            "a live git's lock was cleared: {said:?}"
+        );
+        assert!(orphaned_index_lock(dir.path()).is_none());
+    }
+
+    /// Write beside the `index.lock` in `git_dir` a record of a dead ljos
+    /// process on this host that names that lock, made at `made`, so only a
+    /// live holder keeps the lock.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn dead_owner_record(git_dir: &Path, made: std::time::SystemTime) {
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let dead = gone.id();
+        gone.wait().unwrap();
+        let (host, boot) = host_identity().unwrap();
+        let (dev, ino) = file_id(&git_dir.join("index.lock")).unwrap();
+        let mark = index_mark_line(&git_dir.join("index.lock"));
+        let at = unix_secs(made) - 1;
+        std::fs::write(
+            git_dir.join(INDEX_OWNER),
+            format!(
+                "host {host}\nboot {boot}\npid {dead}\nstart 1\nat {at}\nuntil {}\nlock {dev} {ino}\n{mark}\n",
+                at + 30
+            ),
+        )
+        .unwrap();
+    }
+
+    /// A lock a live process keeps open through another path to the same
+    /// file, as a bind mount gives, is that process's, by device and inode.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_index_lock_held_open_through_another_path_is_left() {
+        let _env = env_guard();
+        let _whole = OwnTree::assume();
+        let dir = tempfile::tempdir().unwrap();
+        seeded_tracker(dir.path());
+        let git_dir = dir.path().join(".git");
+        let lock = git_dir.join("index.lock");
+        let made = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        std::fs::File::create(&lock)
+            .unwrap()
+            .set_modified(made)
+            .unwrap();
+        let alias = dir.path().join("alias.lock");
+        std::fs::hard_link(&lock, &alias).unwrap();
+        let mut holder = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::fs::File::open(&alias).unwrap())
+            .spawn()
+            .unwrap();
+        dead_owner_record(&git_dir, made);
+        let said = clear_orphaned_index_lock(dir.path());
+        let still = lock.exists();
+        let _ = holder.kill();
+        let _ = holder.wait();
+        assert!(said.is_none() && still, "a held lock was cleared: {said:?}");
+    }
+
+    /// A live git of this account that is not dumpable, so its open files,
+    /// directory and environment cannot be read, may be the holder, and its
+    /// lock is left.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_index_lock_a_git_that_cannot_be_read_may_hold_is_left() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _env = env_guard();
+        let _whole = OwnTree::assume();
+        let dir = tempfile::tempdir().unwrap();
+        seeded_tracker(dir.path());
+        let git_dir = dir.path().join(".git");
+        let lock = git_dir.join("index.lock");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let hidden = bin.join("git");
+        std::fs::copy(which::which("git").unwrap(), &hidden).unwrap();
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o111)).unwrap();
+        let mut live = std::process::Command::new(&hidden)
+            .arg("--git-dir")
+            .arg(&git_dir)
+            .args(["update-index", "--index-info"])
+            .current_dir("/")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !lock.exists() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let unreadable = std::fs::read_dir(format!("/proc/{}/fd", live.id())).is_err();
+        let made = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        std::fs::File::options()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_modified(made)
+            .unwrap();
+        dead_owner_record(&git_dir, made);
+        let said = clear_orphaned_index_lock(dir.path());
+        let still = lock.exists();
+        drop(live.stdin.take());
+        let _ = live.wait();
+        assert!(unreadable, "the copy of git is dumpable here");
+        assert!(
+            said.is_none() && still,
+            "an unreadable git's lock was cleared: {said:?}"
+        );
     }
 
     fn drop_pack_index(root: &Path) {
@@ -62323,6 +64477,121 @@ mod tests {
             before,
             "a git add hashing the old file keeps reading the old file"
         );
+    }
+
+    const QUOTED_DRAWER: &str = "\
+* TODO first :ticket:
+:PROPERTIES:
+:ID:         demo-a
+:END:
+:LOGBOOK:
+- Note: \"seeded\" [2026-11-19 Thu 10:00]
+:END:
+
+Copied from the second ticket:
+#+begin_example
+:PROPERTIES:
+:ID:         demo-b
+:END:
+#+end_example
+* TODO second
+:PROPERTIES:
+:ID:         demo-b
+:CLAIMED_BY: bob@host-b
+:END:
+";
+
+    fn logbook_of(text: &str, id: &str) -> Vec<String> {
+        let doc = vissue_core::IssueDoc::parse("demo", PathBuf::new(), text).unwrap();
+        let heading = doc.headings.iter().find(|h| h.id == id).unwrap();
+        heading.logbook.iter().map(|e| e.render()).collect()
+    }
+
+    #[test]
+    fn a_logbook_stamp_lands_on_the_heading_whose_drawer_has_the_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("issues.org");
+        std::fs::write(&path, QUOTED_DRAWER).unwrap();
+        assert!(stamp_seat_logbook(&path, "demo-b", "noted", "bob"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(logbook_of(&text, "demo-a").len(), 1, "{text}");
+        let b = logbook_of(&text, "demo-b");
+        assert!(
+            b.len() == 1 && b[0].starts_with("- Noted by bob ["),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_claim_stamp_rerun_in_the_same_minute_writes_one_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("issues.org");
+        std::fs::write(&path, QUOTED_DRAWER).unwrap();
+        stamp_seat_logbook(&path, "demo-b", "claimed", "bob");
+        stamp_seat_logbook(&path, "demo-b", "claimed", "bob");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(logbook_of(&text, "demo-b").len(), 1, "{text}");
+        assert!(stamp_seat_logbook(&path, "demo-b", "noted", "bob"));
+        assert!(!stamp_seat_logbook(&path, "demo-b", "noted", "bob"));
+        let second = std::fs::read_to_string(&path).unwrap().replacen(
+            "- Noted by bob",
+            "- Note: \"second\" [2026-11-20 Fri 10:00]\n- Noted by bob",
+            1,
+        );
+        std::fs::write(&path, second).unwrap();
+        assert!(stamp_seat_logbook(&path, "demo-b", "noted", "bob"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(logbook_of(&text, "demo-b").len(), 4, "{text}");
+    }
+
+    #[test]
+    fn a_claimed_stamp_is_not_written_over_another_seats_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("issues.org");
+        std::fs::write(&path, QUOTED_DRAWER).unwrap();
+        assert!(!stamp_seat_logbook(&path, "demo-b", "claimed", "eessi"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("Claimed by eessi"), "{text}");
+        assert!(stamp_seat_logbook(&path, "demo-b", "claimed", "bob"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            logbook_of(&text, "demo-b")[0].starts_with("- Claimed by bob ["),
+            "{text}"
+        );
+    }
+
+    /// The pid in a copy's name may be reused by a live process, or be
+    /// another host's, so it decides nothing: under the issues lock a copy
+    /// a minute old is a killed writer's, and a fresh one is left.
+    #[test]
+    fn a_logbook_stamp_removes_the_copies_a_killed_writer_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("issues.org");
+        std::fs::write(&path, QUOTED_DRAWER).unwrap();
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let dead = gone.id();
+        gone.wait().unwrap();
+        let me = std::process::id();
+        let killed = dir
+            .path()
+            .join(format!(".issues.org.tmp.{dead}-1763600000-0"));
+        let reused = dir.path().join(format!(".issues.org.tmp.{me}-3"));
+        let fresh = dir
+            .path()
+            .join(format!(".issues.org.tmp.{dead}-1763600001-0"));
+        let other = dir.path().join(".notes.org.tmp.1-2-0");
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        for leftover in [&killed, &reused, &fresh, &other] {
+            let file = std::fs::File::create(leftover).unwrap();
+            if leftover != &fresh {
+                file.set_modified(long_ago).unwrap();
+            }
+        }
+        assert!(stamp_seat_logbook(&path, "demo-a", "noted", "bob"));
+        assert!(!killed.exists(), "a dead writer's copy stays");
+        assert!(!reused.exists(), "a copy whose pid now runs stays");
+        assert!(fresh.exists(), "a copy younger than a minute is removed");
+        assert!(other.exists(), "another file's copy is not this lock's");
     }
 
     #[test]
@@ -85233,6 +87502,38 @@ lesson, due yesterday, seat ada
             !calls.contains("claim"),
             "asked to claim a non-issue: {calls}"
         );
+    }
+
+    /// A tool call's bound stops a slow `vissue show` with `vissue timed
+    /// out`, which says nothing of an answer. It is still no answer.
+    #[test]
+    fn a_bounded_show_that_times_out_is_no_answer() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_guard();
+        tool_bound::disarm();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("calls.log");
+        let fake = dir.path().join("vissue");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\n[ \"$1\" = show ] && exec sleep 30\necho claimed\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bound = tool_bound::arm(std::time::Duration::from_millis(400));
+        let said = with_fake_on_path(dir.path(), || stamp_tracker("proj-1a2b", "alice"));
+        drop(bound);
+        let err = said.expect_err("a show the bound stopped is not a node the tracker lacks");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("vissue timed out") && text.contains("did not answer"),
+            "{text}"
+        );
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(!calls.contains("claim"), "{calls}");
     }
 
     #[test]
