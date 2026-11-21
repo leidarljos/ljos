@@ -51800,12 +51800,13 @@ fn persist_one_tracker_file(
     // the file clean, so its seat line is the only change. Holding that
     // line would leave HEAD with the body and no seat, and a later stamp
     // finds the line on disk and commits nothing. Such a write commits
-    // now; a file that was already dirty keeps the batch hold.
+    // now; a file that was already dirty keeps the batch hold. A read
+    // that fails cannot show the file was dirty, so it commits now too.
     let mut clean_args = vec!["status", "--porcelain", "--"];
     clean_args.extend(specs.iter().map(String::as_str));
-    let clean_before =
-        matches!(git(&clean_args), Ok(o) if o.status.success() && o.stdout.is_empty());
-    let may_hold = may_hold && (writes.is_empty() || !clean_before);
+    let dirty_before =
+        matches!(git(&clean_args), Ok(o) if o.status.success() && !o.stdout.is_empty());
+    let may_hold = may_hold && (writes.is_empty() || dirty_before);
     stamp_write_seats(path, writes);
     let mut live: Vec<&str> = Vec::new();
     let mut ignored_note = String::new();
@@ -61744,6 +61745,77 @@ mod tests {
             &["show", "HEAD:Software/probe/issues/probe-b007.org"],
         );
         assert_eq!(shown.matches("- Noted by saddle").count(), 1, "{shown}");
+        clear_probe_env();
+    }
+
+    /// A status read that fails before the stamp does not let the batch
+    /// window hold the seat line once the next read succeeds: the write
+    /// commits its line now.
+    #[test]
+    fn a_failed_status_before_the_stamp_does_not_hold_the_seat_line() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let issues = big_board(&root, 300);
+        probe_env(&root);
+        let layout = vissue_core::Layout::new(&root, "Software");
+        vissue_core::ops::note(&layout, "probe-b007", "first look").unwrap();
+        vissue_core::ledger::migrate(&layout, false).unwrap();
+        let made = super::commit_paths(
+            &root,
+            &["Software/probe/issues.org", "Software/probe/issues"],
+            "chore(issues): split by another writer",
+        );
+        assert_eq!(made, super::PathCommit::Made);
+        assert!(vissue_core::ledger::is_ledger(&issues));
+        std::env::set_var("LJOS_TRACKER_BATCH_SECS", "600");
+        std::fs::write(
+            root.join(super::TRACKER_BATCH_FILE),
+            format!("{}\n", super::unix_now()),
+        )
+        .unwrap();
+        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("git"))
+            .find(|git| git.is_file())
+            .expect("git on PATH");
+        let shim = tempfile::tempdir().unwrap();
+        let mark = shim.path().join("failed");
+        let log = shim.path().join("status.log");
+        let git = shim.path().join("git");
+        std::fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = status ]; then\n    \
+                 echo \"$*\" >> '{log}'\n    \
+                 if [ ! -e '{mark}' ]; then : > '{mark}'; exit 128; fi\n    \
+                 break\n  fi\ndone\nexec '{real}' \"$@\"\n",
+                log = log.display(),
+                mark = mark.display(),
+                real = real.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let said = {
+            let _bins = super::prepend_path(shim.path());
+            persist_tracker("probe-b007", "noted")
+        };
+        assert!(mark.exists(), "the first status never ran through the shim");
+        let reads = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(reads.lines().count() >= 2, "{reads}");
+        assert!(!said.contains("held"), "{said}");
+        if said.contains("committed") {
+            let shown = git_text(
+                &root,
+                &["show", "HEAD:Software/probe/issues/probe-b007.org"],
+            );
+            assert_eq!(shown.matches("- Noted by saddle").count(), 1, "{shown}");
+            let left = board_left(&root);
+            assert!(left.is_empty(), "{said}\n{left}");
+        } else {
+            assert!(said.starts_with("tracker git: "), "{said}");
+        }
         clear_probe_env();
     }
 
