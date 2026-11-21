@@ -97,6 +97,7 @@ fn uninstall(home: &Path, args: &[&str]) -> Output {
         .arg(script())
         .args(args)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin")
         .env("XDG_RUNTIME_DIR", home.join("run"))
