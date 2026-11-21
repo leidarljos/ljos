@@ -1480,19 +1480,10 @@ fn keep(request: &str, reply: &Value) {
 
 /// Add one to this month's tally named `what` (`calls`, `cached`).
 fn count_in(state: Option<&Path>, what: &str) {
-    let Some(dir) = state else { return };
-    let _ = std::fs::create_dir_all(dir);
-    let path = dir.join("jev-cost.toml");
-    let mut totals: BTreeMap<String, f64> = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|t| toml::from_str(&t).ok())
-        .unwrap_or_default();
-    *totals
-        .entry(format!("{}-{what}", this_month()))
-        .or_default() += 1.0;
-    if let Ok(text) = toml::to_string(&totals) {
-        let _ = std::fs::write(path, text);
-    }
+    let key = format!("{}-{what}", this_month());
+    update_cost_in(state, |totals| {
+        *totals.entry(key).or_default() += 1.0;
+    });
 }
 
 /// The stop audit's cuts. A stop is held back only on a near-certain
@@ -1762,22 +1753,78 @@ fn log(entry: &Value) {
     log_in(state_dir().as_deref(), entry);
 }
 
-/// Add a call's cost to this month's running total in the state directory,
-/// so `ljos doctor` can say what Jev has cost.
-fn record_cost_in(state: Option<&Path>, cost: f64) {
+fn update_cost_in(state: Option<&Path>, mutate: impl FnOnce(&mut BTreeMap<String, f64>)) {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let Some(dir) = state else { return };
     let _ = std::fs::create_dir_all(dir);
-    let month = crate::now_utc().chars().take(7).collect::<String>();
+
+    #[cfg(unix)]
+    let _lock = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::io::AsRawFd as _;
+        let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(dir.join(".jev-cost.lock"))
+        else {
+            return;
+        };
+        loop {
+            // SAFETY: `file` owns a valid descriptor for the duration of this guard.
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if rc == 0 {
+                break;
+            }
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                return;
+            }
+        }
+        file
+    };
+
     let path = dir.join("jev-cost.toml");
     let mut totals: BTreeMap<String, f64> = std::fs::read_to_string(&path)
         .ok()
         .and_then(|t| toml::from_str(&t).ok())
         .unwrap_or_default();
-    *totals.entry(format!("{month}-calls")).or_default() += 1.0;
-    *totals.entry(month).or_default() += cost;
-    if let Ok(text) = toml::to_string(&totals) {
-        let _ = std::fs::write(path, text);
+    mutate(&mut totals);
+    let Ok(text) = toml::to_string(&totals) else {
+        return;
+    };
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".jev-cost.{}.{}.tmp", std::process::id(), seq));
+    #[cfg(unix)]
+    let wrote = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(text.as_bytes()))
+            .is_ok()
+    };
+    #[cfg(not(unix))]
+    let wrote = std::fs::write(&tmp, text.as_bytes()).is_ok();
+    if !wrote || std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
+}
+
+/// Add a call's cost to this month's running total in the state directory,
+/// so `ljos doctor` can say what Jev has cost.
+fn record_cost_in(state: Option<&Path>, cost: f64) {
+    let month = this_month();
+    update_cost_in(state, |totals| {
+        *totals.entry(format!("{month}-calls")).or_default() += 1.0;
+        *totals.entry(month).or_default() += cost;
+    });
 }
 
 fn month_totals() -> Option<BTreeMap<String, f64>> {
