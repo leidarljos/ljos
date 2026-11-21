@@ -1055,6 +1055,8 @@ fn quiet_pull(store: &SeatStore, from: &Path) -> Result<Option<Summary>> {
 }
 
 pub fn pull(store: &SeatStore, from: &Path) -> Result<Summary> {
+    let _call_budget = crate::pack_link::CallRetryBudget::enter();
+    let _quiet = crate::pack_link::QuietPack::enter();
     if let Some(summary) = quiet_pull(store, from)? {
         let place = crate::memory_port::Place::for_seat(&store.seat);
         crate::memory_port::integrate(&place, None, true, false, false)

@@ -3371,6 +3371,7 @@ impl LjosServer {
         Parameters(args): Parameters<ConsensusArgs>,
     ) -> Result<Json<Rows<Said>>, McpError> {
         // One silent pack is waited out once, as on the command line.
+        let _call_budget = ljos_cli::pack_link::CallRetryBudget::enter();
         let _quiet = ljos_cli::pack_link::QuietPack::enter();
         // Rows scoped to a domain apply when the issue is about it; the
         // personas' anchors go to both settles.

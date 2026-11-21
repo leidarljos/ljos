@@ -132,6 +132,7 @@ LJOS_SEAT=S ljos mesh pull --seat S --from DIR
 The lane name is `--lane`, or `LJOS_SYNC_HOST`, or the hostname.
 A pull and a push each take a file lock on the directory and on the seat.
 A writer that answers 503 is asked again once, after `Retry-After`, with the same deadline.
+Loopback `EAGAIN`, `EWOULDBLOCK`, and `ConnectionRefused` errors before any request byte leaves for the wire retry within a shared two-second per-call budget; once write bytes leave for the wire, an IO failure is never resent.
 A second 503, a 408, or a writer that is not answering stops the pull and exits 1.
 The line is:
 
@@ -140,7 +141,7 @@ Error: mesh: the pull stopped: CAUSE, and lessons already stored stay in the see
 ```
 A 408 uses `the deadline passed before this request ran` as `CAUSE`.
 A second 503 uses the writer's line, or `packsetd busy, retrying later`.
-A writer that is not answering uses the reason this seat prints for a down writer, and that reason names `cargo install --locked packset` or `packset ensure`.
+A writer that is not answering uses the reason this seat prints for a down writer, naming `packset ensure`, `packsetd`, `cargo install --locked packset`, or the configured remote URL when non-loopback.
 Exports already stored stay in the seed.
 The export in progress is left out, and the next pull reads it again.
 A row the writer did not take is one of the rows in that export.

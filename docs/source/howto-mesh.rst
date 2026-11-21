@@ -86,15 +86,19 @@ The file is rewritten only when its bytes would change.
 Two pulls of one seat wait, and the seed holds one copy of each text.
 
 A writer that answers 503 is asked again once, after the ``Retry-After`` it
-sent, with the same deadline. A second 503, a 408, or a writer that is not
+sent, with the same deadline. Loopback ``EAGAIN``, ``EWOULDBLOCK``, and
+``ConnectionRefused`` before any request byte leaves for the wire retry within
+a shared two-second per-call budget; once write bytes leave for the wire, an IO
+failure is never resent. A second 503, a 408, or a writer that is not
 answering stops the pull. The line is one line, and it exits 1:
 
 ``Error: mesh: the pull stopped: CAUSE, and lessons already stored stay in the seed with rows still missing, so run `ljos mesh pull --seat SEAT --from DIR`.``
 
 A 408 uses ``the deadline passed before this request ran`` as ``CAUSE``. A second
 503 uses the writer's line, or ``packsetd busy, retrying later``. A writer that
-is not answering uses the reason this seat prints for a down writer, and
-that reason names ``cargo install --locked packset`` or ``packset ensure``.
+is not answering uses the reason this seat prints for a down writer, naming
+``packset ensure``, ``packsetd``, ``cargo install --locked packset``, or the
+configured remote URL when non-loopback.
 Exports already stored stay in the seed.
 The export in progress is left out, and the next pull reads it again.
 A row the writer did not take is one of the rows in that export.

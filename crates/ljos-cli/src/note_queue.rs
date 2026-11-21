@@ -18,9 +18,25 @@
 //! after a lost answer stores nothing new.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+const SEAL_CLAIM_TTL_SECS: u64 = 120;
+static SEAL_CLAIM_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn next_claim_owner() -> String {
+    let seq = SEAL_CLAIM_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{seq}", std::process::id())
+}
 
 fn default_kind() -> String {
     "note".into()
@@ -81,6 +97,55 @@ pub enum Sent {
     Wait(String),
 }
 
+/// Lease on a queued seal while one drainer runs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealClaim {
+    pub owner: String,
+    pub at: u64,
+}
+
+/// One ticket whose atom log could not be sealed when `finish` queued a
+/// write or found the pack busy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedSeal {
+    pub issue: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub root: String,
+    pub at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<SealClaim>,
+}
+
+impl QueuedSeal {
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        self.issue.trim() == other.issue.trim() && self.root.trim() == other.root.trim()
+    }
+}
+
+fn issue_has_pending_note(dir: &Path, issue: &str) -> bool {
+    if !queue_exists(dir) {
+        return false;
+    }
+    let needle = issue.trim();
+    read(dir).iter().any(|note| note.issue.trim() == needle)
+}
+
+fn claim_is_active(claim: Option<&SealClaim>, now: u64) -> bool {
+    claim.is_some_and(|c| now.saturating_sub(c.at) < SEAL_CLAIM_TTL_SECS)
+}
+
+/// What one queued seal attempt did.
+pub enum SealOutcome {
+    /// The ticket's atoms were sealed; optional sync output lines.
+    Sealed(String),
+    /// Nothing needed sealing (no atoms remained, or logs already held them).
+    Nothing,
+    /// The pack or queued lesson is not ready; keep the seal queued.
+    Wait(String),
+    /// Sealing failed with a non-retryable error; drop the queued seal.
+    Drop(String),
+}
+
 /// What a drain did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Drained {
@@ -94,6 +159,16 @@ pub struct Drained {
     pub waiting_on: Option<String>,
     /// Queue bytes that were not a note, moved out before a rewrite.
     pub set_aside: Vec<SetAside>,
+    /// Issue and sync detail for each queued ticket log sealed during the drain.
+    pub sealed: Vec<(String, String)>,
+    /// Issue and reason for each queued seal that failed permanently.
+    pub seals_dropped: Vec<(String, String)>,
+    /// Queued seals still waiting.
+    pub seals_left: usize,
+    /// Why the first waiting seal did not run, when one did not.
+    pub seal_waiting_on: Option<String>,
+    /// Seal queue bytes that were not a seal, moved out before a rewrite.
+    pub seals_set_aside: Vec<SetAside>,
 }
 
 /// Bytes of the queue a rewrite moved to a file beside it rather than
@@ -120,10 +195,24 @@ fn queue_file(dir: &Path) -> PathBuf {
     dir.join("note-queue.jsonl")
 }
 
+fn seal_queue_file(dir: &Path) -> PathBuf {
+    dir.join("seal-queue.jsonl")
+}
+
 /// Whether `dir` already holds the queue file. A missing directory or a
 /// missing file is false, and neither this nor a later read creates them.
 pub(crate) fn queue_exists(dir: &Path) -> bool {
     let path = queue_file(dir);
+    let Ok((opened, name)) = crate::open_state_dir(&path) else {
+        return false;
+    };
+    crate::open_regular_at(&opened, &name, &path, libc::O_RDONLY, 0).is_ok()
+}
+
+/// Whether `dir` already holds the seal queue file. A missing directory or
+/// a missing file is false, and neither this nor a later read creates them.
+pub(crate) fn seal_queue_exists(dir: &Path) -> bool {
+    let path = seal_queue_file(dir);
     let Ok((opened, name)) = crate::open_state_dir(&path) else {
         return false;
     };
@@ -149,6 +238,54 @@ pub fn busy_in(dir: &Path) -> Option<PathBuf> {
 
 fn read(dir: &Path) -> Vec<Queued> {
     read_split(dir).0
+}
+
+fn read_seals(dir: &Path) -> Vec<QueuedSeal> {
+    read_seals_split(dir).0
+}
+
+/// The seal queue's rows, and its bytes that are not one, as
+/// [`read_split`] reads the note queue. Every append holds the lock, so
+/// a torn last row seen under it is damage, not a write in progress.
+fn read_seals_split(dir: &Path) -> (Vec<QueuedSeal>, Vec<u8>) {
+    let bytes = crate::read_state_file(&seal_queue_file(dir)).unwrap_or_default();
+    let mut seals = Vec::new();
+    let mut unread = Vec::new();
+    for line in bytes.split_inclusive(|&b| b == b'\n') {
+        match line.strip_suffix(b"\n").map(serde_json::from_slice) {
+            Some(Ok(seal)) => seals.push(seal),
+            _ if line == b"\n" => {}
+            _ => unread.extend_from_slice(line),
+        }
+    }
+    (seals, unread)
+}
+
+/// Rewrite the seal queue to `seals`. `unread` is set aside first, so a
+/// rewrite drops no row it could not parse.
+fn write_seals(dir: &Path, seals: &[QueuedSeal], unread: &[u8]) -> Result<Option<SetAside>> {
+    let _durable = crate::bookkeep::durable_write();
+    let aside = set_aside_as(&seal_damaged_file(dir), unread)?;
+    let path = seal_queue_file(dir);
+    if seals.is_empty() {
+        let present = crate::open_state_dir(&path)
+            .and_then(|(fd, name)| crate::open_regular_at(&fd, &name, &path, libc::O_RDONLY, 0));
+        match present {
+            Ok(_) => crate::rewrite_state_file(&path, b"")
+                .with_context(|| format!("empty {}", path.display()))?,
+            Err(err) if err.raw_os_error() == Some(libc::ENOENT) => {}
+            Err(err) => return Err(err).with_context(|| format!("empty {}", path.display())),
+        }
+        return Ok(aside);
+    }
+    let mut body = String::new();
+    for seal in seals {
+        body.push_str(&serde_json::to_string(seal)?);
+        body.push('\n');
+    }
+    crate::rewrite_state_file(&path, body.as_bytes())
+        .with_context(|| format!("replace {}", path.display()))?;
+    Ok(aside)
 }
 
 /// The queue's notes, and its bytes that are not one: each complete line
@@ -177,6 +314,14 @@ fn damaged_file(dir: &Path) -> PathBuf {
     ))
 }
 
+/// Where a rewrite on this day puts the seal queue bytes it could not read.
+fn seal_damaged_file(dir: &Path) -> PathBuf {
+    dir.join(format!(
+        "seal-queue.jsonl.{}.damaged",
+        chrono::Utc::now().format("%Y-%m-%d")
+    ))
+}
+
 /// [`set_aside_at`] for `dir`, opened the way every state-log open is: a
 /// link in place of `dir` is refused and lists nothing.
 #[must_use]
@@ -195,6 +340,16 @@ pub fn set_aside_in(dir: &Path) -> Vec<(PathBuf, u64)> {
 /// never writes through one.
 #[must_use]
 pub fn set_aside_at(fd: &std::fs::File, dir: &Path) -> Vec<(PathBuf, u64)> {
+    damaged_at(fd, dir, "note-queue.jsonl.")
+}
+
+/// [`set_aside_at`] for the files a seal queue rewrite left.
+#[must_use]
+pub fn seal_set_aside_at(fd: &std::fs::File, dir: &Path) -> Vec<(PathBuf, u64)> {
+    damaged_at(fd, dir, "seal-queue.jsonl.")
+}
+
+fn damaged_at(fd: &std::fs::File, dir: &Path, prefix: &str) -> Vec<(PathBuf, u64)> {
     let Ok(names) = crate::deedbag::list_names(fd) else {
         return Vec::new();
     };
@@ -202,8 +357,7 @@ pub fn set_aside_at(fd: &std::fs::File, dir: &Path) -> Vec<(PathBuf, u64)> {
         .iter()
         .filter_map(|name| {
             let text = name.to_str().ok()?;
-            text.strip_prefix("note-queue.jsonl.")?
-                .strip_suffix(".damaged")?;
+            text.strip_prefix(prefix)?.strip_suffix(".damaged")?;
             let st = crate::deedbag::stat_at(fd, name).ok()??;
             let size = u64::try_from(st.st_size).ok()?;
             ((st.st_mode & libc::S_IFMT) == libc::S_IFREG).then(|| (dir.join(text), size))
@@ -216,10 +370,14 @@ pub fn set_aside_at(fd: &std::fs::File, dir: &Path) -> Vec<(PathBuf, u64)> {
 /// Add `unread` to the day's damaged file and put it on disk, before the
 /// rewrite that leaves those bytes out of the queue.
 fn set_aside(dir: &Path, unread: &[u8]) -> Result<Option<SetAside>> {
+    set_aside_as(&damaged_file(dir), unread)
+}
+
+fn set_aside_as(path: &Path, unread: &[u8]) -> Result<Option<SetAside>> {
     if unread.is_empty() {
         return Ok(None);
     }
-    let path = damaged_file(dir);
+    let path = path.to_path_buf();
     crate::append_locked_row(&path, unread, crate::Durability::Durable)
         .and_then(|()| crate::sync_state_file(&path))
         .with_context(|| format!("set aside unreadable queue bytes in {}", path.display()))?;
@@ -269,6 +427,36 @@ pub fn pending_in(dir: &Path) -> Vec<Queued> {
         return Vec::new();
     }
     read(dir)
+}
+
+/// The ticket seals waiting in `dir`, oldest first.
+///
+/// A read does not create `dir` or `note-queue.lock`.
+#[must_use]
+pub fn pending_seals_in(dir: &Path) -> Vec<QueuedSeal> {
+    if !seal_queue_exists(dir) {
+        return Vec::new();
+    }
+    read_seals(dir)
+}
+
+/// Add `seal` to the seal queue in `dir`. `false` when the same ticket
+/// seal already waits there.
+///
+/// # Errors
+///
+/// The seal queue file cannot be written.
+pub fn push_seal_in(dir: &Path, seal: QueuedSeal) -> Result<bool> {
+    let _held = lock(dir);
+    if read_seals(dir).iter().any(|seen| seen.same(&seal)) {
+        return Ok(false);
+    }
+    let path = seal_queue_file(dir);
+    let mut line = serde_json::to_string(&seal)?;
+    line.push('\n');
+    crate::append_locked_row(&path, line.as_bytes(), crate::Durability::Durable)
+        .with_context(|| format!("append {}", path.display()))?;
+    Ok(true)
 }
 
 /// Replace the waiting memories in `dir`.
@@ -375,6 +563,176 @@ pub fn drain_in(dir: &Path, mut send: impl FnMut(&Queued) -> Sent) -> Result<Dra
     Ok(done)
 }
 
+/// Lock-checked handle passed to a seal callback so it can verify no note
+/// entered for the ticket right before running the seal side effect.
+pub struct SealGate<'a> {
+    dir: &'a Path,
+    claimed: &'a QueuedSeal,
+    claim: &'a SealClaim,
+}
+
+impl SealGate<'_> {
+    /// Return a `Wait` outcome if this drainer lost its claim or a note for
+    /// the ticket arrived since the claim was taken.
+    #[must_use]
+    pub fn wait_if_blocked(&self) -> Option<SealOutcome> {
+        let still_claimed;
+        let has_note;
+        {
+            let _held = lock(self.dir);
+            still_claimed = read_seals(self.dir).iter().any(|row| {
+                row.same(self.claimed)
+                    && row
+                        .claim
+                        .as_ref()
+                        .is_some_and(|cur| cur.owner == self.claim.owner && cur.at == self.claim.at)
+            });
+            has_note = issue_has_pending_note(self.dir, &self.claimed.issue);
+        }
+        if !still_claimed {
+            return Some(SealOutcome::Wait("seal claim expired".into()));
+        }
+        if has_note {
+            return Some(SealOutcome::Wait("queued note still pending".into()));
+        }
+        None
+    }
+
+    /// Run `seal` only after re-checking under the queue lock that our claim
+    /// is still active and no note is pending for this ticket.
+    pub fn run_if_clear(&self, seal: impl FnOnce() -> SealOutcome) -> SealOutcome {
+        if let Some(wait) = self.wait_if_blocked() {
+            return wait;
+        }
+        seal()
+    }
+}
+
+/// Claim each waiting ticket seal in `dir` under the queue lock before
+/// running it through `run`, oldest first, folding results into `done`.
+/// A row whose ticket still has a pending note in `note-queue.jsonl` or
+/// an active claim from another drainer is skipped. Callers re-check via
+/// [`SealGate`] under the lock right before the seal side effect, and
+/// reconciliation matches only the exact claim token taken; a lost claim
+/// leaves the queue untouched and ignores the stale result.
+///
+/// # Errors
+///
+/// The seal queue file cannot be rewritten.
+pub fn drain_seals_in(
+    dir: &Path,
+    done: &mut Drained,
+    mut run: impl FnMut(&QueuedSeal, &SealGate<'_>) -> SealOutcome,
+) -> Result<()> {
+    if !seal_queue_exists(dir) {
+        return Ok(());
+    }
+    let mut visited: Vec<QueuedSeal> = Vec::new();
+    loop {
+        let held = lock(dir);
+        let (mut seals, unread) = read_seals_split(dir);
+        let now = now_secs();
+        let mut pick = None;
+        for (idx, row) in seals.iter().enumerate() {
+            if visited.iter().any(|seen| seen.same(row)) {
+                continue;
+            }
+            if claim_is_active(row.claim.as_ref(), now) {
+                if done.seal_waiting_on.is_none() {
+                    done.seal_waiting_on = Some("another seal is running".into());
+                }
+                continue;
+            }
+            if issue_has_pending_note(dir, &row.issue) {
+                if done.seal_waiting_on.is_none() {
+                    done.seal_waiting_on = Some("queued note still pending".into());
+                }
+                visited.push(row.clone());
+                continue;
+            }
+            pick = Some(idx);
+            break;
+        }
+        let Some(idx) = pick else {
+            done.seals_left = seals.len();
+            if !unread.is_empty() {
+                done.seals_set_aside
+                    .extend(write_seals(dir, &seals, &unread)?);
+            }
+            return Ok(());
+        };
+        let claim = SealClaim {
+            owner: next_claim_owner(),
+            at: now,
+        };
+        seals[idx].claim = Some(claim.clone());
+        let claimed = seals[idx].clone();
+        done.seals_set_aside
+            .extend(write_seals(dir, &seals, &unread)?);
+        drop(held);
+
+        let gate = SealGate {
+            dir,
+            claimed: &claimed,
+            claim: &claim,
+        };
+        let outcome = run(&claimed, &gate);
+
+        let _held = lock(dir);
+        let (mut rest, unread) = read_seals_split(dir);
+        let Some(at) = rest.iter().position(|row| {
+            row.same(&claimed)
+                && row
+                    .claim
+                    .as_ref()
+                    .is_some_and(|cur| cur.owner == claim.owner && cur.at == claim.at)
+        }) else {
+            done.seals_left = rest.len();
+            visited.push(claimed);
+            continue;
+        };
+        match outcome {
+            SealOutcome::Sealed(said) => {
+                if issue_has_pending_note(dir, &claimed.issue) {
+                    rest[at].claim = None;
+                    if done.seal_waiting_on.is_none() {
+                        done.seal_waiting_on = Some("queued note still pending".into());
+                    }
+                    visited.push(claimed);
+                } else {
+                    rest.remove(at);
+                    done.sealed.push((claimed.issue.clone(), said));
+                }
+            }
+            SealOutcome::Nothing => {
+                if issue_has_pending_note(dir, &claimed.issue) {
+                    rest[at].claim = None;
+                    if done.seal_waiting_on.is_none() {
+                        done.seal_waiting_on = Some("queued note still pending".into());
+                    }
+                    visited.push(claimed);
+                } else {
+                    rest.remove(at);
+                }
+            }
+            SealOutcome::Drop(why) => {
+                rest.remove(at);
+                done.seals_dropped.push((claimed.issue.clone(), why));
+            }
+            SealOutcome::Wait(why) => {
+                rest[at].claim = None;
+                if done.seal_waiting_on.is_none() {
+                    done.seal_waiting_on = Some(why);
+                }
+                visited.push(claimed);
+            }
+        }
+        done.seals_left = rest.len();
+        done.seals_set_aside
+            .extend(write_seals(dir, &rest, &unread)?);
+    }
+}
+
 /// The lines a drain prints: what went, what the pack refused, and what
 /// still waits. Empty when nothing was queued.
 #[must_use]
@@ -392,6 +750,23 @@ pub fn drained_lines(done: &Drained) -> String {
             ids.join(", ")
         ));
     }
+    if !done.sealed.is_empty() {
+        let mut issues: Vec<&str> = Vec::new();
+        for (issue, _) in &done.sealed {
+            if !issues.contains(&issue.as_str()) {
+                issues.push(issue.as_str());
+            }
+        }
+        out.push_str(&format!(
+            "sync: sealed queued ticket(s): {}\n",
+            issues.join(", ")
+        ));
+    }
+    for (issue, why) in &done.seals_dropped {
+        out.push_str(&format!(
+            "sync: dropped queued seal for {issue} ({why}); run `ljos sync`\n"
+        ));
+    }
     for (issue, why) in &done.refused {
         out.push_str(&format!(
             "memory: the pack refused the queued note on {issue} ({why}); it stays on the logbook\n"
@@ -404,6 +779,13 @@ pub fn drained_lines(done: &Drained) -> String {
             aside.path.display()
         ));
     }
+    for aside in &done.seals_set_aside {
+        out.push_str(&format!(
+            "sync: moved {} byte(s) of the seal queue that are not a seal to {}; they were not run, so run `ljos sync`.\n",
+            aside.bytes,
+            aside.path.display()
+        ));
+    }
     if done.left > 0 {
         out.push_str(&format!(
             "memory: {} note(s) still queued (the lesson is safe and will be sent automatically; {})\n",
@@ -411,6 +793,15 @@ pub fn drained_lines(done: &Drained) -> String {
             done.waiting_on
                 .as_deref()
                 .unwrap_or("the pack did not answer")
+        ));
+    }
+    if done.seals_left > 0 {
+        out.push_str(&format!(
+            "sync: {} ticket seal(s) still queued ({})\n",
+            done.seals_left,
+            done.seal_waiting_on
+                .as_deref()
+                .unwrap_or("waiting for pack")
         ));
     }
     out
@@ -765,5 +1156,440 @@ mod tests {
         .unwrap();
         assert_eq!(done.kept, [("p-1".to_string(), "id".to_string())]);
         assert!(pending_in(&dir).is_empty());
+    }
+
+    #[test]
+    fn queued_seals_dedupe_and_drain() {
+        let dir = dir("seals");
+        let s1 = QueuedSeal {
+            issue: "p-1".into(),
+            root: "/tmp/t".into(),
+            at: 1,
+            claim: None,
+        };
+        assert!(push_seal_in(&dir, s1.clone()).unwrap());
+        assert!(!push_seal_in(&dir, s1).unwrap());
+        let s2 = QueuedSeal {
+            issue: "p-2".into(),
+            root: "/tmp/t".into(),
+            at: 2,
+            claim: None,
+        };
+        assert!(push_seal_in(&dir, s2).unwrap());
+        assert_eq!(pending_seals_in(&dir).len(), 2);
+
+        let mut done = Drained::default();
+        drain_seals_in(&dir, &mut done, |s, _| match s.issue.as_str() {
+            "p-1" => SealOutcome::Sealed("sync: sealed p-1\n".into()),
+            _ => SealOutcome::Wait("waiting for queued note".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            done.sealed,
+            [("p-1".to_string(), "sync: sealed p-1\n".to_string())]
+        );
+        assert_eq!(done.seals_left, 1);
+        let left = pending_seals_in(&dir);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].issue, "p-2");
+        assert!(left[0].claim.is_none());
+        let lines = drained_lines(&done);
+        assert!(
+            lines.contains("sync: sealed queued ticket(s): p-1"),
+            "{lines}"
+        );
+        assert!(
+            lines.contains("sync: 1 ticket seal(s) still queued"),
+            "{lines}"
+        );
+    }
+
+    #[test]
+    fn concurrent_drains_run_one_seal_job_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let dir = dir("seals-concurrent");
+        push_seal_in(
+            &dir,
+            QueuedSeal {
+                issue: "p-1".into(),
+                root: "/tmp/t".into(),
+                at: 1,
+                claim: None,
+            },
+        )
+        .unwrap();
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+
+        let d1 = dir.clone();
+        let runs1 = Arc::clone(&runs);
+        let entered1 = Arc::clone(&entered);
+        let release1 = Arc::clone(&release);
+        let t1 = std::thread::spawn(move || {
+            let mut done = Drained::default();
+            drain_seals_in(&d1, &mut done, |_s, gate| {
+                gate.run_if_clear(|| {
+                    runs1.fetch_add(1, Ordering::SeqCst);
+                    entered1.wait();
+                    release1.wait();
+                    SealOutcome::Sealed("ok\n".into())
+                })
+            })
+            .unwrap();
+            done
+        });
+
+        entered.wait();
+        let mut done2 = Drained::default();
+        drain_seals_in(&dir, &mut done2, |_s, _| {
+            runs.fetch_add(1, Ordering::SeqCst);
+            SealOutcome::Sealed("duplicate\n".into())
+        })
+        .unwrap();
+        release.wait();
+
+        let done1 = t1.join().unwrap();
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "two drainers ran the same seal job more than once"
+        );
+        assert_eq!(done1.sealed.len() + done2.sealed.len(), 1);
+        assert!(pending_seals_in(&dir).is_empty());
+    }
+
+    #[test]
+    fn a_torn_seal_row_does_not_consume_the_next_complete_row() {
+        let dir = dir("seals-torn");
+        std::fs::write(
+            seal_queue_file(&dir),
+            "{\"issue\":\"broken\n{\"issue\":\"p-2\",\"root\":\"/tmp/t\",\"at\":2}\n",
+        )
+        .unwrap();
+        let seals = pending_seals_in(&dir);
+        assert_eq!(seals.len(), 1);
+        assert_eq!(seals[0].issue, "p-2");
+
+        let mut done = Drained::default();
+        drain_seals_in(&dir, &mut done, |s, _| {
+            SealOutcome::Sealed(format!("sealed {}\n", s.issue))
+        })
+        .unwrap();
+        assert_eq!(done.sealed.len(), 1);
+        assert_eq!(done.sealed[0].0, "p-2");
+        assert!(pending_seals_in(&dir).is_empty());
+    }
+
+    /// A seal row the drain cannot read is moved to a dated file and named
+    /// in the drain's lines, not lost in the rewrite.
+    #[test]
+    fn a_torn_seal_row_is_set_aside_and_reported() {
+        let dir = dir("seals-torn-aside");
+        let torn = "{\"issue\":\"broken\n";
+        let tail = "{\"issue\":\"p-3\",\"root\":\"/tmp/t\"";
+        std::fs::write(
+            seal_queue_file(&dir),
+            format!("{torn}{{\"issue\":\"p-2\",\"root\":\"/tmp/t\",\"at\":2}}\n{tail}"),
+        )
+        .unwrap();
+        let mut done = Drained::default();
+        drain_seals_in(&dir, &mut done, |s, _| {
+            SealOutcome::Sealed(format!("sealed {}\n", s.issue))
+        })
+        .unwrap();
+        assert_eq!(done.sealed.len(), 1);
+        let bytes: usize = done.seals_set_aside.iter().map(|a| a.bytes).sum();
+        assert_eq!(bytes, torn.len() + tail.len(), "{:?}", done.seals_set_aside);
+        let aside = &done.seals_set_aside[0].path;
+        assert_eq!(aside, &seal_damaged_file(&dir));
+        let kept = std::fs::read_to_string(aside).unwrap();
+        assert!(kept.contains("broken") && kept.contains("p-3"), "{kept:?}");
+        let lines = drained_lines(&done);
+        assert!(
+            lines.contains("byte(s) of the seal queue that are not a seal"),
+            "{lines}"
+        );
+        assert_eq!(std::fs::read_to_string(seal_queue_file(&dir)).unwrap(), "");
+        let fd = std::fs::File::open(&dir).unwrap();
+        assert_eq!(seal_set_aside_at(&fd, &dir).len(), 1);
+        assert!(set_aside_at(&fd, &dir).is_empty());
+    }
+
+    #[test]
+    fn a_note_queued_before_claim_defers_the_seal() {
+        let dir = dir("seals-pending-note");
+        push_in(&dir, note("p-1", "lesson still queued")).unwrap();
+        push_seal_in(
+            &dir,
+            QueuedSeal {
+                issue: "p-1".into(),
+                root: "/tmp/t".into(),
+                at: 1,
+                claim: None,
+            },
+        )
+        .unwrap();
+
+        let mut ran = false;
+        let mut done = Drained::default();
+        drain_seals_in(&dir, &mut done, |_, _| {
+            ran = true;
+            SealOutcome::Sealed("should not run\n".into())
+        })
+        .unwrap();
+        assert!(!ran, "seal ran while a queued note for the issue waited");
+        assert_eq!(done.seals_left, 1);
+        assert_eq!(
+            done.seal_waiting_on.as_deref(),
+            Some("queued note still pending")
+        );
+        assert_eq!(pending_seals_in(&dir).len(), 1);
+    }
+
+    #[test]
+    fn an_expired_drainer_does_not_remove_a_newer_claim() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = dir("seals-expired-claim");
+        push_seal_in(
+            &dir,
+            QueuedSeal {
+                issue: "p-1".into(),
+                root: "/tmp/t".into(),
+                at: 1,
+                claim: None,
+            },
+        )
+        .unwrap();
+
+        let entered1 = Arc::new(Barrier::new(2));
+        let release1 = Arc::new(Barrier::new(2));
+        let entered2 = Arc::new(Barrier::new(2));
+        let release2 = Arc::new(Barrier::new(2));
+
+        let d1 = dir.clone();
+        let e1 = Arc::clone(&entered1);
+        let r1 = Arc::clone(&release1);
+        let t1 = std::thread::spawn(move || {
+            let mut done = Drained::default();
+            drain_seals_in(&d1, &mut done, |_s, _| {
+                e1.wait();
+                r1.wait();
+                SealOutcome::Sealed("stale\n".into())
+            })
+            .unwrap();
+            done
+        });
+
+        entered1.wait();
+        let owner1 = {
+            let _held = lock(&dir);
+            let mut seals = read_seals(&dir);
+            let owner = seals[0].claim.as_ref().unwrap().owner.clone();
+            seals[0].claim.as_mut().unwrap().at = 1;
+            write_seals(&dir, &seals, b"").unwrap();
+            owner
+        };
+
+        let d2 = dir.clone();
+        let e2 = Arc::clone(&entered2);
+        let r2 = Arc::clone(&release2);
+        let t2 = std::thread::spawn(move || {
+            let mut done = Drained::default();
+            drain_seals_in(&d2, &mut done, |_s, _| {
+                e2.wait();
+                r2.wait();
+                SealOutcome::Sealed("fresh\n".into())
+            })
+            .unwrap();
+            done
+        });
+
+        entered2.wait();
+        let owner2 = pending_seals_in(&dir)[0]
+            .claim
+            .as_ref()
+            .expect("second drainer took over claim")
+            .owner
+            .clone();
+        assert_ne!(owner1, owner2);
+
+        release1.wait();
+        let done1 = t1.join().unwrap();
+        assert!(
+            done1.sealed.is_empty(),
+            "expired drainer reported a stale seal: {done1:?}"
+        );
+        let mid = pending_seals_in(&dir);
+        assert_eq!(mid.len(), 1, "expired drainer removed newer claim");
+        assert_eq!(
+            mid[0].claim.as_ref().map(|c| c.owner.as_str()),
+            Some(owner2.as_str()),
+            "expired drainer altered newer claim"
+        );
+
+        release2.wait();
+        let done2 = t2.join().unwrap();
+        assert_eq!(done2.sealed, [("p-1".to_string(), "fresh\n".to_string())]);
+        assert!(pending_seals_in(&dir).is_empty());
+    }
+
+    #[test]
+    fn a_note_queued_while_a_seal_starts_prevents_that_seal() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let dir = dir("seals-note-during-start");
+        push_seal_in(
+            &dir,
+            QueuedSeal {
+                issue: "p-1".into(),
+                root: "/tmp/t".into(),
+                at: 1,
+                claim: None,
+            },
+        )
+        .unwrap();
+
+        let seal_runs = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(Barrier::new(2));
+        let pushed = Arc::new(Barrier::new(2));
+
+        let d1 = dir.clone();
+        let runs1 = Arc::clone(&seal_runs);
+        let entered1 = Arc::clone(&entered);
+        let pushed1 = Arc::clone(&pushed);
+        let t1 = std::thread::spawn(move || {
+            let mut done = Drained::default();
+            drain_seals_in(&d1, &mut done, |_s, gate| {
+                entered1.wait();
+                pushed1.wait();
+                gate.run_if_clear(|| {
+                    runs1.fetch_add(1, Ordering::SeqCst);
+                    SealOutcome::Sealed("ok\n".into())
+                })
+            })
+            .unwrap();
+            done
+        });
+
+        entered.wait();
+        assert!(push_in(&dir, note("p-1", "late lesson")).unwrap());
+        pushed.wait();
+
+        let done1 = t1.join().unwrap();
+        assert_eq!(
+            seal_runs.load(Ordering::SeqCst),
+            0,
+            "seal side effect ran after a note was queued for the same issue"
+        );
+        assert!(done1.sealed.is_empty());
+        assert_eq!(done1.seals_left, 1);
+        assert_eq!(
+            done1.seal_waiting_on.as_deref(),
+            Some("queued note still pending")
+        );
+        let left = pending_seals_in(&dir);
+        assert_eq!(left.len(), 1);
+        assert!(left[0].claim.is_none());
+    }
+
+    #[test]
+    fn lost_claim_blocks_seal_gate_and_reconciliation_for_owner_and_timestamp() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        // 1. Same owner, altered `claim.at`: SealGate::wait_if_blocked and run_if_clear
+        // must both detect the lost claim and skip the seal side effect, and
+        // reconciliation must not delete the newer claim.
+        let dir_at = dir("seals-lost-at");
+        push_seal_in(
+            &dir_at,
+            QueuedSeal {
+                issue: "p-at".into(),
+                root: "/tmp/t".into(),
+                at: 1,
+                claim: None,
+            },
+        )
+        .unwrap();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let runs_cb = Arc::clone(&runs);
+        let mut done_at = Drained::default();
+        drain_seals_in(&dir_at, &mut done_at, |_s, gate| {
+            {
+                let _held = lock(&dir_at);
+                let mut seals = read_seals(&dir_at);
+                let cur = seals[0].claim.as_mut().unwrap();
+                cur.at = cur.at.saturating_add(10);
+                write_seals(&dir_at, &seals, b"").unwrap();
+            }
+            assert!(
+                matches!(
+                    gate.wait_if_blocked(),
+                    Some(SealOutcome::Wait(ref why)) if why == "seal claim expired"
+                ),
+                "same owner with different claim.at must expire the gate"
+            );
+            gate.run_if_clear(|| {
+                runs_cb.fetch_add(1, Ordering::SeqCst);
+                SealOutcome::Sealed("stale\n".into())
+            })
+        })
+        .unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+        assert!(done_at.sealed.is_empty());
+        assert_eq!(done_at.seals_left, 1);
+        assert!(
+            pending_seals_in(&dir_at)[0].claim.is_some(),
+            "stale outcome must not clear newer claim.at"
+        );
+
+        // 2. Same owner, altered `claim.at` with `Drop` and `Wait` outcomes:
+        // reconciliation must not remove the row or clear the newer claim.
+        for outcome_kind in ["drop", "wait"] {
+            let d = dir(&format!("seals-lost-{outcome_kind}"));
+            push_seal_in(
+                &d,
+                QueuedSeal {
+                    issue: format!("p-{outcome_kind}"),
+                    root: "/tmp/t".into(),
+                    at: 1,
+                    claim: None,
+                },
+            )
+            .unwrap();
+            let mut done = Drained::default();
+            drain_seals_in(&d, &mut done, |_s, _gate| {
+                {
+                    let _held = lock(&d);
+                    let mut seals = read_seals(&d);
+                    let cur = seals[0].claim.as_mut().unwrap();
+                    cur.at = cur.at.saturating_add(5);
+                    cur.owner = "other-owner".into();
+                    write_seals(&d, &seals, b"").unwrap();
+                }
+                if outcome_kind == "drop" {
+                    SealOutcome::Drop("stale drop".into())
+                } else {
+                    SealOutcome::Wait("stale wait".into())
+                }
+            })
+            .unwrap();
+            assert!(done.seals_dropped.is_empty(), "{outcome_kind}: {done:?}");
+            assert!(done.seal_waiting_on.is_none(), "{outcome_kind}: {done:?}");
+            assert_eq!(done.seals_left, 1);
+            let left = pending_seals_in(&d);
+            assert_eq!(left.len(), 1);
+            assert_eq!(
+                left[0].claim.as_ref().map(|c| c.owner.as_str()),
+                Some("other-owner"),
+                "{outcome_kind} must leave newer claim intact"
+            );
+        }
     }
 }

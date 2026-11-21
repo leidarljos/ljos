@@ -212,7 +212,10 @@ Another machine retires that host's copies, including each extra
 scope's `sync:HOST+SCOPE` copies, when it imports the adopt commit.
 A log is a base and the chunks sealed after it, `HOST.chunks/N.age`.
 `ljos finish` adds a chunk only when this machine can open its own log.
-When it cannot, finish prints a warning, leaves the atoms in the pack, and names `ljos sync`, which seals that log whole.
+When a write is queued and the seal cannot finish because the pack still needs that queued write or does not answer, `finish` queues the ticket seal and the next ordinary command sends the queued write before sealing.
+When the ticket's own lesson is queued, `finish` does not seal at all, even when older atoms of the ticket could be sealed; it queues one seal per tracker, and each runs only after the lesson has left the note queue.
+When no write is queued and the pack cannot be reached, `finish` prints one clean line naming `ljos doctor`.
+When the seal fails for another reason, `finish` prints a warning, leaves the atoms in the pack, and names `ljos sync`, which seals that log whole.
 A failed attributes stage does not cause that warning.
 A sync seals only the atoms added, changed or dropped as one chunk and
 leaves the base alone; a sync that changed no atom seals and commits
@@ -761,10 +764,15 @@ sets `PACKSET_TIMEOUT_MS` may use the shorter of those two for that read.
 `LJOS_PACK_TIMEOUT_MS` caps an interactive call (default 4000, at most 5000).
 `LJOS_HOOK_PACK_TIMEOUT_MS` caps a hook (default 1500, at most 2000).
 `PACKSET_TIMEOUT_MS` applies when the matching one of those is unset, and
-it cannot stretch these calls past the caps. A 503 waits the `Retry-After`
-seconds once and sends the same request with the same deadline. A second
-503, or a deadline that has passed, stops. The command prints the JSON
-`error` field on one line and does not retry for the rest of the timeout.
+it cannot stretch these calls past the caps. Loopback `EAGAIN`,
+`EWOULDBLOCK`, and `ConnectionRefused` errors before any request byte
+leaves for the wire retry within a shared two-second per-call budget
+(reads also retry post-wire `EAGAIN`, while writes never resend after an IO
+failure once bytes leave for the wire; `LJOS_IN_HOOK` keeps one attempt). A
+503 waits the `Retry-After` seconds once and sends the same request with
+the same deadline. A second 503, or a deadline that has passed, stops. The
+command prints the JSON `error` field on one line and does not retry for
+the rest of the timeout.
 A search or a recall keeps asking a writer that reports busy, with a
 short pause that grows, for `LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset,
 `0` does not wait). A `Retry-After` or a JSON `retry_ms` sets one pause

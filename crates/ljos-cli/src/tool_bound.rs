@@ -186,6 +186,8 @@ pub async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(move || {
         let _guard = ticket.map(Ticket::bind);
         let _seat = seat.map(crate::BoundCallSeat::enter);
+        let _call_budget = crate::pack_link::CallRetryBudget::enter();
+        let _quiet = crate::pack_link::QuietPack::enter();
         f()
     })
     .await

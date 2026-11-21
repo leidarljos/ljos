@@ -8,11 +8,10 @@
 //! refusals and the call that carries the token are three sockets in a row;
 //! the proof is not kept for a later call.
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-#[cfg(not(test))]
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -282,7 +281,7 @@ pub(crate) fn clock_left() -> Option<Duration> {
 /// A search or island read in this clock already went quiet, or the clock
 /// is spent. Later reads must not wait it out again.
 pub(crate) fn search_stalled() -> bool {
-    pack_quiet() || clock_deadline().is_some_and(|deadline| Instant::now() >= deadline)
+    pack_quiet_any() || clock_deadline().is_some_and(|deadline| Instant::now() >= deadline)
 }
 
 pub(crate) fn error_is_timeout(err: &Error) -> bool {
@@ -472,12 +471,12 @@ struct Raw {
 /// A sitting or MCP pack read. Longer reads keep their own budgets.
 const SHORT_READ: Duration = Duration::from_secs(1);
 
-/// The first pause while a writer reports busy, before it triples up to
-/// [`SEARCH_BUSY_CAP`]. A `Retry-After` or a JSON `retry_ms` replaces this
-/// when it is longer. The sum stays inside [`crate::search_busy_wait`].
-/// Tracker writes do not enter this wait.
-const SEARCH_BUSY_FIRST: Duration = Duration::from_millis(50);
-const SEARCH_BUSY_CAP: Duration = Duration::from_millis(400);
+/// The first pause while a writer reports busy or a loopback socket hits a
+/// transient error, before backoff up to [`RETRY_CAP`]. A `Retry-After` or
+/// a JSON `retry_ms` replaces this when it is longer.
+const RETRY_FIRST: Duration = Duration::from_millis(50);
+const RETRY_CAP: Duration = Duration::from_millis(400);
+const TRANSIENT_WINDOW: Duration = Duration::from_secs(2);
 
 thread_local! {
     static BUSY_RETRY_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -585,7 +584,7 @@ fn busy_started() -> Instant {
 
 /// Time left for another busy pause: the busy bound, the frozen deadline,
 /// and the command deadline, whichever ends first.
-fn busy_room() -> Duration {
+pub(crate) fn busy_room() -> Duration {
     let left = crate::search_busy_wait().saturating_sub(busy_started().elapsed());
     let held = held_remaining().unwrap_or(left);
     let command = command_remaining().unwrap_or(left);
@@ -802,6 +801,22 @@ fn current_deadline(method: &str) -> String {
         .unwrap_or_else(|| deadline_stamp(admission_retry_budget(method, budget())))
 }
 
+#[cfg(test)]
+thread_local! {
+    static RETRY_JITTER: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    static RETRY_AFTER_WAITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The spread added to a `Retry-After` wait, so seats that were refused
+/// together do not ask again on the same instant.
+fn retry_jitter() -> Duration {
+    #[cfg(test)]
+    if let Some(fixed) = RETRY_JITTER.with(std::cell::Cell::get) {
+        return fixed;
+    }
+    Duration::from_millis((std::process::id() as u64).wrapping_mul(17) % 80)
+}
+
 fn retry_after_of(header: Option<&str>) -> Option<Duration> {
     let raw = header?.trim();
     if raw.is_empty() {
@@ -903,25 +918,24 @@ fn degrade(body: &str, method: &str, deadline: bool) -> Error {
 
 // The pack accepted a connection and then stayed silent, or the connect
 // itself never finished. While a [`QuietPack`] guard is alive, the first
-// such read still waits out its budget and a later read returns before it
-// opens another socket. A consensus reading asks several times. Without
-// the stop, each ask waited the whole budget and the command sat for the
-// sum. Dropping the guard clears it, so a later call can try the pack again.
+// such read still waits out its budget and a later read to that same
+// socket address returns before it opens another socket. A consensus
+// reading asks several times. Without the stop, each ask waited the whole
+// budget and the command sat for the sum. Dropping the guard clears it,
+// so a later call can try the pack again.
 //
-// Unit tests share one process and run on many threads. A silent pack on
-// one thread is not the next thread's pack, so the flag stays on the
-// thread that saw it. A command or an MCP call keeps the flag for the
-// process, so a task that resumes on another worker still skips the second wait.
-#[cfg(test)]
-thread_local! {
-    static PACK_QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static QUIET_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
+// Both unit tests and concurrent MCP blocking requests share one process
+// and run across threads, so the quiet map stays thread-local and keyed
+// by socket address: one silent pack on one request or port never silences
+// another request or a healthy pack on another port.
+const QUIET_NONE: u8 = 0;
+const QUIET_EAGAIN: u8 = 1;
+const QUIET_REFUSED: u8 = 2;
 
-#[cfg(not(test))]
-static PACK_QUIET: AtomicBool = AtomicBool::new(false);
-#[cfg(not(test))]
-static QUIET_HELD: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static PACK_QUIET: RefCell<HashMap<SocketAddr, u8>> = RefCell::new(HashMap::new());
+    static QUIET_HELD: Cell<usize> = const { Cell::new(0) };
+}
 
 /// Remember one quiet pack for the reads this guard covers.
 pub struct QuietPack;
@@ -931,68 +945,248 @@ impl QuietPack {
     /// quiet read already seen, so the pile starts with a fresh try.
     #[must_use]
     pub fn enter() -> Self {
-        #[cfg(test)]
         QUIET_HELD.with(|held| {
             if held.get() == 0 {
-                PACK_QUIET.with(|quiet| quiet.set(false));
+                PACK_QUIET.with(|quiet| quiet.borrow_mut().clear());
             }
             held.set(held.get().saturating_add(1));
         });
-        #[cfg(not(test))]
-        if QUIET_HELD.fetch_add(1, Ordering::AcqRel) == 0 {
-            PACK_QUIET.store(false, Ordering::Relaxed);
-        }
         Self
     }
 }
 
 impl Drop for QuietPack {
     fn drop(&mut self) {
-        #[cfg(test)]
         QUIET_HELD.with(|held| {
             let left = held.get().saturating_sub(1);
             held.set(left);
             if left == 0 {
-                PACK_QUIET.with(|quiet| quiet.set(false));
+                PACK_QUIET.with(|quiet| quiet.borrow_mut().clear());
             }
         });
-        #[cfg(not(test))]
-        if QUIET_HELD.fetch_sub(1, Ordering::AcqRel) == 1 {
-            PACK_QUIET.store(false, Ordering::Relaxed);
-        }
     }
 }
 
 fn holding_quiet() -> bool {
-    #[cfg(test)]
-    {
-        QUIET_HELD.with(|held| held.get() > 0)
+    QUIET_HELD.with(Cell::get) > 0
+}
+
+fn pack_quiet_kind_for(addr: SocketAddr) -> u8 {
+    if !holding_quiet() {
+        return QUIET_NONE;
     }
-    #[cfg(not(test))]
-    {
-        QUIET_HELD.load(Ordering::Relaxed) > 0
+    PACK_QUIET.with(|quiet| quiet.borrow().get(&addr).copied().unwrap_or(QUIET_NONE))
+}
+
+fn pack_quiet_for(addr: SocketAddr) -> bool {
+    pack_quiet_kind_for(addr) != QUIET_NONE
+}
+
+fn pack_quiet_any() -> bool {
+    holding_quiet() && PACK_QUIET.with(|quiet| !quiet.borrow().is_empty())
+}
+
+pub(crate) fn is_quiet() -> bool {
+    pack_quiet_any()
+}
+
+pub(crate) fn clear_pack_quiet() {
+    PACK_QUIET.with(|quiet| quiet.borrow_mut().clear());
+}
+
+thread_local! {
+    static TRANSIENT_RETRY_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static NO_TRANSIENT_RETRY: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CALL_TRANSIENT: std::cell::RefCell<Option<TransientBudget>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Suppress transient loopback retries inside best-effort preflight probes so
+/// they do not spend a short command's deadline before the real call runs.
+pub(crate) struct NoTransientRetry;
+
+impl NoTransientRetry {
+    pub(crate) fn enter() -> Self {
+        NO_TRANSIENT_RETRY.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
     }
 }
 
-fn pack_quiet() -> bool {
-    #[cfg(test)]
-    {
-        holding_quiet() && PACK_QUIET.with(|quiet| quiet.get())
-    }
-    #[cfg(not(test))]
-    {
-        holding_quiet() && PACK_QUIET.load(Ordering::Relaxed)
+impl Drop for NoTransientRetry {
+    fn drop(&mut self) {
+        NO_TRANSIENT_RETRY.with(|depth| depth.set(depth.get().saturating_sub(1)));
     }
 }
 
-fn mark_pack_quiet() {
+fn transient_retry_suppressed() -> bool {
+    NO_TRANSIENT_RETRY.with(|depth| depth.get() > 0)
+}
+
+struct TransientRetry;
+
+impl TransientRetry {
+    fn enter() -> Self {
+        TRANSIENT_RETRY_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for TransientRetry {
+    fn drop(&mut self) {
+        TRANSIENT_RETRY_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+fn in_transient_retry() -> bool {
+    TRANSIENT_RETRY_DEPTH.with(|depth| depth.get() > 0)
+}
+
+/// Share one bounded [`TRANSIENT_WINDOW`] retry budget across every pack call
+/// inside a top-level command so multi-call commands never stack 2s stalls.
+pub struct CallRetryBudget {
+    outer: bool,
+}
+
+impl CallRetryBudget {
+    #[must_use]
+    pub fn enter() -> Self {
+        let outer = CALL_TRANSIENT.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let outer = slot.is_none();
+            if outer {
+                *slot = Some(TransientBudget::new());
+            }
+            outer
+        });
+        Self { outer }
+    }
+}
+
+impl Drop for CallRetryBudget {
+    fn drop(&mut self) {
+        if self.outer {
+            CALL_TRANSIENT.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+}
+
+struct TransientBudget {
+    spent: Duration,
+}
+
+impl TransientBudget {
+    fn new() -> Self {
+        Self {
+            spent: Duration::ZERO,
+        }
+    }
+
+    fn charge(&mut self, elapsed: Duration) {
+        self.spent = self.spent.saturating_add(elapsed);
+    }
+
+    fn room(&self, outer_clock: Option<Instant>) -> Option<Duration> {
+        let mut left = TRANSIENT_WINDOW.saturating_sub(self.spent);
+        let headroom = Duration::from_millis(220);
+        if let Some(deadline) = outer_clock {
+            left = left.min(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .saturating_sub(headroom),
+            );
+        }
+        if let Some(cmd) = command_remaining() {
+            left = left.min(cmd.saturating_sub(headroom));
+        }
+        if let Some(wall) = crate::wall_left() {
+            left = left.min(wall.saturating_sub(headroom));
+        }
+        if let Some(tool) = crate::tool_bound::remaining() {
+            left = left.min(tool);
+        }
+        if let Some(side) = super::side_remaining_ms() {
+            left = left.min(Duration::from_millis(side));
+        }
+        (left >= Duration::from_millis(20)).then_some(left)
+    }
+}
+
+fn transient_charge(elapsed: Duration) {
+    CALL_TRANSIENT.with(|slot| {
+        if let Some(budget) = slot.borrow_mut().as_mut() {
+            budget.charge(elapsed);
+        }
+    });
+}
+
+fn transient_room(outer_clock: Option<Instant>) -> Option<Duration> {
+    CALL_TRANSIENT.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(|budget| budget.room(outer_clock))
+    })
+}
+
+/// Non-idempotent requests (any POST and every write) are never resent on an
+/// IO failure once any request byte has left for the wire. Reads (`GET`) may
+/// always retry.
+fn retry_permitted(method: &str, bytes_sent: bool) -> bool {
+    !is_write(method) || !bytes_sent
+}
+
+fn is_transient_io(addr: SocketAddr, io: &std::io::Error) -> bool {
+    addr.ip().is_loopback()
+        && matches!(
+            io.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::ConnectionRefused
+        )
+}
+
+fn set_pack_quiet_for(addr: SocketAddr, kind: u8) {
     if !holding_quiet() {
         return;
     }
-    #[cfg(test)]
-    PACK_QUIET.with(|quiet| quiet.set(true));
-    #[cfg(not(test))]
-    PACK_QUIET.store(true, Ordering::Relaxed);
+    PACK_QUIET.with(|quiet| {
+        quiet.borrow_mut().insert(addr, kind);
+    });
+}
+
+fn mark_pack_quiet_for(addr: SocketAddr) {
+    set_pack_quiet_for(addr, QUIET_EAGAIN);
+}
+
+fn mark_pack_refused_for(addr: SocketAddr) {
+    set_pack_quiet_for(addr, QUIET_REFUSED);
+}
+
+#[derive(Debug)]
+struct PostWireIo(std::io::Error);
+
+impl std::fmt::Display for PostWireIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for PostWireIo {}
+
+fn post_wire_io(io: std::io::Error) -> std::io::Error {
+    std::io::Error::new(io.kind(), PostWireIo(io))
+}
+
+/// Whether `err` is an IO failure on a write after bytes already left for
+/// the wire. Callers such as `with_writer` must not resend that write.
+pub(crate) fn write_bytes_sent(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<PostWireIo>().is_some()
+            || cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.get_ref().is_some_and(|inner| inner.is::<PostWireIo>()))
+            || matches!(
+                cause.downcast_ref::<Error>(),
+                Some(Error::Io(io)) if io.get_ref().is_some_and(|inner| inner.is::<PostWireIo>())
+            )
+    })
 }
 
 /// The tool call's own bound is spent. A shorter read, one atom inside
@@ -1012,7 +1206,10 @@ fn pack_io(err: std::io::Error) -> std::io::Error {
     err
 }
 
-fn quiet_io() -> std::io::Error {
+fn quiet_io_for(addr: SocketAddr) -> std::io::Error {
+    if pack_quiet_kind_for(addr) == QUIET_REFUSED {
+        return std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
+    }
     pack_io(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
         "the pack did not answer",
@@ -1029,8 +1226,8 @@ fn io_is_quiet(err: &std::io::Error) -> bool {
 }
 
 fn connect(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
-    if pack_quiet() {
-        return Err(quiet_io());
+    if pack_quiet_for(addr) {
+        return Err(quiet_io_for(addr));
     }
     if side_budget_spent() {
         return Err(budget_spent());
@@ -1045,8 +1242,8 @@ fn connect(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
         // A short connect cap used to mark the pack quiet while the call
         // still had time, so the write behind a listing never opened a
         // socket. Quiet starts once this clock is spent.
-        if io_is_quiet(err) && clock_is_spent() {
-            mark_pack_quiet();
+        if io_is_quiet(err) && clock_is_spent() && !in_transient_retry() {
+            mark_pack_quiet_for(addr);
         }
         super::charge_side_wait(started.elapsed());
     }
@@ -1125,22 +1322,38 @@ fn capped_wait(timeout: Duration) -> Duration {
     }
 }
 
-fn write_all(stream: &mut TcpStream, bytes: &[u8]) -> std::io::Result<()> {
+struct SendErr {
+    io: std::io::Error,
+    unsent: bool,
+}
+
+fn write_all_tracked<W: Write>(stream: &mut W, bytes: &[u8]) -> Result<(), SendErr> {
     let mut sent = 0;
     while sent < bytes.len() {
         match stream.write(&bytes[sent..]) {
             Ok(0) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "the pack closed the socket",
-                ))
+                return Err(SendErr {
+                    io: std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "the pack closed the socket",
+                    ),
+                    unsent: sent == 0,
+                });
             }
             Ok(n) => sent += n,
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(err) => return Err(pack_io(err)),
+            Err(err) => {
+                return Err(SendErr {
+                    io: pack_io(err),
+                    unsent: sent == 0,
+                });
+            }
         }
     }
-    stream.flush()
+    stream.flush().map_err(|io| SendErr {
+        io: pack_io(io),
+        unsent: bytes.is_empty(),
+    })
 }
 
 fn read_response(stream: &mut TcpStream, deadline: Instant) -> std::io::Result<Raw> {
@@ -1397,6 +1610,15 @@ struct Wire<'a> {
     token: Option<&'a str>,
 }
 
+struct AttemptErr {
+    err: Error,
+    bytes_sent: bool,
+}
+
+struct RetryCtx {
+    outer_clock: Option<Instant>,
+}
+
 enum Gate {
     /// The proof held. The call may carry the token.
     Send,
@@ -1559,8 +1781,8 @@ impl PacksetClient {
             crate::tool_bound::note("packsetd");
         }
         let budget = tightened(method, timeout);
+        let outer_clock = clock_deadline();
         let _held = HeldDeadline::enter(budget);
-        let _clock = PackClock::enter(budget);
         let call = Wire {
             method,
             path,
@@ -1582,7 +1804,9 @@ impl PacksetClient {
         } else {
             None
         };
-        let answer = self.exchange(addr, &call, allow, budget)?;
+        let _call_budget = CallRetryBudget::enter();
+        let answer =
+            self.exchange_resilient(addr, &call, allow, budget, RetryCtx { outer_clock })?;
         let answer = match answer.status {
             408 => return Err(degrade(&answer.body, method, true)),
             503 if crate::pack_warming(&answer.body) => answer,
@@ -1598,19 +1822,22 @@ impl PacksetClient {
                 if crate::search_busy_wait().is_zero() {
                     return Err(crate::reported_busy_error());
                 }
-                self.ask_until_free(addr, &call, allow, budget, answer)?
+                self.ask_until_free(addr, &call, allow, budget, outer_clock, answer)?
             }
             503 => match answer
                 .retry_after
                 .filter(|wait| !deadline_passed() && retry_room(*wait))
             {
                 Some(wait) => {
-                    let jitter_ms = (std::process::id() as u64).wrapping_mul(17) % 80;
-                    std::thread::sleep(wait.saturating_add(Duration::from_millis(jitter_ms)));
+                    #[cfg(test)]
+                    RETRY_AFTER_WAITS.with(|n| n.set(n.get() + 1));
+                    let room = held_remaining().unwrap_or_default().saturating_sub(wait);
+                    let jitter = retry_jitter().min(room / 2);
+                    std::thread::sleep(wait.saturating_add(jitter));
                     if deadline_passed() {
                         return Err(degrade(&answer.body, method, true));
                     }
-                    self.exchange(addr, &call, allow, budget)?
+                    self.exchange_resilient(addr, &call, allow, budget, RetryCtx { outer_clock })?
                 }
                 None => return Err(degrade(&answer.body, method, deadline_passed())),
             },
@@ -1633,6 +1860,85 @@ impl PacksetClient {
         Ok(answer)
     }
 
+    /// Retry transient loopback `EAGAIN` and `ConnectionRefused` errors under
+    /// this top-level call's shared bounded budget before returning an error.
+    /// Non-idempotent requests retry only when the failure happened before any
+    /// request byte left for the wire.
+    fn exchange_resilient(
+        &self,
+        addr: SocketAddr,
+        call: &Wire<'_>,
+        allow: bool,
+        budget: Duration,
+        ctx: RetryCtx,
+    ) -> Result<Answer, Error> {
+        let wrap_io = |io: std::io::Error, bytes_sent: bool| {
+            if bytes_sent && is_write(call.method) {
+                Error::Io(post_wire_io(io))
+            } else {
+                Error::Io(io)
+            }
+        };
+        if std::env::var_os("LJOS_IN_HOOK").is_some() || transient_retry_suppressed() {
+            let _clock = PackClock::enter(budget);
+            return self
+                .exchange(addr, call, allow, budget)
+                .map_err(|e| match e {
+                    AttemptErr {
+                        err: Error::Io(io),
+                        bytes_sent,
+                    } => wrap_io(io, bytes_sent),
+                    AttemptErr { err, .. } => err,
+                });
+        }
+        let _retrying = TransientRetry::enter();
+        let mut pause = RETRY_FIRST;
+        let mut per_try = budget;
+        loop {
+            let attempt_started = Instant::now();
+            let res = {
+                let _clock = PackClock::enter(per_try);
+                self.exchange(addr, call, allow, per_try)
+            };
+            match res {
+                Ok(answer) => return Ok(answer),
+                Err(AttemptErr {
+                    err: Error::Io(io),
+                    bytes_sent,
+                }) => {
+                    let may_retry = retry_permitted(call.method, bytes_sent)
+                        && is_transient_io(addr, &io)
+                        && !pack_quiet_for(addr)
+                        && !side_budget_spent();
+                    if may_retry {
+                        transient_charge(attempt_started.elapsed());
+                        if let Some(room) = transient_room(ctx.outer_clock) {
+                            let wait = pause.min(room);
+                            std::thread::sleep(wait);
+                            transient_charge(wait);
+                            if let Some(next_room) = transient_room(ctx.outer_clock) {
+                                per_try = budget.min(next_room);
+                                pause = pause.saturating_mul(2).min(RETRY_CAP);
+                                continue;
+                            }
+                        }
+                    }
+                    if io.kind() == std::io::ErrorKind::ConnectionRefused
+                        && transient_room(ctx.outer_clock).is_none()
+                    {
+                        mark_pack_refused_for(addr);
+                    } else if io_is_quiet(&io)
+                        && (clock_is_spent() || transient_room(ctx.outer_clock).is_none())
+                    {
+                        mark_pack_quiet_for(addr);
+                    }
+                    return Err(wrap_io(io, bytes_sent));
+                }
+                Err(AttemptErr { err, .. }) => return Err(err),
+            }
+        }
+    }
+
     /// Ask `call` again while the writer reports busy. The pause grows, and
     /// a `Retry-After` or a JSON `retry_ms` is used when it is longer. It
     /// stops at [`busy_room`]. A later answer that is not busy, including a
@@ -1645,9 +1951,10 @@ impl PacksetClient {
         call: &Wire<'_>,
         allow: bool,
         timeout: Duration,
+        outer_clock: Option<Instant>,
         mut latest: Answer,
     ) -> Result<Answer, Error> {
-        let mut wait = SEARCH_BUSY_FIRST;
+        let mut wait = RETRY_FIRST;
         loop {
             let pause = match retry_hint(&latest) {
                 Some(hint) if hint > wait => hint,
@@ -1661,7 +1968,8 @@ impl PacksetClient {
             if deadline_passed() {
                 return Err(crate::reported_busy_error());
             }
-            let next = self.exchange(addr, call, allow, timeout)?;
+            let next =
+                self.exchange_resilient(addr, call, allow, timeout, RetryCtx { outer_clock })?;
             if crate::response_is_starting(Some(next.status), &next.body) {
                 return Err(crate::starting_transport_error());
             }
@@ -1670,7 +1978,7 @@ impl PacksetClient {
                 return Ok(next);
             }
             latest = next;
-            wait = wait.saturating_mul(3).min(SEARCH_BUSY_CAP);
+            wait = wait.saturating_mul(3).min(RETRY_CAP);
         }
     }
 
@@ -1680,7 +1988,7 @@ impl PacksetClient {
         call: &Wire<'_>,
         allow: bool,
         timeout: Duration,
-    ) -> Result<Answer, Error> {
+    ) -> Result<Answer, AttemptErr> {
         // The proof and the call share this budget. A nested guard keeps
         // the command's earlier deadline, so a hook stays under 2s and an
         // interactive command under 5s across every socket of the call.
@@ -1700,7 +2008,12 @@ impl PacksetClient {
                 live.token_tag = tag;
             }
             let carried = if allow {
-                match self.gate(&mut live, addr, timeout)? {
+                match self
+                    .gate(&mut live, addr, timeout)
+                    .map_err(|err| AttemptErr {
+                        err,
+                        bytes_sent: false,
+                    })? {
                     Gate::Bare => None,
                     Gate::Send => call.token,
                     Gate::Busy(raw) => {
@@ -1719,11 +2032,16 @@ impl PacksetClient {
             };
             if live.stream.is_none() {
                 match connect(addr, timeout) {
-                    Ok(stream) => live.stream = Some(stream),
+                    Ok(stream) => {
+                        live.stream = Some(stream);
+                    }
                     Err(err) => {
                         live.proven = false;
                         live.carried = false;
-                        return Err(Error::Io(err));
+                        return Err(AttemptErr {
+                            err: Error::Io(err),
+                            bytes_sent: false,
+                        });
                     }
                 }
                 // The probes ran on sockets the writer closed. This socket is
@@ -1734,6 +2052,7 @@ impl PacksetClient {
             let had = live.stream.is_some();
             let raw = match send(
                 &mut live,
+                addr,
                 &self.origin,
                 &Wire {
                     token: carried,
@@ -1743,7 +2062,11 @@ impl PacksetClient {
             ) {
                 Ok(raw) => raw,
                 Err(err) => {
-                    let stale = had && !revived && !io_is_quiet(&err);
+                    let bytes_sent = !err.unsent;
+                    let stale = had
+                        && !revived
+                        && !io_is_quiet(&err.io)
+                        && retry_permitted(call.method, bytes_sent);
                     live.stream = None;
                     live.proven = false;
                     live.carried = false;
@@ -1751,7 +2074,10 @@ impl PacksetClient {
                         revived = true;
                         continue;
                     }
-                    return Err(Error::Io(err));
+                    return Err(AttemptErr {
+                        err: Error::Io(err.io),
+                        bytes_sent,
+                    });
                 }
             };
             let trusted = carried.is_some();
@@ -1799,6 +2125,7 @@ impl PacksetClient {
             };
             let raw = match send(
                 live,
+                addr,
                 &self.origin,
                 &Wire {
                     method: "GET",
@@ -1817,13 +2144,13 @@ impl PacksetClient {
                     // wait the budget out again, and three of those is a
                     // minute and a half. A closed socket may be tried
                     // again, inside the same deadline.
-                    if io_is_quiet(&err) {
-                        return Err(Error::Io(err));
+                    if io_is_quiet(&err.io) {
+                        return Err(Error::Io(err.io));
                     }
                     restarts += 1;
                     let spent = clock_deadline().is_some_and(|deadline| Instant::now() >= deadline);
                     if spent || restarts > 2 {
-                        return Err(Error::Io(err));
+                        return Err(Error::Io(err.io));
                     }
                     stage = 0;
                     continue;
@@ -1938,6 +2265,7 @@ impl PacksetClient {
             allow,
             timeout,
         )
+        .map_err(|e| e.err)
     }
 
     pub fn health(&self) -> Result<String, Error> {
@@ -2219,13 +2547,25 @@ fn refused(url: &str, code: u16, body: &str) -> Error {
     }
 }
 
-fn send(live: &mut Slot, origin: &Url, call: &Wire<'_>, timeout: Duration) -> std::io::Result<Raw> {
+fn send(
+    live: &mut Slot,
+    addr: SocketAddr,
+    origin: &Url,
+    call: &Wire<'_>,
+    timeout: Duration,
+) -> Result<Raw, SendErr> {
     crate::admit::note_list_pack_call();
-    if pack_quiet() {
-        return Err(quiet_io());
+    if pack_quiet_for(addr) {
+        return Err(SendErr {
+            io: quiet_io_for(addr),
+            unsent: true,
+        });
     }
     if side_budget_spent() {
-        return Err(budget_spent());
+        return Err(SendErr {
+            io: budget_spent(),
+            unsent: true,
+        });
     }
     let started = Instant::now();
     let result = send_once(live, origin, call, timeout);
@@ -2234,8 +2574,8 @@ fn send(live: &mut Slot, origin: &Url, call: &Wire<'_>, timeout: Duration) -> st
     // and search. The first silent read spends its request timeout, and
     // the later ones return at once instead of waiting that timeout again.
     if let Err(err) = &result {
-        if io_is_quiet(err) {
-            mark_pack_quiet();
+        if io_is_quiet(&err.io) && !in_transient_retry() {
+            mark_pack_quiet_for(addr);
         }
         super::charge_side_wait(started.elapsed());
     }
@@ -2247,15 +2587,17 @@ fn send_once(
     origin: &Url,
     call: &Wire<'_>,
     timeout: Duration,
-) -> std::io::Result<Raw> {
+) -> Result<Raw, SendErr> {
+    let unsent = |io| SendErr { io, unsent: true };
     let stream = live
         .stream
         .as_mut()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotConnected, "no pack socket"))?;
-    let wait = bounded_wait(timeout, false)?;
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotConnected, "no pack socket"))
+        .map_err(unsent)?;
+    let wait = bounded_wait(timeout, false).map_err(unsent)?;
     let deadline = Instant::now() + wait;
-    stream.set_read_timeout(Some(wait))?;
-    stream.set_write_timeout(Some(wait))?;
+    stream.set_read_timeout(Some(wait)).map_err(unsent)?;
+    stream.set_write_timeout(Some(wait)).map_err(unsent)?;
     let bytes = render(
         call.method,
         &host_header(origin),
@@ -2263,7 +2605,7 @@ fn send_once(
         call.token,
         call.body,
     );
-    if let Err(err) = write_all(stream, &bytes) {
+    if let Err(err) = write_all_tracked(stream, &bytes) {
         live.stream = None;
         live.proven = false;
         return Err(err);
@@ -2281,7 +2623,10 @@ fn send_once(
         Err(err) => {
             live.stream = None;
             live.proven = false;
-            Err(err)
+            Err(SendErr {
+                io: err,
+                unsent: false,
+            })
         }
     }
 }
@@ -2294,23 +2639,25 @@ mod tests {
         TABLE_READS.with(std::cell::Cell::get)
     }
 
-    /// One thread's silent pack is not the next thread's. The lib tests
-    /// share a process, and a finish on the second thread was queueing its
-    /// lesson because the first had marked the pack quiet.
+    /// One thread's silent pack is not the next thread's, and one silent
+    /// address on the same thread is not another port's address.
     #[test]
     fn a_quiet_pack_on_one_thread_does_not_silence_another() {
+        let addr_a: std::net::SocketAddr = "127.0.0.1:18761".parse().unwrap();
+        let addr_b: std::net::SocketAddr = "127.0.0.1:18762".parse().unwrap();
         let gate = super::QuietPack::enter();
-        super::mark_pack_quiet();
-        assert!(super::pack_quiet());
-        let other = std::thread::spawn(|| {
+        super::mark_pack_quiet_for(addr_a);
+        assert!(super::pack_quiet_for(addr_a));
+        assert!(!super::pack_quiet_for(addr_b));
+        let other = std::thread::spawn(move || {
             let _gate = super::QuietPack::enter();
-            super::pack_quiet()
+            super::pack_quiet_for(addr_a)
         })
         .join()
         .expect("quiet thread");
         assert!(!other, "another thread's pack was treated as already quiet");
         drop(gate);
-        assert!(!super::pack_quiet());
+        assert!(!super::pack_quiet_for(addr_a));
     }
 
     #[test]
@@ -3231,5 +3578,968 @@ mod tests {
             1,
             "stats does not wait out Retry-After"
         );
+    }
+
+    struct TimeoutGuard(Option<std::ffi::OsString>);
+    impl Drop for TimeoutGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.0 {
+                    Some(value) => std::env::set_var("PACKSET_TIMEOUT_MS", value),
+                    None => std::env::remove_var("PACKSET_TIMEOUT_MS"),
+                }
+            }
+        }
+    }
+
+    struct FixedJitter(Option<std::time::Duration>);
+    impl FixedJitter {
+        fn set(jitter: std::time::Duration) -> Self {
+            Self(super::RETRY_JITTER.with(|cell| cell.replace(Some(jitter))))
+        }
+    }
+    impl Drop for FixedJitter {
+        fn drop(&mut self) {
+            super::RETRY_JITTER.with(|cell| cell.set(self.0));
+        }
+    }
+
+    fn set_pack_timeout_ms(ms: &str) -> TimeoutGuard {
+        let prev = std::env::var_os("PACKSET_TIMEOUT_MS");
+        unsafe { std::env::set_var("PACKSET_TIMEOUT_MS", ms) };
+        TimeoutGuard(prev)
+    }
+
+    #[test]
+    fn eagain_get_retries_within_call_budget_and_recovers() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let _restore = set_pack_timeout_ms("120");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&attempts);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { break };
+                let n = count.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(220));
+                    continue;
+                }
+                let body = r#"{"atoms":[{"id":"a1"}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            }
+        });
+        let client = super::PacksetClient::new(format!("http://{addr}"));
+        let atoms = client.atoms_of_kind("seat", "lesson").unwrap();
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    /// A transient retry resends the deadline the call started with; it
+    /// does not stamp a later one.
+    #[test]
+    fn a_transient_retry_keeps_the_first_deadline() {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let _restore = set_pack_timeout_ms("120");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_bg = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { break };
+                let seen_bg = Arc::clone(&seen_bg);
+                std::thread::spawn(move || {
+                    let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    let mut buf = [0u8; 4096];
+                    let Ok(n) = sock.read(&mut buf) else { return };
+                    let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    let first = {
+                        let mut seen = seen_bg.lock().unwrap();
+                        seen.push(req);
+                        seen.len() == 1
+                    };
+                    if first {
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                        return;
+                    }
+                    let body = r#"{"atoms":[{"id":"a1"}]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes());
+                });
+            }
+        });
+        let client = super::PacksetClient::new(format!("http://{addr}"));
+        let atoms = client.atoms_of_kind("seat", "lesson").unwrap();
+        assert_eq!(atoms.len(), 1);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        let first = deadline_of(&seen[0]);
+        assert!(first > 0, "{}", seen[0]);
+        assert_eq!(
+            deadline_of(&seen[1]),
+            first,
+            "the retry moved X-Packset-Deadline"
+        );
+    }
+
+    #[test]
+    fn a_later_top_level_call_gets_its_own_transient_budget() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let _restore = set_pack_timeout_ms("100");
+
+        // Exhaust one top-level call's 2s transient budget, then verify a
+        // second sequential call AND two concurrent calls each still get
+        // their own fresh transient budget and recover from EAGAIN.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stage = Arc::new(AtomicUsize::new(0));
+        let stage_bg = Arc::clone(&stage);
+        let recovered_calls = Arc::new(AtomicUsize::new(0));
+        let recovered_bg = Arc::clone(&recovered_calls);
+        std::thread::spawn(move || {
+            let mut stall_for_second = true;
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { break };
+                let mode = stage_bg.load(Ordering::SeqCst);
+                let recovered_bg = Arc::clone(&recovered_bg);
+                let stall_second = if mode == 1 && stall_for_second {
+                    stall_for_second = false;
+                    true
+                } else {
+                    false
+                };
+                std::thread::spawn(move || {
+                    if mode == 0 || stall_second {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        return;
+                    }
+                    if mode == 2 {
+                        let prev = recovered_bg.fetch_add(1, Ordering::SeqCst);
+                        if prev % 2 == 0 {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                            return;
+                        }
+                    }
+                    let body = r#"{"atoms":[{"id":"ok"}]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes());
+                });
+            }
+        });
+
+        let client = super::PacksetClient::new(format!("http://{addr}"));
+        assert!(
+            client.atoms_of_kind("seat", "lesson").is_err(),
+            "first call should exhaust its own transient budget"
+        );
+
+        stage.store(1, Ordering::SeqCst);
+        let atoms = client
+            .atoms_of_kind("seat", "lesson")
+            .expect("second sequential call must get its own transient budget");
+        assert_eq!(atoms.len(), 1);
+
+        let listener2 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut first = true;
+            for stream in listener2.incoming() {
+                let Ok(mut sock) = stream else { break };
+                let stall = if first {
+                    first = false;
+                    true
+                } else {
+                    false
+                };
+                std::thread::spawn(move || {
+                    if stall {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        return;
+                    }
+                    let body = r#"{"atoms":[{"id":"ok"}]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes());
+                });
+            }
+        });
+
+        stage.store(2, Ordering::SeqCst);
+        let c1 = super::PacksetClient::new(format!("http://{addr}"));
+        let c2 = super::PacksetClient::new(format!("http://{addr2}"));
+        let t1 = std::thread::spawn(move || c1.atoms_of_kind("seat", "lesson"));
+        let t2 = std::thread::spawn(move || c2.atoms_of_kind("seat", "lesson"));
+        assert_eq!(t1.join().unwrap().unwrap().len(), 1);
+        assert_eq!(t2.join().unwrap().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn retry_rule_table_over_method_and_response() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        // Each stall is twice the call budget, and the budget leaves room for
+        // the 50 ms busy pause on a slow runner.
+        let _restore = set_pack_timeout_ms("300");
+        let _jitter = FixedJitter::set(std::time::Duration::ZERO);
+        unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
+
+        #[derive(Clone, Copy, Debug)]
+        enum CaseResponse {
+            PreWireGateEagain,
+            PostWireEagain,
+            RetryAfter503,
+            Busy503,
+        }
+
+        struct Case {
+            method: &'static str,
+            path: &'static str,
+            response: CaseResponse,
+            expect_ok: bool,
+            expected_method_sends: usize,
+        }
+
+        let cases = [
+            Case {
+                method: "GET",
+                path: "/v1/atoms",
+                response: CaseResponse::PreWireGateEagain,
+                expect_ok: true,
+                expected_method_sends: 1,
+            },
+            Case {
+                method: "POST",
+                path: "/v1/atoms",
+                response: CaseResponse::PreWireGateEagain,
+                expect_ok: true,
+                expected_method_sends: 1,
+            },
+            Case {
+                method: "PUT",
+                path: "/v1/atoms/1",
+                response: CaseResponse::PreWireGateEagain,
+                expect_ok: true,
+                expected_method_sends: 1,
+            },
+            Case {
+                method: "DELETE",
+                path: "/v1/atoms/1",
+                response: CaseResponse::PreWireGateEagain,
+                expect_ok: true,
+                expected_method_sends: 1,
+            },
+            Case {
+                method: "PATCH",
+                path: "/v1/atoms/1",
+                response: CaseResponse::PreWireGateEagain,
+                expect_ok: true,
+                expected_method_sends: 1,
+            },
+            Case {
+                method: "GET",
+                path: "/v1/atoms",
+                response: CaseResponse::PostWireEagain,
+                expect_ok: true,
+                expected_method_sends: 2,
+            },
+            Case {
+                method: "POST",
+                path: "/v1/atoms",
+                response: CaseResponse::PostWireEagain,
+                expect_ok: false,
+                expected_method_sends: 1,
+            },
+            Case {
+                method: "PUT",
+                path: "/v1/atoms/1",
+                response: CaseResponse::PostWireEagain,
+                expect_ok: false,
+                expected_method_sends: 1,
+            },
+            Case {
+                method: "DELETE",
+                path: "/v1/atoms/1",
+                response: CaseResponse::PostWireEagain,
+                expect_ok: false,
+                expected_method_sends: 1,
+            },
+            Case {
+                method: "PATCH",
+                path: "/v1/atoms/1",
+                response: CaseResponse::PostWireEagain,
+                expect_ok: false,
+                expected_method_sends: 1,
+            },
+            Case {
+                method: "GET",
+                path: "/v1/atoms",
+                response: CaseResponse::RetryAfter503,
+                expect_ok: true,
+                expected_method_sends: 2,
+            },
+            Case {
+                method: "POST",
+                path: "/v1/atoms",
+                response: CaseResponse::RetryAfter503,
+                expect_ok: true,
+                expected_method_sends: 2,
+            },
+            Case {
+                method: "PUT",
+                path: "/v1/atoms/1",
+                response: CaseResponse::RetryAfter503,
+                expect_ok: true,
+                expected_method_sends: 2,
+            },
+            Case {
+                method: "DELETE",
+                path: "/v1/atoms/1",
+                response: CaseResponse::RetryAfter503,
+                expect_ok: true,
+                expected_method_sends: 2,
+            },
+            Case {
+                method: "PATCH",
+                path: "/v1/atoms/1",
+                response: CaseResponse::RetryAfter503,
+                expect_ok: true,
+                expected_method_sends: 2,
+            },
+            Case {
+                method: "GET",
+                path: "/v1/search",
+                response: CaseResponse::Busy503,
+                expect_ok: true,
+                expected_method_sends: 2,
+            },
+            Case {
+                method: "POST",
+                path: "/v1/atoms",
+                response: CaseResponse::Busy503,
+                expect_ok: true,
+                expected_method_sends: 2,
+            },
+        ];
+
+        for case in &cases {
+            let method_sends = Arc::new(AtomicUsize::new(0));
+            let gate_stalled = Arc::new(AtomicBool::new(false));
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let sends_bg = Arc::clone(&method_sends);
+            let gate_bg = Arc::clone(&gate_stalled);
+            let target_method = case.method;
+            let kind = case.response;
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut sock) = stream else { break };
+                    let sends_bg = Arc::clone(&sends_bg);
+                    let gate_bg = Arc::clone(&gate_bg);
+                    // A stalled socket must not hold up the next accept.
+                    std::thread::spawn(move || loop {
+                        let _ = sock.set_read_timeout(Some(std::time::Duration::from_millis(1000)));
+                        let mut buf = [0u8; 4096];
+                        let Ok(n) = sock.read(&mut buf) else { break };
+                        if n == 0 {
+                            break;
+                        }
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let first_line = req.lines().next().unwrap_or("");
+                        if first_line.starts_with("GET /v1/atoms/") {
+                            if matches!(kind, CaseResponse::PreWireGateEagain)
+                                && !gate_bg.swap(true, Ordering::SeqCst)
+                            {
+                                std::thread::sleep(std::time::Duration::from_millis(600));
+                                break;
+                            }
+                            let _ = sock.write_all(
+                                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n",
+                            );
+                            continue;
+                        }
+                        if first_line.starts_with(target_method) {
+                            let idx = sends_bg.fetch_add(1, Ordering::SeqCst);
+                            match kind {
+                                CaseResponse::PreWireGateEagain => {
+                                    let _ = sock.write_all(
+                                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                                    );
+                                }
+                                CaseResponse::PostWireEagain => {
+                                    if idx == 0 {
+                                        std::thread::sleep(std::time::Duration::from_millis(600));
+                                        break;
+                                    }
+                                    let _ = sock.write_all(
+                                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                                    );
+                                }
+                                CaseResponse::RetryAfter503 => {
+                                    if idx == 0 {
+                                        let body = r#"{"error":"busy"}"#;
+                                        let resp = format!(
+                                            "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                            body.len()
+                                        );
+                                        let _ = sock.write_all(resp.as_bytes());
+                                    } else {
+                                        let _ = sock.write_all(
+                                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                                        );
+                                    }
+                                }
+                                CaseResponse::Busy503 => {
+                                    if idx == 0 {
+                                        let body = r#"{"code":"busy","retry_ms":20,"error":"packsetd is busy"}"#;
+                                        let resp = format!(
+                                            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                            body.len()
+                                        );
+                                        let _ = sock.write_all(resp.as_bytes());
+                                    } else {
+                                        let _ = sock.write_all(
+                                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                                        );
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        break;
+                    });
+                }
+            });
+
+            let bearer = matches!(case.response, CaseResponse::PreWireGateEagain);
+            if bearer {
+                unsafe { std::env::set_var("PACKSET_TOKEN", "test-tok") };
+            } else {
+                unsafe { std::env::remove_var("PACKSET_TOKEN") };
+            }
+            // Only the busy cases hold the memory retry guards. With them
+            // held, a 503 on GET or POST /v1/atoms is asked again by
+            // ask_until_free and never reaches the Retry-After branch.
+            let busy = matches!(case.response, CaseResponse::Busy503);
+            let _busy = busy.then(super::BusyRetry::enter);
+            let _remember = busy.then(super::RememberRetry::enter);
+            let waits_before = super::RETRY_AFTER_WAITS.with(std::cell::Cell::get);
+            let client = super::PacksetClient::new(format!("http://{addr}"));
+            let body = if case.method == "GET" || case.method == "DELETE" {
+                None
+            } else {
+                Some(b"{}".as_slice())
+            };
+            let res = client.roundtrip(
+                case.method,
+                case.path,
+                &[],
+                body,
+                bearer,
+                std::time::Duration::from_millis(400),
+            );
+            assert_eq!(
+                res.is_ok(),
+                case.expect_ok,
+                "case ({}, {:?}) ok mismatch: {:?}",
+                case.method,
+                case.response,
+                res.err()
+            );
+            assert_eq!(
+                method_sends.load(Ordering::SeqCst),
+                case.expected_method_sends,
+                "case ({}, {:?}) send count mismatch",
+                case.method,
+                case.response
+            );
+            let waits = super::RETRY_AFTER_WAITS.with(std::cell::Cell::get) - waits_before;
+            let want = usize::from(matches!(case.response, CaseResponse::RetryAfter503));
+            assert_eq!(
+                waits, want,
+                "case ({}, {:?}) Retry-After branch ran {waits} time(s)",
+                case.method, case.response
+            );
+        }
+    }
+
+    #[test]
+    fn transient_window_enforces_both_sides_of_two_second_bound() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let _timeout = set_pack_timeout_ms("220");
+
+        // Lower bound (> 1s): 4 EAGAIN stalls (~1.05s..1.4s total) still recover.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_bg = Arc::clone(&attempts);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { break };
+                let n = attempts_bg.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    if n < 4 {
+                        std::thread::sleep(std::time::Duration::from_millis(320));
+                        return;
+                    }
+                    let _ = sock.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    );
+                });
+            }
+        });
+        let client = super::PacksetClient::new(format!("http://{addr}"));
+        let res = client.roundtrip(
+            "GET",
+            "/v1/atoms",
+            &[],
+            None,
+            false,
+            std::time::Duration::from_secs(10),
+        );
+        assert!(res.is_ok(), "must recover past 1s inside 2s bound: {res:?}");
+        assert_eq!(attempts.load(Ordering::SeqCst), 5);
+
+        // Upper bound (< 2.7s): persistent EAGAIN with 10s request timeout stops at ~2s.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stalled = Arc::new(AtomicUsize::new(0));
+        let stalled_bg = Arc::clone(&stalled);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(_sock) = stream else { break };
+                stalled_bg.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let _keep = _sock;
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                });
+            }
+        });
+        let client = super::PacksetClient::new(format!("http://{addr}"));
+        let started = std::time::Instant::now();
+        let err = client
+            .roundtrip(
+                "GET",
+                "/v1/atoms",
+                &[],
+                None,
+                false,
+                std::time::Duration::from_secs(10),
+            )
+            .unwrap_err();
+        let took = started.elapsed();
+        assert!(
+            matches!(err, super::Error::Io(_)),
+            "expected IO error after 2s bound: {err:?}"
+        );
+        assert!(
+            took >= std::time::Duration::from_millis(1600)
+                && took < std::time::Duration::from_millis(2700),
+            "persistent EAGAIN must stop around 2s, took {took:?} (attempts={})",
+            stalled.load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn ljos_in_hook_disables_eagain_retry() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        struct HookEnv(Option<std::ffi::OsString>);
+        impl Drop for HookEnv {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(v) => std::env::set_var("LJOS_IN_HOOK", v),
+                        None => std::env::remove_var("LJOS_IN_HOOK"),
+                    }
+                }
+            }
+        }
+        let _hook = HookEnv(std::env::var_os("LJOS_IN_HOOK"));
+        unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_bg = Arc::clone(&calls);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { break };
+                let n = calls_bg.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    if n == 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        return;
+                    }
+                    let _ = sock.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    );
+                });
+            }
+        });
+        let client = super::PacksetClient::new(format!("http://{addr}"));
+        let err = client
+            .roundtrip(
+                "GET",
+                "/v1/atoms",
+                &[],
+                None,
+                false,
+                std::time::Duration::from_millis(100),
+            )
+            .unwrap_err();
+        assert!(matches!(err, super::Error::Io(_)));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "LJOS_IN_HOOK must never retry transient EAGAIN"
+        );
+    }
+
+    #[test]
+    fn write_all_tracked_and_partial_post_never_resends() {
+        use std::io::Read;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        struct PartialFailWriter {
+            allow: usize,
+            written: usize,
+        }
+        impl std::io::Write for PartialFailWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.written < self.allow {
+                    let take = (self.allow - self.written).min(buf.len());
+                    self.written += take;
+                    return Ok(take);
+                }
+                Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut zero_sent = PartialFailWriter {
+            allow: 0,
+            written: 0,
+        };
+        let err = super::write_all_tracked(&mut zero_sent, b"hello").unwrap_err();
+        assert!(err.unsent, "0 bytes written must report unsent=true");
+
+        let mut partial_sent = PartialFailWriter {
+            allow: 2,
+            written: 0,
+        };
+        let err = super::write_all_tracked(&mut partial_sent, b"hello").unwrap_err();
+        assert!(!err.unsent, "partial write must report unsent=false");
+
+        // End-to-end socket check: peer reads a small prefix of a large POST
+        // and stalls so the client fails partway through writing the body;
+        // the POST must never be resent even on loopback WouldBlock/Reset.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sends = Arc::new(AtomicUsize::new(0));
+        let sends_bg = Arc::clone(&sends);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { break };
+                sends_bg.fetch_add(1, Ordering::SeqCst);
+                let mut prefix = [0u8; 32];
+                let _ = sock.read(&mut prefix);
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        });
+
+        let payload = vec![b'x'; 2 * 1024 * 1024];
+        let client = super::PacksetClient::new(format!("http://{addr}"));
+        let err = client
+            .roundtrip(
+                "POST",
+                "/v1/atoms",
+                &[],
+                Some(&payload),
+                false,
+                std::time::Duration::from_millis(120),
+            )
+            .unwrap_err();
+        assert!(matches!(err, super::Error::Io(_)));
+        assert_eq!(
+            sends.load(Ordering::SeqCst),
+            1,
+            "partial POST write must never resend"
+        );
+    }
+
+    #[test]
+    fn loopback_connection_refused_retries_inside_two_second_bound() {
+        use std::io::{Read, Write};
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let _timeout = set_pack_timeout_ms("150");
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+
+        let bg = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(180));
+            let listener = std::net::TcpListener::bind(addr).unwrap();
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 256];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                );
+            }
+        });
+
+        let client = super::PacksetClient::new(format!("http://{addr}"));
+        let answer = client
+            .roundtrip(
+                "POST",
+                "/v1/atoms",
+                &[],
+                Some(b"{}"),
+                false,
+                std::time::Duration::from_millis(250),
+            )
+            .expect("loopback ConnectionRefused before any byte is sent must retry");
+        assert_eq!(answer.status, 200);
+        let _ = bg.join();
+    }
+
+    #[test]
+    fn shared_call_retry_budget_caps_multi_roundtrip_calls_to_one_two_second_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let _timeout = set_pack_timeout_ms("200");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let accepts_bg = Arc::clone(&accepts);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(_sock) = stream else { break };
+                accepts_bg.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let _keep = _sock;
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                });
+            }
+        });
+
+        let client = super::PacksetClient::new(format!("http://{addr}"));
+        let _budget = super::CallRetryBudget::enter();
+        let _quiet = super::QuietPack::enter();
+        let started = std::time::Instant::now();
+        assert!(client.atoms_of_kind("seat", "lesson").is_err());
+        let after_first = accepts.load(Ordering::SeqCst);
+        assert!(client.atoms_of_kind("seat", "lesson").is_err());
+        assert!(client.atoms_of_kind("seat", "lesson").is_err());
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_millis(2700),
+            "shared CallRetryBudget must not stack 2s per roundtrip: {took:?}"
+        );
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            after_first,
+            "subsequent roundtrips after quiet EAGAIN exhaustion must open no new sockets"
+        );
+    }
+
+    #[test]
+    fn long_read_after_an_earlier_retry_keeps_its_budget() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let _timeout = set_pack_timeout_ms("10000");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let first_bg = Arc::clone(&first_calls);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { break };
+                let first_bg = Arc::clone(&first_bg);
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf);
+                    let req = String::from_utf8_lossy(&buf);
+                    if req.contains("/v1/first") {
+                        let n = first_bg.fetch_add(1, Ordering::SeqCst);
+                        if n == 0 {
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                            return;
+                        }
+                        let _ = sock.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                        );
+                    } else if req.contains("/v1/long") {
+                        std::thread::sleep(std::time::Duration::from_millis(2500));
+                        let _ = sock.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nlong",
+                        );
+                    }
+                });
+            }
+        });
+
+        let client = super::PacksetClient::new(format!("http://{addr}"));
+        let _budget = super::CallRetryBudget::enter();
+        let _quiet = super::QuietPack::enter();
+        let first = client
+            .roundtrip(
+                "GET",
+                "/v1/first",
+                &[],
+                None,
+                false,
+                std::time::Duration::from_millis(120),
+            )
+            .expect("first transient stall must retry and succeed");
+        assert_eq!(first.status, 200);
+        assert!(first_calls.load(Ordering::SeqCst) >= 2);
+        let long = client
+            .roundtrip(
+                "GET",
+                "/v1/long",
+                &[],
+                None,
+                false,
+                std::time::Duration::from_secs(5),
+            )
+            .expect("attempt 0 of a later unrelated 5s read must keep its full budget");
+        assert_eq!(long.status, 200);
+        assert_eq!(long.body, "long");
+    }
+
+    #[test]
+    fn write_bytes_sent_marks_post_wire_io_only() {
+        use std::io::Read;
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let _timeout = set_pack_timeout_ms("150");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { break };
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf);
+                    std::thread::sleep(std::time::Duration::from_millis(350));
+                });
+            }
+        });
+
+        let client = super::PacksetClient::new(format!("http://{addr}"));
+        let post_err = client
+            .roundtrip(
+                "POST",
+                "/v1/atoms",
+                &[],
+                Some(b"{}"),
+                false,
+                std::time::Duration::from_millis(150),
+            )
+            .expect_err("withheld POST reply must error");
+        let post_anyhow = anyhow::Error::from(post_err);
+        assert!(
+            super::write_bytes_sent(&post_anyhow),
+            "post-wire POST IO failure must be flagged: {post_anyhow:#}"
+        );
+
+        let get_err = client
+            .roundtrip(
+                "GET",
+                "/v1/atoms",
+                &[],
+                None,
+                false,
+                std::time::Duration::from_millis(150),
+            )
+            .expect_err("withheld GET reply must error");
+        assert!(
+            !super::write_bytes_sent(&anyhow::Error::from(get_err)),
+            "GET timeout must not be marked as write_bytes_sent"
+        );
+
+        let refused_port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let refused_client = super::PacksetClient::new(format!("http://{refused_port}"));
+        let refused_err = {
+            let _no_retry = super::NoTransientRetry::enter();
+            refused_client
+                .roundtrip(
+                    "POST",
+                    "/v1/atoms",
+                    &[],
+                    Some(b"{}"),
+                    false,
+                    std::time::Duration::from_millis(150),
+                )
+                .expect_err("refused connect must error")
+        };
+        assert!(
+            !super::write_bytes_sent(&anyhow::Error::from(refused_err)),
+            "pre-wire refused POST must not be marked as write_bytes_sent"
+        );
+    }
+
+    #[test]
+    fn post_wire_io_does_not_repeat_inner_source_in_chain() {
+        let raw = std::io::Error::from_raw_os_error(104);
+        let wrapped = super::post_wire_io(raw);
+        let msg = wrapped.to_string();
+        let err = super::Error::Io(wrapped);
+        let chain = anyhow::Error::from(err);
+        assert!(super::write_bytes_sent(&chain));
+        // Error::Io + PostWireIo wrapper = 2 causes max (no 3rd copy from PostWireIo::source).
+        assert_eq!(chain.chain().count(), 2, "{chain:#}");
+        assert!(format!("{chain:#}").contains(&msg), "{chain:#}");
     }
 }

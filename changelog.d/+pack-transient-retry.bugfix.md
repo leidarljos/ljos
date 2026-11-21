@@ -1,0 +1,1 @@
+Retry loopback `EAGAIN`/`EWOULDBLOCK` and `ConnectionRefused` within one shared two-second per-call budget, never resend a write after an IO failure once bytes leave for the wire while preserving `503` busy retries, and report real pack-down causes instead of blaming `packset` on `PATH`.

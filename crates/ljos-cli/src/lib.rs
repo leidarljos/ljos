@@ -15795,6 +15795,7 @@ fn error_token_is_starting(text: Option<&str>) -> bool {
 /// `Some(true)` when `/health` says the pack has not opened.
 /// `Some(false)` when it has. `None` when the writer is not there.
 fn health_still_starting() -> Option<bool> {
+    let _no_retry = pack_link::NoTransientRetry::enter();
     let client = pack().ok()?;
     match client.health() {
         Ok(body) => Some(response_is_starting(None, &body)),
@@ -15894,6 +15895,8 @@ fn answer_after_start<T>(mut op: impl FnMut() -> Result<T>) -> Result<T> {
 /// The pack refused the connection, or the search failed for a reason
 /// that is not a busy writer or a deadline.
 pub fn search_hits(query: &str, limit: u32) -> Result<(Vec<Hit>, Ranking)> {
+    let _call_budget = pack_link::CallRetryBudget::enter();
+    let _quiet = pack_link::QuietPack::enter();
     let _busy = pack_link::BusyRetry::enter();
     wait_until_health_open()?;
     answer_after_start(|| search_hits_settled(query, limit))
@@ -16112,21 +16115,22 @@ fn search_after_bounded_wait(
     }
 }
 
+fn is_inflight_busy(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("another memory call is in flight")
+    })
+}
+
 fn search_direct_retry(query: &str, limit: u32) -> Result<Vec<Hit>> {
-    let wait_budget = search_busy_wait();
-    let started = std::time::Instant::now();
     let mut pause = std::time::Duration::from_millis(80);
     loop {
         match search_direct(query, limit) {
             Ok(hits) => return Ok(hits),
-            Err(err)
-                if is_pack_busy(&err)
-                    || is_deadline_miss(&err)
-                    || is_reported_busy(&err)
-                    || is_read_shed(&err) =>
-            {
-                let left = wait_budget.saturating_sub(started.elapsed());
-                if left < std::time::Duration::from_millis(1) {
+            Err(err) if is_inflight_busy(&err) || is_read_shed(&err) => {
+                let left = pack_link::busy_room();
+                if pack_link::is_quiet() || left < std::time::Duration::from_millis(20) {
                     return Err(err);
                 }
                 let sleep = pause.min(left);
@@ -16455,6 +16459,7 @@ fn forget_encoder_restart(status: &Value) {
 }
 
 fn read_encoder_status() -> Option<Value> {
+    let _no_retry = pack_link::NoTransientRetry::enter();
     let status = pack().ok().and_then(|client| client.status(None).ok())?;
     forget_encoder_restart(&status);
     Some(status)
@@ -17223,6 +17228,7 @@ fn other_home_writer_line(base: &str) -> Option<String> {
             asked: host.to_string(),
             asked_port: Some(port),
             packset: true,
+            packsetd: true,
             writers,
             our_home,
             our_pack,
@@ -19179,15 +19185,6 @@ fn pack_step(dry: bool) -> Step {
             ok: true,
         };
     }
-    if !on_path("packset") {
-        return Step {
-            what,
-            detail: "no writer answers and packset is not on PATH, so run `cargo install --locked packset`.".into(),
-            ok: false,
-        };
-    }
-    // A named address is not the default port. `packset ensure` would
-    // start a writer on 8761 and leave the one this seat named alone.
     if std::env::var("PACKSET_URL")
         .ok()
         .is_some_and(|url| !url.trim().is_empty())
@@ -19195,11 +19192,34 @@ fn pack_step(dry: bool) -> Step {
         let where_ = pack()
             .map(|client| client.base().to_string())
             .unwrap_or_else(|_| "the named address".to_string());
+        if !url_is_loopback(&where_) {
+            return Step {
+                what,
+                detail: format!("the pack writer at {where_} is not answering."),
+                ok: false,
+            };
+        }
+        if on_path("packset") {
+            return Step {
+                what,
+                detail: format!(
+                    "the pack writer at {where_} is not answering, so run `packset ensure`."
+                ),
+                ok: false,
+            };
+        }
+    }
+    if !on_path("packset") {
+        if on_path("packsetd") {
+            return Step {
+                what,
+                detail: "no writer answers on the pack port, so start `packsetd`.".into(),
+                ok: false,
+            };
+        }
         return Step {
             what,
-            detail: format!(
-                "the pack writer at {where_} is not answering, so run `packset ensure`."
-            ),
+            detail: "no writer answers and packset is not on PATH, so run `cargo install --locked packset`.".into(),
             ok: false,
         };
     }
@@ -20249,7 +20269,9 @@ fn wake_writer() {
         Err(err) if writer_slow(&err) => {}
         Err(err) if writer_port_down(&err) => {
             clear_health_fails();
-            let _ = ensure_writer();
+            if ensure_writer().is_ok() {
+                pack_link::clear_pack_quiet();
+            }
         }
         Err(_) => {
             if note_health_fail() >= PACK_HEALTH_FAILS_BEFORE_RESTART {
@@ -20746,6 +20768,7 @@ struct DownFacts {
     asked: String,
     asked_port: Option<u16>,
     packset: bool,
+    packsetd: bool,
     our_home: String,
     our_pack: String,
     writers: Vec<SeenWriter>,
@@ -20809,6 +20832,21 @@ pub fn sandbox_memory_off() -> Option<String> {
     bookkeep::temp_home().map(|home| memory_off_temp_line(&home))
 }
 
+fn url_is_loopback(raw: &str) -> bool {
+    let trimmed = raw
+        .trim()
+        .strip_prefix("http://")
+        .or_else(|| raw.trim().strip_prefix("https://"))
+        .unwrap_or(raw.trim());
+    let authority = trimmed.split('/').next().unwrap_or("");
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+}
+
 fn down_facts() -> DownFacts {
     let url = std::env::var("PACKSET_URL")
         .ok()
@@ -20836,13 +20874,15 @@ fn down_facts() -> DownFacts {
         .filter(|path| !path.is_empty())
         .unwrap_or_else(|| pack_home_under(&our_home));
     let packset = on_path("packset");
+    let packsetd = on_path("packsetd");
     DownFacts {
         url_off,
         url_set,
-        asked,
+        asked: asked.clone(),
         asked_port,
         packset,
-        writers: if packset && !url_off {
+        packsetd,
+        writers: if !url_off && (!url_set || url_is_loopback(&asked)) {
             seen_writers(asked_port, &our_home, &our_pack)
         } else {
             Vec::new()
@@ -20868,8 +20908,8 @@ fn render_down(facts: &DownFacts) -> String {
     if facts.url_off {
         return "PACKSET_URL=off: this seat has no pack on purpose".to_string();
     }
-    if !facts.packset {
-        return "no pack writer is answering and packset is not on PATH, so run `cargo install --locked packset`.".to_string();
+    if facts.url_set && !url_is_loopback(&facts.asked) {
+        return format!("the pack writer at {} is not answering.", facts.asked);
     }
     if let Some(line) = foreign_home(facts) {
         return line;
@@ -20879,6 +20919,15 @@ fn render_down(facts: &DownFacts) -> String {
     }
     if let Some(line) = other_port(facts) {
         return line;
+    }
+    if !facts.packset {
+        if facts.packsetd {
+            return format!(
+                "no pack writer is answering on {}, so start `packsetd`.",
+                facts.asked
+            );
+        }
+        return "no pack writer is answering and packset is not on PATH, so run `cargo install --locked packset`.".to_string();
     }
     if facts.url_set {
         return format!(
@@ -20966,8 +21015,15 @@ fn home_on_asked_port(facts: &DownFacts) -> Option<String> {
             && !home_paths_match(&writer.home, &facts.our_home)
             && !pack_is_ours(writer, facts)
     })?;
+    let fix = if facts.packset {
+        "set PACKSET_PORT to a free port and run `packset ensure`"
+    } else if facts.packsetd {
+        "set PACKSET_PORT to a free port and start `packsetd`"
+    } else {
+        "set PACKSET_PORT to your writer's port"
+    };
     Some(format!(
-        "a pack writer on {} is for home {}, not {}, so set PACKSET_PORT to a free port and run `packset ensure`.",
+        "a pack writer on {} is for home {}, not {}, so {fix}.",
         facts.asked, writer.home, facts.our_home
     ))
 }
@@ -20994,8 +21050,15 @@ fn foreign_home(facts: &DownFacts) -> Option<String> {
                 "pack home",
             )
         };
+    let fix = if facts.packset {
+        "run `packset ensure`"
+    } else if facts.packsetd {
+        "start `packsetd` for this home"
+    } else {
+        "point PACKSET_URL at your writer"
+    };
     Some(format!(
-        "a pack writer is running for {what} {theirs}, not {ours}, so run `packset ensure`."
+        "a pack writer is running for {what} {theirs}, not {ours}, so {fix}."
     ))
 }
 
@@ -21007,8 +21070,15 @@ fn other_port(facts: &DownFacts) -> Option<String> {
             .copied()
             .find(|port| facts.asked_port != Some(*port))
     })?;
+    let fix = if facts.packset {
+        "run `packset ensure`".to_string()
+    } else if facts.packsetd {
+        format!("start `packsetd` on {}", facts.asked)
+    } else {
+        format!("set PACKSET_PORT={port}")
+    };
     Some(format!(
-        "a pack writer is listening on 127.0.0.1:{port}, not {}, so run `packset ensure`.",
+        "a pack writer is listening on 127.0.0.1:{port}, not {}, so {fix}.",
         facts.asked
     ))
 }
@@ -21435,16 +21505,20 @@ fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
         Err(err) if pack_link::clock_armed() && (is_pack_busy(&err) || writer_busy(&err)) => {
             Err(pack_busy_err())
         }
+        Err(err) if pack_link::write_bytes_sent(&err) => Err(err),
         Err(err) if writer_unreachable(&err) && !skip_writer_ensure() => match ensure_writer() {
-            Ok(()) => match op() {
-                // The start did not bring a writer up. A timeout on the
-                // retry is that same down writer, not a pack that is busy.
-                Err(err) if writer_unreachable(&err) || is_pack_busy(&err) => {
-                    mark_writer_down();
-                    Err(anyhow::anyhow!("{}", pack_down_line()))
+            Ok(()) => {
+                pack_link::clear_pack_quiet();
+                match op() {
+                    // The start did not bring a writer up. A timeout on the
+                    // retry is that same down writer, not a pack that is busy.
+                    Err(err) if writer_unreachable(&err) || is_pack_busy(&err) => {
+                        mark_writer_down();
+                        Err(anyhow::anyhow!("{}", pack_down_line()))
+                    }
+                    other => other,
                 }
-                other => other,
-            },
+            }
             Err(err) => {
                 mark_writer_down();
                 Err(err)
@@ -22847,12 +22921,24 @@ pub fn add_entities(atom: &mut Value, more: impl IntoIterator<Item = String>) {
     atom["entities"] = Value::Array(list);
 }
 
+fn dedup_error_chain(err: &anyhow::Error) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for cause in err.chain() {
+        let text = flatten_line(&cause.to_string());
+        if text.is_empty() || parts.iter().any(|prev| prev.contains(&text)) {
+            continue;
+        }
+        parts.push(text);
+    }
+    parts.join(": ")
+}
+
 /// The line a log prints for a failed `POST /v1/atoms`. The pack's status
 /// and reason are that line, with what to change when the reason is a
 /// prose refusal. The original error stays the source, so a refusal can
 /// still be told from a pack that did not answer.
 pub(crate) fn with_post_failure(prefix: &str, err: anyhow::Error) -> anyhow::Error {
-    let why = format!("{err:#}");
+    let why = dedup_error_chain(&err);
     if why.contains(prefix) {
         return err;
     }
@@ -23538,56 +23624,105 @@ fn fit_queued(notes: Vec<note_queue::Queued>) -> Vec<note_queue::Queued> {
 fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
     // Nothing was queued. Creating the directory here is what left
     // note-queue.lock behind a read, a dry run, onboard and doctor.
-    if !note_queue::queue_exists(dir) {
+    let has_notes = note_queue::queue_exists(dir);
+    let has_seals = note_queue::seal_queue_exists(dir);
+    if !has_notes && !has_seals {
         return Ok(note_queue::Drained::default());
     }
-    let set_aside = note_queue::tidy_in(dir, fit_queued)?;
-    if note_queue::pending_in(dir).is_empty() {
-        return Ok(note_queue::Drained {
+    let set_aside = if has_notes {
+        note_queue::tidy_in(dir, fit_queued)?
+    } else {
+        None
+    };
+    let mut done = if note_queue::pending_in(dir).is_empty() {
+        note_queue::Drained {
             set_aside: set_aside.into_iter().collect(),
             ..Default::default()
-        });
-    }
-    let client = pack();
-    let mut done = note_queue::drain_in(dir, |note| {
-        let client = match &client {
-            Ok(client) => client.clone().with_workspace(note.workspace.clone()),
-            Err(e) => return note_queue::Sent::Wait(format!("{e:#}")),
-        };
-        // A row an older ljos queued from `ljos note` is left where it
-        // was said, on the ticket. Sending it now would put the working
-        // note back in memory, which is what this queue stopped doing.
-        if note.kind != "lesson" {
-            memory_port::keep_prose(
-                &note.text,
-                &note.kind,
-                "a note is kept on the ticket, not in memory; this copy was dropped",
-            );
-            return note_queue::Sent::Refused(
-                "a note is kept on the ticket, not in memory; this copy was dropped".into(),
-            );
         }
-        match post_queued_lesson(&client, note) {
-            Ok(body) => note_queue::Sent::Kept(body["id"].as_str().unwrap_or("?").to_string()),
-            Err(e) if existing_atom_id(&e).is_some() => {
-                note_queue::Sent::Kept(existing_atom_id(&e).unwrap_or_default())
+    } else {
+        let client = pack();
+        let mut done = note_queue::drain_in(dir, |note| {
+            let client = match &client {
+                Ok(client) => client.clone().with_workspace(note.workspace.clone()),
+                Err(e) => return note_queue::Sent::Wait(format!("{e:#}")),
+            };
+            // A row an older ljos queued from `ljos note` is left where it
+            // was said, on the ticket. Sending it now would put the working
+            // note back in memory, which is what this queue stopped doing.
+            if note.kind != "lesson" {
+                memory_port::keep_prose(
+                    &note.text,
+                    &note.kind,
+                    "a note is kept on the ticket, not in memory; this copy was dropped",
+                );
+                return note_queue::Sent::Refused(
+                    "a note is kept on the ticket, not in memory; this copy was dropped".into(),
+                );
             }
-            Err(e) if note_can_wait(&e) => note_queue::Sent::Wait(format!("{e:#}")),
-            Err(e) => {
-                // A refused lesson is kept in this seat's memory slot.
-                // A lesson another seat queued stays that seat's, so the
-                // drainer does not take the copy.
-                let why = plain_refusal(&format!("{e:#}"));
-                let mine = seat_name();
-                let queued = note.seat.trim();
-                if queued.is_empty() || queued == mine {
-                    memory_port::keep_prose(&note.text, &note.kind, &why);
+            match post_queued_lesson(&client, note) {
+                QueuedPost::Wait(e) => note_queue::Sent::Wait(format!("{e:#}")),
+                QueuedPost::Done(Ok(body)) => {
+                    note_queue::Sent::Kept(body["id"].as_str().unwrap_or("?").to_string())
                 }
-                note_queue::Sent::Refused(why)
+                QueuedPost::Done(Err(e)) if existing_atom_id(&e).is_some() => {
+                    note_queue::Sent::Kept(existing_atom_id(&e).unwrap_or_default())
+                }
+                QueuedPost::Done(Err(e)) if note_can_wait(&e) => {
+                    note_queue::Sent::Wait(format!("{e:#}"))
+                }
+                QueuedPost::Done(Err(e)) => {
+                    // A refused lesson is kept in this seat's memory slot.
+                    // A lesson another seat queued stays that seat's, so the
+                    // drainer does not take the copy.
+                    let why = plain_refusal(&format!("{e:#}"));
+                    let mine = seat_name();
+                    let queued = note.seat.trim();
+                    if queued.is_empty() || queued == mine {
+                        memory_port::keep_prose(&note.text, &note.kind, &why);
+                    }
+                    note_queue::Sent::Refused(why)
+                }
             }
-        }
-    })?;
-    done.set_aside.splice(0..0, set_aside);
+        })?;
+        done.set_aside.splice(0..0, set_aside);
+        done
+    };
+    if note_queue::seal_queue_exists(dir) {
+        note_queue::drain_seals_in(dir, &mut done, |seal, gate| {
+            if let Some(wait) = gate.wait_if_blocked() {
+                return wait;
+            }
+            let trimmed_root = seal.root.trim();
+            if trimmed_root.is_empty() {
+                return note_queue::SealOutcome::Drop("queued seal has no tracker root".into());
+            }
+            let root = Path::new(trimmed_root);
+            if !root.exists() {
+                return note_queue::SealOutcome::Drop("queued seal root is missing".into());
+            }
+            let mut aborted: Option<note_queue::SealOutcome> = None;
+            let mut check = || match gate.wait_if_blocked() {
+                Some(wait) => {
+                    aborted = Some(wait);
+                    false
+                }
+                None => true,
+            };
+            match sync::seal_ticket_in_passing_checked(&seal.issue, Some(root), Some(&mut check)) {
+                Ok(sync::PassingSeal::Sealed(said)) => note_queue::SealOutcome::Sealed(said),
+                Ok(sync::PassingSeal::Unchanged(_)) => note_queue::SealOutcome::Nothing,
+                Ok(sync::PassingSeal::Wait { why, .. }) => note_queue::SealOutcome::Wait(why),
+                Ok(sync::PassingSeal::Drop { why, .. }) => note_queue::SealOutcome::Drop(why),
+                Ok(sync::PassingSeal::Blocked) => aborted.unwrap_or_else(|| {
+                    note_queue::SealOutcome::Wait("queued note still pending".into())
+                }),
+                Err(e) if remember_should_queue(&e) || note_can_wait(&e) => {
+                    note_queue::SealOutcome::Wait(format!("{e:#}"))
+                }
+                Err(e) => note_queue::SealOutcome::Drop(format!("{e:#}")),
+            }
+        })?;
+    }
     Ok(done)
 }
 
@@ -23615,13 +23750,22 @@ fn stamp_queued_seat(atom: &mut Value, seat: &str) {
     }
 }
 
-fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Result<Value> {
-    if let Some(id) = queued_already_stored(client, note) {
-        return Ok(serde_json::json!({
-            "id": id,
-            "kind": "lesson",
-            "duplicate": true,
-        }));
+enum QueuedPost {
+    Wait(anyhow::Error),
+    Done(Result<Value>),
+}
+
+fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> QueuedPost {
+    match queued_already_stored(client, note) {
+        Ok(Some(id)) => {
+            return QueuedPost::Done(Ok(serde_json::json!({
+                "id": id,
+                "kind": "lesson",
+                "duplicate": true,
+            })));
+        }
+        Ok(None) => {}
+        Err(e) => return QueuedPost::Wait(e),
     }
     let text = note.text.trim();
     let project = (!note.project.trim().is_empty()).then(|| note.project.trim().to_string());
@@ -23634,26 +23778,31 @@ fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Resu
         atom["supersedes"] =
             Value::Array(note.supersedes.iter().cloned().map(Value::String).collect());
     }
-    with_writer(|| admit::write_agent_one(client, atom.clone()))
+    QueuedPost::Done(with_writer(|| admit::write_agent_one(client, atom.clone())))
 }
 
 /// The id of a lesson the pack already holds for this queued row.
 ///
 /// A replay that lost the first answer, or a second drain of the same
-/// text, must not store another copy. A listing that does not answer is
-/// not a miss: the post that follows is what reports that.
-fn queued_already_stored(client: &PacksetClient, note: &note_queue::Queued) -> Option<String> {
+/// text, must not store another copy. A listing that fails or exceeds the
+/// pack clock defers the queued row rather than risking a duplicate POST.
+fn queued_already_stored(
+    client: &PacksetClient,
+    note: &note_queue::Queued,
+) -> Result<Option<String>> {
     if pack_link::clock_left().is_some_and(|left| left < std::time::Duration::from_millis(50)) {
-        return None;
+        return Err(anyhow::anyhow!(
+            "the pack clock is spent before duplicate check"
+        ));
     }
-    let atoms = atoms_lean(client, &client.workspace()).ok()?;
+    let atoms = atoms_lean(client, &client.workspace())?;
     let text = note.text.trim();
     let (peeled, _) = peel_citations(text);
     let want_raw = memories::lesson_key(&note.kind, text);
     let want_peeled = memories::lesson_key(&note.kind, &peeled);
     let issue = note.issue.trim();
     let want_project = note.project.trim();
-    atoms.into_iter().find_map(|atom| {
+    Ok(atoms.into_iter().find_map(|atom| {
         let kind = atom["kind"].as_str().unwrap_or("");
         let held = memories::lesson_key(kind, atom["text"].as_str().unwrap_or(""));
         if held != want_raw && held != want_peeled {
@@ -23680,7 +23829,7 @@ fn queued_already_stored(client: &PacksetClient, note: &note_queue::Queued) -> O
             .as_str()
             .filter(|id| !id.is_empty())
             .map(str::to_string)
-    })
+    }))
 }
 
 /// Send lessons that are already queued, without arming a new clock.
@@ -23690,14 +23839,19 @@ fn queued_already_stored(client: &PacksetClient, note: &note_queue::Queued) -> O
 /// land stays queued for the next call.
 fn replay_ready_lessons() -> String {
     let dir = note_queue::state_dir();
-    if !note_queue::queue_exists(&dir) || note_queue::pending_in(&dir).is_empty() {
+    let has_notes = note_queue::queue_exists(&dir) && !note_queue::pending_in(&dir).is_empty();
+    let has_seals =
+        note_queue::seal_queue_exists(&dir) && !note_queue::pending_seals_in(&dir).is_empty();
+    if !has_notes && !has_seals {
         return String::new();
     }
     if pack_link::clock_left().is_some_and(|left| left <= std::time::Duration::from_millis(50)) {
         return String::new();
     }
     match flush_note_queue() {
-        Ok(done) if !done.kept.is_empty() => note_queue::drained_lines(&done),
+        Ok(done) if !done.kept.is_empty() || !done.sealed.is_empty() => {
+            note_queue::drained_lines(&done)
+        }
         _ => String::new(),
     }
 }
@@ -23781,6 +23935,66 @@ fn note_queue_row() -> Habitat {
         state,
         ok: true,
     }
+}
+
+/// How the seal queue row opens when rows of seal-queue.jsonl do not
+/// parse. The row is `warn`: those tickets are not sealed until a drain
+/// moves the bad rows aside and the person runs `ljos sync`.
+const SEAL_QUEUE_DAMAGED: &str = "damaged: ";
+
+/// The doctor row for the ticket seals finish queued, beside the note
+/// queue row. It only reads, without the queue lock. `None` when no seal
+/// waits, no row is damaged and no damaged file is left, so a seat that
+/// never queued a seal shows no row.
+fn seal_queue_row() -> Option<Habitat> {
+    let dir = note_queue::state_dir();
+    let queue = dir.join("seal-queue.jsonl");
+    let row = |state: String| Habitat {
+        name: "seal queue",
+        state,
+        ok: true,
+    };
+    let opened = match open_state_dir(&queue) {
+        Ok(opened) => opened,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            let state = doctor_state_read("seal queue", &queue, Err(err)).unwrap_err();
+            return Some(row(format!("{SEAL_QUEUE_DAMAGED}{state}")));
+        }
+    };
+    let read = read_state_file_dated_at(&opened.0, &opened.1, &queue, DOCTOR_READ_LIMIT);
+    let bytes = match doctor_state_read("seal queue", &queue, read) {
+        Ok(bytes) => bytes,
+        Err(state) => return Some(row(format!("{SEAL_QUEUE_DAMAGED}{state}"))),
+    };
+    let (seals, unread): (Vec<note_queue::QueuedSeal>, usize) = complete_rows_counted(&bytes);
+    let waiting = seals.len();
+    if unread > 0 {
+        return Some(row(format!(
+            "{SEAL_QUEUE_DAMAGED}the seal queue at {} has {unread} row(s) that are not a seal and {waiting} seal(s) wait; the next drain moves the bad rows aside, so run `ljos sync`.",
+            queue.display()
+        )));
+    }
+    let set_aside = note_queue::seal_set_aside_at(&opened.0, &dir);
+    if !set_aside.is_empty() {
+        let bytes: u64 = set_aside.iter().map(|(_, len)| len).sum();
+        let files: Vec<String> = set_aside
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect();
+        return Some(row(format!(
+            "{QUEUE_SET_ASIDE}a drain moved {bytes} byte(s) of the seal queue that are not a seal to {}. Read the file, then delete it. {waiting} seal(s) wait, and the tickets in it were not sealed, so run `ljos sync`.",
+            files.join(", ")
+        )));
+    }
+    if waiting == 0 {
+        return None;
+    }
+    let tickets: Vec<&str> = seals.iter().map(|seal| seal.issue.trim()).collect();
+    Some(row(format!(
+        "{waiting} ticket seal(s) wait ({}); each runs on the next call that reaches the pack after its lesson leaves the note queue",
+        tickets.join(", ")
+    )))
 }
 
 /// Whether a pack refused a note for its kind, as a pack before 0.15.2
@@ -23938,7 +24152,12 @@ pub fn fault_detail_worth_showing(detail: &str, line: &str) -> bool {
             .trim()
             .trim_start_matches(':')
             .trim();
-        if !rest.is_empty() && !line_flat.contains(rest) {
+        if rest
+            .split(": ")
+            .map(str::trim)
+            .filter(|seg| !seg.is_empty())
+            .any(|seg| !line_flat.contains(seg))
+        {
             return true;
         }
     }
@@ -23957,6 +24176,23 @@ mod fault_detail_show {
         assert!(!fault_detail_worth_showing(line, line));
         let fresh = format!("{line}\n\nCaused by:\n    connection refused");
         assert!(fault_detail_worth_showing(&fresh, line));
+    }
+
+    #[test]
+    fn post_failure_prints_io_errno_once_and_verbose_does_not_repeat_it() {
+        let io = std::io::Error::from_raw_os_error(104);
+        let phrase = io.to_string();
+        let wrapped = super::with_post_failure(
+            "Prefer: POST /v1/atoms failed",
+            anyhow::Error::from(packset_client::Error::Io(io)),
+        );
+        let line = super::user_fault_line(&wrapped);
+        assert_eq!(line.matches(&phrase).count(), 1, "{line}");
+        let detail = format!("{wrapped:#}");
+        assert!(
+            !fault_detail_worth_showing(&detail, &line),
+            "verbose detail repeated already-shown errno:\nline={line}\ndetail={detail}"
+        );
     }
 }
 
@@ -24434,7 +24670,10 @@ fn remember_should_queue(err: &anyhow::Error) -> bool {
 
 /// Post one lesson. The client waits out one `Retry-After` on a 503.
 /// A pack that reports busy is asked again inside [`search_busy_wait`].
-/// When it stays busy, nothing is stored and the error is
+/// Loopback `EAGAIN` and `ConnectionRefused` failures before any request
+/// byte leaves for the wire retry within the shared 2 s call budget; once
+/// write bytes leave on the wire, an IO failure is never resent.
+/// When the pack stays busy, nothing is stored and the error is
 /// [`REMEMBER_NOT_STORED_LINE`]. A pack that is not answering queues the
 /// lesson and the command still succeeds. Packs turned off, and a refusal
 /// of the text, stay errors.
@@ -24443,6 +24682,8 @@ fn remember_should_queue(err: &anyhow::Error) -> bool {
 ///
 /// The pack stayed busy, refused the text, or packs are turned off.
 pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) -> Result<Value> {
+    let _call_budget = pack_link::CallRetryBudget::enter();
+    let _quiet = pack_link::QuietPack::enter();
     // A pack that has not opened yet is waited out on the search warm-up
     // budget. The short post budget starts only after that, so a pack that
     // is already open and busy is asked again inside the busy bound.
@@ -24450,7 +24691,6 @@ pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) 
         let _retry = pack_link::RememberRetry::enter();
         let _deadline = pack_link::CommandDeadline::enter(REMEMBER_BUDGET);
         let _clock = pack_link::PackClock::enter(REMEMBER_BUDGET);
-        let _quiet = pack_link::QuietPack::enter();
         // Do not start a writer from this call. Twenty-six of those at once
         // is what pushed the box into memory pressure.
         let _skip = SkipWriterEnsure::enter();
@@ -24652,15 +24892,14 @@ fn plain_refusal(why: &str) -> String {
 /// call this, and they say when a lesson is still waiting.
 pub fn flush_queued_lessons() {
     let dir = note_queue::state_dir();
-    if note_queue::pending_in(&dir).is_empty() {
+    if note_queue::pending_in(&dir).is_empty() && note_queue::pending_seals_in(&dir).is_empty() {
         return;
     }
+    let _call_budget = pack_link::CallRetryBudget::enter();
+    let _quiet = pack_link::QuietPack::enter();
     let _deadline = pack_link::CommandDeadline::enter(REMEMBER_BUDGET);
     let _clock = pack_link::PackClock::enter(REMEMBER_BUDGET);
-    let first = {
-        let _quiet = pack_link::QuietPack::enter();
-        flush_note_queue()
-    };
+    let first = flush_note_queue();
     let done = match first {
         Ok(done) => done,
         Err(err) => {
@@ -24677,7 +24916,7 @@ pub fn flush_queued_lessons() {
             return;
         }
     };
-    let done = if done.left > 0
+    let done = if (done.left > 0 || done.seals_left > 0)
         && !queue_waits_on_writer(&done)
         && pack_link::clock_left().is_some_and(|left| left > std::time::Duration::from_millis(50))
     {
@@ -24687,6 +24926,8 @@ pub fn flush_queued_lessons() {
                 again.kept.splice(0..0, done.kept);
                 again.refused.splice(0..0, done.refused);
                 again.set_aside.splice(0..0, done.set_aside);
+                again.sealed.splice(0..0, done.sealed);
+                again.seals_dropped.splice(0..0, done.seals_dropped);
                 again
             }
             Err(_) => done,
@@ -24699,6 +24940,8 @@ pub fn flush_queued_lessons() {
         let mut rest = done;
         rest.left = 0;
         rest.waiting_on = None;
+        rest.seals_left = 0;
+        rest.seal_waiting_on = None;
         let lines = note_queue::drained_lines(&rest);
         if !lines.is_empty() {
             eprint!("{lines}");
@@ -24713,7 +24956,8 @@ pub fn flush_queued_lessons() {
 
 /// The drain left lessons because the writer refused the connection.
 fn queue_waits_on_writer(done: &note_queue::Drained) -> bool {
-    done.left > 0 && done.waiting_on.as_deref().is_some_and(text_is_down)
+    (done.left > 0 && done.waiting_on.as_deref().is_some_and(text_is_down))
+        || (done.seals_left > 0 && done.seal_waiting_on.as_deref().is_some_and(text_is_down))
 }
 
 /// The preference `ljos prefer` writes, stored at once from any caller.
@@ -28313,6 +28557,8 @@ fn pack_slow_lately() -> bool {
 /// gate judges by the kept rules alone. One hung writer costs one short
 /// wait, not one per tool call.
 fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
+    let _no_retry = pack_link::NoTransientRetry::enter();
+    let _quiet = pack_link::QuietPack::enter();
     let kept = rules_cache_path();
     let kept_only =
         |kept: Option<PathBuf>| (kept.map(|p| kept_rules(&p)).unwrap_or_default(), Vec::new());
@@ -34285,6 +34531,8 @@ fn settle_pack_row(row: Habitat) -> Habitat {
 /// Which habitats answer: binaries on `PATH`, the pack over `PACKSET_URL`, the
 /// deed store, the tracker, the claim graph.
 pub fn doctor() -> Vec<Habitat> {
+    let _call_budget = pack_link::CallRetryBudget::enter();
+    let _quiet = pack_link::QuietPack::enter();
     // The runner rows ask the runners' own command lines, which start slowly;
     // they run beside the seat's rows rather than after them. The seat rows
     // are emitted from [`doctor_seat`] as each one is ready.
@@ -34314,6 +34562,7 @@ pub fn doctor() -> Vec<Habitat> {
         config_diag::doctor_rows(std::env::current_dir().ok().as_deref()),
     );
     doctor_push(&mut out, note_queue_row());
+    doctor_extend(&mut out, seal_queue_row());
     if let Some(state) = sync::legacy_doctor_state() {
         doctor_push(
             &mut out,
@@ -35788,12 +36037,6 @@ pub fn doctor_seat() -> Vec<Habitat> {
                         name: "pack",
                         state: doctor_fix::hint_pack(match pack_down_message(&e) {
                             Some(line) => format!("{} does not answer. {line}", client.base()),
-                            // Same line as a memory command. A temporary home
-                            // used to add a second sentence that named
-                            // `packset ensure` even when packset was missing.
-                            None if bookkeep::temp_home().is_some() => {
-                                format!("{} does not answer. {}", client.base(), pack_down_line())
-                            }
                             None => format!("{} does not answer: {e}", client.base()),
                         }),
                         ok: false,
@@ -37069,6 +37312,12 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     {
         return "warn";
     }
+    if row.ok
+        && row.name == "seal queue"
+        && (row.state.starts_with(SEAL_QUEUE_DAMAGED) || row.state.starts_with(QUEUE_SET_ASIDE))
+    {
+        return "warn";
+    }
     if (row.name == "guard bypass"
         || row.name == "seat source"
         || row.name == "policyd config"
@@ -38202,7 +38451,10 @@ fn plain_write_line(line: &str) -> String {
             None => format!("{lead}, so run `ljos sync`."),
         });
     }
-    if body.contains("could not") && !body.contains("not reached") {
+    if body.contains("could not")
+        && !body.contains("not reached")
+        && !(sync && body.contains("ljos doctor"))
+    {
         return say(format!(
             "The tracker write could not be committed ({}), so run `ljos doctor`.",
             clip_why(body)
@@ -38227,6 +38479,15 @@ fn plain_write_line(line: &str) -> String {
             "Sync could not update the tracker ({}), so run `ljos sync`.",
             clip_why(body)
         ));
+    }
+    if sync
+        && ((body.contains("queued") && body.contains("will be sent on the next call"))
+            || body.contains("ticket seal(s) still queued"))
+    {
+        return say("The sync step is queued and will be sent on the next call.".into());
+    }
+    if sync && body.contains("ljos doctor") {
+        return say("The sync step could not reach the pack, so run `ljos doctor`.".into());
     }
     if sync && body.contains("warning") {
         return say(
@@ -38324,11 +38585,19 @@ pub fn without_routine_git(text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
+    const QUEUED_SYNC: &str = "The sync step is queued and will be sent on the next call.";
+    let mut seen_queued_sync = false;
     let mut out = String::new();
     for line in text.lines() {
         let trim = line.trim();
         if trim.starts_with("tracker git:") || trim.starts_with("sync:") {
             if let Some(shown) = present_write_line(line) {
+                if shown == QUEUED_SYNC {
+                    if seen_queued_sync {
+                        continue;
+                    }
+                    seen_queued_sync = true;
+                }
                 out.push_str(&shown);
                 out.push('\n');
             }
@@ -38426,6 +38695,28 @@ sync: committed chore(sync): runner grokbot atoms; not pushed (LJOS_TRACKER_GIT=
         assert!(skipped.contains("push was skipped"), "{skipped}");
         assert!(skipped.contains("`ljos sync`"), "{skipped}");
         assert!(!skipped.contains("tracker git:"), "{skipped}");
+        let queued_sync =
+            without_routine_git("sync: a write is queued and will be sent on the next call\n");
+        assert_eq!(
+            queued_sync,
+            "The sync step is queued and will be sent on the next call.\n"
+        );
+        assert!(!queued_sync.contains("ljos sync"), "{queued_sync}");
+        let combined = without_routine_git(
+            "sync: 1 ticket seal(s) still queued (queued note still pending)\n\
+             sync: a write is queued and will be sent on the next call\n",
+        );
+        assert_eq!(
+            combined,
+            "The sync step is queued and will be sent on the next call.\n"
+        );
+        let unqueued_doctor = without_routine_git(
+            "sync: could not reach the pack to seal this ticket, so run `ljos doctor`.\n",
+        );
+        assert_eq!(
+            unqueued_doctor,
+            "The sync step could not reach the pack, so run `ljos doctor`.\n"
+        );
     }
 
     #[test]
@@ -46263,6 +46554,8 @@ pub fn sitting_stream_started(
     budget: SittingPreclaimBudget,
     mut emit: impl FnMut(&str),
 ) -> Result<String> {
+    let _call_budget = pack_link::CallRetryBudget::enter();
+    let _quiet = pack_link::QuietPack::enter();
     // One listing for due, recall and the timeline. Each used to fetch
     // the store on its own, and on a busy box those round-trips were the
     // sitting's time.
@@ -48052,6 +48345,8 @@ pub fn finish(
     close: bool,
     verbose: bool,
 ) -> Result<String> {
+    let _call_budget = pack_link::CallRetryBudget::enter();
+    let _quiet = pack_link::QuietPack::enter();
     if let Some(mut ticked) = plan::tick_checklist(issue)? {
         if let Some(text) = lesson.map(str::trim).filter(|text| !text.is_empty()) {
             for claim in lesson_claims(text) {
@@ -48353,7 +48648,23 @@ pub fn finish(
     // What this ticket taught leaves the machine with the tracker. The
     // rest of the pack waits for `ljos sync`.
     out.push_str(&flush_queue_before_seal());
-    out.push_str(&sync::seal_ticket_in_passing(issue).unwrap_or_else(|e| format!("sync: {e:#}\n")));
+    let dir = note_queue::state_dir();
+    let pending = note_queue::pending_in(&dir);
+    let queued = !pending.is_empty();
+    let queued_for_issue = pending.iter().any(|row| row.issue.trim() == issue.trim());
+    // A seal now would read the pack without this ticket's queued lesson
+    // and commit a log that misses it, even when older atoms seal fine.
+    // The queued seal runs once the lesson has left note-queue.jsonl.
+    let sync_line = if queued_for_issue {
+        match queue_ticket_seal(&dir, issue) {
+            Ok(false) if !sync::has_scoped_root() => String::new(),
+            Ok(_) => "sync: a write is queued and will be sent on the next call\n".to_string(),
+            Err(e) => format!("sync: {e:#}\n"),
+        }
+    } else {
+        finish_seal_line(&dir, issue, queued)
+    };
+    out.push_str(&sync_line);
     if !matches!(
         std::env::var("LJOS_TRACKER_GIT").ok().as_deref(),
         Some("off" | "0" | "false")
@@ -48365,6 +48676,50 @@ pub fn finish(
     Ok(out)
 }
 
+/// The sync line for a finish whose own lesson is not queued: seal the
+/// ticket now, or queue the seal when another write waits and the pack is
+/// busy.
+fn finish_seal_line(dir: &Path, issue: &str, queued: bool) -> String {
+    match sync::seal_ticket_in_passing(issue) {
+        Ok(said) => said,
+        Err(e) if queued && remember_should_queue(&e) => match queue_ticket_seal(dir, issue) {
+            Ok(false) if !sync::has_scoped_root() => String::new(),
+            Ok(_) => "sync: a write is queued and will be sent on the next call\n".to_string(),
+            Err(qerr) => format!("sync: {qerr:#} (after {e:#})\n"),
+        },
+        Err(e)
+            if is_pack_busy(&e)
+                || writer_is_down(&e)
+                || pack_under_load(&e)
+                || pack_unreachable(&e) =>
+        {
+            "sync: could not reach the pack to seal this ticket, so run `ljos doctor`.\n"
+                .to_string()
+        }
+        Err(e) => format!("sync: {e:#}\n"),
+    }
+}
+
+fn queue_ticket_seal(dir: &Path, issue: &str) -> Result<bool> {
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut queued = false;
+    for root in sync::seal_roots() {
+        queued |= note_queue::push_seal_in(
+            dir,
+            note_queue::QueuedSeal {
+                issue: issue.trim().to_string(),
+                root,
+                at,
+                claim: None,
+            },
+        )?;
+    }
+    Ok(queued)
+}
+
 /// Send what waits in the note queue before finish seals the atom log.
 ///
 /// The seal reads the pack, so a lesson that finish itself queued on a
@@ -48374,7 +48729,7 @@ pub fn finish(
 /// Nothing queued returns at once and writes nothing.
 fn flush_queue_before_seal() -> String {
     let dir = note_queue::state_dir();
-    if note_queue::pending_in(&dir).is_empty() {
+    if note_queue::pending_in(&dir).is_empty() && note_queue::pending_seals_in(&dir).is_empty() {
         return String::new();
     }
     let budget = std::time::Duration::from_secs(2);
@@ -69886,6 +70241,65 @@ mod tests {
         );
     }
 
+    /// The seal queue row says nothing when no seal was queued, counts
+    /// waiting seals, and warns on a row that is not a seal and on a file
+    /// a drain moved aside.
+    #[test]
+    fn doctor_reports_the_seal_queue_beside_the_note_queue() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let home = dir.path().join("home");
+        for path in [&state.join("ljos"), &home] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let _env = HoldEnv::set(&[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+        ]);
+        assert!(bounded("doctor seal queue", seal_queue_row).is_none());
+
+        let queue = note_queue::state_dir().join("seal-queue.jsonl");
+        std::fs::write(&queue, b"{\"issue\":\"demo-1\",\"root\":\"/t\",\"at\":1}\n").unwrap();
+        let row = bounded("doctor seal queue", seal_queue_row).expect("a waiting seal");
+        assert_eq!(row.name, "seal queue");
+        assert!(
+            row.state.starts_with("1 ticket seal(s) wait (demo-1)"),
+            "{}",
+            row.state
+        );
+        assert_eq!(doctor_word(&row), "ok");
+
+        std::fs::write(
+            &queue,
+            b"{\"issue\":\"demo-1\",\"root\":\"/t\",\"at\":1}\n{\"issue\":\"bro\n",
+        )
+        .unwrap();
+        let row = bounded("doctor seal queue", seal_queue_row).expect("a damaged row");
+        assert!(row.state.starts_with(SEAL_QUEUE_DAMAGED), "{}", row.state);
+        assert!(
+            row.state.contains("1 row(s) that are not a seal"),
+            "{}",
+            row.state
+        );
+        assert_eq!(doctor_word(&row), "warn");
+
+        std::fs::write(&queue, b"").unwrap();
+        std::fs::write(
+            note_queue::state_dir().join("seal-queue.jsonl.2026-11-21.damaged"),
+            b"{\"issue\":\"bro\n",
+        )
+        .unwrap();
+        let row = bounded("doctor seal queue", seal_queue_row).expect("a set-aside file");
+        assert!(row.state.starts_with(QUEUE_SET_ASIDE), "{}", row.state);
+        assert!(
+            row.state.contains("seal-queue.jsonl.2026-11-21.damaged"),
+            "{}",
+            row.state
+        );
+        assert_eq!(doctor_word(&row), "warn");
+    }
+
     fn age_by(path: &std::path::Path, by: std::time::Duration) {
         std::fs::File::options()
             .write(true)
@@ -74417,6 +74831,7 @@ lesson, due yesterday, seat ada
             asked: "127.0.0.1:8761".into(),
             asked_port: Some(8761),
             packset: true,
+            packsetd: true,
             our_home: "/home/ada".into(),
             our_pack: "/home/ada/.local/share/packset".into(),
             writers: Vec::new(),
@@ -74432,6 +74847,7 @@ lesson, due yesterday, seat ada
 
         let mut missing = base.clone();
         missing.packset = false;
+        missing.packsetd = false;
         let missing = super::render_down(&missing);
         assert!(
             missing.contains("packset is not on PATH")
@@ -74440,6 +74856,44 @@ lesson, due yesterday, seat ada
         );
         assert!(!missing.contains("packset ensure"), "{missing}");
         assert!(!super::writer_retries(&missing));
+
+        let mut daemon_only = base.clone();
+        daemon_only.packset = false;
+        daemon_only.packsetd = true;
+        let daemon_only = super::render_down(&daemon_only);
+        assert!(
+            daemon_only.contains("start `packsetd`")
+                && !daemon_only.contains("packset is not on PATH"),
+            "{daemon_only}"
+        );
+
+        let mut remote = base.clone();
+        remote.packset = false;
+        remote.packsetd = false;
+        remote.url_set = true;
+        remote.asked = "http://pack.example.internal:8761".into();
+        let remote = super::render_down(&remote);
+        assert!(
+            remote.contains("pack.example.internal:8761 is not answering")
+                && !remote.contains("packset is not on PATH"),
+            "{remote}"
+        );
+
+        let mut foreign_without_packset = base.clone();
+        foreign_without_packset.packset = false;
+        foreign_without_packset.packsetd = false;
+        foreign_without_packset.writers.push(super::SeenWriter {
+            ports: vec![18761],
+            home: "/home/other".into(),
+            pack_home: "/home/other/.local/share/packset".into(),
+            token: String::new(),
+        });
+        let foreign_without_packset = super::render_down(&foreign_without_packset);
+        assert!(
+            foreign_without_packset.contains("running for home /home/other")
+                && !foreign_without_packset.contains("packset is not on PATH"),
+            "{foreign_without_packset}"
+        );
 
         let mut other = base.clone();
         other.writers.push(super::SeenWriter {
@@ -74504,6 +74958,7 @@ lesson, due yesterday, seat ada
             asked: "127.0.0.1:8761".into(),
             asked_port: Some(8761),
             packset: true,
+            packsetd: true,
             our_home: "/home/ada".into(),
             our_pack: "/home/ada/.local/share/packset".into(),
             writers: Vec::new(),
@@ -74545,6 +75000,7 @@ lesson, due yesterday, seat ada
             asked: "127.0.0.1:8761".into(),
             asked_port: Some(8761),
             packset: true,
+            packsetd: true,
             our_home: "/home/ada".into(),
             our_pack: "/home/ada/.local/share/packset".into(),
             writers: Vec::new(),
@@ -74760,13 +75216,16 @@ lesson, due yesterday, seat ada
         let (url, _) = serve_http({
             let posted = std::sync::Arc::clone(&posted);
             move |req| {
-                if req.lines().next().unwrap_or("").contains("POST /v1/atoms") {
+                let line = req.lines().next().unwrap_or("");
+                if line.contains("POST /v1/atoms") {
                     *posted.lock().unwrap() = req.to_string();
+                    (
+                        400,
+                        r#"{"error":"readability grade 18.24 exceeds 14"}"#.into(),
+                    )
+                } else {
+                    (200, r#"{"atoms":[]}"#.into())
                 }
-                (
-                    400,
-                    r#"{"error":"readability grade 18.24 exceeds 14"}"#.into(),
-                )
             }
         });
         let _url = PackUrl::set(&url);

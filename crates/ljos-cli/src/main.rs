@@ -5129,6 +5129,8 @@ fn run_command() -> Result<()> {
         std::process::exit(USAGE_STATUS);
     }
     ljos_cli::seat_resolve::prepare(seat_flag, seat_kind(&cmd));
+    let _call_budget = ljos_cli::pack_link::CallRetryBudget::enter();
+    let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
     // A lesson left while the pack was busy goes out on the next call
     // that writes. A read, a dry run, onboard, offboard, uninstall and
     // doctor leave the queue where it is and do not create its lock.
@@ -8049,7 +8051,6 @@ fn run_command() -> Result<()> {
                     ljos_cli::pack_link::CommandDeadline::enter(std::time::Duration::from_secs(2));
                 let _clock =
                     ljos_cli::pack_link::PackClock::enter(std::time::Duration::from_secs(2));
-                let _quiet = ljos_cli::pack_link::QuietPack::enter();
                 match ljos_cli::flush_note_queue() {
                     Ok(done) => print!("{}", ljos_cli::note_queue::drained_lines(&done)),
                     Err(e) => eprintln!("ljos finish: note queue: {e:#}"),
