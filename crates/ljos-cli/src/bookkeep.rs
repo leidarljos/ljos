@@ -411,14 +411,16 @@ pub fn guard_off_reason() -> Option<String> {
 /// Whether `path` is a temporary directory or sits inside one.
 #[must_use]
 pub fn path_is_temp(path: Option<&Path>) -> bool {
-    let Some(path) = path else {
-        return false;
-    };
+    path.is_some_and(|path| path_is_temp_in(path, &temp_roots()))
+}
+
+/// [`path_is_temp`] against the given temp roots.
+fn path_is_temp_in(path: &Path, roots: &[PathBuf]) -> bool {
     if path.as_os_str().is_empty() {
         return false;
     }
     let path = canonical_existing_prefix(path);
-    resolved_path_is_temp(&path)
+    roots.iter().any(|root| path.starts_with(root))
 }
 
 /// `path` with the longest existing prefix resolved, and the missing
@@ -494,6 +496,14 @@ pub(crate) fn temp_roots() -> Vec<PathBuf> {
     if let Some(roots) = TEST_TEMP_ROOTS.with(|r| r.borrow().clone()) {
         return roots;
     }
+    temp_roots_for(
+        std::env::var_os("TMPDIR").as_deref(),
+        crate::proc_tree::own_home().as_deref(),
+    )
+}
+
+/// The temp roots for a `TMPDIR` value and a passwd home.
+fn temp_roots_for(tmpdir: Option<&std::ffi::OsStr>, passwd_home: Option<&Path>) -> Vec<PathBuf> {
     let mut roots = vec![
         #[cfg(not(unix))]
         std::env::temp_dir(),
@@ -502,10 +512,7 @@ pub(crate) fn temp_roots() -> Vec<PathBuf> {
         PathBuf::from("/private/tmp"),
         PathBuf::from("/dev/shm"),
     ];
-    if let Some(tmp) = std::env::var_os("TMPDIR")
-        .as_deref()
-        .and_then(|t| per_session_tmpdir(t, crate::proc_tree::own_home().as_deref()))
-    {
+    if let Some(tmp) = tmpdir.and_then(|t| per_session_tmpdir(t, passwd_home)) {
         roots.push(tmp);
     }
     roots
@@ -670,8 +677,7 @@ mod temp_path_tests {
 
     #[test]
     fn tmpdir_temp_home_classification_table() {
-        let _env = crate::test_env_lock();
-        let _own = crate::proc_tree::HoldOwnHome::set(Path::new("/home/person"));
+        let passwd_home = Path::new("/home/person");
         let cases: &[(&str, Option<&str>, bool)] = &[
             ("/home/person", Some("/home"), false),
             ("/home/person", Some("/home/person"), false),
@@ -690,15 +696,9 @@ mod temp_path_tests {
             ("/home/person/work", Some("work"), false),
         ];
         for &(home, tmpdir, expected) in cases {
-            crate::with_env_mutation(|| unsafe {
-                std::env::set_var("HOME", home);
-                match tmpdir {
-                    Some(val) => std::env::set_var("TMPDIR", val),
-                    None => std::env::remove_var("TMPDIR"),
-                }
-            });
+            let roots = temp_roots_for(tmpdir.map(std::ffi::OsStr::new), Some(passwd_home));
             assert_eq!(
-                temp_home().is_some(),
+                path_is_temp_in(Path::new(home), &roots),
                 expected,
                 "HOME={home:?} TMPDIR={tmpdir:?}"
             );
