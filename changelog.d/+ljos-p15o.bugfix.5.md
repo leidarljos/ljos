@@ -1,0 +1,1 @@
+The deed world test helper and the `mcp_claim_holder_orders` test now set `GIT_CEILING_DIRECTORIES` after `env_clear`, so the git they reach through ljos, ljos-mcp and claimdag stops at the scratch roots.
