@@ -3,7 +3,6 @@
 //! and every row stayed green while no other host saw them.
 
 ljos_test_boot::harness!();
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -32,7 +31,7 @@ fn doctor_warns_on_uncommitted_issue_edits_in_the_tracker() {
     let bin = dir.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let stub = bin.join("vissue");
-    std::fs::write(
+    ljos_cli::install_executable(
         &stub,
         format!(
             "#!/bin/sh\n[ \"$1\" = identity ] && printf 'vissue 0.16.2\\nprotocol: 1\\nroot={}\\nprefix=Software\\n'\nexit 0\n",
@@ -40,7 +39,6 @@ fn doctor_warns_on_uncommitted_issue_edits_in_the_tracker() {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
     let home = dir.path().join("home");
     std::fs::create_dir_all(home.join("run")).unwrap();
     let path = format!(

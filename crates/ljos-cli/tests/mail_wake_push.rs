@@ -15,7 +15,6 @@
 )]
 
 ljos_test_boot::harness!();
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -116,10 +115,7 @@ fn write_exe(path: &Path, body: &str) {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).expect("dir");
     }
-    std::fs::write(path, body).expect("write");
-    let mut perms = std::fs::metadata(path).expect("meta").permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms).expect("perms");
+    ljos_cli::install_executable(path, body).expect("write");
 }
 
 fn age_key(path: &Path) -> String {

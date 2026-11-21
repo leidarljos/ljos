@@ -26,13 +26,8 @@ impl Board {
         std::fs::create_dir_all(root.join("Software/probe")).unwrap();
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("vissue"), "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::write(bin.join("claimdag"), "#!/bin/sh\nexit 1\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        for name in ["vissue", "claimdag"] {
-            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
-        }
+        ljos_cli::install_executable(&bin.join("vissue"), "#!/bin/sh\nexit 0\n").unwrap();
+        ljos_cli::install_executable(&bin.join("claimdag"), "#!/bin/sh\nexit 1\n").unwrap();
         let gitconfig = dir.path().join("gitconfig");
         std::fs::write(&gitconfig, "[core]\n\thooksPath = /dev/null\n").unwrap();
         let board = Self {

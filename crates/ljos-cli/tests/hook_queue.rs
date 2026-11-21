@@ -154,10 +154,8 @@ fn hab(name: &str) -> Hab {
     git(&hab.tracker, &["add", ".keep"]);
     git(&hab.tracker, &["commit", "-q", "-m", "seed"]);
     {
-        use std::os::unix::fs::PermissionsExt;
         let shim = hab.bin.join("vissue");
-        std::fs::write(&shim, VISSUE).unwrap();
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::install_executable(&shim, VISSUE).unwrap();
     }
     hab
 }

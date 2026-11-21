@@ -36,12 +36,7 @@ impl Drop for SeatHome {
 
 fn fake_bin(dir: &Path, name: &str, body: &str) {
     let path = dir.join(name);
-    std::fs::write(&path, body).expect(name);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    }
+    ljos_cli::install_executable(&path, body).expect(name);
 }
 
 fn seat() -> (SeatHome, PathBuf, u16) {

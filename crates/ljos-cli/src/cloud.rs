@@ -2123,14 +2123,12 @@ fn executable(path: &Path) -> bool {
 /// is often the one being replaced; a rename leaves it running from the
 /// old inode.
 fn install_binary(src: &Path, dest: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("ljos");
     let tmp = dest.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
     let _ = fs::remove_file(&tmp);
     let copied = (|| -> Result<()> {
-        fs::copy(src, &tmp)
+        crate::copy_executable(src, &tmp)
             .with_context(|| format!("copy {} to {}", src.display(), tmp.display()))?;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
         fs::rename(&tmp, dest).with_context(|| format!("install {}", dest.display()))?;
         Ok(())
     })();
@@ -2546,10 +2544,8 @@ fn installer_script() -> Result<PathBuf> {
         .into_string()
         .with_context(|| format!("read {url}"))?;
     let path = std::env::temp_dir().join(format!("ljos-install-{}.sh", std::process::id()));
-    let mut file = fs::File::create(&path).with_context(|| format!("write {}", path.display()))?;
-    file.write_all(text.as_bytes())?;
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+    crate::install_executable(&path, text.as_bytes())
+        .with_context(|| format!("write {}", path.display()))?;
     Ok(path)
 }
 
@@ -4406,8 +4402,7 @@ mod tests {
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(&empty).unwrap();
         let server = bin.join("ljos-mcp");
-        fs::write(&server, "#!/bin/sh\n").unwrap();
-        fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&server, "#!/bin/sh\n").unwrap();
         let launch = LaunchSpec {
             command: "ljos-mcp".into(),
             args: Vec::new(),

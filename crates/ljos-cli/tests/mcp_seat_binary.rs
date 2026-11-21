@@ -64,8 +64,8 @@ fn mcp_doctor_passes_seat_binary_when_ljos_matches_and_flags_a_stub() {
     std::fs::create_dir_all(&good).unwrap();
     let good_ljos = good.join("ljos");
     let good_mcp = good.join("ljos-mcp");
-    std::fs::copy(env!("CARGO_BIN_EXE_ljos"), &good_ljos).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_ljos-mcp"), &good_mcp).unwrap();
+    ljos_cli::copy_executable(Path::new(env!("CARGO_BIN_EXE_ljos")), &good_ljos).unwrap();
+    ljos_cli::copy_executable(Path::new(env!("CARGO_BIN_EXE_ljos-mcp")), &good_mcp).unwrap();
 
     let ok_row = call_doctor(&good_mcp, &good);
     assert_eq!(ok_row["ok"], true, "{ok_row}");
@@ -76,13 +76,8 @@ fn mcp_doctor_passes_seat_binary_when_ljos_matches_and_flags_a_stub() {
     std::fs::create_dir_all(&tampered).unwrap();
     let stub = tampered.join("ljos");
     let bad_mcp = tampered.join("ljos-mcp");
-    std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    std::fs::copy(env!("CARGO_BIN_EXE_ljos-mcp"), &bad_mcp).unwrap();
+    ljos_cli::install_executable(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+    ljos_cli::copy_executable(Path::new(env!("CARGO_BIN_EXE_ljos-mcp")), &bad_mcp).unwrap();
 
     let bad_row = call_doctor(&bad_mcp, &tampered);
     assert_eq!(bad_row["ok"], false, "{bad_row}");

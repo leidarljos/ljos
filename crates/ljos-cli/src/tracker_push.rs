@@ -1464,7 +1464,6 @@ fn git_path_exists(dir: &Path, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     use super::*;
@@ -1585,7 +1584,7 @@ note from b
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let git_bin = bin.join("git");
-        std::fs::write(
+        crate::install_executable(
             &git_bin,
             "#!/bin/sh\n\
              if [ \"$LC_ALL\" = C ]; then\n\
@@ -1596,7 +1595,6 @@ note from b
              exit 128\n",
         )
         .unwrap();
-        std::fs::set_permissions(&git_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _env = crate::test_env_lock();
         let path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{path}", bin.display()));
@@ -2038,12 +2036,11 @@ body b
         let digest = format!(".ljos/atoms/{host}.digest");
         let age = format!(".ljos/atoms/{host}.jsonl.age");
         let script = dir.path().join("atoms-driver");
-        std::fs::write(
+        crate::install_executable(
             &script,
             "#!/bin/sh\nprintf 're-exported %s\\n' \"$2\" > \"$1\"\nexit 0\n",
         )
         .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let driver = format!("{} %A %P", script.display());
         let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
         unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
@@ -2208,7 +2205,7 @@ body b
         let host = crate::sync::host();
         let digest = format!(".ljos/atoms/{host}.digest");
         let script = dir.path().join("atoms-driver");
-        std::fs::write(
+        crate::install_executable(
             &script,
             format!(
                 "#!/bin/sh\nf='{}'\nn=0\nif [ -f \"$f\" ]; then n=$(cat \"$f\"); fi\nn=$((n + 1))\nprintf '%s\\n' \"$n\" > \"$f\"\nif [ \"$n\" -eq 1 ]; then exit 1; fi\nprintf 're-exported %s\\n' \"$2\" > \"$1\"\nexit 0\n",
@@ -2216,7 +2213,6 @@ body b
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let driver = format!("{} %A %P", script.display());
         let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
         unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
@@ -2511,7 +2507,7 @@ body b
         let record = dir.path().join("percent-a");
         let wrapper = dir.path().join("atoms-driver");
         let ljos = ljos_bin();
-        std::fs::write(
+        crate::install_executable(
             &wrapper,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$1\" > {}\nexec {} merge-atoms \"$1\" \"$2\"\n",
@@ -2520,7 +2516,6 @@ body b
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
         let driver = format!("{} %A %P", wrapper.display());
         let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
         unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };

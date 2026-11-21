@@ -2230,8 +2230,7 @@ mod tests {
         let program = |dir: &Path, name: &str| {
             std::fs::create_dir_all(dir).unwrap();
             let path = dir.join(name);
-            std::fs::write(&path, "").unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::install_executable(&path, "").unwrap();
             path
         };
         let bin = home.join(".local/bin");
@@ -2379,7 +2378,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_executable_that_cannot_be_read_is_no_runner() {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        use std::os::unix::fs::MetadataExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-exe-")
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
@@ -2388,8 +2387,7 @@ mod tests {
         let bin = home.join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
         let claude = bin.join("claude");
-        std::fs::write(&claude, "").unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&claude, "").unwrap();
         let meta = std::fs::metadata(&claude).unwrap();
         let person = Person::new(&SystemAccounts);
         let store = PathBuf::from(NIX_STORE);
@@ -2415,8 +2413,7 @@ mod tests {
         let program = |dir: &Path, name: &str| {
             std::fs::create_dir_all(dir).unwrap();
             let path = dir.join(name);
-            std::fs::write(&path, "").unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::install_executable(&path, "").unwrap();
             path
         };
         let id = |path: &Path| {
@@ -2476,8 +2473,7 @@ mod tests {
         let bin = store.join("0c9yapqd0b8y4mj5xj7mrpmhy3l5ykh8-claude-code-2.0.1/bin");
         std::fs::create_dir_all(&bin).unwrap();
         let claude = bin.join("claude");
-        std::fs::write(&claude, "").unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&claude, "").unwrap();
         let person = Person::new(&SystemAccounts);
         let set = |mode| {
             std::fs::set_permissions(&store, std::fs::Permissions::from_mode(mode)).unwrap();
@@ -2575,7 +2571,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_group_write_counts_only_from_a_group_the_person_has_alone() {
-        use std::os::unix::fs::PermissionsExt as _;
         // SAFETY: getuid takes no arguments and only reads the process
         // identity.
         let uid = unsafe { libc::getuid() };
@@ -2615,8 +2610,7 @@ mod tests {
         let bin = home.join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
         let claude = bin.join("claude");
-        std::fs::write(&claude, "").unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o775)).unwrap();
+        crate::install_executable_mode(&claude, "", 0o775).unwrap();
         let store = PathBuf::from(NIX_STORE);
 
         for accounts in [alone(&[], vec![uid]), alone(&["u"], vec![uid, uid])] {

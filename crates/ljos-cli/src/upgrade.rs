@@ -217,7 +217,7 @@ fn keep_rollback(name: &str, installed: &Path, dir: &Path, version: &str) -> Res
             }
         }
     }
-    std::fs::copy(installed, &keep)?;
+    crate::copy_executable(installed, &keep)?;
     Ok(())
 }
 
@@ -568,12 +568,7 @@ fn upgrade_ljos(version: Option<&str>, dir: &Path, only: Option<&str>) -> Result
         let old = old_version(&installed);
         keep_rollback(name, &installed, dir, &version)?;
         let staged = dir.join(format!("{name}.new"));
-        std::fs::copy(&new, &staged)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
-        }
+        crate::copy_executable(&new, &staged)?;
         let held = pids_holding(&installed);
         replace_installed(&staged, &installed, &held)?;
         out.push_str(&running_note(name, &held));
@@ -688,13 +683,7 @@ fn place_component(dir: &Path, name: &str, version: &str, tree: &Path) -> Result
     let old = old_version(&installed);
     keep_rollback(name, &installed, dir, version).map_err(|e| one_line(&e))?;
     let staged = dir.join(format!("{name}.new"));
-    std::fs::copy(&new, &staged).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| e.to_string())?;
-    }
+    crate::copy_executable(&new, &staged).map_err(|e| e.to_string())?;
     let held = pids_holding(&installed);
     replace_installed(&staged, &installed, &held).map_err(|e| one_line(&e))?;
     Ok(format!(

@@ -45,12 +45,7 @@ impl Home {
         std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
         std::fs::write(root.join("tracker/Software/demo/issues.org"), ISSUES).unwrap();
         let bin = root.join("home/.local/bin/vissue");
-        std::fs::write(&bin, VISSUE_STUB).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        ljos_cli::install_executable(&bin, VISSUE_STUB).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         thread::spawn(move || serve(listener, atoms));

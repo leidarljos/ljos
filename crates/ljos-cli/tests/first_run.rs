@@ -257,8 +257,8 @@ fn link_programs(bin: &Path) {
         ("ljos", env!("CARGO_BIN_EXE_ljos")),
         ("ljos-mcp", env!("CARGO_BIN_EXE_ljos-mcp")),
     ] {
-        std::fs::copy(src, bin.join(name)).unwrap_or_else(|err| panic!("copy {name}: {err}"));
-        std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::copy_executable(Path::new(src), &bin.join(name))
+            .unwrap_or_else(|err| panic!("copy {name}: {err}"));
     }
     for name in [
         "vissue",

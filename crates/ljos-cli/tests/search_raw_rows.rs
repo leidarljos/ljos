@@ -42,7 +42,6 @@ fn world() -> Option<World> {
 }
 
 fn write_embed_stub(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     let body = "#!/usr/bin/env python3\n\
 import json, sys\n\
 for line in sys.stdin:\n\
@@ -58,10 +57,7 @@ for line in sys.stdin:\n\
 \t\tprint(json.dumps({'scores': [0.8] * max(n, 1)}), flush=True)\n\
 \telse:\n\
 \t\tprint(json.dumps({'v': [0.2, 0.4, 0.1]}), flush=True)\n";
-    std::fs::write(path, body).unwrap();
-    let mut perm = std::fs::metadata(path).unwrap().permissions();
-    perm.set_mode(0o755);
-    std::fs::set_permissions(path, perm).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 fn world_with(encoder: bool) -> Option<World> {

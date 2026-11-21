@@ -18,11 +18,9 @@ use std::process::{Command, Output, Stdio};
 const CONVERSATION: &str = "bc-872164c1-e14f-56d0-a32e-fc0bd5afad41";
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn vissue_dir() -> PathBuf {

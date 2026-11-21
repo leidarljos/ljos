@@ -91,14 +91,9 @@ logout)
 esac
 "#;
 
-/// Write the script, sync it, and close the handle before anything execs it.
+/// Publish the script through [`ljos_cli::install_executable_mode`].
 fn write_program(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    let mut file = std::fs::File::create(path).unwrap();
-    file.write_all(body.as_bytes()).unwrap();
-    file.sync_all().unwrap();
-    drop(file);
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    ljos_cli::install_executable_mode(path, body, 0o700).unwrap();
 }
 
 struct World {

@@ -8,7 +8,6 @@
 ljos_test_boot::harness!();
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -161,8 +160,7 @@ fn assert_deps_copy_stays_a_runner(bin: &Path) {
     let deps = dir.path().join("deps");
     fs::create_dir_all(&deps).unwrap();
     let copy = deps.join("ljos");
-    fs::copy(bin, &copy).unwrap();
-    fs::set_permissions(&copy, fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::copy_executable(bin, &copy).unwrap();
     assert!(
         copy.to_string_lossy().contains("/deps/"),
         "copy path {} has no /deps/ segment",

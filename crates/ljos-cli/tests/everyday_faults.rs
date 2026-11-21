@@ -364,17 +364,11 @@ fn a_recall_of_an_empty_pack_names_remember() {
     issues(&home, ORG);
     let bin = home.root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    std::fs::write(
-        bin.join("vissue"),
+    ljos_cli::install_executable(
+        &bin.join("vissue"),
         "#!/bin/sh\nif [ \"$1\" = recall ]; then echo tracker; fi\nexit 0\n",
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(bin.join("vissue"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-    }
     let url = empty_pack();
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let out = home.run(
@@ -618,20 +612,13 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
         log.display()
     );
     let packset = home.join("bin/packset");
-    std::fs::write(&packset, &script).unwrap();
+    ljos_cli::install_executable(&packset, script).unwrap();
     let curl = home.join("bin/curl");
-    std::fs::write(
+    ljos_cli::install_executable(
         &curl,
         "#!/bin/sh\necho 'curl: network is unreachable' >&2\nexit 6\n",
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for path in [&packset, &curl] {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-    }
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)

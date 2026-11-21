@@ -94,17 +94,9 @@ impl Seat {
         ] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
-        std::fs::write(root.join("bin/packset"), "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::write(root.join("bin/vissue"), "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::write(root.join("bare/vissue"), "#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            for path in ["bin/packset", "bin/vissue", "bare/vissue"] {
-                std::fs::set_permissions(root.join(path), std::fs::Permissions::from_mode(0o755))
-                    .unwrap();
-            }
-        }
+        ljos_cli::install_executable(&root.join("bin/packset"), "#!/bin/sh\nexit 0\n").unwrap();
+        ljos_cli::install_executable(&root.join("bin/vissue"), "#!/bin/sh\nexit 0\n").unwrap();
+        ljos_cli::install_executable(&root.join("bare/vissue"), "#!/bin/sh\nexit 0\n").unwrap();
         Self { root }
     }
 

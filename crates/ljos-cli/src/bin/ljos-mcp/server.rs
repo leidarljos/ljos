@@ -6583,9 +6583,8 @@ mod tests {
 
         let bin = tempfile::tempdir().unwrap();
         let program = bin.path().join("deedar");
-        std::fs::write(&program, "#!/bin/sh\necho no such deed >&2\nexit 1\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::install_executable(&program, "#!/bin/sh\necho no such deed >&2\nexit 1\n")
+            .unwrap();
         unsafe { std::env::set_var("PATH", bin.path()) };
         let Err(err) = server
             .ljos_evidence(Parameters(AccessionArgs {
@@ -6664,7 +6663,7 @@ mod tests {
         let danger = home.path().join("danger");
         std::fs::create_dir(&danger).expect("danger dir");
         let bin = home.path().join("ljos-policyd");
-        std::fs::write(
+        ljos_cli::install_executable(
             &bin,
             "#!/bin/sh\n\
              if [ \"$(basename \"$(/bin/pwd -P)\")\" = \"danger\" ]; then\n\
@@ -6674,10 +6673,6 @@ mod tests {
              printf 'allow\\n'\n",
         )
         .expect("policyd");
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
         unsafe {
             std::env::set_var("POLICYD_BIN", &bin);
             std::env::set_var("LJOS_GUARD", "on");
@@ -6720,7 +6715,7 @@ mod tests {
         std::fs::create_dir_all(&danger).expect("danger dir");
         let bin = home.path().join("ljos-policyd");
         // An older daemon's deny is read as the same warning.
-        std::fs::write(
+        ljos_cli::install_executable(
             &bin,
             "#!/bin/sh\n\
              case \"$*\" in\n\
@@ -6734,10 +6729,6 @@ mod tests {
              printf 'allow\\n'\n",
         )
         .expect("policyd");
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
         unsafe {
             std::env::set_var("POLICYD_BIN", &bin);
             std::env::set_var("LJOS_GUARD", "on");

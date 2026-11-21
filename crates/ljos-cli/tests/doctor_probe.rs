@@ -15,12 +15,8 @@ fn doctor_reports_a_hanging_version_probe_and_finishes() {
     let bin = root.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let wrapper = bin.join("ljos-mcp");
-    std::fs::write(&wrapper, "#!/bin/sh\n# exec /no/such/ljos-mcp\nsleep 30\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    ljos_cli::install_executable(&wrapper, "#!/bin/sh\n# exec /no/such/ljos-mcp\nsleep 30\n")
+        .unwrap();
     std::fs::write(
         home.join(".cursor/mcp.json"),
         r#"{"mcpServers":{"ljos":{"command":"ljos-mcp"}}}"#,

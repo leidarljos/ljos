@@ -18,22 +18,14 @@ pub fn install_dir() -> tempfile::TempDir {
         .unwrap()
 }
 
-/// Copy `/bin/sh` to `path` unless it is there, and wait until it runs.
-/// A test thread that forked while the copy was open holds it for writing
-/// until that child execs, and an exec meanwhile fails as text file busy.
+/// Copy `/bin/sh` to `path` unless it is there, then start it once.
+///
+/// The copy runs in another process and exits before the rename, so a fork
+/// in this process does not keep a write descriptor on `path`.
 pub fn runner_at(path: &Path) {
     if path.exists() {
         return;
     }
-    let tmp = path.with_extension("part");
-    std::fs::copy("/bin/sh", &tmp).unwrap();
-    std::fs::rename(&tmp, path).unwrap();
-    for _ in 0..200 {
-        match std::process::Command::new(path).args(["-c", ":"]).status() {
-            Err(e) if e.raw_os_error() == Some(26) => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            _ => return,
-        }
-    }
+    ljos_cli::copy_executable(Path::new("/bin/sh"), path).unwrap();
+    let _ = std::process::Command::new(path).args(["-c", ":"]).status();
 }

@@ -23,9 +23,7 @@ const CONV_Y: &str = "0199a1b2-c3d4-4e5f-8a6b-00000000000y";
 const CONV_Z: &str = "0199a1b2-c3d4-4e5f-8a6b-00000000000z";
 
 fn script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 fn text_of(out: &Output) -> String {

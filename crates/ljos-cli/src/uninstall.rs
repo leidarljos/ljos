@@ -325,14 +325,8 @@ fn program_step(bin: &Path, name: &str, opts: &Options) -> Option<Step> {
 ///
 /// The directory cannot be written.
 pub fn write_stub(path: &Path) -> std::io::Result<()> {
-    let tmp = path.with_extension(format!("stub.{}", std::process::id()));
-    std::fs::write(&tmp, STUB)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
-    }
-    std::fs::rename(&tmp, path)
+    // Rename onto `path`, so a running `ljos` keeps the previous inode.
+    crate::install_executable(path, STUB)
 }
 
 fn xdg(var: &str, under_home: &str) -> Option<PathBuf> {

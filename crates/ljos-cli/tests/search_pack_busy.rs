@@ -379,11 +379,9 @@ fn a_remember_that_stays_busy_stores_nothing() {
 }
 
 fn stub_vissue(bin: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(bin).unwrap();
     let path = bin.join("vissue");
-    std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, "#!/bin/sh\nexit 0\n").unwrap();
 }
 
 fn recall(url: &str, home: &Path, issue: &str) -> (std::process::Output, Duration) {

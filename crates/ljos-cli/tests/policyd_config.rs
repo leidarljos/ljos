@@ -8,7 +8,6 @@
 
 ljos_test_boot::harness!();
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -83,8 +82,7 @@ impl Seat {
     }
 
     fn executable(&self, rel: &str, body: &str) {
-        self.write(rel, body);
-        std::fs::set_permissions(self.path(rel), std::fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::install_executable(&self.path(rel), body).unwrap();
     }
 
     fn env(&self, cmd: &mut Command) {

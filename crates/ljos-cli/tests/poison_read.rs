@@ -876,12 +876,11 @@ fn an_unconfirmed_promoted_deny_still_warns_as_unverified() {
 /// A `vissue` that answers every call with `body`, so a brief reads a
 /// tracker without one.
 fn stub_vissue(seat: &Seat, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let bin = seat.home.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let path = bin.join("vissue");
-    std::fs::write(&path, format!("#!/bin/sh\ncat <<'BODY'\n{body}\nBODY\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, format!("#!/bin/sh\ncat <<'BODY'\n{body}\nBODY\n"))
+        .unwrap();
 }
 
 /// A persona's own working notes do not read as what it established in

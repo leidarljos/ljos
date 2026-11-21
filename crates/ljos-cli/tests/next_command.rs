@@ -105,16 +105,11 @@ fn seat(url: &str) -> Seat {
         std::fs::create_dir_all(home.path().join(dir)).unwrap();
     }
     let curl = home.path().join("bin/curl");
-    std::fs::write(
+    ljos_cli::install_executable(
         &curl,
         "#!/bin/sh\necho 'curl: network is unreachable' >&2\nexit 6\n",
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
     Seat {
         home,
         url: url.to_string(),

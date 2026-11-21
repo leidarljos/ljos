@@ -30,7 +30,6 @@ ljos_test_boot::harness!();
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -283,8 +282,7 @@ fn seat(fixture: &Fixture) -> Option<Seat> {
         std::fs::create_dir_all(dir.path().join(sub)).expect("home dirs");
     }
     let encoder = dir.path().join("packset-embed");
-    std::fs::write(&encoder, ENCODER).expect("encoder");
-    std::fs::set_permissions(&encoder, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    ljos_cli::install_executable(&encoder, ENCODER).expect("encoder");
     let groups = serde_json::to_string(&fixture.encoder.groups).expect("groups");
     std::fs::write(dir.path().join("packset-embed.json"), groups).expect("groups");
     let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos"))

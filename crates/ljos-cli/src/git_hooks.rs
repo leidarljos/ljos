@@ -667,13 +667,8 @@ fn write_owned_hooks(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("git-hooks: {}", dir.display()))?;
     for name in HOOK_NAMES {
         let path = dir.join(name);
-        fs::write(&path, hook_body(name))
+        crate::install_executable(&path, hook_body(name))
             .with_context(|| format!("git-hooks: {}", path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
-        }
     }
     Ok(())
 }
@@ -699,7 +694,8 @@ fn chain_user_hooks(dir: &Path) -> Result<()> {
             .unwrap_or("");
         let next = merge_block(text, name);
         if existing.is_none() || next != text {
-            fs::write(&path, next).with_context(|| format!("git-hooks: {}", path.display()))?;
+            crate::install_executable(&path, next)
+                .with_context(|| format!("git-hooks: {}", path.display()))?;
         }
         ensure_executable(&path)?;
     }

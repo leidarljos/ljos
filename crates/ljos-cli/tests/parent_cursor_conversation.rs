@@ -114,12 +114,7 @@ fn a_parent_cursor_id_in_another_home_does_not_leak_after_a_write_without_xdg_ru
     let stub = child_root.path().join("bin");
     std::fs::create_dir_all(&stub).unwrap();
     let curl = stub.join("curl");
-    std::fs::write(&curl, "#!/bin/sh\nexit 1\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    ljos_cli::install_executable(&curl, "#!/bin/sh\nexit 1\n").unwrap();
     let script = format!(
         "unset XDG_RUNTIME_DIR CURSOR_CONVERSATION_ID CURSOR_AGENT LJOS_SEAT; \
          export HOME='{}' XDG_CONFIG_HOME='{}/.config' XDG_STATE_HOME='{}/.local/state' \

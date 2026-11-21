@@ -245,18 +245,16 @@ fn an_ordinary_interpreter_under_a_runner_stays_allowed() {
 /// so a runner that may not run `vissue note` still notes through ljos.
 #[test]
 fn the_vissue_children_ljos_runs_are_not_refused() {
-    use std::os::unix::fs::PermissionsExt;
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let log = home.path().join("vissue.log");
     let stub = bin.join("vissue");
-    std::fs::write(
+    ljos_cli::install_executable(
         &stub,
         format!("#!/bin/sh\necho \"vissue $*\" >> '{}'\n", log.display()),
     )
     .unwrap();
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!(
         "{}:{}",
         bin.display(),

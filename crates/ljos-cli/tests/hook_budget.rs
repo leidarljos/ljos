@@ -167,12 +167,10 @@ fn a_large_transcript_and_a_quiet_pack_do_not_hold_the_hook() {
 #[cfg(unix)]
 #[test]
 fn a_hook_with_no_policyd_listening_allows_inside_the_guard_wait() {
-    use std::os::unix::fs::PermissionsExt;
     const GUARD_WAIT: Duration = Duration::from_millis(500);
     let home = tempfile::tempdir().unwrap();
     let hang = home.path().join("ljos-policyd");
-    std::fs::write(&hang, "#!/bin/sh\nexec sleep 30\n").unwrap();
-    std::fs::set_permissions(&hang, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&hang, "#!/bin/sh\nexec sleep 30\n").unwrap();
     let missing = home.path().join("gone/ljos-policyd");
     let wait = format!("{}", GUARD_WAIT.as_secs_f32());
     // Two seconds covers a debug binary starting on a loaded runner. The

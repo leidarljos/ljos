@@ -276,10 +276,8 @@ mod tests {
     }
 
     fn fake_policyd(dir: &Path, verdict: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
         let path = dir.join("policyd");
-        std::fs::write(&path, format!("#!/bin/sh\nprintf '{verdict}\\n'\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&path, format!("#!/bin/sh\nprintf '{verdict}\\n'\n")).unwrap();
         path
     }
 

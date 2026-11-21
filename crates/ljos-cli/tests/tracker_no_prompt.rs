@@ -40,9 +40,7 @@ fn on_path(name: &str) -> Option<PathBuf> {
 }
 
 fn script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 /// Answers every request 401 with a Basic challenge, as a private

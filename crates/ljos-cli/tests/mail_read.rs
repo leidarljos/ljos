@@ -9,10 +9,11 @@ ljos_test_boot::harness!();
 #[path = "common/maildir.rs"]
 mod maildir;
 
+use std::os::unix::fs::PermissionsExt;
+
 use ljos_cli::mailbox::config::MailConfig;
 use ljos_cli::mailbox::notmuch::Reader;
 use sha2::{Digest as _, Sha256};
-use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, Instant};
 
 fn reader(mailbox: &maildir::Mailbox) -> Reader {
@@ -207,8 +208,7 @@ fn a_notmuch_config_others_could_change_is_refused() {
 /// A reader whose notmuch is `script`, a shell script.
 fn fake(dir: &tempfile::TempDir, script: &str) -> Reader {
     let bin = dir.path().join("notmuch");
-    std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
     std::fs::write(dir.path().join("notmuch-config"), "").unwrap();
     Reader::new(&MailConfig {
         notmuch: Some(bin),

@@ -5,7 +5,6 @@
 
 ljos_test_boot::harness!();
 
-use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Output};
 
 struct World {
@@ -48,8 +47,7 @@ exit 0
         let deedar = "#!/bin/sh\nprintf 'id=%s kind=file\\n' \"$2\"\nexit 0\n";
         for (name, body) in [("vissue", vissue.as_str()), ("deedar", deedar)] {
             let path = dir.path().join(name);
-            std::fs::write(&path, body).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            ljos_cli::install_executable(&path, body).unwrap();
         }
         let home = dir.path().join("home");
         std::fs::create_dir_all(home.join("run")).unwrap();

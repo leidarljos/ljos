@@ -6678,14 +6678,12 @@ mod tests {
 
     /// `age` that writes its stdin to `-o`. The caller holds [`crate::test_env_lock`].
     fn with_fake_age<T>(dir: &Path, body: impl FnOnce() -> T) -> T {
-        use std::os::unix::fs::PermissionsExt as _;
         let fake_age = dir.join("age");
-        std::fs::write(
+        crate::install_executable(
             &fake_age,
             "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    -r) shift 2 ;;\n    *) shift ;;\n  esac\ndone\nif [ -n \"$out\" ]; then cat > \"$out\"; else cat; fi\n",
         )
         .unwrap();
-        std::fs::set_permissions(&fake_age, std::fs::Permissions::from_mode(0o755)).unwrap();
         with_path_dir(dir, body)
     }
 
@@ -6749,7 +6747,6 @@ mod tests {
     /// index lock and drops it on SIGTERM, as git does.
     #[test]
     fn a_commit_past_its_budget_leaves_no_index_lock() {
-        use std::os::unix::fs::PermissionsExt as _;
         // git comes from PATH. A parallel test points PATH at a directory
         // with no git while this one is running.
         let _env = crate::test_env_lock();
@@ -6763,8 +6760,8 @@ mod tests {
             .expect("git on PATH");
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            bin.join("git"),
+        crate::install_executable(
+            &bin.join("git"),
             format!(
                 "#!/bin/sh\ncase \" $* \" in\n  *' commit '*)\n    lock='{}'\n    : > \"$lock\"\n    trap 'rm -f \"$lock\"; exit 1' TERM\n    sleep 30 &\n    wait\n    ;;\nesac\nexec '{}' \"$@\"\n",
                 root.join(".git/index.lock").display(),
@@ -6772,7 +6769,6 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let started = std::time::Instant::now();
         let deadline = started + std::time::Duration::from_millis(1500);
         let cut =
@@ -7249,14 +7245,12 @@ mod tests {
     fn a_example_host_atom_never_lands_in_the_cloud_file() {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
         let fake_age = dir.path().join("age");
-        std::fs::write(
+        crate::install_executable(
             &fake_age,
             "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    -r) shift 2 ;;\n    *) shift ;;\n  esac\ndone\nif [ -n \"$out\" ]; then cat > \"$out\"; else cat; fi\n",
         )
         .unwrap();
-        std::fs::set_permissions(&fake_age, std::fs::Permissions::from_mode(0o755)).unwrap();
         struct PathGuard(Option<std::ffi::OsString>);
         impl Drop for PathGuard {
             fn drop(&mut self) {
@@ -7957,9 +7951,7 @@ mod tests {
         let script = "#!/bin/sh\nif [ \"$LC_ALL\" = C ]; then echo 'no matching keys found' >&2; exit 1; fi\necho 'Aucune clef correspondante' >&2; exit 1\n";
         for name in ["age", "rage"] {
             let path = bin.join(name);
-            std::fs::write(&path, script).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::install_executable(&path, script).unwrap();
         }
         let old_path = std::env::var("PATH").unwrap_or_default();
         // Only the fakes. A real age later on PATH would hide rage.
@@ -7989,9 +7981,7 @@ mod tests {
         let script = "#!/bin/sh\nif [ \"$LC_ALL\" = C ] && [ \"$LANG\" = C ] && [ \"$LANGUAGE\" = C ] && [ \"$LC_MESSAGES\" = C ]; then echo 'no matching keys found' >&2; exit 1; fi\necho 'Aucune clef correspondante' >&2; exit 1\n";
         for name in ["age", "rage"] {
             let path = bin.join(name);
-            std::fs::write(&path, script).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::install_executable(&path, script).unwrap();
         }
         let old_path = std::env::var("PATH").unwrap_or_default();
         let old_language = std::env::var("LANGUAGE").ok();
@@ -8035,13 +8025,11 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let age = bin.join("age");
-        std::fs::write(
+        crate::install_executable(
             &age,
             "#!/bin/sh\necho 'no matching keys found' >&2\nexit 1\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&age, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("PATH", &bin);
         std::env::set_var("PACKSET_URL", "off");
         let config = dir.path().join("config");
@@ -8076,21 +8064,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            bin.join("age"),
+        crate::install_executable(
+            &bin.join("age"),
             "#!/bin/sh\necho 'no matching keys found' >&2\nexit 1\n",
         )
         .unwrap();
-        std::fs::write(
-            bin.join("age-keygen"),
+        crate::install_executable(
+            &bin.join("age-keygen"),
             "#!/bin/sh\nif [ \"$1\" = -y ]; then echo age1fromkeygen; exit 0; fi\nexit 1\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        for name in ["age", "age-keygen"] {
-            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
-        }
         std::env::set_var("PATH", &bin);
         std::env::set_var("PACKSET_URL", "off");
         let config = dir.path().join("config");
@@ -8120,13 +8103,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            bin.join("age"),
+        crate::install_executable(
+            &bin.join("age"),
             "#!/bin/sh\necho 'no matching keys found' >&2\nexit 1\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(bin.join("age"), std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("PATH", &bin);
         std::env::set_var("PACKSET_URL", "off");
         let config = dir.path().join("config");
@@ -8182,13 +8163,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            bin.join("age"),
+        crate::install_executable(
+            &bin.join("age"),
             "#!/bin/sh\necho 'no matching keys found' >&2\nexit 1\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(bin.join("age"), std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("PATH", &bin);
         std::env::set_var("PACKSET_URL", "off");
         let config = dir.path().join("config");
@@ -8236,21 +8215,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            bin.join("age"),
+        crate::install_executable(
+            &bin.join("age"),
             "#!/bin/sh\necho 'no matching keys found' >&2\nexit 1\n",
         )
         .unwrap();
-        std::fs::write(
-            bin.join("age-keygen"),
+        crate::install_executable(
+            &bin.join("age-keygen"),
             "#!/bin/sh\necho 'age-keygen: refusing' >&2\nexit 1\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        for name in ["age", "age-keygen"] {
-            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
-        }
         let old_path = std::env::var("PATH").unwrap_or_default();
         let old_pack = std::env::var("PACKSET_URL").ok();
         let old_xdg = std::env::var("XDG_CONFIG_HOME").ok();

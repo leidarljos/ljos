@@ -22,10 +22,8 @@ const USAGE_STATUS: i32 = 2;
 const MISSING: &str = "Nope-1234";
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 /// A pack that answers an empty roster, so a read does not wait on a writer.

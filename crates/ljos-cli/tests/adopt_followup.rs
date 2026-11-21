@@ -69,12 +69,8 @@ impl World {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let deedar = bin.join("deedar");
-        std::fs::write(&deedar, "#!/bin/sh\necho \"no such deed $2\" >&2\nexit 1\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&deedar, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        ljos_cli::install_executable(&deedar, "#!/bin/sh\necho \"no such deed $2\" >&2\nexit 1\n")
+            .unwrap();
         let path = format!(
             "{}:{}",
             bin.display(),

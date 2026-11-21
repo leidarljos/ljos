@@ -2,7 +2,6 @@
 
 ljos_test_boot::harness!();
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -22,8 +21,7 @@ fn executable(path: &Path, body: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
-    fs::write(path, body).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 fn says(name: &str, version: &str) -> String {
@@ -51,8 +49,7 @@ fn fixture_release(root: &Path) -> PathBuf {
         ("ljos-mcp", env!("CARGO_BIN_EXE_ljos-mcp")),
     ] {
         let dest = stage.join(name);
-        fs::copy(src, &dest).unwrap();
-        fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::copy_executable(Path::new(src), &dest).unwrap();
     }
     let rel = root.join("release");
     fs::create_dir_all(&rel).unwrap();
@@ -137,8 +134,7 @@ fn publish(rel: &Path, repo: &str, version: &str, asset: &str, bin_name: &str, b
     let stage = stage_root.join(stem_of(asset));
     fs::create_dir_all(&stage).unwrap();
     let dest = stage.join(bin_name);
-    fs::copy(bin, &dest).unwrap();
-    fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::copy_executable(bin, &dest).unwrap();
     let tarball = rel.join(asset);
     let made = Command::new("tar")
         .arg(if asset.ends_with(".tar.xz") {
@@ -277,8 +273,7 @@ fn a_second_upgrade_keeps_the_older_rollback() {
 fn install_built(dir: &Path, name: &str, bin: &Path) {
     fs::create_dir_all(dir).unwrap();
     let dest = dir.join(name);
-    fs::copy(bin, &dest).unwrap();
-    fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::copy_executable(bin, &dest).unwrap();
 }
 
 /// Every installed component already matches its release, so nothing is written.

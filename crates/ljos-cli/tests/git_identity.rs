@@ -18,11 +18,9 @@ const NAME_COMMAND: &str = "git config --global user.name \"Your Name\"";
 const EMAIL_COMMAND: &str = "git config --global user.email \"you@example.com\"";
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 /// The directory of the `vissue` the test run has on `PATH`.
