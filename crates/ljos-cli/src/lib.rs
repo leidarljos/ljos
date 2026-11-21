@@ -51796,6 +51796,16 @@ fn persist_one_tracker_file(
         note_deferred_paths(dir, &refs);
         return tracker_lock_busy(dir, lock_wait);
     };
+    // A write whose body another writer's commit already carried leaves
+    // the file clean, so its seat line is the only change. Holding that
+    // line would leave HEAD with the body and no seat, and a later stamp
+    // finds the line on disk and commits nothing. Such a write commits
+    // now; a file that was already dirty keeps the batch hold.
+    let mut clean_args = vec!["status", "--porcelain", "--"];
+    clean_args.extend(specs.iter().map(String::as_str));
+    let clean_before =
+        matches!(git(&clean_args), Ok(o) if o.status.success() && o.stdout.is_empty());
+    let may_hold = may_hold && (writes.is_empty() || !clean_before);
     stamp_write_seats(path, writes);
     let mut live: Vec<&str> = Vec::new();
     let mut ignored_note = String::new();
@@ -61683,7 +61693,9 @@ mod tests {
     /// persist only once that split is in HEAD, find their issue files
     /// clean: the split commit carried them. Each persist still commits its
     /// seat line, so a note from `attach_to_issue` or a claim names its
-    /// seat. Persisting the same write again stamps nothing more.
+    /// seat. Persisting the same write again stamps nothing more. An open
+    /// batch window does not hold the note's seat line, which is the only
+    /// change in its file.
     #[test]
     fn a_write_persisted_after_another_writers_split_commits_its_seat_line() {
         let _env = env_guard();
@@ -61702,6 +61714,12 @@ mod tests {
         );
         assert_eq!(made, super::PathCommit::Made);
         assert!(vissue_core::ledger::is_ledger(&issues));
+        std::env::set_var("LJOS_TRACKER_BATCH_SECS", "600");
+        std::fs::write(
+            root.join(super::TRACKER_BATCH_FILE),
+            format!("{}\n", super::unix_now()),
+        )
+        .unwrap();
         for (id, verb, line) in [
             ("probe-b007", "noted", "- Noted by saddle"),
             ("probe-b123", "claimed", "- Claimed by saddle"),
