@@ -1223,8 +1223,8 @@ fn book_commit(hook: &str) -> Result<()> {
         return Ok(());
     }
     let _children = HookChildren::enter();
-    // An amend or a rebase lists old and new shas; post-commit may have
-    // noted the new HEAD already.
+    // Only HEAD is noted, after an amend or a rebase too, and once:
+    // post-commit may have noted it already.
     if already_booked(&repo, &head) {
         return Ok(());
     }

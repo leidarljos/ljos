@@ -4535,8 +4535,9 @@ fn run_hook(hook: HookArgs) -> Result<()> {
     }
     // An agent about to end its turn is audited once: a done claim
     // beside a red test run, or asked work put off, holds it for
-    // one more round. An agy stop with `fullyIdle` is the session
-    // end: it finishes even when a mid-loop stop would have held.
+    // one more round. An agy stop with `fullyIdle` has ended its loop
+    // and skips that audit. It finishes no claim: the session finish is
+    // the SessionEnd branch below.
     let agy_idle = call.shape == ljos_cli::HookShape::Steps
         && call.event == "Stop"
         && ljos_cli::stop_is_idle(&input);
@@ -4947,12 +4948,11 @@ fn run_hook(hook: HookArgs) -> Result<()> {
     // tracker that does not answer cannot hold the call. A call a
     // rule warned on runs, so it is booked too; a blocked call does
     // not run and is not booked.
-    // A Stop the audit held never reaches this line, except an agy
-    // stop that is idle: that one is the session end and finishes.
-    // A mid-loop agy stop, fullyIdle absent, does not finish.
-    // The book is queued, not kept in this call: it waits on a lock
-    // every seat shares, and a claim reads the whole tracker. A
-    // gate's book is queued once its answer is out.
+    // A Stop the audit held never reaches this line. An idle agy stop
+    // skipped the audit and is booked; a mid-loop agy stop, fullyIdle
+    // absent, is not. Booking queues no job for any event, so neither
+    // files or finishes a claim. A gate's book is queued once its answer
+    // is out.
     let agy_mid_loop = call.shape == ljos_cli::HookShape::Steps
         && call.event == "Stop"
         && !ljos_cli::stop_is_idle(&input);

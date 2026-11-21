@@ -2768,7 +2768,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this for your own working notes on an issue: progress, a finding, or a claim you read in a file, a tool's output or a web page. A dated line on its logbook, with the tracker committed. The note stays on the ticket and is not written into memory, so it is never recalled and never falls due for review. Recall fences the logbook as unverified tracker text. The note goes on the issue you name, else the one this seat holds; it never files an issue.",
+        description = "Call this for your own working notes on an issue: progress, a finding, or a claim you read in a file, a tool's output or a web page. A dated line on its logbook, with the tracker committed. The note stays on the ticket and is not written into memory, so it is never recalled and never falls due for review. Recall fences the logbook as unverified tracker text. The note goes on the issue you name, else the one this seat holds; it never files an issue. A claim a sitting left pending on that issue is retried.",
         annotations(
             title = "Note progress",
             read_only_hint = false,
@@ -3204,7 +3204,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the task is done. Pass the lesson. It completes the session node, files the lesson, releases the claim, syncs, and pushes the tracker unless LJOS_TRACKER_GIT is commit or off. Pass the issue ljos_start claimed; absent, that issue is the one this sitting has. This tool does not close the tracker ticket. A person does.",
+        description = "Call this when the task is done. Pass the lesson. It retries a claim the sitting left pending, files the lesson, releases the claim so the session node goes back to ready, syncs, and pushes the tracker unless LJOS_TRACKER_GIT is commit or off. Pass the issue ljos_start claimed; absent, that issue is the one this sitting has. This tool does not close the tracker ticket. A person does.",
         annotations(
             title = "Close a sitting",
             read_only_hint = false,
@@ -3302,7 +3302,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the work on an issue is finished, failed, or cancelled: the session node goes terminal. Completing is not closing; the ticket stays open until the tracker changes its state. To stop without finishing, ljos_release.",
+        description = "Call this when the work on an issue is finished, failed, or cancelled: the session node goes terminal. A node a gone conversation of this seat left is claimed first. Completing is not closing; the ticket stays open until the tracker changes its state. To stop without finishing, ljos_release.",
         annotations(
             title = "Complete a node",
             read_only_hint = false,

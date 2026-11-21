@@ -22,7 +22,8 @@ const started = new Set<string>()
 
 type Answer = { ok: true; out: any | undefined } | { ok: false; why: string }
 
-// Edit tools the seat files a claim for, under the name ljos hook expects.
+// Tools the hook sees, under the name ljos hook expects. An edit files no
+// claim.
 function seatTool(name: string): { tool: string; bash: boolean } | undefined {
   const n = name.toLowerCase().replace(/-/g, "_")
   if (n === "bash" || n === "shell") return { tool: "Bash", bash: true }

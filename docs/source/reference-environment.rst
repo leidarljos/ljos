@@ -353,10 +353,15 @@ stdin is an argv line and answered in plain lines.
 | ``SubagentStop``       | names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once                                                                                                                                                                                                                                                    |
 +------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
-No hook takes or finishes a claim. A Write files no claim, and a later
-session or MCP call does not finish a sitting when the runner that
-opened it is gone. The claim stays until ``ljos finish`` or ``ljos release``,
-or until another seat takes it over as stale.
+No hook takes or finishes a claim, and a Write files no claim. A later
+sitting hands an expired claim back: the reclaim step of ``ljos sitting``
+and of ``ljos_sitting`` releases a claim quiet longer than
+``LJOS_LEASE_SECS`` whose conversation is gone, or that no conversation on
+this host names, and keeps one whose runner still runs. When
+``LJOS_TRACKER_GIT`` is ``push``, the default, it first hands back this
+machine's tracker claims whose owner is gone. Otherwise the claim stays
+until ``ljos finish``, ``ljos release`` or ``ljos complete`` (``ljos_finish``, ``ljos_release``,
+``ljos_complete``) ends it, or another seat takes it over as stale.
 On Linux, a child of the recorded client does not keep the MCP connection
 alive after that client exits.
 

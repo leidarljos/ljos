@@ -370,6 +370,26 @@ fn claim_file_and_deed_each_describe_their_own_call() {
     );
     let deed = description_of(&tools, "ljos_deed");
     assert!(deed.contains("A git commit is not cited for you"), "{deed}");
+    let finish = description_of(&tools, "ljos_finish");
+    assert!(!finish.contains("completes the session node"), "{finish}");
+    assert!(
+        finish.contains("releases the claim so the session node goes back to ready"),
+        "{finish}"
+    );
+    assert!(
+        finish.contains("retries a claim the sitting left pending"),
+        "{finish}"
+    );
+    let note = description_of(&tools, "ljos_note");
+    assert!(
+        note.contains("A claim a sitting left pending on that issue is retried"),
+        "{note}"
+    );
+    let complete = description_of(&tools, "ljos_complete");
+    assert!(
+        complete.contains("A node a gone conversation of this seat left is claimed first"),
+        "{complete}"
+    );
 
     let prompt = session.request(
         "prompts/get",

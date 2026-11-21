@@ -39,9 +39,10 @@ no vissue and takes no claim. A git commit the hooks see is written as one
 `note:` line to the book log; it is not cited as a deed. Stop and the end
 of the session do not finish or release the claim: the end of the session
 fires the session's memories, writes its notes and drains a queued tracker
-push. In ljos-mcp, a write tool takes no claim, and shutdown or an idle
-session leaves the claim in place. Claim with `sitting`, `start` or
-`claim`, cite with `deed`, and free the claim with `finish` or `release`.
+push. In ljos-mcp, shutdown or an idle session leaves the claim in
+place. Claim with `sitting`, `start` or `claim`; `note` and `finish` retry
+a claim a sitting left pending. Cite with `deed`, and free the claim with
+`finish` or `release`.
 
 A bot with no harness hooks passes its own name as `seat` on every call.
 Before any repo work it calls `ljos sitting ISSUE`. `ljos start ISSUE` is
@@ -69,11 +70,12 @@ facts, under an `unverified logbook notes` heading, each labelled by its
 agent-derived origin.
 `finish` takes the lesson, releases the claim, syncs, and pushes the
 tracker. In ljos-mcp, `ljos_start`, `ljos_sitting` and `ljos_claim`
-claim. `ljos_finish` also claims once to retry a claim its sitting could
-not record, and `ljos_finish` and `ljos_complete` take over a node a gone
-conversation of the same seat holds before they complete it. No other
-tool claims, and the server finishes nothing on shutdown or when the
-session goes idle.
+claim. `ljos_note` and `ljos_finish` claim once more when a sitting left
+its claim pending. `ljos_finish` then releases the claim and does not
+complete the node; a node a gone conversation of this seat has claimed
+is released under that conversation's name. `ljos_complete` claims a
+node a gone conversation of this seat left, then completes it. The
+server finishes nothing on shutdown or when the session goes idle.
 On a cloud seat, the one `ljos cloud up` marked, finish exports the deeds
 that seat cited on the issue into `.ljos/deeds/<seat>/`, and the tracker
 commit takes the bag.

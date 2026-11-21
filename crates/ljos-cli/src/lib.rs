@@ -13651,7 +13651,8 @@ impl StopTurn {
 }
 
 /// An agy stop whose execution loop has actually ended. Mid-loop stops
-/// omit `fullyIdle`, and those must not run the session finish.
+/// omit `fullyIdle`. The Stop hook audits a mid-loop stop and does not
+/// book it; it skips the audit for an idle one. Neither finishes a claim.
 #[must_use]
 pub fn stop_is_idle(input: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(input.trim()) else {

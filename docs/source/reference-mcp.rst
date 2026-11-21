@@ -59,9 +59,9 @@ A holder that is running, or whose claim moved inside the lease, is refused with
 The old holder is named in a note on the ticket.
 ``ljos_start`` claims when you call it, as the bare seat or as ``SEAT@TAG`` from ``_meta.conversation_id``.
 ``ljos_sitting`` claims when you call it the same way.
-``ljos_finish`` claims once to retry a claim its sitting could not record.
-``ljos_finish`` and ``ljos_complete`` take over a node a gone conversation of the same seat holds before they complete it.
-``ljos_note``, ``ljos_remember`` and the other write tools do not claim a ticket.
+``ljos_note`` and ``ljos_finish`` claim once more when a sitting left its claim pending.
+``ljos_finish`` then releases the claim and does not complete the node; a node a gone conversation of this seat has claimed is released under that conversation's name.
+``ljos_complete`` claims a node a gone conversation of this seat left, then completes it.
 Call ``ljos_claim`` only to name the issue yourself without ``ljos_start`` or ``ljos_sitting``.
 A named worker occupies one slot, and a ``busy`` refusal names the held node.
 ``ljos_finish`` or ``ljos_release`` frees it.
