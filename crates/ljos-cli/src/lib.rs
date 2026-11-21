@@ -47504,13 +47504,6 @@ pub fn lesson_is_the_persons(under_runner: bool, terminal: bool) -> bool {
     !under_runner && terminal
 }
 
-/// Store the lesson of a finished sitting at once. A lesson learned on an
-/// issue belongs to the scope of the repository that holds the issue,
-/// wherever it was written. One the person typed in a terminal of their
-/// own is `user-declared`; any other is `agent-derived` at L0 (`derived`),
-/// unreviewed until `ljos accept` or `ljos memories review`. Called after
-/// the node completed, so a refusal is a line that names the pack's reason
-/// and the command that keeps the lesson, never an error.
 /// A lesson cut into claims the pack takes: at most two sentences each.
 /// The pack refuses an atom of three or more sentences, so a longer
 /// lesson is kept as several, in order, instead of being turned away.
@@ -47563,6 +47556,16 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Store one claim of the lesson `ljos finish` was given, at once. A
+/// lesson learned on an issue belongs to the scope of the repository that
+/// holds the issue, wherever it was written. One the person typed in a
+/// terminal of their own is `user-declared`; any other is `agent-derived`
+/// at L0 (`derived`), unreviewed until `ljos accept` or `ljos memories
+/// review`. Finish files it before the session node is released or
+/// completed, and a plain finish releases the node and does not complete
+/// it. A refusal is a line that names the pack's reason and the command
+/// that keeps the lesson, never an error, so the finish still goes on to
+/// end the sitting.
 fn finish_lesson(issue: &str, text: &str) -> String {
     let _call = SearchCall::enter();
     let filed = answer_after_start(std::time::Instant::now(), || {
@@ -47570,8 +47573,8 @@ fn finish_lesson(issue: &str, text: &str) -> String {
     });
     match filed {
         Ok(line) => line,
-        // The ticket is already closed. Queue the lesson, as a busy pack
-        // does, so the sentence is not dropped.
+        // A pack that is starting or busy has not judged the lesson.
+        // Queue it, so the sentence is not dropped.
         Err(e) if is_memory_starting(&e) || (!pack_turned_off(&e) && remember_should_queue(&e)) => {
             // A busy writer has not judged the words. Queue the sentence
             // as given. A second finish of the same lesson is the row
@@ -48258,10 +48261,10 @@ pub fn finish(
             bail!("{line}");
         }
     }
-    // The lesson is filed before the node completes. A complete that
-    // refuses used to return first and the lesson never reached the pack
-    // `ljos memories list` reads. The refusal says nothing about the
-    // lesson, so the reason stays the whole error.
+    // The lesson is filed before the node is released or completed. A
+    // complete that refused used to return first and the lesson never
+    // reached the pack `ljos memories list` reads. The refusal says
+    // nothing about the lesson, so the reason stays the whole error.
     let supplied = lesson.map(str::trim).filter(|text| !text.is_empty());
     let lesson_lines = match supplied {
         Some(text) => {
