@@ -7723,17 +7723,42 @@ esac
 # A uid with no passwd entry, as in some containers, is not a reason to
 # refuse rm, git or find. The passwd home wins; $HOME is the fallback.
 # With neither, there is no home to limit the command to, and it runs.
+# macOS has no getent; its directory service names the home there.
 pw_home=
-if command -v getent >/dev/null 2>&1 && command -v id >/dev/null 2>&1; then
-  pw=$(getent passwd "$(id -u)" 2>/dev/null || true)
-  rest=$pw
-  i=0
-  while [ "$i" -lt 5 ]; do
-    rest=${rest#*:}
-    i=$((i + 1))
-  done
-  pw_home=${rest%%:*}
+if command -v id >/dev/null 2>&1; then
+  if command -v getent >/dev/null 2>&1; then
+    pw=$(getent passwd "$(id -u)" 2>/dev/null || true)
+    rest=$pw
+    i=0
+    while [ "$i" -lt 5 ]; do
+      rest=${rest#*:}
+      i=$((i + 1))
+    done
+    pw_home=${rest%%:*}
+  elif command -v dscl >/dev/null 2>&1; then
+    pw_user=$(id -un 2>/dev/null || true)
+    if [ -n "$pw_user" ]; then
+      pw=$(dscl . -read "/Users/$pw_user" NFSHomeDirectory 2>/dev/null || true)
+      pw_home=${pw#NFSHomeDirectory:}
+      while :; do
+        case $pw_home in
+          [[:space:]]*) pw_home=${pw_home#?} ;;
+          *) break ;;
+        esac
+      done
+      while :; do
+        case $pw_home in
+          *[[:space:]]) pw_home=${pw_home%?} ;;
+          *) break ;;
+        esac
+      done
+    fi
+  fi
 fi
+case $pw_home in
+  /*) ;;
+  *) pw_home= ;;
+esac
 resolve_path() {
   rp_in=$1
   [ -n "$rp_in" ] || return 0
@@ -7781,13 +7806,15 @@ under_temp() {
       "$root"|"$root"/*) return 0 ;;
     esac
   done
+  # Without a passwd home a TMPDIR cannot be told from one that holds the
+  # person's home, so it is not a temp root.
   case ${TMPDIR-} in
     /*)
       t=$(resolve_path "$TMPDIR")
       case $t in
         /*/*)
           case ${pw_real-} in
-            "$t"|"$t"/*) ;;
+            ""|"$t"|"$t"/*) ;;
             *)
               case $p in
                 "$t"|"$t"/*) return 0 ;;

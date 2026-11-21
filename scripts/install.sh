@@ -619,22 +619,48 @@ case "${home_real}/" in
     case ${TMPDIR-} in
       /*)
         t=$(resolve_path "$tmp_root")
+        # macOS has no getent; its directory service names the home there.
         pw_home=
-        if command -v getent >/dev/null 2>&1 && command -v id >/dev/null 2>&1; then
-          pw=$(getent passwd "$(id -u)" 2>/dev/null || true)
-          rest=$pw
-          i=0
-          while [ "$i" -lt 5 ]; do
-            rest=${rest#*:}
-            i=$((i + 1))
-          done
-          pw_home=${rest%%:*}
+        if command -v id >/dev/null 2>&1; then
+          if command -v getent >/dev/null 2>&1; then
+            pw=$(getent passwd "$(id -u)" 2>/dev/null || true)
+            rest=$pw
+            i=0
+            while [ "$i" -lt 5 ]; do
+              rest=${rest#*:}
+              i=$((i + 1))
+            done
+            pw_home=${rest%%:*}
+          elif command -v dscl >/dev/null 2>&1; then
+            pw_user=$(id -un 2>/dev/null || true)
+            if [ -n "$pw_user" ]; then
+              pw=$(dscl . -read "/Users/$pw_user" NFSHomeDirectory 2>/dev/null || true)
+              pw_home=${pw#NFSHomeDirectory:}
+              while :; do
+                case $pw_home in
+                  [[:space:]]*) pw_home=${pw_home#?} ;;
+                  *) break ;;
+                esac
+              done
+              while :; do
+                case $pw_home in
+                  *[[:space:]]) pw_home=${pw_home%?} ;;
+                  *) break ;;
+                esac
+              done
+            fi
+          fi
         fi
-        pw_real=$(resolve_path "$pw_home")
+        case $pw_home in
+          /*) pw_real=$(resolve_path "$pw_home") ;;
+          *) pw_real= ;;
+        esac
+        # Without a passwd home a TMPDIR cannot be told from one that
+        # holds the person's home, so it is not a temp root.
         case $t in
           /*/*)
             case ${pw_real-} in
-              "$t"|"$t"/*) ;;
+              ""|"$t"|"$t"/*) ;;
               *)
                 case "${home_real}/" in
                   "$t"/*) temporary_root=$t ;;

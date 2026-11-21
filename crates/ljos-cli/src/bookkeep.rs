@@ -483,11 +483,11 @@ fn per_session_tmpdir(raw: &std::ffi::OsStr, passwd_home: Option<&Path>) -> Opti
     if resolved.components().count() < 3 {
         return None;
     }
-    if let Some(pw) = passwd_home {
-        let pw = canonical_existing_prefix(pw);
-        if pw.starts_with(&resolved) {
-            return None;
-        }
+    // Without a passwd home there is no telling a sandbox TMPDIR from one
+    // that holds the person's own home, so TMPDIR is not a temp root.
+    let pw = canonical_existing_prefix(passwd_home?);
+    if pw.starts_with(&resolved) {
+        return None;
     }
     Some(resolved)
 }
