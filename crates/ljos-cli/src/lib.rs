@@ -60812,6 +60812,17 @@ mod tests {
         }
     }
 
+    /// Move the last tracker commit the batch record at `root` names to
+    /// `ago` seconds before now. A test steps past the window this way
+    /// instead of sleeping through it.
+    fn age_tracker_batch(root: &Path, ago: u64) {
+        let file = root.join(super::TRACKER_BATCH_FILE);
+        let text = std::fs::read_to_string(&file).unwrap();
+        let (_, rest) = text.split_once('\n').unwrap();
+        let at = super::unix_now() - ago;
+        std::fs::write(&file, format!("{at}\n{rest}")).unwrap();
+    }
+
     /// The first write after the window commits, with what was held.
     #[test]
     fn a_write_after_the_batch_window_commits() {
@@ -60823,14 +60834,15 @@ mod tests {
         std::env::set_var("VISSUE_NO_ROUTE", "1");
         std::env::set_var("LJOS_TRACKER_GIT", "commit");
         std::env::set_var("LJOS_SEAT", "saddle");
-        std::env::set_var("LJOS_TRACKER_BATCH_SECS", "1");
+        std::env::set_var("LJOS_TRACKER_BATCH_SECS", "600");
         let layout = vissue_core::Layout::new(root, "Software");
         let seeded = commit_count(root);
         vissue_core::ops::note(&layout, "probe-a1b2", "one").unwrap();
         assert!(persist_tracker("probe-a1b2", "noted").contains("committed"));
         vissue_core::ops::note(&layout, "probe-a1b2", "two").unwrap();
-        assert!(persist_tracker("probe-a1b2", "noted").contains("held"));
-        std::thread::sleep(std::time::Duration::from_millis(2100));
+        let said = persist_tracker("probe-a1b2", "noted");
+        assert!(said.contains("held"), "{said}");
+        age_tracker_batch(root, 601);
         vissue_core::ops::note(&layout, "probe-a1b2", "three").unwrap();
         let said = persist_tracker("probe-a1b2", "noted");
         assert!(said.contains("committed"), "{said}");
