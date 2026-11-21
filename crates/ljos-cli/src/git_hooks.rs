@@ -52,7 +52,7 @@ use anyhow::{anyhow, bail, Context, Result};
 
 /// Every hook git looks up by name. A global `core.hooksPath` hides the
 /// repository's copy of each of these, so the stub has to exist for each.
-const HOOK_NAMES: &[&str] = &[
+pub(crate) const HOOK_NAMES: &[&str] = &[
     "applypatch-msg",
     "pre-applypatch",
     "post-applypatch",
@@ -591,6 +591,19 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
+fn file_mode(path: &Path) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).map_or(0o755, |meta| meta.permissions().mode() & 0o7777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        0o755
+    }
+}
+
 fn ensure_executable(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -721,7 +734,8 @@ fn strip_user_hooks(dir: &Path) -> Result<()> {
         if block_only(&stripped) {
             fs::remove_file(&path).with_context(|| format!("git-hooks: {}", path.display()))?;
         } else if stripped != text {
-            fs::write(&path, stripped).with_context(|| format!("git-hooks: {}", path.display()))?;
+            crate::install_executable_mode(&path, stripped, file_mode(&path))
+                .with_context(|| format!("git-hooks: {}", path.display()))?;
         }
     }
     Ok(())
@@ -1591,7 +1605,7 @@ mod tests {
         let other = dir.path().join("user-hooks");
         std::fs::create_dir_all(&other).unwrap();
         let prior = "#!/bin/sh\nprintf 'user-hook\\n'\n";
-        std::fs::write(other.join("post-commit"), prior).unwrap();
+        crate::install_executable(&other.join("post-commit"), prior).unwrap();
         let ours_s = ours.display().to_string();
         let other_s = other.display().to_string();
 
@@ -1632,11 +1646,21 @@ mod tests {
         );
         assert!(other.join("pre-push").is_file());
 
+        crate::install_executable_mode(&other.join("post-commit"), &hooked, 0o750).unwrap();
         super::strip_user_hooks(&other).unwrap();
         assert_eq!(
             std::fs::read_to_string(other.join("post-commit")).unwrap(),
             prior
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(other.join("post-commit"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o7777, 0o750, "the stripped hook lost its mode");
+        }
         assert!(!other.join("pre-push").exists());
 
         let config = dir.path().join("config");
@@ -1704,7 +1728,7 @@ mod tests {
         let fresh = super::hook_body("pre-push");
         let stale = fresh.replace(&super::hook_block("pre-push"), OLD_PRE_PUSH);
         assert_ne!(stale, fresh);
-        std::fs::write(ours.join("pre-push"), &stale).unwrap();
+        crate::install_executable(&ours.join("pre-push"), &stale).unwrap();
         let (ok, state) = super::doctor_state(&ours, Some(&ours_s), &config);
         assert!(!ok, "a stale pre-push stub passed: {state}");
         assert!(state.contains("pre-push stub predates"), "{state}");
@@ -1715,7 +1739,7 @@ mod tests {
             "'/opt/other/ljos'",
         );
         assert_ne!(moved, fresh);
-        std::fs::write(ours.join("pre-push"), moved).unwrap();
+        crate::install_executable(&ours.join("pre-push"), moved).unwrap();
         let (ok, state) = super::doctor_state(&ours, Some(&ours_s), &config);
         assert!(ok, "another fallback path failed the row: {state}");
 
@@ -1723,7 +1747,7 @@ mod tests {
         super::chain_user_hooks(&user).unwrap();
         let user_s = user.display().to_string();
         let prior = format!("#!/bin/sh\necho mine\n{OLD_PRE_PUSH}");
-        std::fs::write(user.join("pre-push"), &prior).unwrap();
+        crate::install_executable(&user.join("pre-push"), &prior).unwrap();
         let (ok, state) = super::hooks_state(&ours, Some(&user_s));
         assert!(!ok, "a stale user block passed: {state}");
         assert!(state.contains("pre-push hook's ljos block"), "{state}");

@@ -3,7 +3,6 @@
 
 ljos_test_boot::harness!();
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -200,8 +199,8 @@ fn git_bare(dir: &Path, args: &[&str]) {
 
 fn habitat_bin(dir: &Path) {
     fs::create_dir_all(dir).unwrap();
-    fs::write(
-        dir.join("vissue"),
+    ljos_cli::install_executable(
+        &dir.join("vissue"),
         r#"#!/usr/bin/env python3
 import os, sys, pathlib, re
 root = pathlib.Path(os.environ["VISSUE_ROOT"])
@@ -283,8 +282,8 @@ else:
 "#,
     )
     .unwrap();
-    fs::write(
-        dir.join("deedar"),
+    ljos_cli::install_executable(
+        &dir.join("deedar"),
         r#"#!/usr/bin/env python3
 import os, pathlib, sys
 root = pathlib.Path(os.environ["VISSUE_ROOT"])
@@ -307,8 +306,8 @@ print(f"id={ident}")
 "#,
     )
     .unwrap();
-    fs::write(
-        dir.join("claimdag"),
+    ljos_cli::install_executable(
+        &dir.join("claimdag"),
         r#"#!/usr/bin/env python3
 import json, os, pathlib, sys
 root = pathlib.Path(os.environ["VISSUE_ROOT"])
@@ -357,9 +356,6 @@ else:
     fs::write(dir.join("ljos"), "").unwrap();
     fs::remove_file(dir.join("ljos")).unwrap();
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ljos"), dir.join("ljos")).unwrap();
-    for name in ["vissue", "deedar", "claimdag"] {
-        fs::set_permissions(dir.join(name), fs::Permissions::from_mode(0o755)).unwrap();
-    }
 }
 
 fn head(hab: &Hab, dir: &Path) -> String {
@@ -1281,7 +1277,8 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
          fi\n\
          {end_mark}"
     );
-    fs::write(&path, format!("{}{old}{}", &stub[..begin], &stub[end..])).unwrap();
+    ljos_cli::install_executable(&path, format!("{}{old}{}", &stub[..begin], &stub[end..]))
+        .unwrap();
     // The current hook already sent develop. Git does not run pre-push
     // when the remote has the commit, so drop that ref and send it again.
     let dropped = Command::new("/usr/bin/git")

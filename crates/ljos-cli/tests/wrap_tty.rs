@@ -7,17 +7,13 @@ mod pty;
 #[path = "common/seat_env.rs"]
 mod seat_env;
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use ljos_cli::output_wrap::{prose_display_width, wrap_hanging_prose};
 
 fn write_exec(path: &Path, body: &str) {
-    std::fs::write(path, body).unwrap();
-    let mut perm = std::fs::metadata(path).unwrap().permissions();
-    perm.set_mode(0o755);
-    std::fs::set_permissions(path, perm).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 struct Board {

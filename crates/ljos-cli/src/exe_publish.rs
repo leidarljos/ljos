@@ -72,19 +72,7 @@ pub fn install_executable_mode(
             let _ = std::fs::remove_file(&tmp);
             return Err(writer_failed(&out.status, &out.stderr));
         }
-        if let Ok(file) = std::fs::File::open(&tmp) {
-            let _ = file.sync_all();
-        }
-        if let Err(err) = std::fs::rename(&tmp, path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(err);
-        }
-        if let Some(parent) = dir_of(path) {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
-        }
-        Ok(())
+        settle(&tmp, path)
     }
     #[cfg(not(unix))]
     {
@@ -127,16 +115,44 @@ pub fn copy_executable(src: &Path, dest: &Path) -> Result<(), Error> {
                 return Err(err);
             }
         }
-        if let Err(err) = std::fs::rename(&tmp, dest) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(err);
-        }
-        Ok(())
+        settle(&tmp, dest)
     }
     #[cfg(not(unix))]
     {
         std::fs::copy(src, dest)?;
         Ok(())
+    }
+}
+
+/// Flush the closed temporary file, rename it onto `path`, then flush the
+/// directory so the new name survives a crash.
+#[cfg(unix)]
+fn settle(tmp: &Path, path: &Path) -> Result<(), Error> {
+    flush(tmp);
+    if let Err(err) = std::fs::rename(tmp, path) {
+        let _ = std::fs::remove_file(tmp);
+        return Err(err);
+    }
+    if let Some(parent) = dir_of(path) {
+        flush(parent);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static FLUSHED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `sync_all` on `path`, a file or a directory. Errors are dropped: the
+/// rename has already happened or is about to, and a flush cannot undo it.
+#[cfg(unix)]
+fn flush(path: &Path) {
+    if let Ok(file) = std::fs::File::open(path) {
+        if file.sync_all().is_ok() {
+            #[cfg(test)]
+            FLUSHED.with(|done| done.borrow_mut().push(path.to_path_buf()));
+        }
     }
 }
 
@@ -208,6 +224,29 @@ mod tests {
         assert_eq!(out.stdout, b"copied\n");
     }
 
+    /// The temporary file is flushed before the rename and the directory
+    /// after it, for both a written and a copied executable.
+    #[test]
+    fn a_publish_flushes_the_file_then_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dest = dir.path().join("dest");
+        for step in ["install", "copy"] {
+            FLUSHED.with(|done| done.borrow_mut().clear());
+            if step == "install" {
+                install_executable(&src, b"#!/bin/sh\necho copied\n").unwrap();
+            } else {
+                copy_executable(&src, &dest).unwrap();
+            }
+            let done = FLUSHED.with(|done| done.borrow().clone());
+            assert_eq!(done.len(), 2, "{step} flushed {done:?}");
+            let tmp = done[0].file_name().unwrap().to_string_lossy();
+            assert!(tmp.starts_with(".ljos-exe."), "{step} flushed {done:?}");
+            assert_eq!(done[0].parent(), Some(dir.path()), "{step}");
+            assert_eq!(done[1], dir.path(), "{step} flushed {done:?}");
+        }
+    }
+
     /// Many threads publish one stub and start it. A writer that leaves a
     /// descriptor in this process makes `exec` and the next write fail with
     /// ETXTBSY. Both counts are zero when the publisher is the short-lived
@@ -265,5 +304,324 @@ mod tests {
             0,
             "exec_etxtbsy={exec_busy} write_etxtbsy={write_busy} spawns={spawns}"
         );
+    }
+
+    /// Files under `crates/` that may write an executable in this process,
+    /// each with the reason it has to.
+    const IN_PROCESS_EXECUTABLES: &[(&str, &str)] = &[];
+
+    /// A file written in this process and then given an exec bit, or a git
+    /// hook rewritten where it lies, can be started while a forked child
+    /// still has it open. Each of those goes through this module instead.
+    #[test]
+    fn executables_are_published_through_this_module() {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        rust_sources(crates, &mut files);
+        assert!(files.len() > 100, "found {} sources", files.len());
+        let mut hits = Vec::new();
+        for file in &files {
+            let rel = file.strip_prefix(crates).unwrap().to_string_lossy();
+            if rel.ends_with("exe_publish.rs")
+                || IN_PROCESS_EXECUTABLES.iter().any(|(path, _)| rel == *path)
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(file).unwrap();
+            for line in write_then_exec(&text) {
+                hits.push(format!("crates/{rel}:{line}"));
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "publish these with install_executable, install_executable_mode or copy_executable:\n{}",
+            hits.join("\n")
+        );
+    }
+
+    #[test]
+    fn the_site_scan_names_a_write_then_chmod_and_a_hook_rewrite() {
+        let chmod = r##"
+fn stub(bin: &Path) {
+    fs::write(bin.join("a"), "#!/bin/sh\n").unwrap();
+    fs::write(bin.join("conf"), "x").unwrap();
+    for name in ["a"] {
+        fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+fn other(dest: &Path) {
+    std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+"##;
+        assert_eq!(write_then_exec(chmod), vec![3]);
+        let open = r#"
+fn server(path: &Path) {
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o700);
+    std::fs::set_permissions(&path, perms).unwrap();
+}
+"#;
+        assert_eq!(write_then_exec(open), vec![3]);
+        let hook = r#"
+fn strip(dir: &Path) {
+    for name in HOOK_NAMES {
+        let path = dir.join(name);
+        fs::write(&path, "x")?;
+    }
+}
+"#;
+        assert_eq!(write_then_exec(hook), vec![5]);
+        let named = r#"
+fn rewrite(ours: &Path, share: &Path) {
+    std::fs::write(ours.join("pre-push"), &stale).unwrap();
+    let path = share.join("ljos/git-hooks/pre-push");
+    let stub = fs::read_to_string(&path).unwrap();
+    fs::write(&path, stub).unwrap();
+    let path = share.join("notes.txt");
+    fs::write(&path, "x").unwrap();
+}
+fn later(path: &Path) {
+    fs::write(&path, "x").unwrap();
+}
+"#;
+        assert_eq!(write_then_exec(named), vec![3, 6]);
+        let fine = r#"
+fn dir(path: &Path) {
+    std::fs::write(path.join("f"), "x").unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(path.join("f"), std::fs::Permissions::from_mode(0o644)).unwrap();
+}
+"#;
+        assert!(write_then_exec(fine).is_empty());
+    }
+
+    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name != "target") {
+                    rust_sources(&path, out);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && path
+                    .components()
+                    .any(|part| part.as_os_str() == "src" || part.as_os_str() == "tests")
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    /// One-based lines of in-process writes that `text` later marks
+    /// executable in the same function, rewrites in a `HOOK_NAMES` loop,
+    /// or aims at a git hook by name or through a `let` bound to one.
+    fn write_then_exec(text: &str) -> Vec<usize> {
+        let code: Vec<&str> = text
+            .lines()
+            .map(|line| {
+                if line.trim_start().starts_with("//") {
+                    ""
+                } else {
+                    line
+                }
+            })
+            .collect();
+        let joined = |from: usize, len: usize| code[from..(from + len).min(code.len())].join(" ");
+        let mut hits = Vec::new();
+        let mut writes: Vec<(usize, String)> = Vec::new();
+        let mut lists: Vec<(String, Vec<String>)> = Vec::new();
+        let mut hook_loop = None;
+        let mut hook_vars: Vec<String> = Vec::new();
+        for (i, line) in code.iter().enumerate() {
+            let head = line.trim_start();
+            let item = ["pub(crate) ", "pub ", "async ", "const ", "unsafe "]
+                .iter()
+                .fold(head, |rest, pre| rest.strip_prefix(pre).unwrap_or(rest));
+            if item.starts_with("fn ") {
+                writes.clear();
+                lists.clear();
+                hook_loop = None;
+                hook_vars.clear();
+            }
+            if let Some((name, value)) = let_binding(&joined(i, 4)) {
+                hook_vars.retain(|bound| *bound != name);
+                if names_hook(&value) {
+                    hook_vars.push(name);
+                }
+            }
+            if let Some(rest) = head.strip_prefix("for ") {
+                if rest.contains("HOOK_NAMES") {
+                    hook_loop = Some(i);
+                }
+                if let Some((name, list)) = rest.split_once(" in [") {
+                    let names = list.split('"').skip(1).step_by(2);
+                    lists.push((
+                        name.trim().to_string(),
+                        names.map(|lit| format!("\"{lit}\"")).collect(),
+                    ));
+                }
+            }
+            let ahead = joined(i, 4);
+            let target = if line.contains("fs::write(") {
+                arg_after(&ahead, "fs::write(", 0)
+            } else if line.contains("File::create(") {
+                arg_after(&ahead, "File::create(", 0)
+            } else if line.contains("fs::copy(") {
+                arg_after(&ahead, "fs::copy(", 1)
+            } else if line.contains("OpenOptions::new()") {
+                arg_after(&joined(i, 8), ".open(", 0)
+            } else {
+                bare_write(line).and_then(|_| arg_after(&ahead, "write(", 0))
+            };
+            if let Some(target) = target.filter(|t| !t.is_empty()) {
+                if hook_loop.is_some_and(|at| i - at <= 20)
+                    || names_hook(&target)
+                    || hook_vars.contains(&target)
+                {
+                    hits.push(i + 1);
+                }
+                writes.push((i, target));
+            }
+            if line.contains("set_permissions(") {
+                let (Some(target), Some(perm)) = (
+                    arg_after(&ahead, "set_permissions(", 0),
+                    arg_after(&ahead, "set_permissions(", 1),
+                ) else {
+                    continue;
+                };
+                let mode = mode_of(&perm).or_else(|| {
+                    let set = format!("{perm}.set_mode(");
+                    (i.saturating_sub(4)..i)
+                        .rev()
+                        .map(|at| code[at])
+                        .find(|line| squeeze(line).contains(&set))
+                        .and_then(mode_of)
+                });
+                if mode.is_some_and(|mode| mode & 0o111 != 0) {
+                    for (at, written) in &writes {
+                        if same_path(written, &target, &lists) {
+                            hits.push(at + 1);
+                        }
+                    }
+                }
+            }
+        }
+        hits.sort_unstable();
+        hits.dedup();
+        hits
+    }
+
+    /// A string literal in `text` whose last path part is a git hook name.
+    fn names_hook(text: &str) -> bool {
+        text.split('"').skip(1).step_by(2).any(|lit| {
+            let leaf = lit.rsplit('/').next().unwrap_or(lit);
+            crate::git_hooks::HOOK_NAMES.contains(&leaf)
+        })
+    }
+
+    /// The name and value of a `let` that starts `text`, up to the `;`.
+    fn let_binding(text: &str) -> Option<(String, String)> {
+        let rest = text.trim_start().strip_prefix("let ")?;
+        let rest = rest.strip_prefix("mut ").unwrap_or(rest);
+        let end = rest
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        let (name, after) = rest.split_at(end);
+        let after = after.trim_start();
+        if name.is_empty() || !(after.starts_with('=') || after.starts_with(':')) {
+            return None;
+        }
+        let value = after.split_once('=')?.1;
+        let value = value.split(';').next().unwrap_or(value);
+        Some((name.to_string(), value.to_string()))
+    }
+
+    fn bare_write(line: &str) -> Option<usize> {
+        let at = line.find("write(")?;
+        let before = line[..at].chars().next_back();
+        match before {
+            Some(c) if c.is_alphanumeric() || matches!(c, '_' | '.' | ':') => None,
+            _ => Some(at),
+        }
+    }
+
+    fn squeeze(text: &str) -> String {
+        text.split_whitespace().collect()
+    }
+
+    /// The `n`th top-level argument after `open`, without spaces or a
+    /// leading `&`.
+    fn arg_after(text: &str, open: &str, n: usize) -> Option<String> {
+        let rest = &text[text.find(open)? + open.len()..];
+        let mut args = vec![String::new()];
+        let mut depth = 0usize;
+        let mut quoted = false;
+        let mut escaped = false;
+        for c in rest.chars() {
+            if quoted {
+                quoted = escaped || c != '"';
+                escaped = !escaped && c == '\\';
+            } else if c == '"' {
+                quoted = true;
+            } else if matches!(c, '(' | '[' | '{') {
+                depth += 1;
+            } else if matches!(c, ')' | ']' | '}') {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            } else if c == ',' && depth == 0 {
+                args.push(String::new());
+                continue;
+            }
+            args.last_mut().unwrap().push(c);
+        }
+        args.get(n)
+            .map(|arg| squeeze(arg).trim_start_matches('&').to_string())
+    }
+
+    fn mode_of(text: &str) -> Option<u32> {
+        ["from_mode(0o", "set_mode(0o"].iter().find_map(|open| {
+            let rest = &text[text.find(open)? + open.len()..];
+            let digits: String = rest.chars().take_while(|c| c.is_digit(8)).collect();
+            u32::from_str_radix(&digits, 8).ok()
+        })
+    }
+
+    /// `dir.join(name)` in a loop is the same path as `dir.join("a")` when
+    /// `"a"` is one of the names the loop walks, or any name when the loop
+    /// is not over a literal list.
+    fn same_path(written: &str, target: &str, lists: &[(String, Vec<String>)]) -> bool {
+        if written == target {
+            return true;
+        }
+        let (Some((dir_a, leaf_a)), Some((dir_b, leaf_b))) =
+            (written.split_once(".join("), target.split_once(".join("))
+        else {
+            return false;
+        };
+        if dir_a != dir_b {
+            return false;
+        }
+        let leaf_a = leaf_a.trim_end_matches(')');
+        let leaf_b = leaf_b.trim_end_matches(')');
+        let (literal, name) = match (leaf_a.starts_with('"'), leaf_b.starts_with('"')) {
+            (true, true) => return false,
+            (true, false) => (leaf_a, leaf_b),
+            (false, true) => (leaf_b, leaf_a),
+            (false, false) => return leaf_a == leaf_b,
+        };
+        lists
+            .iter()
+            .rev()
+            .find(|(bound, _)| bound == name)
+            .is_none_or(|(_, names)| names.iter().any(|lit| lit == literal))
     }
 }

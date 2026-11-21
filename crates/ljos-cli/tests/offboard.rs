@@ -50,7 +50,7 @@ fn seed_runner(home: &Path, harness: &Harness) {
 fn fake_runner_commands(home: &Path) -> PathBuf {
     let bin = home.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    write(
+    ljos_cli::install_executable(
         &bin.join("claude"),
         r#"#!/bin/sh
 case "$*" in
@@ -58,21 +58,16 @@ case "$*" in
   "mcp add"*) mkdir -p "$HOME"; printf '%s\n' '{"mcpServers":{"ljos":{"command":"ljos-mcp"}}}' > "$HOME/.claude.json" ;;
 esac
 "#,
-    );
-    write(
+    )
+    .unwrap();
+    ljos_cli::install_executable(
         &bin.join("hermes"),
         r#"#!/bin/sh
 mkdir -p "$HOME/.hermes"
 printf '%s\n' 'mcp_servers:' '  ljos:' '    command: ljos-mcp' > "$HOME/.hermes/config.yaml"
 "#,
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for name in ["claude", "hermes"] {
-            fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
-        }
-    }
+    )
+    .unwrap();
     bin
 }
 

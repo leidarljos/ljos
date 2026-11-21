@@ -62126,16 +62126,14 @@ mod tests {
     /// Point `root` at a pre-commit hook that refuses any commit holding a
     /// split marker, as a refusing hook or a full disk would.
     fn refuse_split_commits(root: &Path) {
-        use std::os::unix::fs::PermissionsExt;
         let hooks = root.join(".git/refuse-split");
         std::fs::create_dir_all(&hooks).unwrap();
         let hook = hooks.join("pre-commit");
-        std::fs::write(
+        crate::install_executable(
             &hook,
             "#!/bin/sh\nif git diff --cached --name-only | grep -q 'issues/\\.ledger$'; then\n  echo 'no split here' >&2\n  exit 1\nfi\n",
         )
         .unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         git_text(root, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
     }
 
@@ -62465,7 +62463,6 @@ mod tests {
     /// index for the next plain commit.
     #[test]
     fn a_split_that_cannot_be_unstaged_is_kept() {
-        use std::os::unix::fs::PermissionsExt;
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -62480,7 +62477,7 @@ mod tests {
             .expect("git on PATH");
         let shim = tempfile::tempdir().unwrap();
         let git = shim.path().join("git");
-        std::fs::write(
+        crate::install_executable(
             &git,
             format!(
                 "#!/bin/sh\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    reset|rm) echo \"fatal: no $arg here\" >&2; exit 128 ;;\n  esac\ndone\nexec '{}' \"$@\"\n",
@@ -62488,7 +62485,6 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
         let said = {
             let _bins = super::prepend_path(shim.path());
             persist_tracker("probe-b007", "noted")
@@ -62640,7 +62636,6 @@ mod tests {
     /// commit. The test runs itself again as a child that held a write.
     #[test]
     fn a_failed_flush_at_exit_says_so_on_stderr() {
-        use std::os::unix::fs::PermissionsExt;
         if let Some(root) = std::env::var_os("LJOS_TEST_EXIT_FLUSH_ROOT") {
             super::held_a_write_in(Path::new(&root));
             return;
@@ -62651,8 +62646,7 @@ mod tests {
         let hooks = root.join(".git/refuse-all");
         std::fs::create_dir_all(&hooks).unwrap();
         let hook = hooks.join("pre-commit");
-        std::fs::write(&hook, "#!/bin/sh\necho 'no commit here' >&2\nexit 1\n").unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&hook, "#!/bin/sh\necho 'no commit here' >&2\nexit 1\n").unwrap();
         git_text(
             &root,
             &["config", "core.hooksPath", hooks.to_str().unwrap()],
@@ -62691,7 +62685,6 @@ mod tests {
     /// already changed.
     #[test]
     fn a_write_that_cannot_wait_reads_the_status_once() {
-        use std::os::unix::fs::PermissionsExt;
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -62704,7 +62697,7 @@ mod tests {
         let shim = tempfile::tempdir().unwrap();
         let log = shim.path().join("status.log");
         let git = shim.path().join("git");
-        std::fs::write(
+        crate::install_executable(
             &git,
             format!(
                 "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = status ]; then echo \"$*\" >> '{}'; break; fi\ndone\nexec '{}' \"$@\"\n",
@@ -62713,7 +62706,6 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
         let text = std::fs::read_to_string(&issues).unwrap();
         std::fs::write(&issues, text.replacen("TODO", "STARTED", 1)).unwrap();
         let said = {
@@ -62734,7 +62726,6 @@ mod tests {
     /// the index through `git rm --cached`.
     #[test]
     fn unstaging_on_an_unborn_head_falls_back_to_rm_cached() {
-        use std::os::unix::fs::PermissionsExt;
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -62748,7 +62739,7 @@ mod tests {
             .expect("git on PATH");
         let shim = tempfile::tempdir().unwrap();
         let git = shim.path().join("git");
-        std::fs::write(
+        crate::install_executable(
             &git,
             format!(
                 "#!/bin/sh\nfor arg in \"$@\"; do\n  [ \"$arg\" = reset ] && exit 128\ndone\nexec '{}' \"$@\"\n",
@@ -62756,7 +62747,6 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
         let unstaged = {
             let _bins = super::prepend_path(shim.path());
             super::unstage_issues(&root)
@@ -63048,7 +63038,6 @@ mod tests {
     /// commits its line now.
     #[test]
     fn a_failed_status_before_the_stamp_does_not_hold_the_seat_line() {
-        use std::os::unix::fs::PermissionsExt;
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -63078,7 +63067,7 @@ mod tests {
         let mark = shim.path().join("failed");
         let log = shim.path().join("status.log");
         let git = shim.path().join("git");
-        std::fs::write(
+        crate::install_executable(
             &git,
             format!(
                 "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = status ]; then\n    \
@@ -63091,7 +63080,6 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
         let said = {
             let _bins = super::prepend_path(shim.path());
             persist_tracker("probe-b007", "noted")
@@ -63117,19 +63105,17 @@ mod tests {
     /// commit that later lands the split carries it.
     #[test]
     fn a_kept_split_that_waits_keeps_the_writes_seat_line() {
-        use std::os::unix::fs::PermissionsExt;
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let issues = big_board(root, 300);
         refuse_split_commits(root);
         let hook = root.join(".git/refuse-split/pre-commit");
-        std::fs::write(
+        crate::install_executable(
             &hook,
             "#!/bin/sh\nif git diff --cached --name-only | grep -q 'issues/\\.ledger$'; then\n  echo meanwhile > Software/probe/issues/.meanwhile\n  echo 'no split here' >&2\n  exit 1\nfi\n",
         )
         .unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         probe_env(root);
         let layout = vissue_core::Layout::new(root, "Software");
         let head = git_text(root, &["rev-parse", "HEAD"]);
