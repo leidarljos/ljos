@@ -106,6 +106,8 @@ enum PackMode {
     AlwaysEagain,
     AlwaysBusy503,
     TransientGateEagain(usize),
+    /// Listings answer with what is stored; every POST is busy.
+    PostBusy503,
 }
 
 struct MockPack {
@@ -113,6 +115,7 @@ struct MockPack {
     calls: Arc<AtomicUsize>,
     posts: Arc<AtomicUsize>,
     healthy: Arc<AtomicBool>,
+    stored: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
 fn serve_pack(mode: PackMode) -> MockPack {
@@ -193,6 +196,19 @@ fn serve_pack(mode: PackMode) -> MockPack {
                                 write_http(&mut sock, 200, &resp);
                             }
                         }
+                        PackMode::PostBusy503 => {
+                            if line.starts_with("POST") {
+                                write_http(
+                                    &mut sock,
+                                    503,
+                                    r#"{"error":"packsetd is busy: memory pressure; try again"}"#,
+                                );
+                            } else {
+                                let atoms = stored_bg.lock().unwrap().clone();
+                                let resp = serde_json::json!({ "atoms": atoms }).to_string();
+                                write_http(&mut sock, 200, &resp);
+                            }
+                        }
                     }
                 } else if path == "/v1/search" {
                     write_http(&mut sock, 200, r#"{"hits":[]}"#);
@@ -207,6 +223,7 @@ fn serve_pack(mode: PackMode) -> MockPack {
         calls,
         posts,
         healthy,
+        stored,
     }
 }
 
@@ -792,6 +809,82 @@ fn finish_with_already_queued_seal_prints_one_coherent_sync_line() {
         said.matches(SYNC_QUEUED_LINE).count(),
         1,
         "expected exactly one coherent queued sync line:\n{said}"
+    );
+}
+
+/// The pack lists an older atom of the ticket while the new lesson's POST
+/// is busy. Sealing then would commit a log without the lesson, so the
+/// seal waits in seal-queue.jsonl until the lesson leaves the note queue.
+#[test]
+fn finish_with_older_atoms_and_busy_lesson_post_waits_to_seal() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
+    let seat = Seat::open();
+    let pack = serve_pack(PackMode::PostBusy503);
+    pack.stored.lock().unwrap().push(serde_json::json!({
+        "id": "atom-old-1",
+        "kind": "lesson",
+        "text": "The kiln door sticks when warm.",
+        "issue": "demo-busy",
+        "entities": ["issue:demo-busy"],
+        "workspace": "seat",
+    }));
+    let out = seat.run(
+        &["finish", "demo-busy", "--lesson", LESSON],
+        &pack.url,
+        "200",
+        false,
+    );
+    let said = text_of(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains(QUEUED_LINE), "{said}");
+    assert!(said.contains(SYNC_QUEUED_LINE), "{said}");
+    assert!(
+        sealed_logs(&seat.tracker()).is_empty(),
+        "finish sealed the older atoms while the lesson was queued:\n{said}"
+    );
+    let queued =
+        std::fs::read_to_string(seat.state_ljos().join("seal-queue.jsonl")).unwrap_or_default();
+    assert_eq!(
+        queued.lines().count(),
+        1,
+        "expected one queued seal for the one scoped root:\n{queued}"
+    );
+    assert!(
+        queued.contains(&seat.tracker().display().to_string()),
+        "{queued}"
+    );
+
+    let busy = seat.run(&["ready"], &pack.url, "200", false);
+    let busy_said = text_of(&busy);
+    assert!(busy.status.success(), "{busy_said}");
+    assert!(
+        sealed_logs(&seat.tracker()).is_empty(),
+        "the queued seal ran while the lesson was still queued:\n{busy_said}"
+    );
+    assert!(
+        !std::fs::read_to_string(seat.state_ljos().join("seal-queue.jsonl"))
+            .unwrap_or_default()
+            .trim()
+            .is_empty(),
+        "the queued seal left before the lesson was sent:\n{busy_said}"
+    );
+
+    pack.healthy.store(true, Ordering::SeqCst);
+    let next = seat.run(&["ready"], &pack.url, "500", false);
+    let next_said = text_of(&next);
+    assert!(next.status.success(), "{next_said}");
+    assert_eq!(pack.posts.load(Ordering::SeqCst), 1, "{next_said}");
+    assert!(
+        next_said.contains("sync: sealed queued ticket(s): demo-busy"),
+        "{next_said}"
+    );
+    assert!(!sealed_logs(&seat.tracker()).is_empty(), "{next_said}");
+    assert_eq!(
+        std::fs::read_to_string(seat.state_ljos().join("seal-queue.jsonl")).unwrap_or_default(),
+        "",
+        "seal-queue.jsonl was not drained"
     );
 }
 

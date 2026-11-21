@@ -48194,15 +48194,37 @@ pub fn finish(
     let pending = note_queue::pending_in(&dir);
     let queued = !pending.is_empty();
     let queued_for_issue = pending.iter().any(|row| row.issue.trim() == issue.trim());
-    let sync_line = match sync::seal_ticket_in_passing(issue) {
-        Ok(said) if queued_for_issue && said.trim().is_empty() && sync::has_scoped_root() => {
-            match queue_ticket_seal(&dir, issue) {
-                Ok(_) => "sync: a write is queued and will be sent on the next call\n".to_string(),
-                Err(e) => format!("sync: {e:#}\n"),
-            }
+    // A seal now would read the pack without this ticket's queued lesson
+    // and commit a log that misses it, even when older atoms seal fine.
+    // The queued seal runs once the lesson has left note-queue.jsonl.
+    let sync_line = if queued_for_issue {
+        match queue_ticket_seal(&dir, issue) {
+            Ok(false) if !sync::has_scoped_root() => String::new(),
+            Ok(_) => "sync: a write is queued and will be sent on the next call\n".to_string(),
+            Err(e) => format!("sync: {e:#}\n"),
         }
+    } else {
+        finish_seal_line(&dir, issue, queued)
+    };
+    out.push_str(&sync_line);
+    if !matches!(
+        std::env::var("LJOS_TRACKER_GIT").ok().as_deref(),
+        Some("off" | "0" | "false")
+    ) {
+        if let Ok(layout) = vissue_core::Layout::resolve(None, None) {
+            maybe_gc_tracker(layout.root());
+        }
+    }
+    Ok(out)
+}
+
+/// The sync line for a finish whose own lesson is not queued: seal the
+/// ticket now, or queue the seal when another write waits and the pack is
+/// busy.
+fn finish_seal_line(dir: &Path, issue: &str, queued: bool) -> String {
+    match sync::seal_ticket_in_passing(issue) {
         Ok(said) => said,
-        Err(e) if queued && remember_should_queue(&e) => match queue_ticket_seal(&dir, issue) {
+        Err(e) if queued && remember_should_queue(&e) => match queue_ticket_seal(dir, issue) {
             Ok(false) if !sync::has_scoped_root() => String::new(),
             Ok(_) => "sync: a write is queued and will be sent on the next call\n".to_string(),
             Err(qerr) => format!("sync: {qerr:#} (after {e:#})\n"),
@@ -48217,17 +48239,7 @@ pub fn finish(
                 .to_string()
         }
         Err(e) => format!("sync: {e:#}\n"),
-    };
-    out.push_str(&sync_line);
-    if !matches!(
-        std::env::var("LJOS_TRACKER_GIT").ok().as_deref(),
-        Some("off" | "0" | "false")
-    ) {
-        if let Ok(layout) = vissue_core::Layout::resolve(None, None) {
-            maybe_gc_tracker(layout.root());
-        }
     }
-    Ok(out)
 }
 
 fn queue_ticket_seal(dir: &Path, issue: &str) -> Result<bool> {
