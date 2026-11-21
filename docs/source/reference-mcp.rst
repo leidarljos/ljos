@@ -61,7 +61,8 @@ The old holder is named in a note on the ticket.
 ``ljos_sitting`` claims when you call it the same way.
 ``ljos_note`` and ``ljos_finish`` claim once more when a sitting left its claim pending.
 ``ljos_finish`` then releases the claim and does not complete the node; a node a gone conversation of this seat has claimed is released under that conversation's name.
-``ljos_complete`` claims a node a gone conversation of this seat left, then completes it.
+``ljos_complete`` completes such a node under that conversation's name and takes no claim.
+Only when that conversation's hold record was written for another claim graph does ``ljos_complete`` claim the node first, then complete it.
 Call ``ljos_claim`` only to name the issue yourself without ``ljos_start`` or ``ljos_sitting``.
 A named worker occupies one slot, and a ``busy`` refusal names the held node.
 ``ljos_finish`` or ``ljos_release`` frees it.

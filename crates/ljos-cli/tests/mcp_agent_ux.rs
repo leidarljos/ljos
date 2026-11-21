@@ -387,7 +387,9 @@ fn claim_file_and_deed_each_describe_their_own_call() {
     );
     let complete = description_of(&tools, "ljos_complete");
     assert!(
-        complete.contains("A node a gone conversation of this seat left is claimed first"),
+        complete.contains(
+            "is completed under that conversation's name with no new claim; it is claimed first only when its hold record names another claim graph"
+        ),
         "{complete}"
     );
 

@@ -73,8 +73,10 @@ tracker. In ljos-mcp, `ljos_start`, `ljos_sitting` and `ljos_claim`
 claim. `ljos_note` and `ljos_finish` claim once more when a sitting left
 its claim pending. `ljos_finish` then releases the claim and does not
 complete the node; a node a gone conversation of this seat has claimed
-is released under that conversation's name. `ljos_complete` claims a
-node a gone conversation of this seat left, then completes it. The
+is released under that conversation's name. `ljos_complete` completes
+such a node under that conversation's name and takes no claim. Only
+when that conversation's hold record was written for another claim
+graph does `ljos_complete` claim the node first, then complete it. The
 server finishes nothing on shutdown or when the session goes idle.
 On a cloud seat, the one `ljos cloud up` marked, finish exports the deeds
 that seat cited on the issue into `.ljos/deeds/<seat>/`, and the tracker
@@ -582,8 +584,10 @@ acceptance: `ljos accept ID --quote "their words" --at TIME --via SEAT`
 keeps the sentence, the time and the seat that carried it. All three are
 needed, and the quote is the person's sentence word for word. A
 lesson the person types with `ljos remember` stays `user-declared`. The
-verb then fires the island,
-completes the session node, and learns from a named outcome. Without
+verb then hands the session node back to ready; with `--close` and a
+status of `done` or `cancelled` it completes the node instead. It links
+related memories only with `--verbose`, and learns from an outcome only
+when `--outcome` names one. Without
 `--lesson` it says so;
 a sitting that taught nothing worth two sentences is rare. By hand, the
 same four steps are:

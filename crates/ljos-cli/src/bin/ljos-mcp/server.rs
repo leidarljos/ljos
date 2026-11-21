@@ -3302,7 +3302,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the work on an issue is finished, failed, or cancelled: the session node goes terminal. A node a gone conversation of this seat left is claimed first. Completing is not closing; the ticket stays open until the tracker changes its state. To stop without finishing, ljos_release.",
+        description = "Call this when the work on an issue is finished, failed, or cancelled: the session node goes terminal. A node a gone conversation of this seat holds is completed under that conversation's name with no new claim; it is claimed first only when its hold record names another claim graph. Completing is not closing; the ticket stays open until the tracker changes its state. To stop without finishing, ljos_release.",
         annotations(
             title = "Complete a node",
             read_only_hint = false,
