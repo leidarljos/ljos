@@ -68382,14 +68382,14 @@ mod tests {
         );
         assert!(
             after.contains("exit_code"),
-            "a command's exit reaches the deed hook"
+            "a command's exit reaches ljos hook"
         );
         assert!(
             after.contains("commands.get"),
             "the after hook keeps the command the before hook saw"
         );
         assert!(
-            after.contains("A zero exit still cites the commit"),
+            after.contains("A zero exit is not a failure, even with stderr on it."),
             "stderr on a clean commit is not a failed commit"
         );
         assert!(!text.contains("lets the work go on"));

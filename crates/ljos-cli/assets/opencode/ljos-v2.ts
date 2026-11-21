@@ -108,8 +108,9 @@ export default Plugin.define({
     const started = new Set<string>()
     // A before-hook refusal still reaches execute.after on some builds.
     const blocked = new Map<string, string>()
-    // The before hook sees the command. The after hook cites the commit
-    // from it when the result does not carry the args.
+    // The before hook sees the command. The after hook passes it to
+    // `ljos hook` when the result does not carry the args. A commit gets a
+    // `note:` line from git's post-commit hook. No deed is cited.
     const commands = new Map<string, string>()
     let lastSession: string | undefined
     const remember = (id: string | undefined) => {
