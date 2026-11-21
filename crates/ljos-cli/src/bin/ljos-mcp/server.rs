@@ -185,6 +185,22 @@ fn next_step(tool: &str) -> &'static str {
     }
 }
 
+/// A new directory under the temp dir holding `name` with `text`, for a
+/// tool that hands text to a command that reads a file.
+fn scratch_file(
+    name: &str,
+    text: &str,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), McpError> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir().join(format!("ljos-mcp-{}-{nanos}", std::process::id()));
+    std::fs::create_dir(&dir).map_err(|e| refused(e.into()))?;
+    let path = dir.join(name);
+    std::fs::write(&path, text).map_err(|e| refused(e.into()))?;
+    Ok((dir, path))
+}
+
 /// A tool this server has and did not list. The person changes the set, and
 /// the tool's shell command, when it has one, answers meanwhile.
 fn unlisted_line(tool: &str) -> String {
@@ -192,6 +208,9 @@ fn unlisted_line(tool: &str) -> String {
     let tail = match verb {
         "guard_check" | "mail_search" | "mail_show" => String::new(),
         "bump_plan" => ", or run `ljos bump-plan` in a shell".to_string(),
+        "deed_show" => ", or run `ljos deed --show ACCESSION` in a shell".to_string(),
+        "table" => ", or run `ljos table ISSUE` in a shell".to_string(),
+        "file_from" => ", or run `ljos file --from FILE` in a shell".to_string(),
         other => format!(", or run `ljos {other}` in a shell"),
     };
     format!(
@@ -322,6 +341,7 @@ const SEAT_FREE_TOOLS: &[&str] = &[
     "ljos_conflicts",
     "ljos_evidence",
     "ljos_current",
+    "ljos_deed_show",
     "ljos_digest",
     "ljos_timeline",
     "ljos_cards",
@@ -347,6 +367,7 @@ const TRACKER_WRITES: &[&str] = &[
     "ljos_release",
     "ljos_complete",
     "ljos_file",
+    "ljos_file_from",
     "ljos_options",
     "ljos_deed",
     "ljos_playbook",
@@ -354,6 +375,10 @@ const TRACKER_WRITES: &[&str] = &[
 ];
 
 fn writes_tracker(name: &str, args: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
+    if name == "ljos_table" {
+        let set = |key| args.and_then(|a| a.get(key)).is_some_and(|v| !v.is_null());
+        return set("add") || set("csv");
+    }
     if name == "ljos_deed" {
         return args
             .and_then(|a| a.get("add"))
@@ -428,6 +453,7 @@ const SEAT_ON_WRITE: &str =
 /// Tools that read or write depending on the arguments.
 const SEAT_MIXED_TOOLS: &[&str] = &[
     "ljos_deed",
+    "ljos_table",
     "ljos_vote",
     "ljos_bump_plan",
     "ljos_habit",
@@ -464,7 +490,7 @@ fn write_needs_named_seat(
         return false;
     }
     match name {
-        "ljos_deed" | "ljos_vote" | "ljos_bump_plan" => writes_tracker(name, args),
+        "ljos_deed" | "ljos_table" | "ljos_vote" | "ljos_bump_plan" => writes_tracker(name, args),
         "ljos_habit" => args
             .and_then(|map| map.get("value"))
             .is_some_and(|value| !value.is_null()),
@@ -861,6 +887,15 @@ pub struct AccessionArgs {
     pub accession: String,
 }
 
+/// A stored deed to read, and where to write its bytes.
+#[derive(Deserialize, JsonSchema)]
+pub struct DeedShowArgs {
+    /// `deed-<kind>-<slug>`, as `ljos_deed` lists it.
+    pub accession: String,
+    /// A file to write the bytes to. Absent, they are the text of the answer.
+    pub out: Option<String>,
+}
+
 /// A tracker node, and optionally a deed to cite on it.
 #[derive(Deserialize, JsonSchema)]
 pub struct DeedArgs {
@@ -869,6 +904,51 @@ pub struct DeedArgs {
     pub issue: String,
     /// An accession to cite. Absent, the tool lists what the issue cites.
     pub add: Option<String>,
+}
+
+/// Rows to file as tickets in one tracker commit.
+#[derive(Deserialize, JsonSchema)]
+pub struct FileFromArgs {
+    /// One object per ticket with `title` and, when wanted, `body`, `tags`
+    /// (a comma-separated string or a list), `parent`, `priority` (`A`, `B`
+    /// or `C`) and `type`.
+    #[serde(default)]
+    pub rows: Vec<serde_json::Map<String, serde_json::Value>>,
+    /// A JSONL or CSV file with those columns, instead of `rows`.
+    pub path: Option<String>,
+    /// The project for a row with no parent. A row with one goes to its
+    /// parent's project.
+    pub project: Option<String>,
+    /// The parent for a row that names none.
+    pub parent: Option<String>,
+    /// The type for a row that names none.
+    #[serde(rename = "issue_kind", alias = "kind")]
+    pub kind: Option<String>,
+    /// Comma-separated tags for a row that names none.
+    pub tags: Option<String>,
+    /// `A`, `B` or `C` for a row that names none.
+    pub priority: Option<String>,
+}
+
+/// A table on an issue: one to add, one to show, or none to list them.
+#[derive(Deserialize, JsonSchema)]
+pub struct TableArgs {
+    /// The issue's tracker id, as `ljos_ready` prints it, such as `proj-1a2b`.
+    #[serde(alias = "id")]
+    pub issue: String,
+    /// A CSV file to add: a header row, the same column count on each row.
+    pub add: Option<String>,
+    /// The CSV text to add, in place of a file. Needs `name`.
+    pub csv: Option<String>,
+    /// The table's name, such as `scores`.
+    pub name: Option<String>,
+    /// A table name to print.
+    pub show: Option<String>,
+    /// With `show`, this version instead of the latest.
+    pub version: Option<u32>,
+    /// True for JSON.
+    #[serde(default)]
+    pub json: bool,
 }
 
 /// Work found while sitting, filed on the tracker.
@@ -1703,6 +1783,8 @@ fn help_command(name: &str) -> String {
     let command = match tool {
         "guard_check" => "policy",
         "bump_plan" => "bump-plan",
+        "deed_show" => "deed",
+        "file_from" => "file",
         "mail_search" | "mail_show" => return "ljos help".to_string(),
         other => other,
     };
@@ -2434,6 +2516,36 @@ impl LjosServer {
         habitat("deedar", &["current", &args.accession])
     }
 
+    #[tool(
+        description = "Read a stored deed's bytes, such as a cited CSV. They are returned only after deedar evidence passes and the store's copy hashes to the deed's digest; a missing or altered copy is refused. Pass out to write them to a file, which bytes that are not UTF-8 need.",
+        annotations(title = "Read a deed", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn ljos_deed_show(
+        &self,
+        Parameters(args): Parameters<DeedShowArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let read = ljos_cli::deed_bytes::read_deed(&args.accession).map_err(refused)?;
+        let text = match args.out.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
+            Some(out) => {
+                std::fs::write(out, &read.bytes)
+                    .map_err(|e| refused(anyhow::anyhow!("deed: could not write {out}: {e}")))?;
+                format!(
+                    "wrote {} bytes of {} to {out} (sha256:{})\n",
+                    read.bytes.len(),
+                    read.accession,
+                    read.sha256
+                )
+            }
+            None => String::from_utf8(read.bytes).map_err(|_| {
+                refused(anyhow::anyhow!(
+                    "deed: {} is not UTF-8 text, so pass out to write it to a file",
+                    read.accession
+                ))
+            })?,
+        };
+        Ok(Json(Said { text, aside: None }))
+    }
+
     // ---- the tracker ---------------------------------------------------------
 
     #[tool(
@@ -2460,6 +2572,55 @@ impl LjosServer {
             }
             None => habitat("vissue", &["deed", &args.issue]),
         }
+    }
+
+    #[tool(
+        description = "Keep a CSV table on an issue, such as a scoreboard or a ranking, instead of one ticket per row. Pass add (a CSV path) or csv (the text) with name to store it as a deed and cite it in one tracker commit; the same name again is the next version. Pass show to print a table, version for an older one, json for columns and rows. With neither, it lists the tables.",
+        annotations(
+            title = "Keep a table",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_table(
+        &self,
+        Parameters(args): Parameters<TableArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let mut argv: Vec<String> = vec!["table".into(), args.issue];
+        let mut scratch = None;
+        if let Some(text) = args.csv {
+            let name = args
+                .name
+                .clone()
+                .ok_or_else(|| refused(anyhow::anyhow!("ljos_table: csv needs a name")))?;
+            ljos_cli::table::check_name(&name).map_err(refused)?;
+            let (dir, path) = scratch_file(&format!("{name}.csv"), &text)?;
+            scratch = Some(dir);
+            argv.extend(["--add".into(), path.display().to_string()]);
+        } else if let Some(path) = args.add {
+            argv.extend(["--add".into(), path]);
+        }
+        if argv.len() > 2 {
+            if let Some(name) = args.name {
+                argv.extend(["--name".into(), name]);
+            }
+        } else if let Some(name) = args.show {
+            argv.extend(["--show".into(), name]);
+            if let Some(n) = args.version {
+                argv.extend(["--version".into(), n.to_string()]);
+            }
+        }
+        if args.json && !argv.iter().any(|a| a == "--add") {
+            argv.push("--json".into());
+        }
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let said = habitat("ljos", &refs);
+        if let Some(dir) = scratch {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        said
     }
 
     #[tool(
@@ -2523,6 +2684,65 @@ impl LjosServer {
                 e
             }
         })
+    }
+
+    #[tool(
+        description = "File many tickets in one tracker commit: one per entry of `rows` (or per line of the JSONL or CSV file at `path`), each with a `title` and optional `body`, `tags`, `parent`, `priority` and `type`. Returns the new ids one per line. A row that cannot be filed files none of them and names the row.",
+        annotations(
+            title = "File many",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_file_from(
+        &self,
+        Parameters(args): Parameters<FileFromArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let mut scratch = None;
+        let from = match (args.path, args.rows.is_empty()) {
+            (Some(_), false) => {
+                return Err(refused(anyhow::anyhow!(
+                    "ljos_file_from: pass rows or path, not both"
+                )))
+            }
+            (Some(path), true) => path,
+            (None, true) => {
+                return Err(refused(anyhow::anyhow!(
+                    "ljos_file_from: pass rows, or path to a JSONL or CSV file"
+                )))
+            }
+            (None, false) => {
+                let mut text = String::new();
+                for row in &args.rows {
+                    text.push_str(&serde_json::Value::Object(row.clone()).to_string());
+                    text.push('\n');
+                }
+                let (dir, path) = scratch_file("rows.jsonl", &text)?;
+                scratch = Some(dir);
+                path.display().to_string()
+            }
+        };
+        let mut argv: Vec<String> = vec!["file".into(), "--from".into(), from];
+        for (flag, value) in [
+            ("-p", args.project),
+            ("--parent", args.parent),
+            ("-t", args.kind),
+            ("--tags", args.tags),
+            ("--priority", args.priority),
+        ] {
+            if let Some(v) = value {
+                argv.push(flag.into());
+                argv.push(v);
+            }
+        }
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let said = habitat("ljos", &refs);
+        if let Some(dir) = scratch {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        said
     }
 
     #[tool(
@@ -5933,7 +6153,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            54,
+            57,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -5971,6 +6191,7 @@ mod tests {
                 "ljos_consolidate",
                 "ljos_deed",
                 "ljos_file",
+                "ljos_file_from",
                 "ljos_findings",
                 "ljos_finish",
                 "ljos_forget",
@@ -5996,6 +6217,7 @@ mod tests {
                 "ljos_send",
                 "ljos_sitting",
                 "ljos_start",
+                "ljos_table",
                 "ljos_trust",
                 "ljos_vote"
             ]

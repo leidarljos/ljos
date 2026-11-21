@@ -1097,12 +1097,22 @@ enum Cmd {
     /// Name a stored file on a ticket, or list the ones named.
     ///
     /// The bytes stay in `deedar`, the program that keeps those files. Citing records the id.
+    /// `--show ACCESSION` prints a stored file's bytes once `deedar evidence`
+    /// passes and the copy in the store hashes to the digest it was stored
+    /// under.
+    /// A missing or altered copy exits 1 and prints nothing.
     ///
     /// Example: `ljos deed proj-1a2b`
     Deed {
         /// The issue: cited on, listed, or dropped from.
-        #[arg(required_unless_present = "ticket")]
+        #[arg(required_unless_present_any = ["ticket", "show"])]
         issue: Option<String>,
+        /// Print the bytes of this stored file, checked first.
+        #[arg(long, value_name = "ACCESSION", conflicts_with_all = ["issue", "add", "remove", "ticket"])]
+        show: Option<String>,
+        /// With `--show`, write the bytes to FILE instead of stdout.
+        #[arg(long, value_name = "FILE", requires = "show")]
+        out: Option<PathBuf>,
         /// An accession to cite, from `deedar create`; repeat for several.
         #[arg(long, conflicts_with = "remove")]
         add: Vec<String>,
@@ -1115,6 +1125,46 @@ enum Cmd {
         /// Print only the new id. Everything else goes to stderr.
         #[arg(short = 'q', long = "porcelain")]
         porcelain: bool,
+    },
+    /// Keep a CSV table on a ticket, list its tables, or print one.
+    ///
+    /// `--add FILE` checks the CSV (a header row, the same number of
+    /// columns on every row, UTF-8, at most 8 MiB), stores it in `deedar`
+    /// and cites it on ISSUE in one tracker commit. Adding a name again
+    /// makes the next version, which supersedes the one before, so
+    /// `ljos current` on an older accession names the newer one. Bytes the
+    /// latest version already has write nothing. With no flag, the latest
+    /// version of each table is listed with its rows, columns, version and
+    /// accession. `--show NAME` prints the latest version, `--version N` an
+    /// older one, read and checked as `ljos deed --show` reads.
+    ///
+    /// Example: `ljos table proj-1a2b --add scores.csv --name scores`
+    #[command(after_help = "Example: `ljos table proj-1a2b --add scores.csv --name scores`")]
+    Table {
+        /// The ticket the tables are cited on.
+        issue: String,
+        /// A CSV file to check, store and cite.
+        #[arg(long, value_name = "FILE", conflicts_with = "show")]
+        add: Option<PathBuf>,
+        /// The table's name with `--add`; the file name without its extension when omitted.
+        #[arg(long, requires = "add")]
+        name: Option<String>,
+        /// Print this table's latest version.
+        #[arg(long, value_name = "NAME")]
+        show: Option<String>,
+        /// With `--show`, this version instead of the latest.
+        #[arg(long, value_name = "N", requires = "show")]
+        version: Option<u32>,
+        /// With `--show`, print the CSV as it was stored. The default.
+        #[arg(long, requires = "show", conflicts_with = "json")]
+        csv: bool,
+        /// Print JSON: the list, or the table's columns and rows.
+        #[arg(long, conflicts_with = "add")]
+        json: bool,
+        /// Print the tracker and sync lines. Without it, a commit that landed
+        /// is quiet. A refusal is still printed.
+        #[arg(long)]
+        verbose: bool,
     },
     /// File a ticket. The new id is the only line on stdout.
     ///
@@ -1130,11 +1180,30 @@ enum Cmd {
     /// skipped is one sentence naming the command to run. `--verbose` prints
     /// the tracker and sync lines. `--json` keeps those lines in fields.
     ///
+    /// `--from FILE` files one ticket per row of a JSONL or CSV file with
+    /// the columns title, body, tags, parent, priority and type, in one
+    /// tracker commit, and prints the new ids one per line. `-p`, `-t`,
+    /// `--tags`, `--priority` and `--parent` fill a column a row leaves
+    /// empty, and each row is placed as `ljos file` places one: a row with
+    /// a parent goes to that parent's project. A row that cannot be filed
+    /// files none of them.
+    ///
     /// Example: `LJOS_SEAT=alice ljos file "Pick a codec" -p demo`
-    #[command(after_help = "Example: `LJOS_SEAT=alice ljos file \"Pick a codec\" -p demo`")]
+    #[command(
+        after_help = "Example: `LJOS_SEAT=alice ljos file \"Pick a codec\" -p demo`\nExample: `LJOS_SEAT=alice ljos file --from rows.jsonl -p demo`"
+    )]
     File {
         /// The issue's title.
-        title: String,
+        #[arg(required_unless_present = "from")]
+        title: Option<String>,
+        /// File one ticket per row of this JSONL or CSV file (`-` reads
+        /// stdin) in one tracker commit. Prints the new ids one per line.
+        #[arg(
+            long,
+            value_name = "FILE",
+            conflicts_with_all = ["title", "body", "options", "quorum", "deadline", "json"]
+        )]
+        from: Option<PathBuf>,
         /// The parent issue; the held issue when omitted.
         #[arg(long)]
         parent: Option<String>,
@@ -3452,6 +3521,44 @@ fn show_error(err: anyhow::Error) -> anyhow::Error {
     ticket_error(err)
 }
 
+/// The held issue, as the parent `ljos file` uses.
+struct FileHold {
+    held: Option<String>,
+    /// A hold the tracker does not have. It was cleared.
+    dropped: Option<String>,
+    /// A hold recorded for another tracker. It is kept for that tracker.
+    other_tracker: Option<String>,
+}
+
+/// The hold, resolved before any line says a ticket was filed. A hold the
+/// tracker does not have is cleared, and an alias becomes the id on disk,
+/// so the parent vissue is asked for exists. `skip` is a parent the seat
+/// chose, or `--top`.
+fn file_hold(skip: bool) -> Result<FileHold> {
+    let mut hold = FileHold {
+        held: if skip { None } else { ljos_cli::held_issue() },
+        dropped: None,
+        other_tracker: None,
+    };
+    if let Some(id) = hold.held.clone() {
+        if ljos_cli::hold_names_other_tracker(&id) {
+            hold.held = None;
+            hold.other_tracker = Some(id);
+        }
+    }
+    if let Some(id) = hold.held.clone() {
+        match ljos_cli::resolve_held_parent(&id)? {
+            Some(canonical) => hold.held = Some(canonical),
+            None => {
+                ljos_cli::clear_hold_for(&id);
+                hold.held = None;
+                hold.dropped = Some(id);
+            }
+        }
+    }
+    Ok(hold)
+}
+
 /// Print a ticket lookup failure and exit 1.
 fn stop_ticket(id: &str) {
     if let Some(line) = ljos_cli::ticket_refusal(id) {
@@ -4220,6 +4327,7 @@ fn seat_kind(cmd: &Cmd) -> ljos_cli::seat_resolve::Kind {
         | Cmd::Complete { .. }
         | Cmd::Options { .. }
         | Cmd::Deed { .. }
+        | Cmd::Table { .. }
         | Cmd::Seat { action: Some(_) } => Kind::Write,
         _ => Kind::Keep,
     }
@@ -6048,12 +6156,30 @@ fn run_command() -> Result<()> {
         Cmd::Current { accession } => run("deedar", &["current", &accession])?,
         Cmd::Deed {
             issue,
+            show,
+            out,
             add,
             remove,
             ticket,
             porcelain,
         } => {
-            if !remove.is_empty() {
+            if let Some(accession) = show {
+                let read = ljos_cli::deed_bytes::read_deed(&accession)?;
+                match out {
+                    Some(path) => {
+                        std::fs::write(&path, &read.bytes)
+                            .with_context(|| format!("deed: could not write {}", path.display()))?;
+                        println!(
+                            "wrote {} bytes of {} to {} (sha256:{})",
+                            read.bytes.len(),
+                            read.accession,
+                            path.display(),
+                            read.sha256
+                        );
+                    }
+                    None => std::io::Write::write_all(&mut std::io::stdout(), &read.bytes)?,
+                }
+            } else if !remove.is_empty() {
                 let ticket = ticket
                     .as_deref()
                     .or(issue.as_deref())
@@ -6119,6 +6245,38 @@ fn run_command() -> Result<()> {
                 }
             }
         }
+        Cmd::Table {
+            issue,
+            add,
+            name,
+            show,
+            version,
+            csv: _,
+            json,
+            verbose,
+        } => {
+            stop_ticket(&issue);
+            if let Some(file) = add {
+                let added = ljos_cli::table::add(&issue, &file, name.as_deref())?;
+                let mut said = added.text;
+                if added.wrote {
+                    said.push_str(&ljos_cli::persist_tracker(&issue, &added.verb));
+                }
+                print!("{}", render_write(&said, git_detail(verbose), false, None));
+            } else if let Some(name) = show {
+                let (version, read) = ljos_cli::table::show(&issue, &name, version)?;
+                if json {
+                    print!(
+                        "{}",
+                        ljos_cli::table::as_json(&issue, &version, &read.bytes)?
+                    );
+                } else {
+                    std::io::Write::write_all(&mut std::io::stdout(), &read.bytes)?;
+                }
+            } else {
+                print!("{}", ljos_cli::table::list(&issue, json)?);
+            }
+        }
         Cmd::OpenPanel {
             prompt_file,
             log,
@@ -6134,6 +6292,7 @@ fn run_command() -> Result<()> {
         }
         Cmd::File {
             title,
+            from,
             parent,
             top,
             project,
@@ -6152,6 +6311,58 @@ fn run_command() -> Result<()> {
             // the most recent write that is still the fallback, and the
             // commit line alone does not say to name one.
             ljos_cli::seat_resolve::announce_named_unknown(&ljos_cli::whoami());
+            if let Some(from) = from {
+                let rows = ljos_cli::bulk_file::read_rows(&from)?;
+                if let Some(parent) = parent.as_deref() {
+                    stop_ticket(parent);
+                }
+                let defaults = ljos_cli::bulk_file::Defaults {
+                    project,
+                    parent,
+                    kind,
+                    tags,
+                    priority,
+                };
+                // A row with no parent of its own is placed as `ljos file`
+                // places one, under the held issue.
+                let skip =
+                    top || defaults.parent.is_some() || rows.iter().all(|row| row.parent.is_some());
+                let hold = file_hold(skip)?;
+                let (placed, mut notes) =
+                    ljos_cli::bulk_file::place_rows(&rows, &defaults, top, hold.held)?;
+                if let Some(id) = hold.dropped {
+                    notes.insert(
+                        0,
+                        format!("held issue {id} is gone; rows with no parent are filed at the top of their project\n"),
+                    );
+                } else if let Some(id) = hold.other_tracker {
+                    notes.insert(
+                        0,
+                        format!("held issue {id} is on another tracker; rows with no parent are filed at the top of their project\n"),
+                    );
+                }
+                let filed = ljos_cli::bulk_file::file_rows(&placed, &defaults)?;
+                ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
+                for id in &filed.ids {
+                    println!("{id}");
+                }
+                let mut rest = notes.concat();
+                let _ = std::fmt::Write::write_fmt(
+                    &mut rest,
+                    format_args!(
+                        "filed {} tickets in {}\n",
+                        filed.ids.len(),
+                        filed.projects.join(", ")
+                    ),
+                );
+                rest.push_str(&filed.persisted);
+                if !git_detail(verbose) {
+                    rest = ljos_cli::without_routine_git(&rest);
+                }
+                eprint!("{rest}");
+                return Ok(());
+            }
+            let title = title.unwrap_or_default();
             if let Some(parent) = parent.as_deref() {
                 stop_ticket(parent);
             }
@@ -6164,36 +6375,11 @@ fn run_command() -> Result<()> {
             let named_project = project.is_some();
             // `--top` and `--parent` are a parent the seat chose. Only the
             // plain command asks what this conversation holds.
-            let mut held = if top || named_parent {
-                None
-            } else {
-                ljos_cli::held_issue()
-            };
-            // A sitting recorded for another tracker is not this ticket's
-            // parent. The record stays, so that tracker still has it.
-            let mut other_tracker = None;
-            if let Some(id) = held.clone() {
-                if ljos_cli::hold_names_other_tracker(&id) {
-                    held = None;
-                    other_tracker = Some(id);
-                }
-            }
-            // Resolve before any line that says the ticket was filed. A
-            // hold the tracker does not have is cleared and the ticket
-            // goes to the top of the project. An alias becomes the id
-            // on disk, so the parent vissue is asked for exists.
-            let mut dropped = None;
-            if let Some(id) = held.clone() {
-                match ljos_cli::resolve_held_parent(&id) {
-                    Ok(Some(canonical)) => held = Some(canonical),
-                    Ok(None) => {
-                        ljos_cli::clear_hold_for(&id);
-                        held = None;
-                        dropped = Some(id);
-                    }
-                    Err(err) => return Err(err),
-                }
-            }
+            let FileHold {
+                held,
+                dropped,
+                other_tracker,
+            } = file_hold(top || named_parent)?;
             let no_hold = held.is_none();
             let (parent, mut project, passed_over) =
                 ljos_cli::file_placement(top, parent, project, held);
@@ -8018,6 +8204,7 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         Cmd::File { .. } => "file",
         Cmd::Options { .. } => "options",
         Cmd::Deed { add, remove, .. } if !add.is_empty() || !remove.is_empty() => "deed",
+        Cmd::Table { add: Some(_), .. } => "table",
         Cmd::Workflow { start, round, .. } if start.is_some() || *round => "workflow",
         Cmd::Consensus {
             no_file, deadline, ..

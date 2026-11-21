@@ -101,6 +101,8 @@ A word that is not a command names the verb it was reaching for as a line that r
    Stores: none / tracker. ``DIR`` holds schema-v1 question and ballot entries; ``--tracker`` holds every ballot under ``ROOT``, a persona's and a judge's included, to one test: the voter's newest ``ballot-sig:`` note names the choice, verifies, and is under the key ``.ljos-seat-keys`` pins for that voter and no other seat. One ``FILE:LINE: ISSUE: REASON`` line per ballot that does not stand, and exits 1. An unsigned ballot committed before signing began is legacy. It only reads, so CI can run it.
 ``file TITLE [--parent ID|--top] [-p PROJECT] [-t TYPE] [--tags T] [--priority P] [--body TEXT] [--options A,B] [--quorum N --deadline RFC3339] [-q] [--verbose] [--json]``
    Stores: tracker. File work found while sitting: a child of the held issue unless ``--parent`` names another or ``--top`` none, in the parent's project; a projected board takes it into its inbox under the printed id; the tracker file is committed. ``--options`` writes ``Options: A, B`` as the first body line. ``--quorum`` and ``--deadline`` together say how many ballots are due, and when. ``-q`` (``--porcelain``) is accepted and changes nothing: the id is already the only line on stdout. A commit that landed is not printed, and neither is a push that landed. A refused commit, a refused push, or a push that was skipped is one sentence that names the command to run. ``--verbose`` prints the tracker and sync lines. ``--json`` prints ``id``, ``text``, ``tracker_git`` and ``sync``. A day's checklist is ``ljos sitting --plan``, which files the parent and its items in one commit. ``-p`` is one name: a leading segment that repeats the tracker directory or its org prefix is dropped, and any other slash is refused, as are ``.`` and ``..`` and any name that reads as one after Unicode NFKC folding, such as U+2024, so an id never contains ``/`` and no file lands outside a project directory. A held issue the tracker does not have is dropped, and the ticket is filed at the top of the project. With no held issue, no ``--parent``, no ``-p``, and no project in checkout config or ``LJOS_PROJECT``, ``ljos file`` exits 1 and names ``-p NAME``. Example: ``LJOS_SEAT=alice ljos file "Pick a codec" -p demo``.
+``file --from FILE [-p PROJECT] [--parent ID|--top] [-t TYPE] [--tags T] [--priority P] [--verbose]``
+   Stores: tracker. File one ticket per row of a JSONL or CSV file (``-`` reads stdin) with the columns title, body, tags, parent, priority and type (a CSV header that names one twice, even with spaces around one, is refused), in one tracker commit, and print the new ids one per line. The flags fill a column a row leaves empty. Each row goes where ``ljos file`` would put it: a row with a parent in that parent's project, whatever ``-p`` names, so one batch can file in several projects; a row without one under the held issue, unless ``-p`` or the checkout names another project, else in ``-p``, the checkout's project or ``LJOS_PROJECT``; ``--top`` files it at the top instead. A row that cannot be filed files none of them: the error names the row and the tickets written before it are taken back. If another writer changes the project file during the batch, the batch stops and leaves the tickets it filed uncommitted rather than writing over that change.
 ``ready [-p PROJECT] [-n N | --limit N | --all] [--json] [--mine]``
    Stores: tracker. Tickets that are open and not waiting on an open ticket. This seat's claims come first. Unclaimed tickets follow by priority, then by the newest note, claim or filing. Another seat's claims follow, with claims untouched for ``LJOS_STALE_DAYS`` (7 when unset) last. The id breaks the last tie, so the order is deterministic. The page prints the first 20, headed ``ready  shown X of Y``. ``-n N`` and ``--limit N`` print N. ``--all`` prints every ticket. A short page ends with one line naming ``--limit``, ``--all``, ``-p`` and ``--mine``. ``--json`` prints ``shown``, ``total`` and ``rows`` for that same page and order. ``--mine`` keeps its separate meaning: it names the next unfinished item of each of this seat's plans. When the open sitting's ticket is not a plan, the line names that ticket and says it has no plan items. ``-p`` limits the list to tickets in one project.
 ``list [-p PROJECT] [-n N | --limit N | --all] [--json] [--mine]``
@@ -131,8 +133,10 @@ A word that is not a command names the verb it was reaching for as a line that r
    Stores: pack. List a group, or add and drop members; membership is atoms and travels in the sealed log.
 ``wake [SEAT] [--command CMD [--timeout S]|--webhook URL [--key-file F] [--key-env VAR]|--clear|--fire]``
    Stores: machine. How mail wakes a seat that is idle: a shell line this machine runs with ``LJOS_SEAT`` set to the seat, or a URL it posts the envelope to (never the body); ``send`` and ``reply`` start it in its own session and do not wait on it; policyd reads a command when it is set and on every run, and a rule that fires is a warning beside it while the command still runs, and block-on-warning warns with that label and the command runs. It does not block; ``--fire`` runs it now and prints what happened. With ``--fire``, ``--from``, ``--msg``, ``--issue`` and ``--interrupt`` name the message. Alone, show the wake. Kept in ``~/.config/ljos/wake.toml``.
-``deed ID [--add ACCESSION]... [-q|--porcelain]`` / ``--remove ACCESSION --ticket ID``
-   Stores: tracker. Cite with ``--add``, or list; ``--remove`` drops one citation, appended to the ledger, and the heading is not rewritten.
+``deed ID [--add ACCESSION]... [-q|--porcelain]`` / ``--remove ACCESSION --ticket ID`` / ``--show ACCESSION [--out FILE]``
+   Stores: tracker, deed store. Cite with ``--add``, or list; ``--remove`` drops one citation, appended to the ledger, and the heading is not rewritten. ``--show`` prints a stored file's bytes, or writes them to ``--out``, once ``deedar evidence`` passes and the copy in the store hashes to the digest the deed names; a missing or altered copy exits 1 and prints nothing.
+``table ISSUE [--add FILE [--name NAME]]`` / ``--show NAME [--version N] [--csv|--json]`` / ``[--json]``
+   Stores: tracker, deed store. Keep a CSV table on a ticket instead of one ticket per row. ``--add`` checks the file (a header row, the same number of columns on every row, UTF-8, at most 8 MiB), stores it in ``deedar`` as ``table ISSUE NAME vN`` and cites it in one tracker commit; the name is the file name without its extension unless ``--name`` gives one. The same name again is the next version, which supersedes the one before, so ``ljos current`` on an older accession names the newer one; bytes the latest version already has write nothing. A name that differs from another only in case, ``.``, ``_`` or ``-`` is a separate table: its accession ends in a short digest of the issue and name. An accession another deed already uses is refused, naming that deed. Alone it lists each table's latest version with rows, columns, version and accession. ``--show`` prints the latest version, or ``--version N``, read the way ``deed --show`` reads; ``--json`` prints the columns and rows.
 ``claims [--mine | --stale [--days N] [--json]] [ARGS]``
    Stores: tracker. Who has claimed what: ``vissue claims`` with its flags (``--by NAME``, ``--json``, ``-p PROJECT``). ``--mine`` lists this seat's claims with no note, stored file or finish for a day. ``--stale`` lists the ones untouched for ``--days`` or longer (``LJOS_STALE_DAYS``, 7 when unset), oldest first, with the age and the command to finish, release or note each one. ``--json`` prints that list as an array.
 ``recall ID [--json] [--no-graph]``
@@ -355,13 +359,13 @@ conflicts --limit
 consensus --compare --deadline --json --no-file --quorum
 consolidate --apply
 current
-deed --add --porcelain --remove --ticket
+deed --add --out --porcelain --remove --show --ticket
 digest --json --mark --since
 doctor --all --fix --verbose
 due --all --json --judge
 evidence
 export --json --machine --out
-file --body --deadline --json --options --parent --porcelain --priority --project --quorum --tags --top --type --verbose
+file --body --deadline --from --json --options --parent --porcelain --priority --project --quorum --tags --top --type --verbose
 findings --all --issue --remember
 finish --assignee --beta --close --gen --json --lesson --new-option --outcome --quiet --status --verbose
 forget --json --why
@@ -444,6 +448,7 @@ slot --key --model --run
 statusline
 supervise --at --cwd --exit --failures --harness --max-restarts --restart --script --window
 sync --adopt --adopt-legacy --compact --dry-run --export --force --import --key
+table --add --csv --json --name --show --verbose
 timeline --json --limit
 trust --about --why
 uninstall --all --bin-dir --dry-run --keep-programs --no-stub --purge

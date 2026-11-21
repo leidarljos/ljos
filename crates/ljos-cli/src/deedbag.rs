@@ -432,7 +432,7 @@ fn file_kind(path: &Path) -> Result<Kind> {
     }
 }
 
-fn store_dir() -> Result<PathBuf> {
+pub(crate) fn store_dir() -> Result<PathBuf> {
     let raw = std::env::var("DEEDAR_URL").unwrap_or_default();
     let raw = raw.trim();
     if !raw.is_empty() {
