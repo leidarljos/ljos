@@ -190,8 +190,8 @@ from a seat it does not list is refused.
 A grant is made with ~ljos seat grant SEAT close=own --quote "..." --at ISO --via RECORDER~. The
 row lives in =vissue.toml=. It holds the quote, the time, the recorder and the tracker commit. A
 grant edited in by hand is ignored, because only the command writes the commit that backs the row.
-A seat cannot grant itself. Every close cites the grant record, so a close can be traced to the
-words that allowed it.
+A seat cannot grant itself. Every close that uses the grant cites the record, so that close can be
+traced to the words that allowed it. A person at a terminal closes with no grant note.
 
 A shell-only agent has no MCP client and no hook. =ljos onboard= for such a runner writes the skill
 and an env file. Source the file, and =LJOS_SEAT= is the name.
