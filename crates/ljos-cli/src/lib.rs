@@ -48186,10 +48186,10 @@ pub fn finish(
         }
         return Ok(ticked);
     }
-    let pending = retry_pending_claim(issue);
     // A close asks whether a person is present, before any write. A
     // runner with no terminal is refused unless a standing grant covers
-    // this seat and this ticket. The sitting can still end.
+    // this seat and this ticket. The sitting can still end. A pending
+    // claim is retried only after every close check below has passed.
     let close_note = if close {
         seat_roster::close_note(issue)?
     } else {
@@ -48239,6 +48239,7 @@ pub fn finish(
             Err(_) => {}
         }
     }
+    let pending = retry_pending_claim(issue);
     let terminal = ["done", "failed", "cancelled"];
     if !terminal.contains(&status) {
         bail!("finish: status {status:?} is not one of done, failed, cancelled");
@@ -67199,6 +67200,9 @@ mod tests {
         std::env::remove_var("ISSUE_ROOT");
         std::env::set_var("LJOS_TRACKER_GIT", "off");
         super::PERSON_AT_TERMINAL.with(|p| p.set(true));
+        super::note_claim_pending("demo-p001", "seat", "the claim graph did not answer");
+        let pending = super::claim_pending_path("demo-p001").unwrap();
+        let before = std::fs::read_to_string(&pending).unwrap();
         let err = super::finish(
             "demo-p001",
             "done",
@@ -67216,6 +67220,11 @@ mod tests {
         assert!(err.contains("open child"), "{err}");
         assert!(err.contains("demo-c001"), "{err}");
         assert!(err.contains("Nothing was written"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&pending).ok(),
+            Some(before),
+            "a refused close leaves the pending claim untried"
+        );
         std::fs::write(
             &fake,
             "#!/bin/sh\ncase \"$1\" in\n  children) printf '%s' '[{\"id\":\"demo-c001\",\"state\":\"DONE\",\"title\":\"Name the index in the notes\"}]' ;;\n  *) exit 0 ;;\nesac\n",
