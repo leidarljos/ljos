@@ -32257,8 +32257,11 @@ fn raw_tracker_write(line: &str) -> Option<Rule> {
     })
 }
 
-/// The tracker verb a command writes with and the ljos command that does
-/// the same write, its issue carried over. `None` for a read.
+/// The tracker verb a command writes with and the ljos command to run
+/// instead, its issue carried over. `None` for a read. A close, a cancel,
+/// or a state of DONE or CANCELLED maps to a finish with no `--close`.
+/// That finish ends the sitting and leaves the ticket open, so it is not
+/// the same write, and its `--status cancelled` records nothing.
 fn tracker_write_instead(words: &[String]) -> Option<(String, String)> {
     let (at, _) = prefix_end(words);
     let words = &words[at..];
