@@ -593,6 +593,7 @@ fn resolve_org(dir: &Path, file: &str) -> Result<(), String> {
     let theirs = stage(dir, 3, file);
     let merged = match (ours, theirs) {
         (Some(a), Some(b)) => field_or_union(&base, &a, &b, file)?,
+        (Some(a), None) | (None, Some(a)) if vissue_core::ledger::is_ledger_text(&a) => a,
         (Some(a), None) | (None, Some(a)) => fold_org_text(&a),
         (None, None) => {
             return Err(format!(
@@ -623,6 +624,14 @@ fn looks_like_issue(text: &str) -> bool {
 }
 
 fn field_merge(base: &str, ours: &str, theirs: &str) -> Result<String, String> {
+    // A per-issue file of a split board is a heading and appended records.
+    // Read as a board, the records are body text: records on both sides
+    // conflict, and theirs go to a MERGE_CONFLICT drawer.
+    if vissue_core::ledger::is_ledger_text(ours) || vissue_core::ledger::is_ledger_text(theirs) {
+        return vissue_core::ledger::merge_file(base, ours, theirs)
+            .map(|merged| merged.text)
+            .map_err(|e| e.to_string());
+    }
     let merged = vissue_core::merge::merge_tracker("tracker", base, ours, theirs)
         .map_err(|e| e.to_string())?;
     if merged.text.contains("<<<<<<<") {
@@ -2633,5 +2642,40 @@ body b
             "{plain}"
         );
         assert!(!plain.contains("<<<<<<<"), "{plain}");
+    }
+
+    /// Two seats that each appended to the same per-issue file of a split
+    /// board merge to ours with theirs appended, with no conflict drawer.
+    #[test]
+    fn a_split_issue_file_merges_both_sides_records() {
+        let _env = crate::tests::env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("Software/probe/issues.org");
+        std::fs::create_dir_all(board.parent().unwrap()).unwrap();
+        std::fs::write(
+            &board,
+            "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        let layout = vissue_core::Layout::new(dir.path(), "Software");
+        vissue_core::ledger::migrate(&layout, false).unwrap();
+        let file = dir.path().join("Software/probe/issues/probe-a1b2.org");
+        let base = std::fs::read_to_string(&file).unwrap();
+        vissue_core::ops::note(&layout, "probe-a1b2", "from ours").unwrap();
+        let ours = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, &base).unwrap();
+        vissue_core::ops::note(&layout, "probe-a1b2", "from theirs").unwrap();
+        let theirs = std::fs::read_to_string(&file).unwrap();
+        let merged = field_merge(&base, &ours, &theirs).unwrap();
+        assert!(merged.starts_with(&ours), "{merged}");
+        assert!(merged.contains("from theirs"), "{merged}");
+        assert!(!merged.contains("MERGE_CONFLICT"), "{merged}");
+        std::fs::write(&file, &merged).unwrap();
+        let card = vissue_core::agent::show_json(&layout, "probe-a1b2").unwrap();
+        let shown = card.to_string();
+        assert!(
+            shown.contains("from ours") && shown.contains("from theirs"),
+            "{shown}"
+        );
     }
 }

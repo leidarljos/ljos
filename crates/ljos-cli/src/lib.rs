@@ -49652,6 +49652,9 @@ fn insert_logbook_line(text: &str, issue: &str, entry: &str) -> Option<String> {
 /// whole, and so does this. Rewritten in place, the stamp could drop a
 /// ballot another seat wrote between the read and the write, and a `git
 /// add` hashing the file meanwhile dies on unstable object data.
+///
+/// A board split into per-issue files gets the line as one appended log
+/// record in that issue's file, under the board's issues lock.
 pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> bool {
     sweep_tracker_temps(path);
     let entry = format!(
@@ -49660,6 +49663,27 @@ pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> b
         seat.trim(),
         chrono::Local::now().format("[%Y-%m-%d %a %H:%M]")
     );
+    if let Some(board) = ledger_board(path) {
+        return with_wall_bounded_issues_lock(&board, || {
+            let mut doc = vissue_core::IssueDoc::parse_file(&board_project(&board), &board)?;
+            let Some(heading) = doc.headings.iter_mut().find(|h| h.id == issue) else {
+                return Ok(false);
+            };
+            heading.logbook.insert(
+                0,
+                vissue_core::LogEntry {
+                    timestamp: String::new(),
+                    from_state: None,
+                    to_state: None,
+                    note: None,
+                    raw: Some(entry.clone()),
+                },
+            );
+            doc.write()?;
+            Ok(true)
+        })
+        .unwrap_or(false);
+    }
     with_wall_bounded_issues_lock(path, || {
         let text = std::fs::read_to_string(path)?;
         let Some(next) = insert_logbook_line(&text, issue, &entry) else {
@@ -49669,6 +49693,47 @@ pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> b
         Ok(true)
     })
     .unwrap_or(false)
+}
+
+/// The board whose per-issue files hold the tracker file at `path`: `path`
+/// itself when it is a split board, or `BOARD_DIR/issues.org` when `path`
+/// is `BOARD_DIR/issues/ID.org`. `None` for a board that is not split.
+pub(crate) fn ledger_board(path: &Path) -> Option<PathBuf> {
+    if vissue_core::ledger::is_ledger(path) {
+        return Some(path.to_path_buf());
+    }
+    let dir = path.parent()?;
+    if dir.file_name()? != "issues" {
+        return None;
+    }
+    let board = dir.parent()?.join("issues.org");
+    vissue_core::ledger::is_ledger(&board).then_some(board)
+}
+
+/// The project name a board's directory gives it.
+fn board_project(board: &Path) -> String {
+    board
+        .parent()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// `BOARD_DIR/issues/ID.org` for `issue` on the split board `board`, named
+/// as vissue names it: bytes outside `[A-Za-z0-9._-]` are `%XX`. `None`
+/// when that file is not there.
+fn ledger_issue_file(board: &Path, issue: &str) -> Option<PathBuf> {
+    let mut name = String::new();
+    for byte in issue.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            name.push(byte as char);
+        } else {
+            name.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    name.push_str(".org");
+    let file = board.parent()?.join("issues").join(name);
+    file.is_file().then_some(file)
 }
 
 /// Remove the stale whole-file temporaries beside the tracker file at
@@ -49743,6 +49808,14 @@ pub fn stamp_note_seat(issue: &str) {
 
 /// Whether the first logbook line of `issue` is `- Noted by SEAT`.
 fn logbook_opens_with_note_seat(path: &Path, issue: &str, seat: &str) -> bool {
+    let want = format!("- Noted by {seat} ");
+    if let Some(board) = ledger_board(path) {
+        return vissue_core::IssueDoc::parse_file(&board_project(&board), &board)
+            .ok()
+            .and_then(|doc| doc.headings.into_iter().find(|h| h.id == issue))
+            .and_then(|heading| heading.logbook.first().map(vissue_core::LogEntry::render))
+            .is_some_and(|line| line.trim().starts_with(&want));
+    }
     let Ok(text) = std::fs::read_to_string(path) else {
         return false;
     };
@@ -49756,7 +49829,6 @@ fn logbook_opens_with_note_seat(path: &Path, issue: &str, seat: &str) -> bool {
     else {
         return false;
     };
-    let want = format!("- Noted by {seat} ");
     lines
         .get(id_at + book + 1)
         .is_some_and(|line| line.trim().starts_with(&want))
@@ -50724,6 +50796,13 @@ fn persist_tracker_with(issue: &str, verb: &str, also: &[String]) -> String {
 /// The file that holds `issue`. A ledger fold names `issues/<id>.org`.
 /// A single board names `issues.org`. `show_json` prints `path:start-end`.
 fn tracker_issue_path(issue: &str) -> Result<PathBuf, String> {
+    let path = tracker_issue_path_or_board(issue)?;
+    Ok(ledger_board(&path)
+        .and_then(|board| ledger_issue_file(&board, issue))
+        .unwrap_or(path))
+}
+
+fn tracker_issue_path_or_board(issue: &str) -> Result<PathBuf, String> {
     if let Some(spot) = issue_spot::find(issue) {
         let path = spot.rec().path.clone();
         if path.is_file() {
@@ -50880,11 +50959,160 @@ pub fn persist_tracker_many(ids: &[String], verb: &str) -> String {
     persist_tracker_writes(path, writes, &also, &files[1..], subject.as_deref())
 }
 
+/// A board at least this many bytes is split into per-issue files on its
+/// next tracker write. `LJOS_TRACKER_SPLIT_BYTES` sets it; `0` never splits.
+const TRACKER_SPLIT_BYTES: u64 = 1 << 20;
+
+fn tracker_split_bytes() -> u64 {
+    std::env::var("LJOS_TRACKER_SPLIT_BYTES")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(TRACKER_SPLIT_BYTES)
+}
+
+/// Whether `path` is an unsplit `issues.org` of at least `limit` bytes.
+fn board_wants_split(path: &Path, limit: u64) -> bool {
+    limit > 0
+        && path.file_name().is_some_and(|name| name == "issues.org")
+        && !vissue_core::ledger::is_ledger(path)
+        && std::fs::metadata(path).is_ok_and(|meta| meta.len() >= limit)
+}
+
+/// Split the board at `path`, and every unsplit board beside it, into
+/// per-issue files (`vissue migrate-ledger`), and commit the new files with
+/// the board in one commit. Later writes append to one small file and
+/// leave `issues.org` as it was at the split. Never an error: the line
+/// says what did not happen, and the write goes on to the board.
+fn split_board(path: &Path) -> String {
+    let (Some(dir), Some(projects)) = (path.parent(), path.parent().and_then(Path::parent)) else {
+        return String::new();
+    };
+    let (Some(root), Some(prefix)) = (projects.parent(), projects.file_name()) else {
+        return String::new();
+    };
+    let Some(top) = git_ok_stdout(dir, &["rev-parse", "--show-toplevel"]) else {
+        return String::new();
+    };
+    let top = PathBuf::from(top.trim());
+    let Some(_held) = tracker_commit_lock_by(dir, std::time::Instant::now() + tracker_lock_wait())
+    else {
+        return String::new();
+    };
+    if vissue_core::ledger::is_ledger(path) {
+        return String::new();
+    }
+    let layout = vissue_core::Layout::new(root, prefix.to_string_lossy());
+    let said = match vissue_core::ledger::migrate(&layout, false) {
+        Ok(said) => said,
+        Err(e) => {
+            return format!(
+                "tracker git: could not split {} into per-issue files: {e}\n",
+                path.display()
+            )
+        }
+    };
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let top = canon(&top);
+    let rel = |p: &Path| {
+        canon(p)
+            .strip_prefix(&top)
+            .ok()
+            .map(|r| r.to_string_lossy().into_owned())
+    };
+    let Some(board) = rel(path) else {
+        return format!(
+            "tracker git: split {}; it is outside {}, so nothing was committed\n",
+            path.display(),
+            top.display()
+        );
+    };
+    let mut rels = vec![board.clone()];
+    let mut body = Vec::new();
+    for line in said.lines() {
+        match line.rsplit_once(" -> ") {
+            Some((head, split)) => match rel(Path::new(split)) {
+                Some(split) => {
+                    body.push(format!("{head} -> {split}"));
+                    rels.push(split);
+                }
+                None => body.push(head.to_string()),
+            },
+            None => body.push(line.to_string()),
+        }
+    }
+    let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
+    let message = format!(
+        "chore(issues): split {board} into per-issue files by {}\n\n{}",
+        tracker_seat(),
+        body.join("\n")
+    );
+    match commit_paths(&top, &refs, &message) {
+        PathCommit::Made | PathCommit::AlreadyIn => {
+            format!("tracker git: split {board} into per-issue files and committed the split\n")
+        }
+        PathCommit::Refused(why) => {
+            format!("tracker git: split {board} into per-issue files; commit refused: {why}\n")
+        }
+        PathCommit::Deferred(why) => {
+            format!("tracker git: split {board} into per-issue files; {why}\n")
+        }
+    }
+}
+
 /// [`persist_tracker_paths`] for several writes to the one file at
 /// `path`, in one commit. `others` are files among `also` whose writes
 /// are stamped with `path`'s: after the checkout lock is held and before
 /// any issues lock, and only once nothing refuses the commit.
+///
+/// A board past [`tracker_split_bytes`] is split first. On a split board
+/// each write commits the issue's own file instead of `issues.org`.
 fn persist_tracker_writes(
+    path: &Path,
+    writes: &[(String, String)],
+    also: &[String],
+    others: &[(PathBuf, Vec<(String, String)>)],
+    message: Option<&str>,
+) -> String {
+    let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
+    let split = if !matches!(mode.as_str(), "off" | "0" | "false")
+        && board_wants_split(path, tracker_split_bytes())
+        && path
+            .parent()
+            .is_some_and(|dir| tracker_place::product_checkout(dir).is_none())
+    {
+        split_board(path)
+    } else {
+        String::new()
+    };
+    if vissue_core::ledger::is_ledger(path) {
+        let mut groups: Vec<(PathBuf, Vec<(String, String)>)> = Vec::new();
+        for write in writes {
+            let file = ledger_issue_file(path, &write.0).unwrap_or_else(|| path.to_path_buf());
+            match groups.iter_mut().find(|(seen, _)| *seen == file) {
+                Some((_, list)) => list.push(write.clone()),
+                None => groups.push((file, vec![write.clone()])),
+            }
+        }
+        if groups.iter().all(|(file, _)| file != path) {
+            let mut out = split;
+            for (at, (file, list)) in groups.iter().enumerate() {
+                let (also, others, message) = if at == 0 {
+                    (also, others, message)
+                } else {
+                    (&[][..], &[][..], None)
+                };
+                out.push_str(&persist_one_tracker_file(file, list, also, others, message));
+            }
+            return out;
+        }
+    }
+    format!(
+        "{split}{}",
+        persist_one_tracker_file(path, writes, also, others, message)
+    )
+}
+
+fn persist_one_tracker_file(
     path: &Path,
     writes: &[(String, String)],
     also: &[String],
@@ -60070,6 +60298,171 @@ mod tests {
         assert!(!old.exists(), "the stale temporary is still there");
         assert!(young.exists(), "a young temporary was swept");
         for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// A tracker checkout whose one board holds `count` padded issues,
+    /// committed. Returns the board.
+    fn big_board(root: &Path, count: usize) -> PathBuf {
+        let issues = seeded_tracker(root);
+        let mut text = String::new();
+        for at in 0..count {
+            text.push_str(&format!(
+                "* TODO [#C] Probe {at}\n:PROPERTIES:\n:ID:         probe-b{at:03}\n:END:\n\
+                 A body line that pads the board the way real notes do.\n"
+            ));
+        }
+        std::fs::write(&issues, text).unwrap();
+        let run = |args: &[&str]| {
+            let o = super::git_at(root).args(args).output().unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        };
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "big board"]);
+        issues
+    }
+
+    fn git_text(root: &Path, args: &[&str]) -> String {
+        let o = super::git_at(root).args(args).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    }
+
+    /// Bytes added and removed by the HEAD commit, and the paths it touched.
+    fn head_change(root: &Path) -> (usize, Vec<String>) {
+        let mut bytes = 0;
+        let mut paths = Vec::new();
+        for line in git_text(root, &["show", "--format=", "--numstat", "HEAD"]).lines() {
+            paths.push(line.split('\t').nth(2).unwrap_or_default().to_string());
+        }
+        for line in git_text(root, &["show", "--format=", "--unified=0", "HEAD"]).lines() {
+            if (line.starts_with('+') || line.starts_with('-'))
+                && !line.starts_with("+++")
+                && !line.starts_with("---")
+            {
+                bytes += line.len();
+            }
+        }
+        (bytes, paths)
+    }
+
+    /// A board past the split size is split into per-issue files on its next
+    /// tracker write, in one commit with the board. Every later event then
+    /// commits only that issue's small file, and changes it by about the
+    /// size of the event, not the size of the board. vissue and ljos still
+    /// find every ticket and its log.
+    #[test]
+    fn a_large_board_splits_and_each_event_commits_a_small_file() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let issues = big_board(root, 300);
+        let board_bytes = std::fs::metadata(&issues).unwrap().len();
+        assert!(board_bytes > 30_000, "{board_bytes}");
+        std::env::set_var("VISSUE_ROOT", root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        std::env::set_var("LJOS_TRACKER_SPLIT_BYTES", "20000");
+        let layout = vissue_core::Layout::new(root, "Software");
+        let board_status = [
+            "status",
+            "--porcelain",
+            "--",
+            "Software/probe/issues.org",
+            "Software/probe/issues",
+        ];
+
+        // The board rewrite on this note is the last one; the write splits.
+        vissue_core::ops::note(&layout, "probe-b007", "first look").unwrap();
+        let said = persist_tracker_file(&issues, "probe-b007", "noted");
+        assert!(said.contains("split Software/probe/issues.org"), "{said}");
+        assert!(said.contains("committed"), "{said}");
+        assert!(vissue_core::ledger::is_ledger(&issues));
+        let split = git_text(root, &["log", "--format=%s", "-2"]);
+        assert!(split.contains("into per-issue files by saddle"), "{split}");
+        let tracked = git_text(root, &["ls-files", "Software/probe/issues"]);
+        assert_eq!(tracked.lines().filter(|l| l.ends_with(".org")).count(), 300);
+        assert!(
+            tracked.contains("Software/probe/issues/.ledger"),
+            "{tracked}"
+        );
+        let left = git_text(root, &board_status);
+        assert!(left.is_empty(), "{said}\n{left}");
+        let board_blob = git_text(root, &["rev-parse", "HEAD:Software/probe/issues.org"]);
+        let board_at_split = std::fs::read(&issues).unwrap();
+
+        for (at, id) in ["probe-b007", "probe-b123", "probe-b299"]
+            .iter()
+            .enumerate()
+        {
+            vissue_core::ops::note(&layout, id, &format!("event {at}")).unwrap();
+            let said = persist_tracker(id, "noted");
+            assert!(said.contains("committed"), "{said}");
+            let (bytes, paths) = head_change(root);
+            assert_eq!(paths, vec![format!("Software/probe/issues/{id}.org")]);
+            assert!(bytes < 400, "{id}: {bytes} bytes changed for one event");
+            let left = git_text(root, &board_status);
+            assert!(left.is_empty(), "{said}\n{left}");
+        }
+        assert_eq!(
+            git_text(root, &["rev-parse", "HEAD:Software/probe/issues.org"]),
+            board_blob,
+            "the board changed after the split"
+        );
+        assert_eq!(std::fs::read(&issues).unwrap(), board_at_split);
+        let card = vissue_core::agent::show_json(&layout, "probe-b000").unwrap();
+        assert_eq!(card["title"], "Probe 0");
+
+        let card = vissue_core::agent::show_json(&layout, "probe-b123").unwrap();
+        let shown = card.to_string();
+        assert!(shown.contains("event 1"), "{shown}");
+        assert!(shown.contains("Noted by saddle"), "{shown}");
+        let hit = vissue_core::Router::load(layout.clone())
+            .unwrap()
+            .find_by_id("probe-b299")
+            .unwrap();
+        assert_eq!(hit.path, issues);
+        assert_eq!(
+            tracker_issue_path("probe-b299").unwrap(),
+            root.join("Software/probe/issues/probe-b299.org")
+        );
+        let listed = vissue_core::report::show_all(&layout).unwrap();
+        assert!(listed.contains("probe-b000") && listed.contains("probe-b299"));
+        for var in [
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_SEAT",
+            "LJOS_TRACKER_SPLIT_BYTES",
+        ] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// A board under the split size, or with the split turned off, keeps
+    /// its single file.
+    #[test]
+    fn a_small_board_or_split_off_stays_one_file() {
+        let _env = env_guard();
+        for limit in [None, Some("0")] {
+            let dir = tempfile::tempdir().unwrap();
+            let issues = big_board(dir.path(), 300);
+            std::env::set_var("LJOS_TRACKER_GIT", "commit");
+            std::env::set_var("LJOS_SEAT", "saddle");
+            match limit {
+                Some(limit) => std::env::set_var("LJOS_TRACKER_SPLIT_BYTES", limit),
+                None => std::env::remove_var("LJOS_TRACKER_SPLIT_BYTES"),
+            }
+            let text = std::fs::read_to_string(&issues).unwrap();
+            std::fs::write(&issues, text.replacen("TODO", "STARTED", 1)).unwrap();
+            let said = persist_tracker_file(&issues, "probe-b000", "claimed");
+            assert!(!said.contains("split"), "{said}");
+            assert!(!vissue_core::ledger::is_ledger(&issues));
+            assert!(!dir.path().join("Software/probe/issues").exists());
+        }
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT", "LJOS_TRACKER_SPLIT_BYTES"] {
             std::env::remove_var(var);
         }
     }

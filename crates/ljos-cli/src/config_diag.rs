@@ -807,6 +807,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_TRACKER_SPLIT_BYTES",
+        default: "1048576 bytes",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_TRACKER_TOKEN",
         default: "unset",
         group: "ljos",
