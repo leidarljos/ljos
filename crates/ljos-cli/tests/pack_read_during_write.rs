@@ -313,7 +313,7 @@ fn a_held_write_does_not_fail_readers() {
             );
         } else {
             assert!(
-                stderr.contains("The memory pack was busy, so these rows are word matches; run the search again for ranked results."),
+                stderr.contains("Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`."),
                 "{what}:\n{said}"
             );
             assert!(!stderr.contains("pack busy, try again"), "{what}:\n{said}");

@@ -626,7 +626,7 @@ enum Cmd {
     /// Starting is waited out on `LJOS_SEARCH_WARMUP_WAIT` (5 seconds when unset, `0` does not wait), and not past `LJOS_CALL_TIMEOUT`.
     /// The pack is starting when `/health` is `not-ready` or `not ready`, or the JSON says `ready` is false or `code` is `starting`.
     /// Words in the lesson are not that signal.
-    /// When that budget runs out the line is `Memory is starting, so try again in a few seconds.` and the command exits non-zero.
+    /// When that budget runs out the line is `` Memory is starting, so try again in a few seconds. If this persists, run `ljos doctor`. `` and the command exits non-zero.
     /// The pack is this seat's memory store.
     /// Turned off on purpose, the command exits 1.
     #[command(after_help = "Example: `ljos remember \"The lexical default is BM25+.\"`")]
@@ -859,19 +859,23 @@ enum Cmd {
     /// A busy memory store is asked again for `LJOS_SEARCH_BUSY_WAIT` seconds (2 when unset, `0` does not wait).
     /// The wait follows `Retry-After` or a JSON `retry_ms`.
     /// When it answers, the rows are ranked by meaning. When it stays
-    /// busy, the rows are ranked by words and a hit that names the subject
-    /// stays. Search fell back, and the one line is
-    /// `The memory pack was busy, so these rows are word matches; run the search again for ranked results.`
-    /// While the encoder is
+    /// busy, has not opened after the start wait below, or is not running,
+    /// the rows are ranked by words from the listing a hook last kept on
+    /// this machine and this seat's memory slot, and a hit that names the
+    /// subject stays. Search fell back, and one line on stderr says which
+    /// of the three it was:
+    /// `` Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`. ``
+    /// It reads `starting` or `not running` in the other two. `ljos recall`
+    /// and `ljos sitting` say the same line, once. While the encoder is
     /// still loading, a remaining time that fits in `LJOS_SEARCH_WARMUP_WAIT`
     /// seconds (5 when unset, `0` does not wait) is waited out, inside
     /// `LJOS_CALL_TIMEOUT`, and the search then ranks by meaning. The pack
     /// is starting when `/health` is `not-ready` or `not ready`, or the JSON
     /// says `ready` is false or `code` is `starting`. Words in the query are
-    /// not that signal. That same budget is waited out. When it runs out,
-    /// search ranks by words and the one line is `Used word search because
-    /// memory is still starting.` A dated search has no word fallback, so
-    /// the line is `Memory is starting, so try again in a few seconds.` and
+    /// not that signal. That same budget is waited out once, however many
+    /// times the search asks again. When it runs out, search ranks by words
+    /// and says so on stderr. A dated search has no word fallback, so
+    /// the line is `` Memory is starting, so try again in a few seconds. If this persists, run `ljos doctor`. `` and
     /// the command exits non-zero. A remaining
     /// time that is absent or longer than that budget keeps `LJOS_SEARCH_WAIT`
     /// (3 when unset). If the encoder is still not ready and rows
@@ -884,12 +888,10 @@ enum Cmd {
     /// row per hit, the id, the kind and the text, separated by tabs, and
     /// leaves this page off. A receipt, a mail row and another seat's
     /// bookkeeping stay off the page, the JSON and the porcelain rows.
-    /// A pack that is down
-    /// ranks by words from what is stored locally, prints one line that
-    /// names `packset ensure`, and exits 0. A pack that stays busy ranks
-    /// by words. Search fell back, and the one line is
-    /// `The memory pack was busy, so these rows are word matches; run the search again for ranked results.`
-    /// When no words match, the line is `The memory pack was busy and no words matched.` and the command exits 1.
+    /// A pack that is down ranks by words from what is stored locally,
+    /// prints the `not running` line, and exits 0. A pack that stays busy
+    /// ranks by words and prints the `busy` line. When no words match on a
+    /// busy pack, the command exits 1.
     /// The pack is this seat's memory store.
     #[command(after_help = "Example: `ljos search \"lexical default\"`")]
     Search {
@@ -5771,6 +5773,7 @@ fn run_command() -> Result<()> {
             // that accepts and stays silent spends one request, not one per
             // later read.
             let _quiet_pack = ljos_cli::pack_link::QuietPack::enter();
+            let _call = ljos_cli::SearchCall::enter();
             let dated_ahead = as_of.is_some();
             let budget = if !dated_ahead && !rerank {
                 ljos_cli::search_budget()
@@ -5820,37 +5823,20 @@ fn run_command() -> Result<()> {
                 Err(err) if err.to_string().contains(ljos_cli::WRITER_PORT_FIX) => {
                     return Err(err);
                 }
-                // The pack has not opened. A search of now ranks by words.
-                // A dated search has no live snapshot to rank, so it exits
-                // with the starting line.
-                Err(err) if ljos_cli::is_memory_starting(&err) => {
-                    if dated {
-                        return Err(err);
-                    }
+                // A dated search has no live snapshot to rank, so a pack
+                // that has not opened exits with the starting line.
+                Err(err) if dated && ljos_cli::is_memory_starting(&err) => return Err(err),
+                // The pack has not opened, is busy, or is not running. A
+                // search of now ranks the words it has on this machine, and
+                // one line on stderr says which of the three it was.
+                Err(err) if !dated && ljos_cli::degraded::of_error(&err).is_some() => {
+                    let state = ljos_cli::degraded::of_error(&err)
+                        .unwrap_or(ljos_cli::degraded::State::Busy);
                     (
                         ljos_cli::search_by_words(&asked, fetch),
                         ljos_cli::Ranking {
                             mode: "lexical",
-                            reason: ljos_cli::MEMORY_STARTING_REASON,
-                        },
-                    )
-                }
-                // The writer reported busy, or it accepted and did not answer.
-                // One line says word search was used. It does not also
-                // print `pack busy, try again` or that the search did not
-                // answer in time.
-                Err(err)
-                    if !dated
-                        && (ljos_cli::is_read_shed(&err)
-                            || ljos_cli::is_reported_busy(&err)
-                            || ljos_cli::is_pack_busy(&err)
-                            || ljos_cli::is_deadline_miss(&err)) =>
-                {
-                    (
-                        ljos_cli::search_by_words(&asked, fetch),
-                        ljos_cli::Ranking {
-                            mode: "lexical",
-                            reason: ljos_cli::MEMORY_SEARCH_BUSY_REASON,
+                            reason: state.reason(),
                         },
                     )
                 }
@@ -5861,46 +5847,6 @@ fn run_command() -> Result<()> {
                         reason: ljos_cli::PACK_OFF_REASON,
                     },
                 ),
-                Err(err)
-                    if !dated
-                        && (ljos_cli::pack_unreachable(&err)
-                            || ljos_cli::pack_memory_down(&err)
-                            || format!("{err:#}")
-                                .to_ascii_lowercase()
-                                .contains("closed the socket")) =>
-                {
-                    let closed = format!("{err:#}")
-                        .to_ascii_lowercase()
-                        .contains("closed the socket");
-                    let down = ljos_cli::pack_unreachable(&err) || closed;
-                    // One line, printed with the rows. A writer that is not
-                    // listening names `packset ensure`. A writer that ran
-                    // out of time names the command to rerun and how long
-                    // to wait.
-                    let reason = if down {
-                        ljos_cli::WRITER_DOWN_REASON
-                    } else {
-                        let detail = if ljos_cli::is_read_shed(&err) {
-                            ljos_cli::pack_fault_line(&err)
-                        } else {
-                            String::new()
-                        };
-                        let secs = if ljos_cli::is_read_shed(&err) {
-                            1
-                        } else {
-                            ljos_cli::SEARCH_PACK_BUDGET.as_secs().max(1)
-                        };
-                        ljos_cli::note_writer_fallback(secs, &detail);
-                        ljos_cli::WRITER_BUSY_REASON
-                    };
-                    (
-                        ljos_cli::search_by_words(&asked, fetch),
-                        ljos_cli::Ranking {
-                            mode: "lexical",
-                            reason,
-                        },
-                    )
-                }
                 Err(err) => return Err(err),
             };
             if let Some(day) = day {
@@ -6070,17 +6016,9 @@ fn run_command() -> Result<()> {
                     )
                 );
             } else if busy_miss {
-                let rank =
-                    ljos_cli::search_rank_for_person(&ljos_cli::search_rank_line(&ranking, &hits));
-                if !rank.is_empty() {
-                    eprint!("{rank}");
-                }
+                ljos_cli::say_search_rank(&ranking, &hits);
             } else {
-                let rank =
-                    ljos_cli::search_rank_for_person(&ljos_cli::search_rank_line(&ranking, &hits));
-                if !rank.is_empty() {
-                    eprint!("{rank}");
-                }
+                ljos_cli::say_search_rank(&ranking, &hits);
                 if floor_emptied {
                     print!(
                         "{}",
@@ -6804,12 +6742,7 @@ fn run_command() -> Result<()> {
                 );
             } else {
                 if let Some(ranking) = ranking.as_ref() {
-                    let line = if ranking.reason == ljos_cli::MEMORY_SEARCH_BUSY_REASON {
-                        ljos_cli::search_busy_line(!memories.trim().is_empty())
-                    } else {
-                        ljos_cli::ranking_line(ranking)
-                    };
-                    eprint!("{}", ljos_cli::search_rank_for_person(&line));
+                    ljos_cli::say_ranking(ranking);
                 }
                 let page = format!("{}{memories}{code}", said.stdout);
                 print!(
