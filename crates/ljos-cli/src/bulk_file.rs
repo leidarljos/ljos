@@ -373,44 +373,167 @@ fn locked<R>(issues: &Path, f: impl FnOnce() -> Result<R>) -> Result<R> {
         .map_err(anyhow::Error::from)
 }
 
+fn parsed(project: &str, issues: &Path) -> Result<vissue_core::IssueDoc> {
+    vissue_core::IssueDoc::parse_file(project, issues)
+        .with_context(|| format!("reading {}", issues.display()))
+}
+
 /// The board at `issues`, a single file or a ledger, rendered with its
-/// cookies filled and without the heading `drop`. `None` when `drop` is
-/// not on it.
-fn rendered(project: &str, issues: &Path, drop: Option<&str>) -> Result<Option<String>> {
-    let mut doc = vissue_core::IssueDoc::parse_file(project, issues)
-        .with_context(|| format!("reading {}", issues.display()))?;
-    if let Some(id) = drop {
-        if doc.remove(id).is_none() {
-            return Ok(None);
-        }
-    }
+/// cookies filled.
+fn rendered(project: &str, issues: &Path) -> Result<String> {
+    let mut doc = parsed(project, issues)?;
     doc.refresh_statistics();
-    Ok(Some(doc.render_string()))
+    Ok(doc.render_string())
+}
+
+/// What ends the log of a ledger file; a new file has no record after it.
+const LEDGER_LOG: &str = "\n#+VISSUE_LEDGER_LOG:\n";
+
+/// One row as it was handed to `vissue_core::ops::create`, with the id it
+/// came back with.
+struct Want<'a> {
+    id: &'a str,
+    title: &'a str,
+    priority: Option<char>,
+    kind: Option<&'a str>,
+    tags: Option<&'a str>,
+    parent: Option<&'a str>,
+    body: Option<&'a str>,
+    /// The tracker's configured default priority.
+    cfg_priority: char,
+}
+
+impl Want<'_> {
+    /// The heading `ops::create` writes for this row at `priority`.
+    /// `CREATED` is the day it ran, so it is read from `found`; `None` when
+    /// `found` has no `CREATED`.
+    fn heading(
+        &self,
+        found: &vissue_core::IssueHeading,
+        priority: char,
+    ) -> Option<vissue_core::IssueHeading> {
+        use vissue_core::{org::is_org_tag_char, props};
+        let mut properties = BTreeMap::new();
+        properties.insert("ID".to_string(), self.id.to_string());
+        properties.insert(
+            "CREATED".to_string(),
+            found.properties.get("CREATED")?.clone(),
+        );
+        if let Some(from) = props::get(&found.properties, props::DISCOVERED_FROM) {
+            if self
+                .body
+                .is_some_and(|body| body.contains(&format!("[[id:{from}]")))
+            {
+                props::insert(&mut properties, props::DISCOVERED_FROM, from.to_string());
+            }
+        }
+        let mut org_tags: Vec<String> = Vec::new();
+        if let Some(kind) = self.kind {
+            props::insert(&mut properties, props::TYPE, kind.to_string());
+            if !kind.is_empty() && kind.chars().all(is_org_tag_char) {
+                org_tags.push(kind.to_string());
+            }
+        }
+        if let Some(tags) = self.tags {
+            let mut property_tags: Vec<String> = Vec::new();
+            for tag in tags.split([',', ':']).map(str::trim) {
+                if tag.is_empty() {
+                    continue;
+                }
+                let list = if tag.chars().all(is_org_tag_char) {
+                    &mut org_tags
+                } else {
+                    &mut property_tags
+                };
+                if !list.iter().any(|seen| seen == tag) {
+                    list.push(tag.to_string());
+                }
+            }
+            if !property_tags.is_empty() {
+                properties.insert(
+                    vissue_core::model::TAGS_PROPERTY.to_string(),
+                    property_tags.join(","),
+                );
+            }
+        }
+        if let Some(parent) = self.parent {
+            props::insert(&mut properties, props::PARENT, parent.to_string());
+        }
+        Some(vissue_core::IssueHeading {
+            id: self.id.to_string(),
+            title: self.title.to_string(),
+            state: "TODO".into(),
+            priority,
+            properties,
+            org_tags,
+            statistics: None,
+            property_order: Vec::new(),
+            extra_drawers: Vec::new(),
+            body: match self.body {
+                Some(body) if !body.trim().is_empty() => format!("{}\n", body.trim_end()),
+                _ => String::new(),
+            },
+            logbook: Vec::new(),
+            line_start: 0,
+            line_end: 0,
+        })
+    }
 }
 
 impl Board {
-    /// After `id` was filed here, and under the issues lock: the directory
-    /// and board if `id` is the only change since `ours`, else `None`. A
-    /// create writes `issues.org` or the ledger beside it and nothing else
-    /// in the directory.
-    fn only_filed(&self, id: &str) -> Result<Option<(Files, String)>> {
+    /// After `want` was filed here, and under the issues lock: the directory
+    /// and board if that create is the only change since `ours`, else
+    /// `None`. A create changes one file: `issues.org`, rewritten as vissue
+    /// renders it, or on a ledger a new file for the id with no record in
+    /// its log. The new heading is the one this row asked for, with nothing
+    /// on it, and the board without it is the board the batch last left.
+    /// Anything else may be another writer's, and a roll back would lose it.
+    fn only_filed(&self, want: &Want) -> Result<Option<(Files, String)>> {
         let now = snapshot(&self.dir)?;
-        let ledger = self.dir.join("issues");
-        let board_file = |path: &Path| path == self.issues || path.starts_with(&ledger);
-        let elsewhere = self
-            .ours
+        let mut changed = now
             .iter()
-            .any(|(path, bytes)| !board_file(path) && now.get(path) != Some(bytes))
-            || now
-                .keys()
-                .any(|path| !board_file(path) && !self.ours.contains_key(path));
-        if elsewhere
-            || rendered(&self.project, &self.issues, Some(id))?.as_deref()
-                != Some(self.board.as_str())
-        {
+            .filter(|(path, bytes)| self.ours.get(*path) != Some(*bytes))
+            .map(|(path, _)| path)
+            .chain(self.ours.keys().filter(|path| !now.contains_key(*path)));
+        let (Some(changed), None) = (changed.next(), changed.next()) else {
+            return Ok(None);
+        };
+        let Some(text) = now.get(changed).map(|bytes| String::from_utf8_lossy(bytes)) else {
+            return Ok(None);
+        };
+        let mut doc = parsed(&self.project, &self.issues)?;
+        let Some(found) = doc.headings.iter().find(|h| h.id == want.id) else {
+            return Ok(None);
+        };
+        let clean = if vissue_core::ledger::is_ledger(&self.issues) {
+            changed == doc.heading_path(want.id)
+                && !self.ours.contains_key(changed)
+                && text
+                    .split_once(LEDGER_LOG)
+                    .is_some_and(|(_, log)| log.is_empty())
+        } else {
+            let mut whole = doc.clone();
+            whole.refresh_statistics();
+            *changed == self.issues && whole.render_string() == text
+        };
+        let house_new = !self.ours.contains_key(&self.issues);
+        let priority = want
+            .priority
+            .unwrap_or(if doc.priorities_are_named() || house_new {
+                doc.priority_spec().default
+            } else {
+                want.cfg_priority
+            });
+        if !clean || want.heading(found, priority).map(|h| h.render()) != Some(found.render()) {
             return Ok(None);
         }
-        let board = rendered(&self.project, &self.issues, None)?.unwrap_or_default();
+        doc.refresh_statistics();
+        let board = doc.render_string();
+        doc.remove(want.id);
+        doc.refresh_statistics();
+        if doc.render_string() != self.board {
+            return Ok(None);
+        }
         Ok(Some((now, board)))
     }
 }
@@ -453,6 +576,9 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
             .map_err(|_| anyhow::anyhow!("file --from: --priority {p:?} is not A, B or C"))?,
         None => None,
     };
+    let cfg_priority = vissue_core::VissueConfig::load(&layout)?
+        .issues
+        .default_priority;
     let projected = vissue_core::projection::boards(layout.root()).unwrap_or_default();
     let mut boards: Vec<Board> = Vec::new();
     let mut at_board = Vec::with_capacity(placed.len());
@@ -480,10 +606,7 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
             .map(Path::to_path_buf)
             .context("file --from: the project file has no directory")?;
         let (before, board) = locked(&issues, || {
-            Ok((
-                snapshot(&dir)?,
-                rendered(&project, &issues, None)?.unwrap_or_default(),
-            ))
+            Ok((snapshot(&dir)?, rendered(&project, &issues)?))
         })?;
         at_board.push(boards.len());
         boards.push(Board {
@@ -523,7 +646,17 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
                 // Another writer that changes a project directory mid-batch
                 // ends it, and its change is never put back over.
                 let b = &boards[board];
-                let Some((ours, filed)) = locked(&b.issues, || b.only_filed(&id))? else {
+                let want = Want {
+                    id: &id,
+                    title: &row.title,
+                    priority: row.priority.or(default_priority),
+                    kind: kind.as_deref(),
+                    tags: tags.as_deref(),
+                    parent: place.parent.as_deref(),
+                    body: row.body.as_deref(),
+                    cfg_priority,
+                };
+                let Some((ours, filed)) = locked(&b.issues, || b.only_filed(&want))? else {
                     bail!(
                         "file --from: another writer changed {} while row {line} was filed, so the batch stopped; the {} tickets filed are on the tracker and not committed: {}",
                         b.dir.display(),
@@ -630,6 +763,143 @@ mod tests {
         assert_eq!(roll_back(boards).unwrap(), None);
         assert_eq!(read(), "before\n");
         assert!(dir.join("issues.org.lock").is_file());
+    }
+
+    /// A tracker with project `demo` holding one issue, and the batch's
+    /// board for it as `file_rows` first reads it.
+    fn demo(ledger: bool) -> (tempfile::TempDir, vissue_core::Layout, Board) {
+        let root = tempfile::tempdir().unwrap();
+        let layout = vissue_core::Layout::new(root.path(), "tracker");
+        let issues = layout.project_issues_path("demo");
+        let dir = issues.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(dir.join("issues")).unwrap();
+        if ledger {
+            std::fs::write(dir.join("issues/.ledger"), "").unwrap();
+        }
+        file(&layout, "old");
+        let before = snapshot(&dir).unwrap();
+        let board = Board {
+            project: "demo".into(),
+            board: rendered("demo", &issues).unwrap(),
+            issues,
+            dir,
+            ours: before.clone(),
+            before,
+        };
+        (root, layout, board)
+    }
+
+    const BODY: &str = "why, see [[id:nowhere]]";
+    const TAGS: &str = "x,needs-review";
+
+    fn file(layout: &vissue_core::Layout, title: &str) -> String {
+        let made = vissue_core::ops::create(
+            layout,
+            "demo",
+            title,
+            vissue_core::ops::CreateOpts {
+                issue_type: Some("task"),
+                tags: Some(TAGS),
+                body: Some(BODY),
+                quiet: true,
+                ..vissue_core::ops::CreateOpts::default()
+            },
+        );
+        made.unwrap().trim().to_string()
+    }
+
+    fn want<'a>(layout: &vissue_core::Layout, id: &'a str) -> Want<'a> {
+        Want {
+            id,
+            title: "new",
+            priority: None,
+            kind: Some("task"),
+            tags: Some(TAGS),
+            parent: None,
+            body: Some(BODY),
+            cfg_priority: vissue_core::VissueConfig::load(layout)
+                .unwrap()
+                .issues
+                .default_priority,
+        }
+    }
+
+    /// What `file_rows` does with a filed row and then a refused one:
+    /// `None` when the filed row stopped the batch, else what `roll_back`
+    /// said.
+    fn refuse_next(board: &mut Board, want: &Want) -> Option<Option<PathBuf>> {
+        let (ours, filed) = board.only_filed(want).unwrap()?;
+        board.ours = ours;
+        board.board = filed;
+        Some(roll_back(std::slice::from_ref(board)).unwrap())
+    }
+
+    #[test]
+    fn a_batch_takes_back_a_create_that_is_its_own() {
+        for ledger in [false, true] {
+            let (_root, layout, mut board) = demo(ledger);
+            let id = file(&layout, "new");
+            assert_eq!(refuse_next(&mut board, &want(&layout, &id)), Some(None));
+            assert_eq!(
+                snapshot(&board.dir).unwrap(),
+                board.before,
+                "ledger {ledger}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_batch_never_takes_back_a_file_another_writer_made_beside_the_board() {
+        for ledger in [false, true] {
+            let (_root, layout, mut board) = demo(ledger);
+            let id = file(&layout, "new");
+            let side = board.dir.join("issues/side.txt");
+            std::fs::write(&side, "other writer\n").unwrap();
+            assert_eq!(refuse_next(&mut board, &want(&layout, &id)), None);
+            assert_eq!(std::fs::read_to_string(&side).unwrap(), "other writer\n");
+            let doc = vissue_core::IssueDoc::parse_file("demo", &board.issues).unwrap();
+            assert!(doc.known_ids().contains(&id), "ledger {ledger}");
+        }
+    }
+
+    #[test]
+    fn a_batch_never_takes_back_a_logbook_line_another_writer_put_on_the_new_heading() {
+        let (_root, layout, mut board) = demo(false);
+        let id = file(&layout, "new");
+        let text = std::fs::read_to_string(&board.issues).unwrap();
+        let at = text.find(id.as_str()).unwrap();
+        let end = at + text[at..].find(":END:\n").unwrap() + ":END:\n".len();
+        let line = "- Noted by other [2026-11-21 Sat 12:00]";
+        let theirs = format!("{}:LOGBOOK:\n{line}\n:END:\n{}", &text[..end], &text[end..]);
+        std::fs::write(&board.issues, &theirs).unwrap();
+        assert_eq!(refuse_next(&mut board, &want(&layout, &id)), None);
+        assert_eq!(std::fs::read_to_string(&board.issues).unwrap(), theirs);
+    }
+
+    #[test]
+    fn a_batch_never_takes_back_a_ledger_record_another_writer_appended() {
+        let (_root, layout, mut board) = demo(true);
+        let id = file(&layout, "new");
+        let doc = vissue_core::IssueDoc::parse_file("demo", &board.issues).unwrap();
+        let path = doc.heading_path(&id).to_path_buf();
+        let mut theirs = std::fs::read_to_string(&path).unwrap();
+        theirs.push_str("%% later-op 3\nabc\n");
+        std::fs::write(&path, &theirs).unwrap();
+        assert_eq!(refuse_next(&mut board, &want(&layout, &id)), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs);
+    }
+
+    #[test]
+    fn a_batch_stops_on_a_new_heading_that_is_not_the_row() {
+        let (_root, layout, board) = demo(false);
+        let id = file(&layout, "new");
+        let mut other = want(&layout, &id);
+        other.title = "renamed";
+        assert!(board.only_filed(&other).unwrap().is_none());
+        other = want(&layout, &id);
+        other.priority = Some('A');
+        assert!(board.only_filed(&other).unwrap().is_none());
+        assert!(board.only_filed(&want(&layout, &id)).unwrap().is_some());
     }
 
     #[test]
