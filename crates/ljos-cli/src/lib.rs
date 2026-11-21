@@ -47135,9 +47135,9 @@ pub fn complete(
 
 /// [`complete`], and with `reopen` the tracker issue goes back to the
 /// state it had before the claim, as a release puts it ([`unstamp_tracker`]).
-/// `ljos finish` without `--close` passes it: the sitting ends, the claim
-/// graph frees the node and the tracker drops the claim, and an issue kept
-/// STARTED then reads as taken by nobody and leaves every ready list.
+/// `ljos finish` never passes it. Without `--close`, or with `--close` and
+/// a `failed` status, finish calls [`release`], which hands the issue back
+/// that way.
 ///
 /// # Errors
 ///
