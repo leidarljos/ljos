@@ -2525,7 +2525,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Finish work on a ticket: remember the lesson, strengthen the memories it used, hand the claim back.
+    /// Finish work on a ticket: remember the lesson and hand the claim back. The ticket stays open.
     ///
     /// A sitting is one conversation's claim on an issue.
     /// With no id, this finishes that issue.
@@ -2567,11 +2567,12 @@ enum Cmd {
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
-        /// Close the tracker ticket. A runner is refused. CANCELLED with `--status cancelled`. Only when the work is accepted or dropped, not when the work session ends.
+        /// Complete the claim and close the tracker ticket. A runner is refused. CANCELLED with `--status cancelled`. With `--status failed` the claim is handed back and the ticket stays open. Only when the work is accepted or dropped, not when the work session ends.
         #[arg(long)]
         close: bool,
-        /// Print whether related memories were linked, and the tracker and
-        /// sync lines. Without it, finish says the ticket and the next
+        /// Link the memories the ticket's title activates, say whether they
+        /// were linked, and print the tracker and sync lines. Without it,
+        /// finish links nothing and says the ticket and the next
         /// command. A commit that landed is quiet, and so is a push that
         /// landed or a sealed log. A refusal is one sentence.
         #[arg(long)]
