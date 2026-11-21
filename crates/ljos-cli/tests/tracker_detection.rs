@@ -260,7 +260,9 @@ fn a_write_from_a_product_checkout_lands_in_the_configured_tracker() {
         let sat = seat.ljos(product, &["sitting", &id]);
         assert!(sat.status.success(), "{}", said(&sat));
         assert_eq!(seat.snapshot(product), before, "{}", product.display());
-        let log = seat.git(&tracker, &["log", "--format=%s"]);
+        // A note held for the batch commit is named in the body of the
+        // commit that carries it.
+        let log = seat.git(&tracker, &["log", "--format=%B"]);
         for verb in ["filed", "noted", "claimed"] {
             assert!(log.contains(&format!("{id} {verb} by saddle")), "{log}");
         }

@@ -38526,6 +38526,12 @@ fn plain_write_line(line: &str) -> String {
             "The {what} was refused: {why}, so run the command again."
         ));
     }
+    if body.contains("into per-issue files and committed the split") {
+        return say(
+            "The tracker board was split into one file per issue and the split was committed."
+                .into(),
+        );
+    }
     if body.contains("not a git") {
         return say("The tracker is not a git checkout, so run `ljos doctor`.".into());
     }
@@ -51438,7 +51444,7 @@ fn persist_one_tracker_file(
                 write_tracker_batch(root, &batch);
                 drop(held);
                 return format!(
-                    "tracker git: held {} for the batch commit; the next write after {}s, any other write, a push or the session end commits it\n{ignored_note}",
+                    "tracker git: held for the batch commit: {}; the next note after {}s, any other tracker write, a push or the session end commits it\n{ignored_note}",
                     named.join(", "),
                     window.as_secs()
                 );
@@ -60683,6 +60689,25 @@ mod tests {
         }
     }
 
+    /// A held note and a split say what happened in one quiet or plain
+    /// line, not that the tracker git step did not finish.
+    #[test]
+    fn a_held_note_is_quiet_and_a_split_is_one_plain_sentence() {
+        assert_eq!(
+            super::present_write_line(
+                "tracker git: held for the batch commit: probe-a1b2 noted; the next note after 60s, any other tracker write, a push or the session end commits it"
+            ),
+            None
+        );
+        assert_eq!(
+            super::present_write_line(
+                "tracker git: split Software/probe/issues.org into per-issue files and committed the split"
+            )
+            .as_deref(),
+            Some("The tracker board was split into one file per issue and the split was committed.")
+        );
+    }
+
     fn commit_count(root: &Path) -> usize {
         git_text(root, &["rev-list", "--count", "HEAD"])
             .trim()
@@ -60716,7 +60741,10 @@ mod tests {
         for at in 1..=20 {
             vissue_core::ops::note(&layout, "probe-a1b2", &format!("note {at}")).unwrap();
             let said = persist_tracker("probe-a1b2", "noted");
-            assert!(said.contains("held probe-a1b2 noted"), "{said}");
+            assert!(
+                said.contains("held for the batch commit: probe-a1b2 noted"),
+                "{said}"
+            );
         }
         assert_eq!(commit_count(root), seeded + 1, "a held write committed");
         assert!(std::fs::read_to_string(root.join(super::TRACKER_PENDING))
