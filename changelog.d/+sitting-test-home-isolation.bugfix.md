@@ -1,0 +1,1 @@
+Take the test environment lock in the sitting test that drops weakly related due lessons, so its recall count goes to a scratch home instead of `~/.local/state/ljos/recalls.json` and `scripts/ci-test-hermetic.sh` passes.

@@ -72319,6 +72319,7 @@ The body asks the recall to rank memories by the ticket, not by a process log.
     /// keep a lesson that names the issue and leave the others out.
     #[test]
     fn a_sitting_drops_due_lessons_that_only_share_weak_words() {
+        let _g = env_guard();
         let now = "2026-11-20T12:00:00Z";
         let ticket = "\
 Review the kiln order
