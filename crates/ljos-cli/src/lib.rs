@@ -5601,12 +5601,13 @@ pub fn write_assignee(
         return Err(keep_policy(verb, err));
     }
     if !delegates {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "assignee-mismatch",
             format!(
                 "{verb}: {assignee} is not this seat, {}, and a write is recorded as the seat that makes it and nothing was written, and --assignee can be dropped, so run `export LJOS_SEAT={slug}`.",
                 checked.seat
             ),
+            1,
         ));
     }
     if let Err(err) = registered_seat(&assignee) {
@@ -5713,9 +5714,10 @@ pub fn registered_seat(seat: &str) -> Result<()> {
     let slug = canonical_seat_name(seat);
     match seat_roster::seat_list() {
         seat_roster::SeatList::Absent => Ok(()),
-        seat_roster::SeatList::Broken { why } => Err(policy_label::labelled(
+        seat_roster::SeatList::Broken { why } => Err(policy_label::refused(
             "seat-unlisted",
             format!("{why}, and no seat may write and nothing was written, so run `ljos doctor`."),
+            1,
         )),
         seat_roster::SeatList::Listed { path, seats } => {
             if seats.contains(&slug) || seats.iter().any(|listed| same_memory_family(listed, &slug))
@@ -5723,21 +5725,23 @@ pub fn registered_seat(seat: &str) -> Result<()> {
                 return Ok(());
             }
             if seats.is_empty() {
-                return Err(policy_label::labelled(
+                return Err(policy_label::refused(
                     "seat-unlisted",
                     format!(
                         "{} lists no seat and nothing was written, so run `ljos seat add NAME`.",
                         path.display()
                     ),
+                    1,
                 ));
             }
-            Err(policy_label::labelled(
+            Err(policy_label::refused(
                 "seat-unlisted",
                 format!(
                     "no seat named {slug} in {}, which lists {}, and nothing was written, so run `ljos seat add {slug}`.",
                     path.display(),
                     seats.into_iter().collect::<Vec<_>>().join(", ")
                 ),
+                1,
             ))
         }
     }
@@ -6421,13 +6425,18 @@ pub(crate) fn seat_for_env(name: &str) -> String {
 pub(crate) fn claim_holder(raw: &str) -> Result<String> {
     let raw = raw.trim();
     if raw.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "seat-unresolved",
             "pass a seat name",
+            1,
         ));
     }
     if is_raw_subagent_name(raw) {
-        return Err(policy_label::labelled("seat-unresolved", SUBAGENT_NO_SEAT));
+        return Err(policy_label::refused(
+            "seat-unresolved",
+            SUBAGENT_NO_SEAT,
+            1,
+        ));
     }
     let (body, scope) = split_claim_scope(raw);
     let (seat, tag) = holder_parts(body);
@@ -8607,17 +8616,49 @@ fn hook_events_of(h: &Harness) -> Vec<String> {
     }
 }
 
+fn hook_word_path(program: &str) -> Option<String> {
+    let words = shell_words(program);
+    let [path] = words.as_slice() else {
+        return None;
+    };
+    (path.starts_with('/') && path.ends_with("/ljos")).then(|| path.clone())
+}
+
+fn seat_hook_program(command: &str) -> Option<String> {
+    let program = command.strip_suffix(" hook")?;
+    if program == "ljos" {
+        return Some(program.to_string());
+    }
+    let path = hook_word_path(program)?;
+    (tools::sh_word(&path) == program).then_some(path)
+}
+
 fn is_seat_hook(h: &Value) -> bool {
-    h["command"]
-        .as_str()
-        .is_some_and(|c| c.contains("ljos") && c.ends_with(" hook"))
+    h["command"].as_str().and_then(seat_hook_program).is_some()
+}
+
+fn repaired_seat_hook_command(command: &str, wanted: &str) -> Option<String> {
+    if command == wanted {
+        return None;
+    }
+    if command == "ljos hook" && wanted != "ljos hook" {
+        return Some(wanted.to_string());
+    }
+    let program = command.strip_suffix(" hook")?;
+    let path = if program.starts_with('/') && program.ends_with("/ljos") {
+        program.to_string()
+    } else {
+        hook_word_path(program)?
+    };
+    let fixed = format!("{} hook", tools::sh_word(&path));
+    (fixed != command).then_some(fixed)
 }
 
 /// The command the runner's hook runs.
 fn hook_command() -> String {
     which::which("ljos").map_or_else(
         |_| "ljos hook".to_string(),
-        |p| format!("{} hook", p.display()),
+        |p| format!("{} hook", tools::sh_word(&p.display().to_string())),
     )
 }
 
@@ -8687,6 +8728,7 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
     let mut removed = Vec::new();
     let mut opened = Vec::new();
     let mut widened = Vec::new();
+    let mut repaired = Vec::new();
     for event in events {
         let groups = hooks
             .entry(event.clone())
@@ -8701,6 +8743,17 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
         let mut freed = false;
         let mut grew = false;
         for group in groups.iter_mut() {
+            if let Some(hooks) = group["hooks"].as_array_mut() {
+                for hook in hooks {
+                    if let Some(fixed) = hook["command"]
+                        .as_str()
+                        .and_then(|old| repaired_seat_hook_command(old, &command))
+                    {
+                        hook["command"] = fixed.into();
+                        repaired.push(event.clone());
+                    }
+                }
+            }
             let seat = group["hooks"]
                 .as_array()
                 .is_some_and(|hs| hs.iter().any(is_seat_hook));
@@ -8765,19 +8818,27 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
         let Some(groups) = groups.as_array_mut() else {
             continue;
         };
-        let before = groups.len();
-        groups.retain(|g| {
-            !g["hooks"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(is_seat_hook)
+        let mut changed = false;
+        groups.retain_mut(|group| {
+            let Some(entries) = group["hooks"].as_array_mut() else {
+                return true;
+            };
+            let before = entries.len();
+            entries.retain(|entry| !is_seat_hook(entry));
+            let removed_owned = entries.len() != before;
+            changed |= removed_owned;
+            !removed_owned || !entries.is_empty()
         });
-        if groups.len() != before {
+        if changed {
             removed.push(event.clone());
         }
     }
-    if added.is_empty() && removed.is_empty() && opened.is_empty() && widened.is_empty() {
+    if added.is_empty()
+        && removed.is_empty()
+        && opened.is_empty()
+        && widened.is_empty()
+        && repaired.is_empty()
+    {
         return Step {
             what,
             detail: format!(
@@ -8805,6 +8866,12 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
     if !widened.is_empty() {
         change.push(format!("widen its matcher on {}", widened.join(", ")));
         done.push(format!("widened the matcher on {}", widened.join(", ")));
+    }
+    repaired.sort();
+    repaired.dedup();
+    if !repaired.is_empty() {
+        change.push(format!("repair its command on {}", repaired.join(", ")));
+        done.push(format!("repaired the command on {}", repaired.join(", ")));
     }
     let change = change.join(" and ");
     let done = done.join(" and ");
@@ -9159,6 +9226,7 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
     let command = hook_command();
     let mut added = Vec::new();
     let mut opened: Vec<&str> = Vec::new();
+    let mut repaired: Vec<&str> = Vec::new();
     for (event, timeout) in CURSOR_HOOK_EVENTS {
         if claude_has_seat && !CURSOR_ONLY_EVENTS.contains(event) {
             continue;
@@ -9169,6 +9237,19 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
         let Some(entries) = entries.as_array_mut() else {
             continue;
         };
+        let mut repaired_here = false;
+        for entry in entries.iter_mut() {
+            if let Some(fixed) = entry["command"]
+                .as_str()
+                .and_then(|old| repaired_seat_hook_command(old, &command))
+            {
+                entry["command"] = fixed.into();
+                repaired_here = true;
+            }
+        }
+        if repaired_here {
+            repaired.push(*event);
+        }
         if let Some(seat) = entries.iter_mut().find(|e| is_seat_hook(e)) {
             // A `failClosed` an earlier onboard wrote makes the editor harness refuse
             // the call when the hook is missing or fails.
@@ -9183,7 +9264,7 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
         entries.push(serde_json::json!({"command": command, "timeout": timeout}));
         added.push(*event);
     }
-    if added.is_empty() && opened.is_empty() {
+    if added.is_empty() && opened.is_empty() && repaired.is_empty() {
         return Step {
             what,
             detail: format!("{} carries the seat's hook", file.display()),
@@ -9199,6 +9280,10 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
     if !opened.is_empty() {
         change.push(format!("drop failClosed on {}", opened.join(", ")));
         done.push(format!("dropped failClosed on {}", opened.join(", ")));
+    }
+    if !repaired.is_empty() {
+        change.push(format!("repair the command on {}", repaired.join(", ")));
+        done.push(format!("repaired the command on {}", repaired.join(", ")));
     }
     if dry {
         return Step {
@@ -13412,10 +13497,9 @@ fn file_yes_no(parent: Option<&str>, prompt: &str) -> Result<String> {
         argv.push("--parent".into());
         argv.push(parent.to_string());
     }
-    argv.push("--body".into());
-    argv.push(body);
-    argv.push("--tags".into());
-    argv.push("decision,panel".into());
+    argv.push(format!("--body={body}"));
+    argv.push("--tags=decision,panel".into());
+    argv.push("--".into());
     argv.push(title);
     issue_spot::forget_reads();
     let mut cmd = std::process::Command::new(which::which("vissue").context("vissue not on PATH")?);
@@ -14528,7 +14612,7 @@ pub fn held_issue() -> Option<String> {
     holders.iter().find_map(|holder| {
         let out = run_captured_within(
             "vissue",
-            &["claims", "--by", holder, "--json"],
+            &["claims", &format!("--by={holder}"), "--json"],
             None,
             tracker_verb_wait(),
         )
@@ -22923,9 +23007,10 @@ fn post_claim_horizon(
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "empty-input",
             format!("{label}: empty text is not a claim"),
+            1,
         ));
     }
     let kind = atom_kind(label)?;
@@ -22968,9 +23053,10 @@ pub fn packset_write_agent(
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "empty-input",
             format!("{label}: empty text is not a claim"),
+            1,
         ));
     }
     let kind = atom_kind(label)?;
@@ -23089,9 +23175,10 @@ pub fn mcp_claim_atom(
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "empty-input",
             format!("{label}: empty text is not a claim"),
+            1,
         ));
     }
     let kind = atom_kind(label)?;
@@ -23217,9 +23304,10 @@ fn agent_sourced_atom(
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "empty-input",
             format!("{label}: empty text is not a claim"),
+            1,
         ));
     }
     let kind = atom_kind(label)?;
@@ -23462,9 +23550,10 @@ pub(crate) fn queue_memory(
             .unwrap_or_else(|| "the pack would refuse this copy".into());
         memory_port::keep_prose(text, kind, &why);
         let case = content_case(&why).unwrap_or("policy");
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "writer-pending",
             format!("queue: the pack would refuse this copy on {case}: {why}"),
+            1,
         ));
     }
     let at = std::time::SystemTime::now()
@@ -23796,9 +23885,10 @@ pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> R
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "empty-input",
             format!("{label}: empty text is not a claim"),
+            1,
         ));
     }
     let kind = atom_kind(label)?;
@@ -24202,16 +24292,18 @@ pub fn packset_write_agent_note_tagged(text: &str, tags: &[String]) -> Result<Va
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty("note");
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "empty-input",
             "Remember: empty text is not a note",
+            1,
         ));
     }
     let Some((issue, _)) = live_held_issue() else {
         memory_port::keep_unattached(trimmed);
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "unattached-note",
             NOTE_WITHOUT_TICKET,
+            1,
         ));
     };
     let client = pack()?;
@@ -24371,6 +24463,64 @@ pub fn remember_split_line(n: usize) -> String {
     format!(
         "remember: stored as {n} {claims}, because a lesson is at most two sentences, so run `ljos search`."
     )
+}
+
+/// What `ljos remember` prints when every chunk of a split was queued.
+#[must_use]
+pub fn remember_queued_split_line(n: usize) -> String {
+    let claims = if n == 1 { "claim" } else { "claims" };
+    format!(
+        "remember: queued as {n} {claims}, because a lesson is at most two sentences, so run `ljos search`."
+    )
+}
+
+/// What `ljos remember` prints when a split stored some chunks and queued
+/// the others. A queued chunk is saved by a later command.
+#[must_use]
+pub fn remember_mixed_split_line(stored: usize, queued: usize) -> String {
+    let noun = |n: usize| if n == 1 { "claim" } else { "claims" };
+    format!(
+        "remember: stored {stored} {} and queued {queued} {} for a later call, because a lesson is at most two sentences, so run `ljos search`.",
+        noun(stored),
+        noun(queued)
+    )
+}
+
+/// The line that opens a split `ljos remember`, for `stored` chunks the pack
+/// contains and `queued` chunks waiting for a later call.
+#[must_use]
+pub fn remember_split_summary(stored: usize, queued: usize) -> String {
+    match (stored, queued) {
+        (_, 0) => remember_split_line(stored),
+        (0, _) => remember_queued_split_line(queued),
+        _ => remember_mixed_split_line(stored, queued),
+    }
+}
+
+/// One JSON document for a split `ljos remember --json`.
+///
+/// One claim is the claim object itself, printed by the command. This page
+/// is only the split. `claims` lists every chunk the pack accepted, including
+/// a duplicate, and every chunk that was queued. `stored` counts the first
+/// kind and `queued` the second. `failed` is present when a later chunk was
+/// refused, and names that text.
+///
+/// # Errors
+///
+/// The document could not be encoded.
+pub fn remember_json_page(claims: &[Value], failed: &[Value]) -> Result<String> {
+    let mut page = serde_json::Map::new();
+    let queued = claims
+        .iter()
+        .filter(|claim| claim["queued"].as_bool() == Some(true))
+        .count();
+    page.insert("claims".into(), Value::Array(claims.to_vec()));
+    page.insert("stored".into(), Value::from(claims.len() - queued));
+    page.insert("queued".into(), Value::from(queued));
+    if !failed.is_empty() {
+        page.insert("failed".into(), Value::Array(failed.to_vec()));
+    }
+    Ok(serde_json::to_string_pretty(&Value::Object(page))?)
 }
 
 pub fn packset_write(label: &str, text: &str) -> Result<Value> {
@@ -24554,9 +24704,10 @@ fn queue_unjudged_lesson(issue: &str, text: &str) -> Result<bool> {
     let text = text.trim();
     if text.is_empty() {
         memory_port::keep_empty("lesson");
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "empty-input",
             "remember: empty text is not a claim",
+            1,
         ));
     }
     let at = std::time::SystemTime::now()
@@ -24752,9 +24903,10 @@ pub fn packset_write_scoped(
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "empty-input",
             format!("{label}: empty text is not a claim"),
+            1,
         ));
     }
     let kind = atom_kind(label)?;
@@ -24817,9 +24969,10 @@ pub fn packset_write_as(
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "empty-input",
             format!("{label}: empty text is not a claim"),
+            1,
         ));
     }
     let kind = atom_kind(label)?;
@@ -24957,22 +25110,25 @@ pub struct Persona {
 pub fn persona_atom(p: &Persona, workspace: &str) -> Result<Value> {
     let name = p.name.trim();
     if name.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "persona-owner-warning",
             "persona: a name is required",
+            1,
         ));
     }
     if !(0.0..=1.0).contains(&p.anchor) {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "persona-owner-warning",
             format!("persona: anchor {} is not in [0, 1]", p.anchor),
+            1,
         ));
     }
     let view = p.view.trim();
     if view.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "persona-owner-warning",
             format!("persona: say in a sentence or two how {name} reads the work"),
+            1,
         ));
     }
     let mut atom = atom_body("persona", view, workspace);
@@ -24984,13 +25140,14 @@ pub fn persona_atom(p: &Persona, workspace: &str) -> Result<Value> {
     if let Some(r) = p.runner.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
         let names = persona_session::runner_names();
         if !names.is_empty() && !names.iter().any(|n| n == r) {
-            return Err(policy_label::labelled(
+            return Err(policy_label::refused(
                 "persona-owner-warning",
                 format!(
                     "persona: runner {r:?} is not a [[harness]] in {}; it names {}",
                     harnesses_path().display(),
                     names.join(", ")
                 ),
+                1,
             ));
         }
         atom["runner"] = Value::String(r.into());
@@ -25085,13 +25242,14 @@ pub fn write_persona_as(p: &Persona, how: PersonaWrite) -> Result<Value> {
     let owner = match (how, live.as_ref().and_then(persona_owner)) {
         (PersonaWrite::Learned, Some(kept)) => kept,
         (PersonaWrite::Define, Some(kept)) if foreign_owner(&kept, &seat, &holder) => {
-            return Err(policy_label::labelled(
+            return Err(policy_label::refused(
                 "persona-owner-warning",
                 format!(
                     "persona: {name} was defined by {}, and personas are shared by every seat on this pack. \
                  Pass --replace to take it over, or pick another name. Nothing was written",
                     owner_phrase(&kept),
                 ),
+                1,
             ));
         }
         (PersonaWrite::Define, Some(kept)) => kept,
@@ -25252,9 +25410,10 @@ pub fn check_persona(p: &Persona, how: PersonaWrite) -> Result<String> {
 pub fn retire_persona(name: &str, take_over: bool) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "persona-owner-warning",
             "persona: name the persona to retire",
+            1,
         ));
     }
     let client = pack()?;
@@ -25266,21 +25425,23 @@ pub fn retire_persona(name: &str, take_over: bool) -> Result<String> {
         .filter(|a| a.get("name").and_then(Value::as_str) == Some(name))
         .collect();
     let Some(live) = latest_persona_atoms(&same).remove(name) else {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "persona-owner-warning",
             format!("persona: no persona {name} on this pack; `ljos personas` lists them"),
+            1,
         ));
     };
     let owner = persona_owner(&live)
         .filter(|kept| !take_over && foreign_owner(kept, &seat_name(), &holder_name()));
     if let Some(kept) = owner {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "persona-owner-warning",
             format!(
                 "persona: {name} was defined by {}, so this seat may not retire it. \
              Pass --replace to retire it anyway. Nothing was withdrawn",
                 owner_phrase(&kept)
             ),
+            1,
         ));
     }
     let mut withdrawn = 0;
@@ -25591,12 +25752,13 @@ pub fn shipped_playbooks() -> Vec<Playbook> {
 pub fn parse_playbook_name(name: &str) -> Result<&'static str> {
     let n = name.trim();
     if n.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "playbook-warning",
             format!(
                 "playbook: a name is required ({})",
                 PLAYBOOK_NAMES.join(", ")
             ),
+            1,
         ));
     }
     PLAYBOOK_NAMES
@@ -25604,12 +25766,13 @@ pub fn parse_playbook_name(name: &str) -> Result<&'static str> {
         .copied()
         .find(|k| *k == n)
         .ok_or_else(|| {
-            policy_label::labelled(
+            policy_label::refused(
                 "playbook-warning",
                 format!(
                     "playbook: unknown name {n:?}; the closed set is {}",
                     PLAYBOOK_NAMES.join(", ")
                 ),
+                1,
             )
         })
 }
@@ -25623,9 +25786,10 @@ pub fn playbook_atom(p: &Playbook, workspace: &str) -> Result<Value> {
     let name = parse_playbook_name(&p.name)?;
     let body = p.body.trim();
     if body.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "playbook-warning",
             format!("playbook: {name} needs a recipe body"),
+            1,
         ));
     }
     let mut atom = atom_body("playbook", body, workspace);
@@ -25785,12 +25949,13 @@ pub fn playbook_among(name: &str, pack: &[Playbook]) -> Result<Playbook> {
         .into_iter()
         .find(|p| p.name == name)
         .ok_or_else(|| {
-            policy_label::labelled(
+            policy_label::refused(
                 "playbook-warning",
                 format!(
                     "playbook: unknown name {name:?}; the closed set is {}",
                     PLAYBOOK_NAMES.join(", ")
                 ),
+                1,
             )
         })
 }
@@ -25979,33 +26144,36 @@ pub fn bind_playbook(issue: &str, name: &str) -> Result<()> {
     let issue = issue.trim();
     let name = name.trim();
     if issue.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "playbook-warning",
             "playbook: an issue is required",
+            1,
         ));
     }
     if name.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "playbook-warning",
             "playbook: a name is required",
+            1,
         ));
     }
     let name = parse_playbook_name(name)?;
     if let Some(have) = bound_playbook(issue) {
         if have != name {
-            return Err(policy_label::labelled(
+            return Err(policy_label::refused(
                 "playbook-warning",
                 format!(
                     "playbook: {issue} is bound to {have} until finish or release; \
                  a new task is a new sitting"
                 ),
+                1,
             ));
         }
         let _ = write_playbook_cache(issue, name);
         return Ok(());
     }
     let note = format!("{PLAYBOOK_NOTE_PREFIX} {name}");
-    match run_captured("vissue", &["note", issue, &note]) {
+    match run_captured("vissue", &["note", issue, "--", &note]) {
         Ok(_) => {
             let _ = write_playbook_cache(issue, name);
             Ok(())
@@ -26536,7 +26704,14 @@ pub(crate) fn workflow_child(
     let project = project_name(project).map_err(anyhow::Error::msg)?;
     let said = run_captured(
         "vissue",
-        &["q", "-p", &project, "--parent", parent, "-t", kind, title],
+        &[
+            "q",
+            &format!("--project={project}"),
+            &format!("--parent={parent}"),
+            &format!("--type={kind}"),
+            "--",
+            title,
+        ],
     )?;
     let id = said.stdout.trim().to_string();
     if id.is_empty() {
@@ -26560,16 +26735,22 @@ pub fn workflow_start(parent: &str, name: &str) -> Result<String> {
     let mut out = String::new();
     match workflow_name_from_issue(&v) {
         Some(have) if have != name => {
-            return Err(policy_label::labelled(
+            return Err(policy_label::refused(
                 "workflow-warning",
                 format!("workflow: {parent} already runs the {have} workflow; nothing was written"),
+                1,
             ));
         }
         Some(_) => out.push_str(&format!("{parent} already runs the {name} workflow\n")),
         None => {
             run_captured(
                 "vissue",
-                &["note", parent, &format!("{WORKFLOW_NOTE_PREFIX} {name}")],
+                &[
+                    "note",
+                    parent,
+                    "--",
+                    &format!("{WORKFLOW_NOTE_PREFIX} {name}"),
+                ],
             )?;
             run_captured(
                 "vissue",
@@ -26676,7 +26857,7 @@ fn note_objections_below(issue: &str, state: &converge::PanelState) -> Result<()
             objection.text,
             objection.target
         );
-        run_captured("vissue", &["note", issue, &text])?;
+        run_captured("vissue", &["note", issue, "--", &text])?;
     }
     Ok(())
 }
@@ -26693,18 +26874,20 @@ fn note_objections_below(issue: &str, state: &converge::PanelState) -> Result<()
 /// tracker refusing a write.
 pub fn workflow_round(parent: &str) -> Result<String> {
     let Some(status) = workflow_status(parent)? else {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "workflow-warning",
             format!("workflow: {parent} carries no workflow; `ljos workflow {parent} --start feature` starts one"),
+            1,
         ));
     };
     if status.stage == "design" && status.open.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "workflow-warning",
             format!(
                 "workflow: {parent} has no design child; next: {}",
                 status.next
             ),
+            1,
         ));
     }
     let state = panel_state_for(parent, &status)?;
@@ -26712,12 +26895,13 @@ pub fn workflow_round(parent: &str) -> Result<String> {
     match converge::plan_round(&state, &limits) {
         converge::RoundPlan::Passed => {
             let _ = note_objections_below(parent, &state);
-            Err(policy_label::labelled(
+            Err(policy_label::refused(
                 "workflow-warning",
                 format!(
                     "workflow: {parent} passed round {}; a person closes it",
                     status.round
                 ),
+                1,
             ))
         }
         converge::RoundPlan::Hold { why } => {
@@ -26727,9 +26911,10 @@ pub fn workflow_round(parent: &str) -> Result<String> {
             } else {
                 format!(" ({})", ids.join(", "))
             };
-            Err(policy_label::labelled(
+            Err(policy_label::refused(
                 "workflow-warning",
                 format!("workflow: {parent} {why}{which}. Nothing was written"),
+                1,
             ))
         }
         converge::RoundPlan::FileBlocking {
@@ -26795,7 +26980,7 @@ pub fn workflow_round(parent: &str) -> Result<String> {
                 cfg.veto.join(", "),
                 cfg.quorum
             );
-            run_captured("vissue", &["append", &id, &body])?;
+            run_captured("vissue", &["append", &id, "--", &body])?;
             let mut out = format!("filed panel round {n}: {id}\n");
             out.push_str(&persist_tracker(&id, "filed a panel round"));
             if let Some(s) = workflow_status(parent)? {
@@ -27406,25 +27591,27 @@ fn tags_of(v: &Value) -> Vec<String> {
 /// to `issue`.
 pub(crate) fn panel_roster(issue: &str) -> Result<(usize, Vec<Persona>)> {
     if bound_playbook(issue).is_none() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "panel-incomplete",
             format!(
                 "panel: no playbook bound on {issue}; `ljos playbook {issue} NAME` or \
              `ljos sitting {issue} --playbook NAME` names one before personas enter"
             ),
+            1,
         ));
     }
     let all = personas_from_pack()?;
     if all.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "panel-incomplete",
             "panel: the pack holds no personas; `ljos persona NAME --anchor A --view ...` writes one",
+            1,
         ));
     }
     let words = issue_words(issue);
     let personas = panel_personas(issue, &all);
     if personas.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "panel-incomplete",
             format!(
                 "panel: none of the {} personas speaks to {issue}: none holds its words ({}) as a \
@@ -27434,6 +27621,7 @@ pub(crate) fn panel_roster(issue: &str) -> Result<(usize, Vec<Persona>)> {
                 all.len(),
                 words.join(", ")
             ),
+            1,
         ));
     }
     Ok((all.len(), personas))
@@ -27498,9 +27686,10 @@ pub fn options_line(raw: &[String]) -> Result<String> {
         .map(str::to_string)
         .collect();
     if options.len() < 2 {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "panel-incomplete",
             "options: name two or more, separated by commas",
+            1,
         ));
     }
     Ok(format!("Options: {}", options.join(", ")))
@@ -27529,7 +27718,7 @@ pub fn body_with_options(body: Option<String>, raw: &[String]) -> Result<Option<
 /// Fewer than two options, or the tracker did not append.
 pub fn append_issue_options(issue: &str, raw: &[String]) -> Result<String> {
     let line = options_line(raw)?;
-    let said = run_captured("vissue", &["append", issue, &line])
+    let said = run_captured("vissue", &["append", issue, "--", &line])
         .with_context(|| format!("options: {issue} was not updated"))?;
     let persisted = persist_tracker(issue, "noted options");
     Ok(format!("{}{persisted}", said.stdout))
@@ -27547,9 +27736,10 @@ pub fn jev_ballot(name: &str, issue: &str) -> Result<jev::Ballot> {
     let v = issue_record(issue)?;
     let options = issue_options(v["body"].as_str().unwrap_or(""));
     if options.len() < 2 {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "panel-incomplete",
             format!("vote --jev: {issue} has no `Options: A, B` line with two options or more"),
+            1,
         ));
     }
     let full = brief(name, issue)?;
@@ -27635,18 +27825,12 @@ pub fn cast_jev(name: &str, issue: &str, b: &jev::Ballot) -> Result<()> {
     // The forecast first: a ballot cast with its forecast refused would
     // stand half recorded, and the command would still say it failed.
     write_prediction(issue, &voter, &serde_json::to_string(&b.forecast)?)?;
+    let choice = format!("--for={}", b.choice);
+    let used = format!("--used={voter}");
+    let confidence = format!("--confidence={p}");
     run_captured_as(
         "vissue",
-        &[
-            "vote",
-            issue,
-            "--for",
-            &b.choice,
-            "--used",
-            &voter,
-            "--confidence",
-            &p,
-        ],
+        &["vote", issue, &choice, &used, &confidence],
         Some(&voter),
     )?;
     let _ = write_trust(&judge_trust_row(&model), &[]);
@@ -27664,7 +27848,7 @@ pub fn cast_jev(name: &str, issue: &str, b: &jev::Ballot) -> Result<()> {
 }
 
 fn note_jev(issue: &str, text: &str) {
-    let _ = run_captured("vissue", &["note", issue, text]);
+    let _ = run_captured("vissue", &["note", issue, "--", text]);
 }
 
 /// What a Jev ballot did: cast under the persona's name, or handed to a
@@ -27784,9 +27968,10 @@ pub fn panel_jev(issue: &str, out: &Path) -> Result<String> {
     let all = personas_from_pack()?;
     let personas = panel_personas(issue, &all);
     if personas.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "panel-incomplete",
             format!("panel --jev: no persona speaks to {issue}"),
+            1,
         ));
     }
     let mut ballots = Vec::new();
@@ -28021,10 +28206,11 @@ impl Rule {
 pub fn write_rule(rule: &Rule, basis: Basis) -> Result<Value> {
     validate_rule(rule)?;
     if rule.verdict == "allow" {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "rule-input-warning",
             "rule: an allow is kept in the user rules, not the pack: `ljos rule --user PATTERN \
              --verdict allow --why REASON` at your own terminal",
+            1,
         ));
     }
     let pattern = rule.pattern.trim();
@@ -28050,9 +28236,10 @@ pub fn write_rule(rule: &Rule, basis: Basis) -> Result<Value> {
 /// bad pattern leaves neither the preference nor a rule behind.
 pub fn preference_rules(text: &str, deny: &[String], ask: &[String]) -> Result<Vec<Rule>> {
     if text.trim().is_empty() && !(deny.is_empty() && ask.is_empty()) {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "rule-input-warning",
             "prefer: the preference is the rule's reason, so it needs words",
+            1,
         ));
     }
     let rules: Vec<Rule> = deny
@@ -28066,31 +28253,33 @@ pub fn preference_rules(text: &str, deny: &[String], ask: &[String]) -> Result<V
         })
         .collect();
     if rules.iter().any(|r| r.pattern.is_empty()) {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "rule-input-warning",
             "prefer: a --deny or --ask pattern over the command line is required",
+            1,
         ));
     }
     if let Some(rule) = rules.iter().find(|r| blankets_ordinary_pushes(&r.pattern)) {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "rule-input-warning",
             format!(
                 "prefer: `{}` matches an ordinary git push. Cite the exact command; `git push*` is refused",
                 rule.pattern
             ),
-        ));
+            1));
     }
     if under_a_runner() {
         if let Some(rule) = rules
             .iter()
             .find(|r| broader_than_cited(&r.pattern, &r.reason))
         {
-            return Err(policy_label::labelled(
+            return Err(policy_label::refused(
                 "rule-input-warning",
                 format!(
                     "prefer: `{}` is broader than the command this cites",
                     rule.pattern
                 ),
+                1,
             ));
         }
     }
@@ -28149,25 +28338,28 @@ fn cited_push(reason: &str) -> Option<String> {
 pub fn validate_rule(rule: &Rule) -> Result<()> {
     let pattern = rule.pattern.trim();
     if pattern.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "rule-input-warning",
             "rule: a pattern over the command line is required",
+            1,
         ));
     }
     if !matches!(rule.verdict.as_str(), "deny" | "ask" | "allow") {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "rule-input-warning",
             format!(
                 "rule: the verdict is deny, ask or allow, not {:?}",
                 rule.verdict
             ),
+            1,
         ));
     }
     let reason = rule.reason.trim();
     if reason.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "rule-input-warning",
             "rule: say in a sentence why, so the reader who is stopped knows",
+            1,
         ));
     }
     // An allow is the person loosening their own gate; how wide is theirs
@@ -28176,7 +28368,7 @@ pub fn validate_rule(rule: &Rule) -> Result<()> {
         return Ok(());
     }
     if blankets_ordinary_pushes(pattern) {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "rule-input-warning",
             format!(
                 "rule: `{pattern}` matches an ordinary git push. A rule stays as exact as the command \
@@ -28184,15 +28376,16 @@ pub fn validate_rule(rule: &Rule) -> Result<()> {
              A deny can still name a force push (`git push --force*`, `*--force*`) or deleting \
              a remote branch (`git push*--delete*`)"
             ),
-        ));
+            1));
     }
     if under_a_runner() && broader_than_cited(pattern, reason) {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "rule-input-warning",
             format!(
                 "rule: `{pattern}` is broader than the command this cites. An agent-written rule \
              matches that command and nothing wider"
             ),
+            1,
         ));
     }
     Ok(())
@@ -32842,9 +33035,10 @@ pub fn forecasts_from_json(raw: &str) -> Result<Vec<Forecast>> {
                         .or_else(|| value.as_str()?.parse::<f64>().ok())
                         .context("ballots: confidence must be a probability in (0, 1]")?;
                     if !probability.is_finite() || probability <= 0.0 || probability > 1.0 {
-                        return Err(policy_label::labelled(
+                        return Err(policy_label::refused(
                             "decision-input-warning",
                             "ballots: confidence must be a probability in (0, 1]",
+                            1,
                         ));
                     }
                     Some(probability)
@@ -33280,18 +33474,20 @@ pub fn learn_record(
 ) -> Result<(Vec<Trust>, std::collections::BTreeMap<String, Standing>)> {
     let outcome = outcome.trim();
     if outcome.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "decision-input-warning",
             "learn: an outcome is required",
+            1,
         ));
     }
     let mut agents: Vec<&str> = ballots.iter().map(|(a, _)| a.as_str()).collect();
     agents.sort_unstable();
     agents.dedup();
     if agents.len() < 2 {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "decision-input-warning",
             "learn: fewer than two voters, nothing to weigh",
+            1,
         ));
     }
     let mut next = records.clone();
@@ -33586,31 +33782,35 @@ pub fn learn_shared(
     share: f64,
 ) -> Result<Vec<Trust>> {
     if !(beta > 0.0 && beta < 1.0) {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "decision-input-warning",
             format!("learn: beta {beta} is not in (0, 1)"),
+            1,
         ));
     }
     if !(0.0..1.0).contains(&share) {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "decision-input-warning",
             format!("learn: share {share} is not in [0, 1)"),
+            1,
         ));
     }
     let outcome = outcome.trim();
     if outcome.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "decision-input-warning",
             "learn: an outcome is required",
+            1,
         ));
     }
     let mut agents: Vec<&str> = ballots.iter().map(|(a, _)| a.as_str()).collect();
     agents.sort_unstable();
     agents.dedup();
     if agents.len() < 2 {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "decision-input-warning",
             "learn: fewer than two voters, nothing to weigh",
+            1,
         ));
     }
     let refuted = |agent: &str| {
@@ -38591,6 +38791,7 @@ pub fn handover_scoped(
                     "export",
                     "--into",
                     &atoms_dir.display().to_string(),
+                    "--",
                     &client.workspace(),
                 ],
             ) {
@@ -38633,7 +38834,7 @@ pub fn handover_scoped(
     }
 
     lines.push(
-        run_captured("vissue", &["satchel", "--seal", &out.display().to_string()])?
+        run_captured("vissue", &["satchel", &format!("--seal={}", out.display())])?
             .stdout
             .trim_end()
             .to_string(),
@@ -38721,7 +38922,7 @@ pub fn receive(
     lines.push(
         run_captured(
             "vissue",
-            &["satchel", "--verify", &dir.display().to_string()],
+            &["satchel", &format!("--verify={}", dir.display())],
         )?
         .stdout
         .trim_end()
@@ -38755,9 +38956,10 @@ pub fn receive(
         .trim_end()
         .to_string();
         if !said.starts_with("signed by ") {
-            return Err(policy_label::labelled(
+            return Err(policy_label::refused(
                 "import-unverified",
                 format!("receive: satchel is not signed by an accepted key: {said}"),
+                1,
             ));
         }
         if let Some(hex) = said
@@ -38769,9 +38971,10 @@ pub fn receive(
         }
         lines.push(said);
     } else if import {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "import-unverified",
             "receive: unsigned satchel; will not import",
+            1,
         ));
     } else {
         lines.push("unsigned".into());
@@ -39423,7 +39626,9 @@ pub fn parse_every(text: &str) -> Result<i64> {
     if n <= 0 {
         bail!("habit: --every must be positive");
     }
-    Ok(n * each)
+    n.checked_mul(each).ok_or_else(|| {
+        anyhow::anyhow!("habit: --every {t:?} is too long; write 7d, 24h, 2w or 30m")
+    })
 }
 
 /// An RFC 3339 stamp `secs` after `now` (`YYYY-MM-DDTHH:MM:SSZ`, to the
@@ -39682,13 +39887,14 @@ pub fn graded(id: &str, recalled: bool) -> Result<Value> {
     // showed in the last hour was not, and a loop over a saved list grades
     // a thousand claims it never read, each lapse bringing it back sooner.
     if !take_due_shown(id) {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "review-not-shown",
             format!(
                 "graded: {id} is not on a due page read in the last hour; `ljos due` (or \
              ljos_due) shows the soonest {SITTING_DUE}, and only those are graded, \
              each after checking it against the work"
             ),
+            1,
         ));
     }
     let client = pack()?;
@@ -40534,23 +40740,25 @@ pub fn file_issue(
     quorum_deadline: Option<(usize, &str)>,
 ) -> Result<(String, String, String, Result<String>)> {
     let project = project_name(project).map_err(anyhow::Error::msg)?;
-    let mut argv: Vec<String> = vec!["create".into(), "-p".into(), project.clone()];
+    let mut argv: Vec<String> = vec!["create".into(), format!("--project={project}")];
     for (flag, value) in [
         ("--parent", parent),
-        ("-t", kind),
+        ("--type", kind),
         ("--tags", tags),
         ("--priority", priority),
-        ("--body", body),
     ] {
         if let Some(v) = value {
-            argv.push(flag.into());
-            argv.push(v.to_string());
+            argv.push(format!("{flag}={v}"));
         }
     }
-    argv.push(title.to_string());
+    if let Some(body) = body {
+        argv.push(format!("--body={body}"));
+    }
     if quiet {
         argv.push("-q".into());
     }
+    argv.push("--".into());
+    argv.push(title.to_string());
     let said = match run_captured_within("vissue", &argv, Some(agent), tracker_verb_wait()) {
         Ok(said) => said,
         Err(err)
@@ -40564,7 +40772,7 @@ pub fn file_issue(
     let id = created_issue_id(&text);
     if let (Some((n, d)), false) = (quorum_deadline, id.is_empty()) {
         let note = format!("{}{n} by {}", reap::QUORUM_NOTE, d.trim());
-        run_captured("vissue", &["note", &id, &note])?;
+        run_captured("vissue", &["note", &id, "--", &note])?;
     }
     let inbox = text
         .lines()
@@ -40856,15 +41064,17 @@ fn check_tracker_claim_conflict(node: &str, assignee: &str) -> Result<(String, S
     if let Some(held) = tracker_open_holder(node) {
         if !same_claimed_seat(&held, &assignee, node) {
             if let Some((_, live)) = live_other_hold_on_ticket(node, &actor, &assignee) {
-                return Err(policy_label::labelled(
+                return Err(policy_label::refused(
                     "claim-conflict",
                     held_by_another_message(node, &assignee, &live, true),
+                    1,
                 ));
             }
             if let Some(quiet) = takeover::stale_for(node) {
-                return Err(policy_label::labelled(
+                return Err(policy_label::refused(
                     "claim-conflict",
                     takeover::stale_refusal(node, &assignee, &held, quiet),
+                    1,
                 ));
             }
             let clean = unscoped_holder(&held, node);
@@ -40874,11 +41084,12 @@ fn check_tracker_claim_conflict(node: &str, assignee: &str) -> Result<(String, S
             } else {
                 seat.as_str()
             };
-            return Err(policy_label::labelled(
+            return Err(policy_label::refused(
                 "claim-conflict",
                 format!(
                     "claim: {node} is held by another ({held}, seat {seat}), not by {assignee}, so run `ljos send {seat} TEXT`."
                 ),
+                1,
             ));
         }
     }
@@ -41064,17 +41275,19 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                             )
                         }
                         Some(h) => {
-                            return Err(policy_label::labelled(
+                            return Err(policy_label::refused(
                                 "claim-conflict",
                                 held_by_another_message(node, assignee, &h, hold_alive(&h)),
+                                1,
                             ));
                         }
                         None => {
-                            return Err(policy_label::labelled(
+                            return Err(policy_label::refused(
                                 "claim-conflict",
                                 format!(
                                     "claim: {node} is held by another conversation, not by {assignee}, and no record on this host names it, so run `ljos release {node} --assignee NAME`."
                                 ),
+                                1,
                             ));
                         }
                     },
@@ -41108,7 +41321,7 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                      `ljos release {name} --assignee {assignee}` hands it back"
                 ));
             }
-            Err(policy_label::labelled("claim-conflict", lines.join("\n")))
+            Err(policy_label::refused("claim-conflict", lines.join("\n"), 1))
         }
     }
 }
@@ -41156,9 +41369,10 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
     let rows: Vec<Value> =
         serde_json::from_str(listed.trim()).context("claim --next: claimdag ready --json")?;
     if rows.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "claim-conflict",
             "claim --next: nothing in the claim graph is ready",
+            1,
         ));
     }
     for row in &rows {
@@ -41184,12 +41398,13 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
             Err(e) => return Err(e),
         }
     }
-    Err(policy_label::labelled(
+    Err(policy_label::refused(
         "claim-conflict",
         format!(
             "claim --next: {} ready, and another conversation took each first",
             rows.len()
         ),
+        1,
     ))
 }
 
@@ -44382,15 +44597,17 @@ pub fn block_edge(issue: &str, on: &str, remove: bool) -> Result<String> {
     let issue = issue.trim();
     let on = on.trim();
     if issue.is_empty() || on.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "input-warning",
             "block: name the ticket and the one it waits on",
+            1,
         ));
     }
     if !remove && issue == on {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "graph-cycle",
             format!("block: issue {issue} cannot block itself"),
+            1,
         ));
     }
     let layout = vissue_core::Layout::resolve(None, None)?;
@@ -44449,7 +44666,7 @@ pub fn block_edge(issue: &str, on: &str, remove: bool) -> Result<String> {
         let detail = format!("block: {err}");
         let lower = detail.to_ascii_lowercase();
         if lower.contains("cycle") || lower.contains("loop") {
-            policy_label::labelled("graph-cycle", detail)
+            policy_label::refused("graph-cycle", detail, 1)
         } else {
             policy_label::failed("effect-unavailable", anyhow::anyhow!(detail))
         }
@@ -44485,9 +44702,10 @@ pub fn reparent_issue(issue: &str, parent: &str) -> Result<String> {
     let issue = issue.trim();
     let parent = parent.trim();
     if issue.is_empty() || parent.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "input-warning",
             "parent: pass the ticket id and the new parent id",
+            1,
         ));
     }
     if issue == parent {
@@ -46240,20 +46458,22 @@ pub fn sitting_stream_started(
     let (resolved_assignee, actor) = check_tracker_claim_conflict(issue, assignee)?;
     if let Some((_, live)) = live_other_hold_on_ticket(issue, &actor, &resolved_assignee) {
         if !same_claimed_seat(&live.seat, &resolved_assignee, issue) {
-            return Err(policy_label::labelled(
+            return Err(policy_label::refused(
                 "claim-conflict",
                 held_by_another_message(issue, &resolved_assignee, &live, true),
+                1,
             ));
         }
     }
     if let Some(have) = bound_playbook(issue) {
         if have != name {
-            return Err(policy_label::labelled(
+            return Err(policy_label::refused(
                 "playbook-warning",
                 format!(
                     "playbook: {issue} is bound to {have} until finish or release; \
                  a new task is a new sitting"
                 ),
+                1,
             ));
         }
     }
@@ -47565,26 +47785,29 @@ struct StateFlip {
 pub fn reopen(issue: &str) -> Result<String> {
     let issue = issue.trim();
     if issue.is_empty() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "reopen-warning",
             "reopen: an issue id is required; nothing was written",
+            1,
         ));
     }
     if !person_present() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "reopen-warning",
             "reopen: a person reopens a ticket; nothing was written",
+            1,
         ));
     }
     let caller = reopen_caller()?;
     let v = issue_record(issue)?;
     let state = v["state"].as_str().unwrap_or("");
     if !undo::is_closed(state) {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "reopen-warning",
             format!(
                 "reopen: {issue} is {state}, neither finished nor cancelled; nothing was written"
             ),
+            1,
         ));
     }
     let prior = match find_written_close(issue) {
@@ -47602,7 +47825,7 @@ pub fn reopen(issue: &str) -> Result<String> {
         }
     }
     let note = undo::reopen_note(&caller, state);
-    if let Err(e) = run_captured("vissue", &["note", issue, &note]) {
+    if let Err(e) = run_captured("vissue", &["note", issue, "--", &note]) {
         eprintln!("ljos reopen: the note on {issue} was not written: {e:#}");
     }
     let mut out = format!("{issue} reopened as {prior}\n");
@@ -47628,17 +47851,19 @@ fn reopen_caller() -> Result<String> {
         }
         (Some(file), None) => Ok(canonical_seat_name(&file)),
         (Some(file), Some(process)) => {
-            Err(policy_label::labelled(
+            Err(policy_label::refused(
                 "reopen-warning",
                 format!(
                     "reopen: LJOS_SEAT {process} and the seat file {file} name different seats and nothing was written, so run `export LJOS_SEAT={file}`."
                 ),
+                1,
             ))
         }
         (None, _) => {
-            Err(policy_label::labelled(
+            Err(policy_label::refused(
                 "reopen-warning",
                 "reopen: the seat file does not name the caller; nothing was written",
+                1,
             ))
         }
     }
@@ -47847,13 +48072,14 @@ fn ticket_has_lesson(issue: &str) -> bool {
 /// of `issue`, or it is `DONE` or `CANCELLED`.
 pub fn against_child(issue: &str, child: Option<&str>) -> Result<String> {
     let Some(child) = child.map(str::trim).filter(|id| !id.is_empty()) else {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "ballot-eligibility-warning",
             format!(
                 "vote: a no ballot on {issue} has to name a child ticket. \
              `ljos file --parent {issue} \"TITLE\"` files one, then \
              `ljos vote {issue} --against REASON --child ID` links it. Nothing was cast"
             ),
+            1,
         ));
     };
     let card = tracker_show_json(child).with_context(|| {
@@ -47861,22 +48087,24 @@ pub fn against_child(issue: &str, child: Option<&str>) -> Result<String> {
     })?;
     let parent = card["parent"].as_str().unwrap_or("").trim();
     if parent != issue.trim() {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "ballot-eligibility-warning",
             format!(
                 "vote: {child} is not a child of {issue}. \
              `ljos file --parent {issue} \"TITLE\"` files one under it. Nothing was cast"
             ),
+            1,
         ));
     }
     let state = card["state"].as_str().unwrap_or("").trim();
     if matches!(state, "DONE" | "CANCELLED") {
-        return Err(policy_label::labelled(
+        return Err(policy_label::refused(
             "ballot-eligibility-warning",
             format!(
                 "vote: {child} is {state}, so it does not keep the objection open. \
              File another child with `ljos file --parent {issue}`. Nothing was cast"
             ),
+            1,
         ));
     }
     Ok(child.to_string())
@@ -48008,7 +48236,7 @@ pub fn finish(
     if close && tracker_show_json(issue).is_ok_and(|v| is_decision(&v)) {
         let ballots = ballot_rows(issue).len();
         if ballots < 2 {
-            return Err(policy_label::labelled(
+            return Err(policy_label::refused(
                 "panel-incomplete",
                 format!(
                     "finish: {issue} is a decision and holds {ballots} ballot{}; run the panel \
@@ -48017,6 +48245,7 @@ pub fn finish(
                  Nothing was written",
                     if ballots == 1 { "" } else { "s" }
                 ),
+                1,
             ));
         }
     }
@@ -48027,12 +48256,12 @@ pub fn finish(
         match workflow_status(issue) {
             Ok(Some(s)) => {
                 if let Some(why) = workflow_close_refusal(&s) {
-                    return Err(policy_label::labelled("workflow-warning", why));
+                    return Err(policy_label::refused("workflow-warning", why, 1));
                 }
             }
             Ok(None) => {
                 if let Some(why) = open_child_close_refusal(issue) {
-                    return Err(policy_label::labelled("children-open", why));
+                    return Err(policy_label::refused("children-open", why, 1));
                 }
             }
             // A workflow parent whose children cannot be read fails closed.
@@ -48260,7 +48489,7 @@ pub fn finish(
     // The ticket closes only when asked, so a blocker on it stays a blocker.
     if let Some(state) = closed_as {
         if let Some(note) = &close_note {
-            run_as("vissue", &["note", issue, note], None).with_context(|| {
+            run_as("vissue", &["note", issue, "--", note], None).with_context(|| {
                 format!("finish: could not note the grant on the ticket {issue}")
             })?;
         }
@@ -54558,30 +54787,49 @@ fn tracker_retry_line(retries: usize) -> String {
     }
 }
 
-fn note_landed(issue: &str, text: &str) -> bool {
-    let Ok(card) = tracker_show_json(issue) else {
-        return false;
-    };
-    let latest = card["logbook"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            entry["note"]
-                .as_str()
-                .map(|note| (entry["timestamp"].as_str().unwrap_or(""), note))
-        })
-        .max_by_key(|(ts, _)| ts.to_string());
-    latest.is_some_and(|(_, note)| note.trim() == text.trim())
+#[derive(Debug)]
+struct NoteBefore {
+    issue: String,
+    text: String,
+    count: usize,
+    first: Option<serde_json::Value>,
 }
 
-fn tracker_note_already_written(args: &[impl AsRef<str>]) -> bool {
+fn tracker_note_before(args: &[impl AsRef<str>]) -> Option<NoteBefore> {
     if args.first().map(AsRef::as_ref) != Some("note") || args.len() < 3 {
-        return false;
+        return None;
     }
     let issue = args.get(1).map(AsRef::as_ref).unwrap_or_default();
-    let text = args.get(2).map(AsRef::as_ref).unwrap_or_default();
-    !issue.trim().is_empty() && !text.trim().is_empty() && note_landed(issue, text)
+    let mut text = args.get(2).map(AsRef::as_ref).unwrap_or_default();
+    if text == "--" {
+        text = args.get(3).map(AsRef::as_ref).unwrap_or_default();
+    }
+    if issue.trim().is_empty() || text.trim().is_empty() {
+        return None;
+    }
+    let card = tracker_show_json(issue).ok()?;
+    let logbook = card["logbook"].as_array()?;
+    Some(NoteBefore {
+        issue: issue.to_string(),
+        text: text.to_string(),
+        count: logbook.len(),
+        first: logbook.first().cloned(),
+    })
+}
+
+fn tracker_note_landed(before: &NoteBefore) -> bool {
+    let Ok(card) = tracker_show_json(&before.issue) else {
+        return false;
+    };
+    let Some(logbook) = card["logbook"].as_array() else {
+        return false;
+    };
+    logbook.len() == before.count + 1
+        && logbook
+            .first()
+            .and_then(|entry| entry["note"].as_str())
+            .is_some_and(|note| note.trim() == before.text.trim())
+        && logbook.get(1) == before.first.as_ref()
 }
 
 /// How long [`run_captured`] waits. A habitat that never exits used to
@@ -54895,6 +55143,7 @@ fn run_captured_within(
     let mut retries = 0usize;
     let words: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
     'attempt: loop {
+        let note_before = tracker_note_before(args);
         let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -54942,23 +55191,25 @@ fn run_captured_within(
                         tool_bound::mark_failed(line.clone());
                         bail!(line);
                     }
-                    if retryable && retries < 2 {
-                        if tracker_note_already_written(args) {
+                    if retryable {
+                        if note_before.as_ref().is_some_and(tracker_note_landed) {
                             return Ok(Said {
                                 stdout: String::new(),
                                 stderr: String::new(),
                             });
                         }
-                        let backoff = std::time::Duration::from_millis(120 * (1u64 << retries));
-                        if retry_start
-                            .elapsed()
-                            .saturating_add(backoff)
-                            .saturating_add(deadline)
-                            <= retry_budget
-                        {
-                            retries += 1;
-                            std::thread::sleep(backoff);
-                            continue 'attempt;
+                        if retries < 2 {
+                            let backoff = std::time::Duration::from_millis(120 * (1u64 << retries));
+                            if retry_start
+                                .elapsed()
+                                .saturating_add(backoff)
+                                .saturating_add(deadline)
+                                <= retry_budget
+                            {
+                                retries += 1;
+                                std::thread::sleep(backoff);
+                                continue 'attempt;
+                            }
                         }
                     }
                     let line = if retries > 0 && retryable {
@@ -55407,12 +55658,9 @@ pub fn remember_findings(state: &Path, issue: Option<&str>, all: bool) -> Result
             &[
                 "create",
                 "file",
-                "--name",
-                &name,
-                "--path",
-                &state.display().to_string(),
-                "--agent",
-                &seat,
+                &format!("--name={name}"),
+                &format!("--path={}", state.display()),
+                &format!("--agent={seat}"),
             ],
         ) {
             Ok(said) => said.stdout,
@@ -55643,8 +55891,15 @@ pub fn bump_plan(
             run_captured(
                 "vissue",
                 &[
-                    "create", "-p", project, "--id", &row.id, "--parent", parent, "-t", "task",
-                    "--quiet", "--body", &body, &title,
+                    "create",
+                    &format!("--project={project}"),
+                    &format!("--id={}", row.id),
+                    &format!("--parent={parent}"),
+                    "--type=task",
+                    "--quiet",
+                    &format!("--body={body}"),
+                    "--",
+                    &title,
                 ],
             )
             .with_context(|| format!("bump-plan: create {} ({})", row.id, row.module))?;
@@ -56904,6 +57159,250 @@ mod tests {
         assert!(
             again.detail.contains("carries the memory hook"),
             "{again:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_command_quotes_an_ljos_path_with_spaces() {
+        with_env_mutation(|| {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = tempfile::tempdir().unwrap();
+            let bin = dir.path().join("my bin");
+            let ljos = bin.join("ljos");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(&ljos, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&ljos, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let saved = std::env::var_os("PATH");
+            unsafe { std::env::set_var("PATH", &bin) };
+            let command = hook_command();
+            unsafe {
+                match saved {
+                    Some(saved) => std::env::set_var("PATH", saved),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+            assert_eq!(
+                command,
+                format!(
+                    "{} hook",
+                    crate::tools::sh_word(&ljos.display().to_string())
+                )
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reonboard_repairs_unquoted_hook_paths_for_json_runners() {
+        with_env_mutation(|| {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = tempfile::tempdir().unwrap();
+            let bin = dir.path().join("my bin");
+            let ljos = bin.join("ljos");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(&ljos, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&ljos, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let saved = std::env::var_os("PATH");
+            unsafe { std::env::set_var("PATH", &bin) };
+            let wanted = format!(
+                "{} hook",
+                crate::tools::sh_word(&ljos.display().to_string())
+            );
+            for runner in ["claude", "cursor", "codex"] {
+                let file = dir.path().join(format!("{runner}.json"));
+                let old = format!("{} hook", ljos.display());
+                std::fs::write(
+                    &file,
+                    serde_json::json!({
+                        "hooks": {
+                            "PreToolUse": [{
+                                "matcher": "Bash",
+                                "hooks": [{"type": "command", "command": old, "timeout": 20}]
+                            }]
+                        }
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+                let step = hook_step(&file, &["PreToolUse".to_string()], false);
+                assert!(step.detail.contains("repaired the command"), "{step:?}");
+                let value: Value =
+                    serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+                assert_eq!(
+                    value["hooks"]["PreToolUse"][0]["hooks"][0]["command"], wanted,
+                    "{runner}"
+                );
+                let again = hook_step(&file, &["PreToolUse".to_string()], false);
+                assert!(
+                    again.detail.contains("carries the memory hook"),
+                    "{runner}: {again:?}"
+                );
+            }
+            unsafe {
+                match saved {
+                    Some(saved) => std::env::set_var("PATH", saved),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn reonboard_quotes_shell_metacharacters_in_an_owned_hook_path() {
+        for program in [
+            "/opt/ljos$(echo)/bin/ljos",
+            "/opt/ljos`echo`/bin/ljos",
+            "/opt/ljos'quote/bin/ljos",
+            "/opt/ljos\"quote/bin/ljos",
+        ] {
+            let old = format!("{program} hook");
+            let fixed = repaired_seat_hook_command(&old, "ljos hook")
+                .unwrap_or_else(|| panic!("shell metacharacters stayed unquoted: {old}"));
+            assert_eq!(fixed, format!("{} hook", tools::sh_word(program)));
+        }
+    }
+
+    #[test]
+    fn reonboard_requotes_noncanonical_owned_hook_words() {
+        with_env_mutation(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let empty_path = dir.path().join("empty-bin");
+            std::fs::create_dir_all(&empty_path).unwrap();
+            let saved = std::env::var_os("PATH");
+            unsafe { std::env::set_var("PATH", &empty_path) };
+            let path = "/opt/ljos$(echo)/bin/ljos";
+            let wanted = format!("{} hook", tools::sh_word(path));
+            for (name, old) in [
+                ("double", format!("\"{path}\" hook")),
+                ("breakout", "'/opt/ljos'$(echo)'/bin/ljos' hook".to_string()),
+            ] {
+                let file = dir.path().join(format!("{name}.json"));
+                std::fs::write(
+                    &file,
+                    serde_json::json!({
+                        "hooks": {
+                            "PreToolUse": [{
+                                "matcher": "Bash",
+                                "hooks": [{"type": "command", "command": old, "timeout": 20}]
+                            }]
+                        }
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+                let step = hook_step(&file, &["PreToolUse".to_string()], false);
+                assert!(step.detail.contains("repaired the command"), "{step:?}");
+                let value: Value =
+                    serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+                assert_eq!(
+                    value["hooks"]["PreToolUse"][0]["hooks"][0]["command"], wanted,
+                    "{name}"
+                );
+            }
+            unsafe {
+                match saved {
+                    Some(saved) => std::env::set_var("PATH", saved),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn reonboard_leaves_prefixed_wrapped_and_working_absolute_hooks() {
+        with_env_mutation(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let empty_path = dir.path().join("empty-bin");
+            std::fs::create_dir_all(&empty_path).unwrap();
+            let saved = std::env::var_os("PATH");
+            unsafe { std::env::set_var("PATH", &empty_path) };
+            for (name, old, groups) in [
+                ("seat-prefix", "LJOS_SEAT=reviewer ljos hook", 4),
+                ("env-prefix", "env LJOS_SEAT=reviewer ljos hook", 4),
+                ("wrapper", "/opt/ljos-wrapper.sh hook", 4),
+                ("quoted-absolute", "'/opt/My Tools/ljos' hook", 3),
+                ("absolute", "/opt/ljos/bin/ljos hook", 3),
+            ] {
+                let file = dir.path().join(format!("{name}.json"));
+                std::fs::write(
+                    &file,
+                    serde_json::json!({
+                        "hooks": {
+                            "PreToolUse": [{
+                                "matcher": "Bash",
+                                "hooks": [{"type": "command", "command": old, "timeout": 20}]
+                            }]
+                        }
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+                hook_step(&file, &["PreToolUse".to_string()], false);
+                let value: Value =
+                    serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+                assert_eq!(
+                    value["hooks"]["PreToolUse"][0]["hooks"][0]["command"], old,
+                    "{name}"
+                );
+                assert_eq!(
+                    value["hooks"]["PreToolUse"].as_array().unwrap().len(),
+                    groups,
+                    "{name}"
+                );
+            }
+            unsafe {
+                match saved {
+                    Some(saved) => std::env::set_var("PATH", saved),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn removing_an_unrequested_hook_keeps_its_foreign_group_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        std::fs::write(
+            &file,
+            serde_json::json!({
+                "hooks": {
+                    "PostToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "/opt/ljos/bin/ljos hook",
+                                "timeout": 20
+                            },
+                            {
+                                "type": "command",
+                                "command": "/usr/bin/true",
+                                "foreignExtra": "keep"
+                            }
+                        ]
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let step = hook_step(&file, &["PreToolUse".to_string()], false);
+        assert!(step.ok, "{step:?}");
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let groups = value["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "{value}");
+        assert_eq!(
+            groups[0]["hooks"],
+            serde_json::json!([{
+                "type": "command",
+                "command": "/usr/bin/true",
+                "foreignExtra": "keep"
+            }])
         );
     }
 
@@ -73107,6 +73606,16 @@ lesson, due yesterday, seat ada
             remember_split_line(1),
             "remember: stored as 1 claim, because a lesson is at most two sentences, so run `ljos search`."
         );
+        assert_eq!(
+            remember_split_summary(1, 1),
+            "remember: stored 1 claim and queued 1 claim for a later call, because a lesson is at most two sentences, so run `ljos search`."
+        );
+        assert_eq!(
+            remember_split_summary(2, 3),
+            "remember: stored 2 claims and queued 3 claims for a later call, because a lesson is at most two sentences, so run `ljos search`."
+        );
+        assert_eq!(remember_split_summary(2, 0), remember_split_line(2));
+        assert_eq!(remember_split_summary(0, 2), remember_queued_split_line(2));
         let hit = |atom: &Value| Hit {
             id: None,
             text: "Run the linter before the push.".into(),
@@ -77192,6 +77701,52 @@ lesson, due yesterday, seat ada
         std::fs::create_dir_all(dropped_file.parent().unwrap()).unwrap();
         std::fs::write(&dropped_file, serde_json::to_string(&dropped).unwrap()).unwrap();
         assert!(!super::cursor_hooks_satisfy(&dropped_file, &claude));
+    }
+
+    #[test]
+    fn cursor_reonboard_repairs_an_expanding_hook_command_in_place() {
+        with_env_mutation(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("cursor/hooks.json");
+            let claude = dir.path().join("claude/settings.json");
+            let empty_path = dir.path().join("empty-bin");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(&empty_path).unwrap();
+            let saved = std::env::var_os("PATH");
+            unsafe { std::env::set_var("PATH", &empty_path) };
+            let program = "/opt/ljos$(echo)/bin/ljos";
+            std::fs::write(
+                &file,
+                serde_json::json!({
+                    "version": 1,
+                    "hooks": {
+                        "beforeShellExecution": [{
+                            "command": format!("{program} hook"),
+                            "timeout": 20
+                        }]
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+            let step = cursor_hook_step(&file, &claude, false);
+            assert!(step.detail.contains("repaired"), "{step:?}");
+            let value: Value =
+                serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            let entries = value["hooks"]["beforeShellExecution"].as_array().unwrap();
+            assert_eq!(entries.len(), 1, "{value}");
+            assert_eq!(
+                entries[0]["command"],
+                format!("{} hook", tools::sh_word(program))
+            );
+            unsafe {
+                match saved {
+                    Some(saved) => std::env::set_var("PATH", saved),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        });
     }
 
     /// A seat hook an earlier onboard wrote with `failClosed` loses it,

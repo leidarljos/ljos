@@ -259,9 +259,10 @@ fn write_fitted(
     let text = atom["text"].as_str().unwrap_or("").trim().to_string();
     if text.is_empty() {
         crate::memory_port::keep_empty("lesson");
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "empty-input",
             "remember: empty text is not a claim",
+            1,
         ));
     }
     let refused = (held && atom["kind"].as_str() != Some(packset_core::record::NOTE_KIND))
@@ -320,9 +321,10 @@ pub(crate) fn write_agent_one(client: &PacksetClient, mut atom: Value) -> Result
     let text = atom["text"].as_str().unwrap_or("").trim();
     if text.is_empty() {
         crate::memory_port::keep_empty("lesson");
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "empty-input",
             "remember: empty text is not a claim",
+            1,
         ));
     }
     stamp_origin(&mut atom, ORIGIN_AGENT);
@@ -377,9 +379,10 @@ fn post_live(client: &PacksetClient, atom: Value) -> Result<Value> {
 pub fn store_labelled(client: &PacksetClient, mut atom: Value) -> Result<Value> {
     if atom["text"].as_str().unwrap_or("").trim().is_empty() {
         crate::memory_port::keep_empty("lesson");
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "empty-input",
             "store: empty text is not a claim",
+            1,
         ));
     }
     if atom

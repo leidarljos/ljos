@@ -169,13 +169,12 @@ fn a_paragraph_says_why_it_was_stored_as_more_than_one_claim() {
     };
     let seat = Seat::on(daemon.url());
     let (code, stdout, stderr) = seat.run(&["remember", PARA]);
-    assert_eq!(code, 0, "{stdout}{stderr}");
-    assert!(
-        stderr.contains(
-            "remember: stored as 2 claims, because a lesson is at most two sentences, so run `ljos search`."
-        ),
-        "{stderr}"
-    );
+    let said = format!("{stdout}{stderr}");
+    assert_eq!(code, 0, "{said}");
+    let summary =
+        "remember: stored as 2 claims, because a lesson is at most two sentences, so run `ljos search`.";
+    assert!(said.contains(summary), "{said}");
+    assert_eq!(said.matches(summary).count(), 1, "{said}");
 }
 
 #[test]
@@ -224,16 +223,14 @@ fn a_missing_memory_id_names_the_list_and_search() {
         "--text",
         "Leave the kiln cold.",
     ]);
-    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
     assert!(
-        stdout.contains("no memory starts with abcd1234abcd"),
-        "{stdout}"
+        stderr.contains("no memory starts with abcd1234abcd")
+            && stderr.contains("`ljos memories list --all --user`"),
+        "{stderr}"
     );
-    assert!(
-        stdout.contains("`ljos memories list --all --user`"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("`ljos search`"), "{stdout}");
+    assert!(stderr.contains("`ljos search`"), "{stderr}");
 }
 
 #[test]

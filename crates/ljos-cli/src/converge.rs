@@ -1152,14 +1152,12 @@ fn file_child(parent: &str, project: &str, title: &str, depth: usize) -> Result<
     };
     let mut args = vec!["q".to_string()];
     if !project.is_empty() {
-        args.push("-p".into());
-        args.push(project);
+        args.push(format!("--project={project}"));
     }
     args.extend([
-        "--parent".into(),
-        parent.to_string(),
-        "-t".into(),
-        "task".into(),
+        format!("--parent={parent}"),
+        "--type=task".into(),
+        "--".into(),
         title.to_string(),
     ]);
     let said = crate::run_captured("vissue", &args)?;
@@ -1167,12 +1165,15 @@ fn file_child(parent: &str, project: &str, title: &str, depth: usize) -> Result<
     if id.is_empty() {
         anyhow::bail!("vissue q printed no id");
     }
-    let _ = crate::run_captured("vissue", &["note", &id, &format!("dissent-depth: {depth}")]);
+    let _ = crate::run_captured(
+        "vissue",
+        &["note", &id, "--", &format!("dissent-depth: {depth}")],
+    );
     Ok(id)
 }
 
 fn note_issue(id: &str, text: &str) -> Result<()> {
-    crate::run_captured("vissue", &["note", id, text])?;
+    crate::run_captured("vissue", &["note", id, "--", text])?;
     Ok(())
 }
 

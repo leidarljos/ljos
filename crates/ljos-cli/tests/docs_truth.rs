@@ -188,6 +188,24 @@ fn the_docs_do_not_give_the_cli_claim_refusal_a_label() {
     );
 }
 
+#[test]
+fn runtime_failure_examples_are_not_described_as_empty_checks() {
+    let wanted = "Runtime failures include a missing program, a ticket absent from the tracker, \
+                  a store that is missing, read-only or full, a pack that was turned off, or a \
+                  network error while upgrading.";
+    for rel in [
+        "docs/orgmode/reference-commands.org",
+        "docs/source/reference-commands.rst",
+    ] {
+        let text = page(rel);
+        assert!(text.contains(wanted), "{rel} does not say {wanted:?}");
+        assert!(
+            !text.contains("That is a missing program"),
+            "{rel} calls a runtime failure an empty check"
+        );
+    }
+}
+
 fn registered_events(output: &str) -> Vec<String> {
     let row = output
         .lines()

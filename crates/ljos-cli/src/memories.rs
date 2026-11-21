@@ -384,19 +384,19 @@ pub fn resolve(short: &str, all: &[Memory]) -> Result<String> {
     let hits: Vec<&Memory> = all.iter().filter(|m| m.id.starts_with(short)).collect();
     match hits.as_slice() {
         [one] => Ok(one.id.clone()),
-        [] => Err(crate::policy_label::labelled(
+        [] => Err(crate::policy_label::refused(
             "review-input-warning",
             format!(
                 "memories: no memory starts with {short}. `ljos memories list --all --user` prints ids, and so does `ljos search`"
             ),
-        )),
-        _ => Err(crate::policy_label::labelled(
+            1)),
+        _ => Err(crate::policy_label::refused(
             "review-input-warning",
             format!(
                 "memories: {short} starts {} memories; give more of the id. `ljos memories list --all --user` prints them",
                 hits.len()
             ),
-        )),
+            1)),
     }
 }
 
@@ -671,7 +671,7 @@ pub fn lesson_key(kind: &str, text: &str) -> String {
 /// newest is kept), and one never recalled that is older than `days` as
 /// of `today` (`YYYY-MM-DD`). A kept verdict protects a memory.
 #[must_use]
-pub fn stale(all: &[Memory], days: i64, today: &str) -> Vec<Stale> {
+pub fn stale(all: &[Memory], days: u64, today: &str) -> Vec<Stale> {
     let mut out = Vec::new();
     let mut seen: BTreeMap<String, &Memory> = BTreeMap::new();
     let mut newest_first: Vec<&Memory> = all.iter().collect();
@@ -694,10 +694,9 @@ pub fn stale(all: &[Memory], days: i64, today: &str) -> Vec<Stale> {
     }
     let cutoff = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d")
         .ok()
-        .map(|d| {
-            (d - chrono::Duration::days(days))
-                .format("%Y-%m-%d")
-                .to_string()
+        .and_then(|d| {
+            let back = chrono::Duration::try_days(i64::try_from(days).ok()?)?;
+            Some(d.checked_sub_signed(back)?.format("%Y-%m-%d").to_string())
         });
     if let Some(cutoff) = cutoff {
         for m in &newest_first {

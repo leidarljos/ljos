@@ -669,23 +669,93 @@ fn with_start_line(out: &str, line: &str) -> String {
 /// The hook command a runner's file names.
 #[must_use]
 pub fn runner_command(base: &str, runner: &str) -> String {
-    format!("{base} --runner {runner}")
+    format!("{} --runner {runner}", quoted_hook_command(base))
 }
 
+fn quoted_hook_command(base: &str) -> String {
+    let program = base.strip_suffix(" hook").unwrap_or(base);
+    let program = if program.starts_with('\'') && program.ends_with('\'') {
+        program.to_string()
+    } else {
+        crate::tools::sh_word(program)
+    };
+    format!("{program} hook")
+}
+
+/// Ownership is read from the field the runner executes, never from
+/// free text beside it.
 fn ours(v: &Value, runner: &str) -> bool {
-    let t = v.to_string();
-    t.contains(&format!("--runner {runner}")) || t.contains(&format!("ljos-guard-{runner}.sh"))
+    ["command", "to"]
+        .iter()
+        .filter_map(|field| v.get(field).and_then(Value::as_str))
+        .any(|t| {
+            t.contains(&format!("--runner {runner}"))
+                || t.contains(&format!("ljos-guard-{runner}.sh"))
+        })
 }
 
-/// Push `item` onto the array at `key` of `obj` unless one already names
-/// the seat's command. True when it was added.
+fn owned_entry(v: &Value, runner: &str) -> bool {
+    v.get("hooks").and_then(Value::as_array).map_or_else(
+        || ours(v, runner),
+        |hooks| hooks.iter().any(|h| ours(h, runner)),
+    )
+}
+
+fn repair_field(found: &mut Value, item: &Value, field: &str) -> Option<bool> {
+    let wanted = item.get(field)?;
+    let found = found.as_object_mut()?;
+    let old = found.get(field)?;
+    if old == wanted {
+        Some(false)
+    } else {
+        found.insert(field.to_string(), wanted.clone());
+        Some(true)
+    }
+}
+
+fn repair_owned_hook(found: &mut Value, item: &Value, runner: &str) -> Option<bool> {
+    if let Some(changed) = repair_field(found, item, "command") {
+        return Some(changed);
+    }
+    let wanted = item["hooks"]
+        .as_array()?
+        .iter()
+        .find(|hook| ours(hook, runner))?;
+    let mut seen = false;
+    let mut changed = false;
+    for owned in found["hooks"]
+        .as_array_mut()?
+        .iter_mut()
+        .filter(|hook| ours(hook, runner))
+    {
+        if let Some(repaired) = repair_field(owned, wanted, "command") {
+            seen = true;
+            changed |= repaired;
+        }
+    }
+    seen.then_some(changed)
+}
+
+/// Put `item` in the array at `key` of `obj`. An older entry owned by this
+/// seat is repaired in place; unrelated entries stay. True when it changed.
 fn ensure_in(obj: &mut Map<String, Value>, key: &str, item: Value, runner: &str) -> bool {
     let list = obj.entry(key.to_string()).or_insert_with(|| json!([]));
     let Some(list) = list.as_array_mut() else {
         return false;
     };
-    if list.iter().any(|g| ours(g, runner)) {
-        return false;
+    let mut seen = false;
+    let mut changed = false;
+    for found in list.iter_mut().filter(|g| owned_entry(g, runner)) {
+        seen = true;
+        if let Some(repaired) = repair_owned_hook(found, &item, runner) {
+            changed |= repaired;
+        } else if *found != item {
+            *found = item.clone();
+            changed = true;
+        }
+    }
+    if seen {
+        return changed;
     }
     list.push(item);
     true
@@ -848,16 +918,19 @@ fn spec(runner: &str, root: &mut Value, command: &str) -> Result<bool, String> {
             let Some(list) = list.as_array_mut() else {
                 return Err("amp.permissions is not a list".into());
             };
-            if list.iter().any(|r| ours(r, runner)) {
-                false
-            } else {
-                // First, since Amp applies the first rule that matches.
-                list.insert(
-                    0,
-                    json!({ "tool": "Bash", "action": "delegate", "to": command }),
-                );
-                true
+            let want = json!({ "tool": "Bash", "action": "delegate", "to": command });
+            let mut seen = false;
+            let mut changed = false;
+            for found in list.iter_mut().filter(|rule| ours(rule, runner)) {
+                seen = true;
+                changed |= repair_field(found, &want, "to").unwrap_or(false);
             }
+            if !seen {
+                // First, since Amp applies the first rule that matches.
+                list.insert(0, want);
+                changed = true;
+            }
+            changed
         }
         "crush" => {
             let hooks = hooks_of(obj)?;
@@ -888,8 +961,9 @@ pub fn hook_step(runner: &str, file: &Path, base_command: &str, dry: bool) -> St
         return cline_step(file, &command, dry);
     }
     let script = needs_script(runner).then(|| script_path(runner, file));
+    let exec_line = runner_command(base_command, runner);
     let script_text = format!(
-        "#!/bin/sh\n# Written by ljos onboard: the seat's guard for {runner}.\nexec {command}\n"
+        "#!/bin/sh\n# Written by ljos onboard: the seat's guard for {runner}.\nexec {exec_line}\n"
     );
     let script_stale = script
         .as_ref()
@@ -897,6 +971,13 @@ pub fn hook_step(runner: &str, file: &Path, base_command: &str, dry: bool) -> St
     if let Some(p) = &script {
         command = p.display().to_string();
     }
+    // Auggie runs the entry through a shell. Amp's delegate takes a raw path,
+    // so a quote mark would be part of the filename.
+    let command = if runner == "auggie" {
+        crate::tools::sh_word(&command)
+    } else {
+        command
+    };
     let mut root: Value = match std::fs::read_to_string(file) {
         Ok(text) if !text.trim().is_empty() => match serde_json::from_str(&text) {
             Ok(v) => v,
@@ -1615,11 +1696,12 @@ mod tests {
         for (runner, name) in [("auggie", "settings.json"), ("amp", "settings.json")] {
             let dir = tempfile::tempdir().unwrap();
             let file = dir.path().join(name);
-            std::fs::write(
-                &file,
-                r#"{"keep": 1, "amp.permissions": [{"tool": "Read", "action": "allow"}]}"#,
-            )
-            .unwrap();
+            let old = if runner == "amp" {
+                r#"{"keep":1,"amp.permissions":[{"tool":"Bash","action":"delegate","to":"/old/ljos-guard-amp.sh"},{"tool":"Read","action":"allow"}]}"#
+            } else {
+                r#"{"keep":1,"amp.permissions":[{"tool":"Read","action":"allow"}]}"#
+            };
+            std::fs::write(&file, old).unwrap();
             let step = hook_step(runner, &file, "/bin/ljos hook", false);
             assert!(step.ok, "{}", step.detail);
             let script = script_path(runner, &file);
@@ -1630,10 +1712,354 @@ mod tests {
             assert!(v.to_string().contains(&script.display().to_string()));
             if runner == "amp" {
                 assert_eq!(v["amp.permissions"][0]["action"], "delegate");
+                assert_eq!(v["amp.permissions"][0]["to"], script.display().to_string());
                 assert_eq!(v["amp.permissions"][1]["tool"], "Read");
+                assert_eq!(v["amp.permissions"].as_array().unwrap().len(), 2);
             }
             let again = hook_step(runner, &file, "/bin/ljos hook", false);
             assert!(again.detail.contains("carries"), "{}", again.detail);
+        }
+    }
+
+    #[test]
+    fn amp_delegate_path_stays_raw_and_auggie_command_is_shell_quoted() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("my hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        for runner in ["amp", "auggie", "cline"] {
+            let file = if runner == "cline" {
+                dir.join("cline-hooks")
+            } else {
+                dir.join(format!("{runner}.json"))
+            };
+            let step = hook_step(runner, &file, "/opt/my bin/ljos hook", false);
+            assert!(step.ok, "{}", step.detail);
+            if runner == "cline" {
+                for event in ["PreToolUse", "UserPromptSubmit"] {
+                    let text = std::fs::read_to_string(file.join(event)).unwrap();
+                    assert!(
+                        text.contains("exec '/opt/my bin/ljos' hook --runner cline"),
+                        "{text}"
+                    );
+                }
+                continue;
+            }
+            let script = script_path(runner, &file);
+            let text = std::fs::read_to_string(&script).unwrap();
+            assert!(
+                text.contains(&format!("'/opt/my bin/ljos' hook --runner {runner}")),
+                "{text}"
+            );
+            let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            let raw = script.display().to_string();
+            if runner == "amp" {
+                assert_eq!(v["amp.permissions"][0]["to"], raw);
+            } else {
+                let command = v["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap_or("");
+                assert_eq!(command, crate::tools::sh_word(&raw));
+                assert!(command.starts_with('\''), "{command}");
+            }
+        }
+    }
+
+    #[test]
+    fn amp_reonboard_repairs_every_owned_permission() {
+        let command = "/safe path/ljos-guard-amp.sh";
+        let stale = json!({
+            "tool": "Bash",
+            "action": "delegate",
+            "to": "/opt/ljos$(echo)/ljos-guard-amp.sh"
+        });
+        let foreign = json!({"tool": "Read", "action": "allow"});
+        let mut root = json!({ "amp.permissions": [stale.clone(), foreign.clone(), stale] });
+
+        assert!(spec("amp", &mut root, command).unwrap());
+        let rules = root["amp.permissions"].as_array().unwrap();
+        assert_eq!(rules.len(), 3, "{root}");
+        assert_eq!(rules[0]["to"], command, "{root}");
+        assert_eq!(rules[1], foreign);
+        assert_eq!(rules[2]["to"], command, "{root}");
+        let before = root.clone();
+        assert!(!spec("amp", &mut root, command).unwrap());
+        assert_eq!(root, before);
+    }
+
+    #[test]
+    fn auggie_reonboard_repairs_an_owned_unquoted_command() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("my hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        let script = script_path("auggie", &file);
+        let old = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "launch-process",
+                    "hooks": [{
+                        "type": "command",
+                        "command": script.display().to_string(),
+                        "timeout": 20_000
+                    }]
+                }]
+            }
+        });
+        std::fs::write(&file, serde_json::to_string_pretty(&old).unwrap()).unwrap();
+
+        let step = hook_step("auggie", &file, "/opt/my bin/ljos hook", false);
+        assert!(step.ok, "{}", step.detail);
+        assert!(step.detail.contains("wrote"), "{}", step.detail);
+        let fixed: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(
+            fixed["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            json!(crate::tools::sh_word(&script.display().to_string()))
+        );
+    }
+
+    #[test]
+    fn json_runner_reonboard_keeps_sibling_hooks_in_an_owned_group() {
+        for (runner, groups) in [
+            ("gemini", 2),
+            ("qwen", 2),
+            ("factory", 2),
+            ("openhands", 2),
+            ("auggie", 1),
+        ] {
+            let mut root = json!({});
+            let old = format!("/old/ljos hook --runner {runner}");
+            assert!(spec(runner, &mut root, &old).unwrap(), "{runner}");
+            let events = if runner == "factory" {
+                root.as_object_mut().unwrap()
+            } else {
+                root["hooks"].as_object_mut().unwrap()
+            };
+            let mut added = 0;
+            for event in events.values_mut() {
+                for group in event.as_array_mut().unwrap() {
+                    if owned_entry(group, runner) {
+                        group["hooks"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!({"type": "command", "command": "/usr/bin/true"}));
+                        added += 1;
+                    }
+                }
+            }
+            assert_eq!(added, groups, "{runner}: {root}");
+
+            let new = format!("/new/ljos hook --runner {runner}");
+            assert!(spec(runner, &mut root, &new).unwrap(), "{runner}");
+            assert_eq!(
+                root.to_string().matches("/usr/bin/true").count(),
+                groups,
+                "{runner}: {root}"
+            );
+            assert_eq!(
+                root.to_string().matches(&new).count(),
+                groups,
+                "{runner}: {root}"
+            );
+        }
+    }
+
+    #[test]
+    fn reonboard_changes_only_the_owned_command_field() {
+        let command = "/old/ljos hook --runner auggie";
+        let mut root = json!({});
+        assert!(spec("auggie", &mut root, command).unwrap());
+        let hook = &mut root["hooks"]["PreToolUse"][0]["hooks"][0];
+        hook["timeout"] = json!(7);
+        hook["ownedExtra"] = json!("keep");
+        let before = root.clone();
+        assert!(!spec("auggie", &mut root, command).unwrap());
+        assert_eq!(root, before);
+
+        let changed = "/new/ljos hook --runner auggie";
+        assert!(spec("auggie", &mut root, changed).unwrap());
+        assert_eq!(
+            root["hooks"]["PreToolUse"][0]["hooks"][0],
+            json!({
+                "type": "command",
+                "command": changed,
+                "timeout": 7,
+                "ownedExtra": "keep"
+            })
+        );
+
+        let command = "/old/ljos-guard-amp.sh";
+        let mut root = json!({});
+        assert!(spec("amp", &mut root, command).unwrap());
+        root["amp.permissions"][0]["ownedExtra"] = json!("keep");
+        let before = root.clone();
+        assert!(!spec("amp", &mut root, command).unwrap());
+        assert_eq!(root, before);
+
+        let changed = "/new/ljos-guard-amp.sh";
+        assert!(spec("amp", &mut root, changed).unwrap());
+        assert_eq!(
+            root["amp.permissions"][0],
+            json!({
+                "tool": "Bash",
+                "action": "delegate",
+                "to": changed,
+                "ownedExtra": "keep"
+            })
+        );
+    }
+
+    #[test]
+    fn reonboard_repairs_every_owned_hook_in_a_group() {
+        let command = "'/safe path/ljos-guard-auggie.sh'";
+        let mut root = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "launch-process",
+                    "hooks": [
+                        {"type": "command", "command": command, "timeout": 20_000},
+                        {
+                            "type": "command",
+                            "command": "/opt/ljos$(echo)/ljos-guard-auggie.sh",
+                            "timeout": 7
+                        },
+                        {"type": "command", "command": "/usr/bin/true"}
+                    ]
+                }]
+            }
+        });
+
+        assert!(spec("auggie", &mut root, command).unwrap());
+        let hooks = root["hooks"]["PreToolUse"][0]["hooks"].as_array().unwrap();
+        assert_eq!(
+            hooks
+                .iter()
+                .filter(|hook| hook["command"] == command)
+                .count(),
+            2,
+            "{root}"
+        );
+        assert_eq!(hooks[1]["timeout"], 7);
+        assert_eq!(hooks[2]["command"], "/usr/bin/true");
+    }
+
+    #[test]
+    fn a_group_marker_does_not_make_foreign_hooks_owned() {
+        let command = "'/safe path/ljos-guard-auggie.sh'";
+        let foreign = json!({
+            "matcher": "launch-process",
+            "ownerNote": "ljos-guard-auggie.sh",
+            "hooks": [{"type": "command", "command": "/usr/bin/true"}]
+        });
+        let mut root = json!({
+            "hooks": {
+                "PreToolUse": [foreign.clone()]
+            }
+        });
+
+        assert!(spec("auggie", &mut root, command).unwrap());
+        let groups = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 2, "{root}");
+        assert_eq!(groups[0], foreign);
+        assert_eq!(groups[1]["hooks"][0]["command"], command);
+    }
+
+    #[test]
+    fn reonboard_repairs_every_owned_group_and_entry() {
+        let stale = |runner: &str| format!("/opt/ljos$(echo)/ljos-guard-{runner}.sh");
+        let command = "'/safe path/ljos-guard-auggie.sh'";
+        let group = json!({
+            "matcher": "launch-process",
+            "hooks": [{"type": "command", "command": stale("auggie"), "timeout": 20_000}]
+        });
+        let foreign = json!({
+            "matcher": "launch-process",
+            "hooks": [{"type": "command", "command": "/usr/bin/true"}]
+        });
+        let mut root = json!({
+            "hooks": { "PreToolUse": [group.clone(), foreign.clone(), group] }
+        });
+        assert!(spec("auggie", &mut root, command).unwrap());
+        let groups = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 3, "{root}");
+        assert_eq!(groups[0]["hooks"][0]["command"], command, "{root}");
+        assert_eq!(groups[1], foreign);
+        assert_eq!(groups[2]["hooks"][0]["command"], command, "{root}");
+        let before = root.clone();
+        assert!(!spec("auggie", &mut root, command).unwrap());
+        assert_eq!(root, before);
+
+        let command = "/safe/ljos hook --runner windsurf";
+        let entry = json!({"command": stale("windsurf"), "show_output": false});
+        let foreign = json!({"command": "/usr/bin/true", "show_output": true});
+        let mut root = json!({
+            "hooks": { "pre_run_command": [entry.clone(), foreign.clone(), entry] }
+        });
+        assert!(spec("windsurf", &mut root, command).unwrap());
+        let entries = root["hooks"]["pre_run_command"].as_array().unwrap();
+        assert_eq!(entries.len(), 3, "{root}");
+        assert_eq!(entries[0]["command"], command, "{root}");
+        assert_eq!(entries[1], foreign);
+        assert_eq!(entries[2]["command"], command, "{root}");
+        let before = root.clone();
+        assert!(!spec("windsurf", &mut root, command).unwrap());
+        assert_eq!(root, before);
+    }
+
+    #[test]
+    fn a_free_text_field_does_not_make_an_entry_owned() {
+        let auggie = json!({
+            "matcher": "launch-process",
+            "hooks": [{
+                "type": "command",
+                "command": "/usr/bin/true",
+                "ownerNote": "ljos-guard-auggie.sh"
+            }]
+        });
+        let windsurf = json!({"command": "/usr/bin/true", "note": "ljos-guard-windsurf.sh"});
+        let amp = json!({
+            "tool": "Bash",
+            "action": "delegate",
+            "to": "/usr/bin/true",
+            "note": "ljos-guard-amp.sh"
+        });
+        for (runner, mut root, foreign_at, ours_at, command) in [
+            (
+                "auggie",
+                json!({ "hooks": { "PreToolUse": [auggie.clone()] } }),
+                "/hooks/PreToolUse/0",
+                "/hooks/PreToolUse/1/hooks/0/command",
+                "'/safe path/ljos-guard-auggie.sh'",
+            ),
+            (
+                "windsurf",
+                json!({ "hooks": { "pre_run_command": [windsurf.clone()] } }),
+                "/hooks/pre_run_command/0",
+                "/hooks/pre_run_command/1/command",
+                "/safe/ljos hook --runner windsurf",
+            ),
+            (
+                "amp",
+                json!({ "amp.permissions": [amp.clone()] }),
+                "/amp.permissions/1",
+                "/amp.permissions/0/to",
+                "/safe path/ljos-guard-amp.sh",
+            ),
+        ] {
+            let foreign = match runner {
+                "auggie" => &auggie,
+                "windsurf" => &windsurf,
+                _ => &amp,
+            };
+            assert!(spec(runner, &mut root, command).unwrap(), "{runner}");
+            assert_eq!(root.pointer(foreign_at), Some(foreign), "{runner}: {root}");
+            assert_eq!(
+                root.pointer(ours_at),
+                Some(&json!(command)),
+                "{runner}: {root}"
+            );
+            let before = root.clone();
+            assert!(!spec(runner, &mut root, command).unwrap(), "{runner}");
+            assert_eq!(root, before, "{runner}");
         }
     }
 
