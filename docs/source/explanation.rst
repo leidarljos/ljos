@@ -34,8 +34,8 @@ consensus              the weighting that settles a vote                        
 
 The claim graph shows itself least, by design. It answers one question while work runs: is
 anyone already on this ticket, here, now? ``ljos sitting`` takes the ticket's node before it
-returns. A second sitting on the same ticket learns who has it. ``ljos finish`` marks the node
-done. A reboot clears the store, and a lease never outlives its holder.
+returns. A second sitting on the same ticket learns who has it. ``ljos finish`` hands the node
+back, or with ``--close`` marks it done. A reboot clears the store, and a lease never outlives its holder.
 
 A deed accession is the one identifier the writable stores share. The tracker cites it on a
 ticket, and the pack cites it in a memory. The deed store answers for it.

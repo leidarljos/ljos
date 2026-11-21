@@ -33,7 +33,7 @@ receives it:
 ``signer = ed25519:<hex>`` to their deed store's ``layout`` and ``receive``
 reports ``(accepted)``. Two seats share one ticket by this walk, in
 sequence: A sits and hands over, B imports and sits after A releases,
-both vote, consensus, finish closes. ``scripts/smoke.sh`` runs it on
+both vote, consensus, ``finish --close`` closes. ``scripts/smoke.sh`` runs it on
 scratch stores; ``scripts/herd.sh`` is the concurrent contention check.
 
 Receive from the same sender again
