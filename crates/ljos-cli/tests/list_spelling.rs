@@ -5,6 +5,7 @@
 
 ljos_test_boot::harness!();
 
+use chrono::TimeZone;
 use std::process::{Command, Output};
 
 struct Board {
@@ -18,8 +19,8 @@ struct Board {
 ///
 /// The stamp is wall time to the minute, so with the real clock the age
 /// turns from `just now` to `1m` at the next minute, which can fall
-/// between two runs a test compares. ljos reads the stamp in the offset
-/// of now, so the stamp's wall time at `+00:00` is the same instant.
+/// between two runs a test compares. The stamp is this machine's wall
+/// time, so the instant is written in the machine's offset.
 fn claim_clock(layout: &vissue_core::Layout, project: &str, id: &str) -> String {
     let path = layout.project_issues_path(project);
     let doc = vissue_core::IssueDoc::parse_file(project, &path).unwrap();
@@ -35,7 +36,14 @@ fn claim_clock(layout: &vissue_core::Layout, project: &str, id: &str) -> String 
     let mut parts = text.split_whitespace();
     let date = parts.next().unwrap();
     let clock = parts.find(|part| part.contains(':')).unwrap();
-    format!("{date}T{clock}:00+00:00")
+    let wall = chrono::NaiveDateTime::parse_from_str(&format!("{date} {clock}"), "%Y-%m-%d %H:%M")
+        .unwrap();
+    chrono::Local
+        .from_local_datetime(&wall)
+        .earliest()
+        .unwrap()
+        .fixed_offset()
+        .to_rfc3339()
 }
 
 impl Board {
@@ -97,6 +105,7 @@ impl Board {
             .env("LJOS_ASK_PACK", "off")
             .env("LJOS_USER_RULES_SYNC", "off")
             .env("LJOS_CLAIM_NOW", &self.claim_now)
+            .envs(std::env::var_os("TZ").map(|tz| ("TZ", tz)))
             .output()
             .unwrap()
     }
