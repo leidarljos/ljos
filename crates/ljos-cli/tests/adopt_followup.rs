@@ -467,10 +467,8 @@ fn a_refused_pack_search_is_one_line_and_exits_75() {
     );
     let said = text(&out);
     assert!(out.status.success(), "{said}");
-    assert!(
-        said.contains("The memory writer is not running") && said.contains("packset ensure"),
-        "{said}"
-    );
+    assert!(said.contains("Memory is not running, so these results are ranked by words. If this persists, run `ljos doctor`."), "{said}");
+    assert_eq!(said.matches("ranked by words").count(), 1, "{said}");
     assert!(!said.contains("Caused by"), "{said}");
     assert!(!said.contains("packsetd is unreachable"), "{said}");
 }

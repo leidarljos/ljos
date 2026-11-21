@@ -18,7 +18,8 @@ use std::time::Duration;
 
 const LESSON: &str = "Cold metal seats the door.";
 const QUEUED: &str = "Memory busy: queued 1 write, it will be saved on a later call.";
-const WORDS: &str = "These are word matches; the pack did not answer.";
+const WORDS: &str =
+    "Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`.";
 
 fn script(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;

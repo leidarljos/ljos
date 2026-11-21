@@ -4,6 +4,11 @@
 
 ljos_test_boot::harness!();
 
+const BUSY_LINE: &str =
+    "Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`.";
+const DOWN_LINE: &str =
+    "Memory is not running, so these results are ranked by words. If this persists, run `ljos doctor`.";
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
@@ -195,13 +200,22 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
         1,
         "a sitting asks the search once and does not ask it again:\n{stdout}"
     );
-    assert!(
-        stdout.contains("ranked by words; the pack search did not answer in time"),
-        "a stalled search is the one read, and the sitting says so:\n{stdout}"
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    let said: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("ranked by words"))
+        .collect();
+    assert_eq!(
+        said,
+        [BUSY_LINE],
+        "a search that never answers is one line on stderr and the sitting goes on:\n{stderr}"
     );
     assert!(
-        stdout.contains("These are word matches; the pack did not answer."),
-        "a search that never answers is one line and the sitting goes on:\n{stdout}"
+        !stdout.contains("ranked by words") && !stdout.contains("word matches"),
+        "the sitting repeats the line on stdout:\n{stdout}"
     );
     assert!(
         started.elapsed() < Duration::from_secs(8),
@@ -501,10 +515,8 @@ fn a_sitting_skips_memory_when_packsetd_answers_503() {
         "a 503 with Retry-After 60 held the sitting for {took:?}:\n{said}"
     );
     assert!(ok, "{said}");
-    assert!(
-        said.contains("These are word matches; the pack did not answer."),
-        "{said}"
-    );
+    assert_eq!(said.matches(BUSY_LINE).count(), 1, "{said}");
+    assert_eq!(said.matches("ranked by words").count(), 1, "{said}");
     assert!(
         said.contains("== claim") || said.contains("claimed"),
         "{said}"
@@ -523,8 +535,6 @@ fn a_sitting_skips_memory_when_packsetd_never_answers() {
         "a closed pack port held the sitting for {took:?}:\n{said}"
     );
     assert!(ok, "{said}");
-    assert!(
-        said.contains("These are word matches; the pack did not answer."),
-        "{said}"
-    );
+    assert_eq!(said.matches(DOWN_LINE).count(), 1, "{said}");
+    assert_eq!(said.matches("ranked by words").count(), 1, "{said}");
 }

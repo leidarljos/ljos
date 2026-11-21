@@ -59,9 +59,7 @@ fn search_and_remember_say_one_line_when_the_pack_is_down() {
     let search_err = lines(&search.stderr);
     assert!(search.status.success(), "{search_err:?}");
     assert!(
-        search_err.iter().any(|line| {
-            line.contains("The memory writer is not running") && line.contains("packset ensure")
-        }),
+        search_err.iter().any(|line| line == "Memory is not running, so these results are ranked by words. If this persists, run `ljos doctor`."),
         "{search_err:?}"
     );
     let remember = run(

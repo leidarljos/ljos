@@ -22,7 +22,6 @@ Set ``LJOS_SEAT`` to the seat that files it. Once ``vissue.toml`` lists seats, t
      day-ef56  pick a default
    next: day-cd34  measure the files
    tracker: day-ab12 STARTED under ada
-   These are word matches; the pack did not answer.
    warn    crates.io   did not answer, so the version check was skipped
    matched by words (encoder not installed)
    day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.

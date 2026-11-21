@@ -18,8 +18,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const HIT: &str = "d-SEAMS keeps the migrate video beside the cut.";
-const BUSY: &str = "The memory pack was busy, so these rows are word matches; run the search again for ranked results.";
-const BUSY_MISS: &str = "The memory pack was busy and no words matched.";
+const BUSY: &str =
+    "Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`.";
+const BUSY_MISS: &str = BUSY;
 const WORD_QUERY: &str = "GPRidge video narration";
 const BUSY_BODY: &str =
     r#"{"error":"packsetd is busy: every worker is answering and the queue is full; try again"}"#;
@@ -198,7 +199,6 @@ fn a_writer_that_stays_busy_uses_one_word_line() {
     );
     assert!(!text.contains("The memory writer is busy"), "{text}");
     assert!(!text.contains("No close matches"), "{text}");
-    assert!(!text.contains(BUSY), "{text}");
     assert!(searches.load(Ordering::SeqCst) > 2, "{text}");
     assert!(
         took < Duration::from_secs(4),
@@ -489,7 +489,6 @@ fn a_pack_that_accepts_and_stays_silent_uses_one_word_line() {
         "{text}"
     );
     assert!(!text.contains("The memory writer is busy"), "{text}");
-    assert!(!text.contains(BUSY), "{text}");
     // LJOS_SEARCH_BUSY_WAIT (2s) plus one short request (3s).
     assert!(
         took < Duration::from_secs(5),
@@ -585,7 +584,6 @@ fn a_busy_pack_with_a_word_match_prints_one_line() {
         "{text}"
     );
     assert!(!text.contains("pack busy, try again"), "{text}");
-    assert!(!text.contains(BUSY_MISS), "{text}");
     assert!(stdout.contains(LESSON), "{text}");
 
     let json = search_fast(&url, &home, &["search", "--json", "kiln door"]);

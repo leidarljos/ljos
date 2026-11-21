@@ -347,8 +347,8 @@ fn a_busy_writer_names_the_reason_and_the_next_command() {
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or("");
-    let rows = "The memory pack was busy, so these rows are word matches; run the search again for ranked results.";
-    let miss = "The memory pack was busy and no words matched.";
+    let rows = "Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`.";
+    let miss = rows;
     if stdout.trim().is_empty() {
         assert_eq!(search.status.code(), Some(1), "{said}");
         assert_eq!(first, miss, "first line: {first}\n{said}");

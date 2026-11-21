@@ -424,11 +424,7 @@ fn a_busy_pack_names_the_search_to_run_again() {
     let reading = search["result"]["structuredContent"]["reading"]
         .as_str()
         .unwrap_or("");
-    assert_eq!(
-        reading,
-        ljos_cli::MEMORY_SEARCH_BUSY_EMPTY_LINE,
-        "{reading}"
-    );
+    assert_eq!(reading, ljos_cli::degraded::BUSY_LINE, "{reading}");
     let quoted = call(
         &mut session,
         4,
@@ -440,7 +436,7 @@ fn a_busy_pack_names_the_search_to_run_again() {
         .as_str()
         .unwrap_or("")
         .to_string();
-    assert_eq!(quoted, ljos_cli::MEMORY_SEARCH_BUSY_EMPTY_LINE, "{quoted}");
+    assert_eq!(quoted, ljos_cli::degraded::BUSY_LINE, "{quoted}");
     assert!(session.alive());
     let remember = call(
         &mut session,
@@ -472,16 +468,17 @@ fn a_busy_pack_with_a_word_match_is_one_result_line() {
     let reading = search["result"]["structuredContent"]["reading"]
         .as_str()
         .unwrap_or("");
-    assert_eq!(reading, ljos_cli::MEMORY_SEARCH_BUSY_LINE, "{search}");
+    assert_eq!(reading, ljos_cli::degraded::BUSY_LINE, "{search}");
     let body = search.to_string();
     assert!(
         body.contains("Seat the kiln door only when cold."),
         "{search}"
     );
     assert!(!body.contains("pack busy, try again"), "{search}");
-    assert!(
-        !body.contains(ljos_cli::MEMORY_SEARCH_BUSY_EMPTY_LINE),
-        "{search}"
+    assert_eq!(
+        body.matches(ljos_cli::degraded::BUSY_LINE).count(),
+        2,
+        "the line is the reading and its text copy, and nothing else: {search}"
     );
     assert!(session.alive());
 }
