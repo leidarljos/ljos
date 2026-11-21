@@ -3,6 +3,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/tools.rs"]
+mod tools;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -73,6 +76,15 @@ fn script(dir: &Path, name: &str, body: &str) {
     let path = dir.join(name);
     std::fs::write(&path, body).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The stubs in `root` come first; the inherited `PATH` follows, so a
+/// real `age` installed outside `/usr/bin`, as Homebrew does, is found.
+fn seat_path(root: &Path) -> std::ffi::OsString {
+    let inherited = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
+    let mut dirs = vec![root.to_path_buf()];
+    dirs.extend(std::env::split_paths(&inherited));
+    std::env::join_paths(dirs).unwrap()
 }
 
 fn git(repo: &Path, args: &[&str]) -> String {
@@ -267,7 +279,7 @@ impl Seat {
 
     fn run(&self, args: &[&str], pack: &str, timeout_ms: &str, auth: bool) -> std::process::Output {
         let home = self.root.path().join("home");
-        let path = format!("{}:/usr/bin:/bin", self.root.path().display());
+        let path = seat_path(self.root.path());
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(self.root.path())
@@ -333,6 +345,9 @@ fn sealed_logs(tracker: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn finish_with_queued_write_and_eagain_sync_does_not_ask_for_ljos_sync() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let seat = Seat::open();
     let pack = serve_pack(PackMode::AlwaysEagain);
     let out = seat.run(
@@ -386,6 +401,9 @@ fn finish_with_queued_write_and_eagain_sync_does_not_ask_for_ljos_sync() {
 
 #[test]
 fn finish_with_queued_write_and_503_sync_does_not_ask_for_ljos_sync() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let seat = Seat::open();
     let pack = serve_pack(PackMode::AlwaysBusy503);
     let out = seat.run(
@@ -426,6 +444,9 @@ fn finish_with_queued_write_and_503_sync_does_not_ask_for_ljos_sync() {
 
 #[test]
 fn finish_recovers_when_pack_answers_after_transient_eagain() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let seat = Seat::open();
     let pack = serve_pack(PackMode::TransientGateEagain(2));
     let out = seat.run(
@@ -516,6 +537,9 @@ fn seal_ticket_in_passing_skips_checkout_without_tracker() {
 
 #[test]
 fn queued_seal_with_missing_or_empty_root_does_not_seal_in_another_checkout() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let seat = Seat::open();
     let base_rev = git(&seat.tracker(), &["rev-parse", "HEAD"])
         .trim()
@@ -572,6 +596,9 @@ fn queued_seal_with_missing_or_empty_root_does_not_seal_in_another_checkout() {
 
 #[test]
 fn queued_seal_reaches_all_configured_sync_roots() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let seat = Seat::open();
     let second = seat.root.path().join("tracker-two");
     let second_proj = second.join("Software/demo");
@@ -651,6 +678,9 @@ fn queued_seal_reaches_all_configured_sync_roots() {
 
 #[test]
 fn queued_seal_not_reported_sealed_when_nothing_sealed() {
+    if tools::halt(tools::Tool::AgeKeygen) {
+        return;
+    }
     let seat = Seat::open();
     let pack = serve_pack(PackMode::AlwaysBusy503);
     pack.healthy.store(true, Ordering::SeqCst);
@@ -669,7 +699,7 @@ fn queued_seal_not_reported_sealed_when_nothing_sealed() {
     // With LJOS_TRACKER_GIT=off nothing can be sealed, so it must stay queued
     // and must not report "sealed queued ticket(s)".
     let home = seat.root.path().join("home");
-    let path = format!("{}:/usr/bin:/bin", seat.root.path().display());
+    let path = seat_path(seat.root.path());
     let off_run = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["ready"])
         .current_dir(seat.root.path())

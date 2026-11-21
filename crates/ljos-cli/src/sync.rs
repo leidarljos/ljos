@@ -12979,6 +12979,9 @@ mod tests {
 
     #[test]
     fn seal_ticket_in_passing_checked_skips_missing_root_and_checks_gate_before_atoms_fetch() {
+        if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
+            return;
+        }
         let _g = crate::tests::env_guard();
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
