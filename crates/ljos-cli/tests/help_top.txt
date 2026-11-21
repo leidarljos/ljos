@@ -53,6 +53,7 @@ Memory:
   memory       Copy memories to a file, or bring a file from another machine into this seat
   memories     Review the memories agents wrote on their own: list, keep, edit, merge, drop, prune, or browse them in a terminal viewer
   export       Write this seat's memories to a file. The same as `ljos memory export`
+  handbook     Write the lessons, preferences, rules, tickets and workflows marked public as an Org document
   accept       Accept a stored memory or a waiting proposal, so a later search treats it as kept
   forget       Retire one memory by id. The text stays, marked retired
   proposals    List lesson proposals waiting on a review

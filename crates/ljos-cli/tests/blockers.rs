@@ -282,7 +282,9 @@ fn a_ticket_like_word_after_block_suggests_on() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "{}", text(&out));
     assert!(
-        err.contains("looks like a ticket id") && err.contains("ljos block ISSUE --on probe-AB12"),
+        err.contains("looks like a ticket id")
+            && err.contains("ljos block ISSUE --on ID")
+            && !err.contains("probe-AB12"),
         "{err}"
     );
     assert!(board.heading(&board.a).blocked_by().is_empty());

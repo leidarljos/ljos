@@ -65,6 +65,9 @@ pub struct UserRule {
     /// The lesson id a promote copied, when this row came from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    /// `project:` and `tag:` entities recorded with the row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<String>,
     /// Who stands behind a rule written as words or an argv law, as
     /// `source.basis` on a seat atom: `person` only when the person typed
     /// it or said it in their latest prompt. A row with neither this nor
@@ -610,6 +613,7 @@ fn fresh(text: &str, reason: &str, from: Option<String>) -> Result<UserRule> {
         updated_at: now,
         deleted: false,
         from,
+        entities: super::active_policy_entities(),
         basis: None,
         lesson_hash: None,
         due_at: None,
@@ -1973,6 +1977,7 @@ mod tests {
             updated_at: "2020-01-01T00:00:00Z".into(),
             deleted: false,
             from: None,
+            entities: Vec::new(),
             basis: None,
             lesson_hash: None,
             due_at: Some("2020-01-02T00:00:00Z".into()),

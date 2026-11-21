@@ -1,0 +1,2 @@
+Add `ljos handbook` to write the lessons, preferences, rules, tickets and workflows marked public as one Org document. Nothing unmarked is exported. A marked item that reads as private refuses the whole export, names the item and the kind of match, and writes nothing.
+Refuse a capital `Cursor`, and credential phrasing such as `the password is hunter`, `the pin is 4921`, `curl -u user:pass` and `sshpass -p`, in the public-text screen.

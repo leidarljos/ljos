@@ -37,6 +37,8 @@ pub mod extract;
 pub mod gates;
 pub mod git_hooks;
 pub mod graphify;
+pub mod handbook;
+mod handbook_ids;
 mod handover_scope;
 pub mod hookd;
 pub mod hud;
@@ -66,6 +68,7 @@ pub mod plan;
 pub mod plugin;
 pub mod policy_label;
 pub mod proc_tree;
+pub mod public_text;
 pub mod quiet_claims;
 pub mod quoted_yes;
 pub mod readability;
@@ -22586,6 +22589,12 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
             add_entities(&mut atom, [format!("project:{project}")]);
         }
     }
+    if kind == "lesson" && lesson_is_public() {
+        add_entities(&mut atom, [PUBLIC_ENTITY.to_string()]);
+    }
+    if kind == "preference" || kind == "rule" {
+        add_entities(&mut atom, active_policy_entities());
+    }
     atom
 }
 
@@ -22670,8 +22679,38 @@ fn url_at_start(text: &str) -> bool {
 pub const VALID_FROM: &str = "valid_from:";
 pub const VALID_TO: &str = "valid_to:";
 
+/// The entity that marks a lesson, a preference or a rule as one the person
+/// chose to publish. `ljos handbook` exports only rows that carry it.
+pub const PUBLIC_ENTITY: &str = "visibility:public";
+
 thread_local! {
     static REMEMBER_PROJECT: std::cell::Cell<Option<String>> = const { std::cell::Cell::new(None) };
+    static REMEMBER_PUBLIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks lessons written while this guard is alive as public. Dropping it
+/// restores the previous setting.
+#[must_use = "lessons are marked public until this guard drops"]
+pub struct RememberPublic {
+    prev: bool,
+}
+
+impl RememberPublic {
+    /// Mark each lesson written before this guard drops when `public` is set.
+    pub fn set(public: bool) -> Self {
+        let prev = REMEMBER_PUBLIC.with(|cell| cell.replace(public));
+        Self { prev }
+    }
+}
+
+impl Drop for RememberPublic {
+    fn drop(&mut self) {
+        REMEMBER_PUBLIC.with(|cell| cell.set(self.prev));
+    }
+}
+
+fn lesson_is_public() -> bool {
+    REMEMBER_PUBLIC.with(std::cell::Cell::get)
 }
 
 /// The project `ljos remember -p` records on lessons written while this
@@ -22703,6 +22742,125 @@ fn lesson_project_entity() -> Option<String> {
         cell.set(current);
         out
     })
+}
+
+thread_local! {
+    static POLICY_SCOPE: std::cell::RefCell<Option<PolicyScope>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[derive(Clone, Debug, Default)]
+struct PolicyScope {
+    project: Option<String>,
+    tags: Vec<String>,
+    public: bool,
+}
+
+/// Restores the previous project and tag scope when dropped.
+pub struct PolicyScopeGuard {
+    previous: Option<PolicyScope>,
+}
+
+impl Drop for PolicyScopeGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        POLICY_SCOPE.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// The project and tags recorded on preferences and rules written while
+/// this value is alive.
+pub struct PolicyHold {
+    _guard: PolicyScopeGuard,
+}
+
+/// The refusal every `--public` path gives a runner: marking an item public
+/// is the person's to give.
+///
+/// # Errors
+///
+/// `public` is set and a runner is the caller.
+pub fn refuse_public_under_a_runner(command: &str, public: bool) -> Result<()> {
+    if public && under_a_runner() {
+        bail!(
+            "{command}: --public is the person's to give, so run it from a terminal with no runner"
+        );
+    }
+    Ok(())
+}
+
+/// Record `project` and `tags` on preferences and rules written before the
+/// returned value drops, and mark them public when `public` is set. An
+/// explicit project must be one the tracker knows. An empty tag is refused.
+/// A tag or the public mark given with no project records the checkout's
+/// project when one resolves. With none of the three, nothing is recorded,
+/// so a preference or rule written without these flags is unchanged.
+///
+/// # Errors
+///
+/// A tag is empty, an explicit project is not on the tracker, or `public` is
+/// set and no project resolves.
+pub fn policy_hold(
+    command: &str,
+    project: Option<String>,
+    tags: Vec<String>,
+    public: bool,
+) -> Result<PolicyHold> {
+    refuse_public_under_a_runner(command, public)?;
+    if tags.iter().any(|tag| tag.trim().is_empty()) {
+        bail!("{command}: --tag needs a name");
+    }
+    let scope = if project.is_none() && tags.is_empty() && !public {
+        None
+    } else {
+        let project = match project {
+            Some(name) => Some(require_known_project(&name)?),
+            None => seat_tracker_project(),
+        };
+        if public && project.is_none() {
+            bail!("{command}: --public needs a project, so pass -p");
+        }
+        Some(PolicyScope {
+            project,
+            tags,
+            public,
+        })
+    };
+    let previous = POLICY_SCOPE.with(|slot| slot.replace(scope));
+    Ok(PolicyHold {
+        _guard: PolicyScopeGuard { previous },
+    })
+}
+
+pub(crate) fn active_policy_entities() -> Vec<String> {
+    POLICY_SCOPE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|scope| {
+                let mut list = policy_entity_list(scope.project.as_deref(), &scope.tags);
+                if scope.public {
+                    list.push(PUBLIC_ENTITY.to_string());
+                }
+                list
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// `project:` and `tag:` entities for a preference or a rule.
+#[must_use]
+pub fn policy_entity_list(project: Option<&str>, tags: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(project) = project.map(str::trim).filter(|name| !name.is_empty()) {
+        out.push(format!("project:{project}"));
+    }
+    for tag in tags {
+        let tag = tag.trim();
+        if !tag.is_empty() {
+            out.push(format!("tag:{tag}"));
+        }
+    }
+    out
 }
 
 static VALIDITY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
@@ -24466,6 +24624,11 @@ pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) 
             Err(err) if is_reported_busy(&err) => Err(anyhow::Error::msg(REMEMBER_NOT_STORED_LINE)),
             Err(err) if is_memory_starting(&err) => Err(err),
             Err(err) if pack_turned_off(&err) => Err(err),
+            Err(err) if lesson_is_public() && remember_should_queue(&err) => {
+                Err(anyhow::Error::msg(
+                    "remember: the pack did not take it, and a public lesson is not queued. Run `ljos remember --public` again.",
+                ))
+            }
             Err(err) if remember_should_queue(&err) => {
                 // A sandbox home does not queue a lesson nobody will send.
                 // The line says why memory is off and which HOME to use.
@@ -28332,7 +28495,11 @@ fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
     // under. While the pack still shows that stamp nothing in it has
     // moved, so the kept rules and preferences are what a listing would
     // say: one status read stands in for two listings.
-    let stamp = with_pack_timeout(HOOK_PACK_MS, || pack_stamp(&client));
+    let Ok(stamp) = with_pack_timeout(HOOK_PACK_MS, || pack_stamp(&client)) else {
+        let _ = std::fs::create_dir_all(runtime_dir());
+        let _ = std::fs::write(pack_slow_mark(), b"");
+        return kept_only(kept);
+    };
     if let (Some(path), Some(stamp)) = (&kept, stamp.as_deref()) {
         if gate_kept_under(path, stamp) {
             let _ = std::fs::write(gate_sibling(path, "fresh-"), stamp);
@@ -28376,16 +28543,19 @@ fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
 /// seat's client drops the mark at once ([`forget_gate_fresh`]).
 const GATE_FRESH: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// The pack's last-write stamp, from one status read; None when the
-/// pack does not answer or has no stamp yet.
-fn pack_stamp(client: &PacksetClient) -> Option<String> {
-    client
-        .status(None)
-        .ok()?
-        .get("last_write_ts")?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+/// The pack's last-write stamp, from one status read. `Ok(None)` when the
+/// pack answers with no stamp yet or with an error that is not a timeout.
+/// `Err` when the read ran out of time, so the caller can stop asking.
+fn pack_stamp(client: &PacksetClient) -> Result<Option<String>, ()> {
+    match client.status(None) {
+        Ok(status) => Ok(status
+            .get("last_write_ts")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)),
+        Err(err) if pack_link::error_is_timeout(&err) => Err(()),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Whether the kept rules and preferences were read under `stamp`: the

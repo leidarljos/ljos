@@ -74,6 +74,9 @@ pub struct Memory {
     /// Ticket the memory was filed on, from an `issue:ID` entity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+    /// The atom's entities. Not part of the JSON listing.
+    #[serde(skip)]
+    pub entities: Vec<String>,
 }
 
 fn s(v: &Value) -> String {
@@ -134,6 +137,13 @@ impl Memory {
             earlier: 0,
             verdict: None,
             aliases: aliases_of(atom).map(str::to_string).collect(),
+            entities: atom["entities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
             ticket: atom["entities"].as_array().and_then(|entities| {
                 entities.iter().find_map(|item| {
                     item.as_str()
@@ -440,34 +450,15 @@ pub fn drop_memory(id: &str, all: &[Memory]) -> Result<String> {
 /// A missing basis is left missing: origin `user-declared` is not a
 /// person basis, and this does not stamp one. Under a runner the new text
 /// is the agent's, so it is written as `agent-derived`.
-fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
+fn replace(olds: &[&Memory], text: &str, verdict: &str, carry: &[String]) -> Result<String> {
     let text = text.trim();
     if text.is_empty() {
         bail!("memories: {verdict} needs a text");
     }
     let first = olds.first().context("memories: nothing to replace")?;
     let client = crate::pack()?;
-    let ws = client.workspace();
-    let mut atom = crate::atom_body(&first.kind, text, &ws);
-    atom["source"]["seat"] = Value::String(first.seat.clone());
-    atom["source"]["harness"] = Value::String(first.harness.clone());
-    atom["source"]["session"] = Value::String(first.session.clone());
-    atom["source"]["reviewed_by"] = Value::String(crate::seat_name());
-    atom["source"]["replaces"] =
-        Value::Array(olds.iter().map(|m| Value::String(m.id.clone())).collect());
-    if let Some(reason) = &first.reason {
-        atom["source"]["reason"] = Value::String(reason.clone());
-    }
-    crate::add_entities(&mut atom, ["horizon:standing".to_string()]);
-    let posted = if first.is_agents() || crate::under_a_runner() {
-        crate::admit::write_agent(&client, atom)?
-    } else {
-        atom["origin"] = Value::String(first.origin.clone());
-        if !first.basis.is_empty() {
-            atom["source"]["basis"] = Value::String(first.basis.clone());
-        }
-        crate::admit::post_kept(&client, &atom)?
-    };
+    let atom = replacement(&client, olds, text, carry);
+    let posted = post_replacement(&client, first, atom)?;
     let new_id = s(&posted["id"]);
     for m in olds {
         // Record the verdict before retiring the old claim, so a pack that
@@ -491,6 +482,47 @@ fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
     ))
 }
 
+/// The atom that stands in for `olds`, with the first one's provenance and
+/// the entities in `carry`.
+fn replacement(
+    client: &crate::PacksetClient,
+    olds: &[&Memory],
+    text: &str,
+    carry: &[String],
+) -> Value {
+    let first = olds[0];
+    let ws = client.workspace();
+    let mut atom = crate::atom_body(&first.kind, text, &ws);
+    atom["source"]["seat"] = Value::String(first.seat.clone());
+    atom["source"]["harness"] = Value::String(first.harness.clone());
+    atom["source"]["session"] = Value::String(first.session.clone());
+    atom["source"]["reviewed_by"] = Value::String(crate::seat_name());
+    atom["source"]["replaces"] =
+        Value::Array(olds.iter().map(|m| Value::String(m.id.clone())).collect());
+    if let Some(reason) = &first.reason {
+        atom["source"]["reason"] = Value::String(reason.clone());
+    }
+    crate::add_entities(&mut atom, ["horizon:standing".to_string()]);
+    crate::add_entities(&mut atom, carry.iter().cloned());
+    atom
+}
+
+fn post_replacement(
+    client: &crate::PacksetClient,
+    first: &Memory,
+    mut atom: Value,
+) -> Result<Value> {
+    if first.is_agents() || crate::under_a_runner() {
+        crate::admit::write_agent(client, atom)
+    } else {
+        atom["origin"] = Value::String(first.origin.clone());
+        if !first.basis.is_empty() {
+            atom["source"]["basis"] = Value::String(first.basis.clone());
+        }
+        crate::admit::post_kept(client, &atom)
+    }
+}
+
 /// Rewrite one memory's text. The replacement keeps the basis the memory
 /// already had, or is the agent's under a runner.
 ///
@@ -499,7 +531,67 @@ fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
 /// An id that names no memory, an empty text, or the pack refusing.
 pub fn edit(id: &str, text: &str, all: &[Memory]) -> Result<String> {
     let m = find(id, all)?;
-    replace(&[m], text, "edited")
+    replace(&[m], text, "edited", &[])
+}
+
+/// Mark a lesson or a preference public: write the same text again
+/// with the public entity and the project, tag and ticket entities it had,
+/// and retire the old claim. `ljos handbook` exports only a marked row. A
+/// later edit or merge writes a row with no mark, because the person
+/// approved the words they read.
+///
+/// # Errors
+///
+/// An id that names no memory, a kind that is not a lesson or a preference, a runner
+/// caller, or the pack refusing.
+pub fn mark_public(id: &str, all: &[Memory]) -> Result<String> {
+    crate::refuse_public_under_a_runner("memories", true)?;
+    let m = find(id, all)?;
+    if !matches!(m.kind.as_str(), "lesson" | "preference") {
+        bail!("memories: only a lesson or a preference can be marked here. Write a rule with `ljos rule --public`");
+    }
+    if m.entities
+        .iter()
+        .any(|entity| entity == crate::PUBLIC_ENTITY)
+    {
+        return Ok(format!("{} is already public\n", m.short_id()));
+    }
+    let mut carry: Vec<String> = m
+        .entities
+        .iter()
+        .filter(|entity| {
+            ["project:", "tag:", "issue:"]
+                .iter()
+                .any(|prefix| entity.starts_with(prefix))
+        })
+        .cloned()
+        .collect();
+    let client = crate::pack()?;
+    let plain = replacement(&client, &[m], m.text.trim(), &carry);
+    carry.push(crate::PUBLIC_ENTITY.to_string());
+    let marked = replacement(&client, &[m], m.text.trim(), &carry);
+    // The pack keeps one live row for a text, so the unmarked row is retired
+    // first and the marked one written after it. A write that fails puts the
+    // unmarked row back, so the memory is not lost.
+    record(&m.id, "marked", None)?;
+    crate::packset_forget(&m.id, None)?;
+    let posted = match post_replacement(&client, m, marked) {
+        Ok(posted) => posted,
+        Err(err) => {
+            let _ = post_replacement(&client, m, plain);
+            return Err(err.context("memories: the pack did not take the marked row, and the unmarked one was written back"));
+        }
+    };
+    let new_id = s(&posted["id"]);
+    record(&m.id, "marked", Some(&new_id))?;
+    if !new_id.is_empty() {
+        record(&new_id, "keep", None)?;
+    }
+    let short_new = new_id.get(..8).unwrap_or(&new_id);
+    Ok(format!(
+        "marked {} public as {short_new}\n`ljos handbook` can export {short_new}. `ljos forget {short_new}` retires it.\n",
+        m.short_id()
+    ))
 }
 
 /// Merge memories into one. Without `text` the merged text is theirs,
@@ -525,7 +617,7 @@ pub fn merge(ids: &[String], text: Option<&str>, all: &[Memory]) -> Result<Strin
             .join(" ");
         &joined
     };
-    replace(&olds, text, "merged")
+    replace(&olds, text, "merged", &[])
 }
 
 /// The memories as a person reads them: a count, newest first, each claim
