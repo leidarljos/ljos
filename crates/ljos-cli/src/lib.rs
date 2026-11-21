@@ -47104,17 +47104,15 @@ fn reclaim_expired(lease: u64) -> String {
     out
 }
 
-/// Close a sitting: remember the lesson when there is one, fire the island
-/// the issue's title activates, complete the session node, and learn from
-/// the outcome when one is named. A finish that does not complete says
-/// nothing about a lesson. One that completes, and whose ticket has no
-/// lesson, says once that none was given.
-///
-/// # Errors
-///
-/// Any habitat refusing; the pack refuses a lesson longer than two
-/// sentences, the claim graph a status that is not terminal.
-/// Finish a session node only if `gen` is still the live lease.
+/// Complete the session node `node` under `assignee`, with `status` when
+/// one is given, only if `gen` is still the live lease. The claim graph
+/// frees the node, and the tracker drops `assignee`'s claim and keeps the
+/// issue's state, so the ticket stays open. A node a gone conversation of
+/// this seat holds is completed under that conversation's name. It stores
+/// no lesson, fires no island and learns nothing. `ljos finish` runs this
+/// completion only with `--close` and a status of `done` or `cancelled`,
+/// and then closes the ticket itself. A finish that ends a sitting any
+/// other way calls [`release`].
 ///
 /// # Errors
 ///
