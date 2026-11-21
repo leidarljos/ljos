@@ -3,10 +3,17 @@
 //! name this one. `ljos` does not.
 //!
 //! [`Packsetd`] starts the pack writer for a test and stops it again.
+//!
+//! [`git`] and [`fresh_dir`] are the git and the scratch directories a
+//! test uses.
 
 mod packsetd;
+mod scratch;
 
 pub use packsetd::{reap_listener, Builder, Packsetd};
+pub use scratch::{
+    checkout, checkout_seats, fresh_dir, git, git_at, git_ceiling, home_seats, GIT_CEILING,
+};
 
 use std::ffi::c_char;
 

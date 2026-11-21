@@ -213,7 +213,7 @@ fn kind_and_issue_kind_together_are_refused_on_ljos_file() {
 }
 
 fn git(root: &Path, config: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(root)
         .args(args)

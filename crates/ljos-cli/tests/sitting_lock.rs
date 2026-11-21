@@ -57,7 +57,7 @@ impl Board {
         std::fs::create_dir_all(layout.projects_dir()).unwrap();
         vissue_core::ops::create(&layout, "probe", "wait for the writer", Default::default())
             .unwrap();
-        let initialized = Command::new("git")
+        let initialized = ljos_test_boot::git()
             .arg("-C")
             .arg(&root)
             .args(["init", "-q", "-b", "main"])

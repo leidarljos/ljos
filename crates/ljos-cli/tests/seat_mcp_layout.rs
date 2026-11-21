@@ -27,15 +27,7 @@ impl Drop for Hab {
 }
 
 fn hab(name: &str) -> Hab {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let root = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp).join(format!(
-        "m3-{name}-{}-{}",
-        std::process::id(),
-        nanos % 1_000_000_000
-    ));
+    let root = seat_root::seat_dir(ljos_cli::bookkeep::path_is_temp, &format!("m3-{name}"));
     let hab = Hab {
         home: root.join("home"),
         run: root.join("run"),
@@ -47,7 +39,7 @@ fn hab(name: &str) -> Hab {
     }
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&hab.run, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let git = Command::new("git")
+    let git = ljos_test_boot::git()
         .args(["init", "-q", "-b", "main"])
         .current_dir(&hab.repo)
         .status()

@@ -19,7 +19,7 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(root: &Path, config: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(root)
         .args(args)
@@ -80,7 +80,7 @@ fn two_seats_keep_their_notes_and_a_seatless_write_is_refused() {
         &["config", "core.hooksPath", "/dev/null"],
     );
     git(&tracker, &gitconfig, &["add", "."]);
-    let seeded = Command::new("git")
+    let seeded = ljos_test_boot::git()
         .arg("-C")
         .arg(&tracker)
         .args(["commit", "-q", "-m", "seed"])

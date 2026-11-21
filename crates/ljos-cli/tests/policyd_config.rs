@@ -58,7 +58,7 @@ impl Seat {
         for dir in ["bin", "guard", "work"] {
             std::fs::create_dir_all(home.path().join(dir)).unwrap();
         }
-        let init = Command::new("git")
+        let init = ljos_test_boot::git()
             .args(["init", "-q"])
             .current_dir(home.path().join("work"))
             .output()
@@ -207,7 +207,7 @@ impl Seat {
         let work = self.path("work");
         let victim = fresh("victim");
         let repo = fresh("repo");
-        let init = Command::new("git")
+        let init = ljos_test_boot::git()
             .args(["init", "-q"])
             .current_dir(&repo)
             .output()

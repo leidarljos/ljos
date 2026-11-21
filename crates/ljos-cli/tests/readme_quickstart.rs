@@ -477,9 +477,10 @@ fn expect_output(cmd: &str, output: &str) {
 }
 
 fn git_value(seat: &Seat, key: &str) -> String {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .args(["config", "--global", "--get", key])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .envs(&seat.env)
         .stdin(Stdio::null())
         .output()

@@ -74,7 +74,7 @@ impl Box_ {
                 c = card.display(),
             ),
         );
-        let init = Command::new("git")
+        let init = ljos_test_boot::git()
             .args(["init", "-q"])
             .current_dir(&repo)
             .output()

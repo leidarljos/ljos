@@ -64,7 +64,7 @@ impl Board {
     }
 
     fn git_cmd(&self, args: &[&str], author: bool) {
-        let mut cmd = Command::new("git");
+        let mut cmd = ljos_test_boot::git();
         cmd.arg("-C").arg(&self.root).args(args);
         cmd.env("GIT_CONFIG_GLOBAL", &self.gitconfig);
         cmd.env("GIT_CONFIG_NOSYSTEM", "1");
@@ -150,7 +150,7 @@ fn a_commit_mode_note_prints_no_tracker_or_sync_line() {
     board.dirty();
     let out = board.ljos(&["note", "probe-a1b2", "the parser kept the hyphen"]);
     assert_quiet(&out);
-    let log = Command::new("git")
+    let log = ljos_test_boot::git()
         .arg("-C")
         .arg(&board.root)
         .args(["log", "-1", "--format=%s"])

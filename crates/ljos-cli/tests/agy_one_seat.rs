@@ -6,7 +6,7 @@ fn tracker(seats: &str) -> tempfile::TempDir {
     // The person's global config may carry commit hooks; the fixture's
     // repository reads none of it.
     let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = ljos_test_boot::git()
             .arg("-C")
             .arg(dir.path())
             .args(args)

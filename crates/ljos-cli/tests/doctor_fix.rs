@@ -49,9 +49,10 @@ impl Seat {
     /// there. A home under /tmp is a sandbox and must not.
     fn outside(name: &str) -> Self {
         scrub();
-        let home = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp)
-            .join(format!("ljos-doctor-fix-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
+        let home = seat_root::seat_dir(
+            ljos_cli::bookkeep::path_is_temp,
+            &format!("ljos-doctor-fix-{name}"),
+        );
         Self::at(home)
     }
 

@@ -740,7 +740,7 @@ fn a_vissue_file_that_links_to_nothing_refuses_every_write() {
 
 fn git_tracker(b: &Bench) {
     let git = |args: &[&str]| {
-        let out = Command::new("git")
+        let out = ljos_test_boot::git()
             .arg("-C")
             .arg(&b.tracker)
             .args(args)

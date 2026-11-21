@@ -4,7 +4,6 @@
 
 ljos_test_boot::harness!();
 use std::path::Path;
-use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 
 static ENV: Mutex<()> = Mutex::new(());
@@ -37,7 +36,7 @@ impl Drop for OwnRuntime {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(dir)
         .args(args)

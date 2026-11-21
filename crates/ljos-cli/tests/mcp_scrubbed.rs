@@ -53,10 +53,11 @@ fn session(program: &str, args: &[&str]) -> (String, String, Duration) {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(work.join("Software")).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
-    let git = Command::new("git")
+    let git = ljos_test_boot::git()
         .args(["init", "-q"])
         .current_dir(&work)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &home)
         .env("GIT_CONFIG_NOSYSTEM", "1")

@@ -94,7 +94,7 @@ fn file_without_a_tracker_names_onboard() {
     let product = dir.path().join("greet");
     std::fs::create_dir_all(&product).unwrap();
     let git = |args: &[&str]| {
-        let out = Command::new("git")
+        let out = ljos_test_boot::git()
             .args(args)
             .current_dir(&product)
             .env("GIT_CONFIG_GLOBAL", dir.path().join("gitconfig"))

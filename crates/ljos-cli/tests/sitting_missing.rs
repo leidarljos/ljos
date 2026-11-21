@@ -49,7 +49,7 @@ fn a_sitting_on_a_missing_issue_names_it_and_writes_nothing() {
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(root.path().join("run")).unwrap();
     let git = |args: &[&str]| {
-        let out = Command::new("git")
+        let out = ljos_test_boot::git()
             .arg("-C")
             .arg(&product)
             .args(args)
@@ -190,7 +190,7 @@ impl Probe {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&run).unwrap();
         let git = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = ljos_test_boot::git()
                 .arg("-C")
                 .arg(&product)
                 .args(args)

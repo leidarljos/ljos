@@ -163,7 +163,7 @@ fn a_scratch_checkout_without_a_project_names_p() {
     let seat = Seat::new("'vissue test'");
     let checkout = seat.dir.path().join("obchk");
     std::fs::create_dir_all(&checkout).unwrap();
-    let init = Command::new("git")
+    let init = ljos_test_boot::git()
         .arg("init")
         .arg("-q")
         .current_dir(&checkout)
@@ -182,7 +182,7 @@ fn a_scratch_checkout_uses_ljos_project_when_set() {
     let seat = Seat::new("'vissue test'");
     let checkout = seat.dir.path().join("obchk");
     std::fs::create_dir_all(&checkout).unwrap();
-    let init = Command::new("git")
+    let init = ljos_test_boot::git()
         .arg("init")
         .arg("-q")
         .current_dir(&checkout)

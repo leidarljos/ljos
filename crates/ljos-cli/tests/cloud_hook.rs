@@ -75,7 +75,7 @@ fn sh_ok(dir: &Path, script: &str) -> String {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -230,7 +230,7 @@ fn bare_repo(root: &Path, name: &str) -> (PathBuf, PathBuf) {
 }
 
 fn has_ref(origin: &Path, name: &str) -> bool {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(origin)
         .args(["show-ref"])
@@ -244,7 +244,7 @@ fn has_ref(origin: &Path, name: &str) -> bool {
 /// Every `core.hooksPath` git reads in `dir`, one `origin<TAB>value` line
 /// each. `scope` is `--system`, `--global` or `--local`, or `None` for all.
 fn hooks_paths(dir: &Path, scope: Option<&str>) -> String {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(dir)
         .arg("config")

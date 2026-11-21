@@ -103,7 +103,7 @@ fn keygen(path: &Path) -> String {
 }
 
 fn git(cwd: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(cwd)
         .args(args)

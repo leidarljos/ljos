@@ -131,7 +131,7 @@ impl Board {
     }
 
     fn git(&self, dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = ljos_test_boot::git()
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -344,7 +344,7 @@ fn saves_and_later_syncs(board: &Board, unreachable: &str) {
     let said = text(&out);
     assert!(out.status.success(), "{said}");
     assert!(said.contains("sync: pushed pending commits"), "{said}");
-    let remote = Command::new("git")
+    let remote = ljos_test_boot::git()
         .arg("--git-dir")
         .arg(&board.reachable)
         .args(["show", "main:Software/probe/issues.org"])

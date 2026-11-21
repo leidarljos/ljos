@@ -45,13 +45,14 @@ impl Scratch {
     /// git for the test's own setup and reads. No hook runs, whatever the
     /// global file names.
     fn git(&self, cwd: &Path, args: &[&str]) -> Output {
-        Command::new("git")
+        ljos_test_boot::git()
             .arg("-c")
             .arg("core.hooksPath=/dev/null")
             .arg("-C")
             .arg(cwd)
             .args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", path_var())
             .env("HOME", self.path("home"))
             .env("GIT_CONFIG_GLOBAL", &self.gitconfig)

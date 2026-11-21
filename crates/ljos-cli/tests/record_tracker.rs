@@ -17,7 +17,7 @@ fn key(seed: u8) -> SigningKey {
 }
 
 fn git(dir: &Path, args: &[&str], date: Option<&str>) -> String {
-    let mut cmd = Command::new("git");
+    let mut cmd = ljos_test_boot::git();
     cmd.arg("-C")
         .arg(dir)
         .args(["-c", "commit.gpgsign=false"])

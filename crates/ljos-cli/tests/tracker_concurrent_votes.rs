@@ -73,7 +73,7 @@ fn vissue_shim() {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(dir)
         .args(args)
