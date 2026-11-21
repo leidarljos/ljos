@@ -44285,9 +44285,11 @@ node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the
 `vissue claims` answers who has it; a tracker that refuses the name\n   \
 refuses the sitting, and `ljos release` frees the claim graph.\n   \
 A background worker you start sits under its own conversation's\n   \
-name and the same seat. The conversation that started it can\n   \
-complete, finish or release the worker's claim, and the worker can\n   \
-finish a claim its parent took.\n   \
+name and the same seat. Once the worker's conversation has exited,\n   \
+the conversation that started it can complete, finish or release\n   \
+the worker's claim. Once the parent's conversation has exited, the\n   \
+worker can finish a claim its parent took. A conversation that is\n   \
+still running keeps its claim.\n   \
 Another seat's claim is still refused, and the refusal names who\n   \
 has it. The claim is taken and this section is printed before the\n   \
 pack or recall is asked. Claims this seat already has in this\n   \

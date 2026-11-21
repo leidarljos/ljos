@@ -110,9 +110,11 @@ sitting that gets that far.
    `vissue claims` answers who has it; a tracker that refuses the name
    refuses the sitting, and `ljos release` frees the claim graph.
    A background worker you start sits under its own conversation's
-   name and the same seat. The conversation that started it can
-   complete, finish or release the worker's claim, and the worker can
-   finish a claim its parent took.
+   name and the same seat. Once the worker's conversation has exited,
+   the conversation that started it can complete, finish or release
+   the worker's claim. Once the parent's conversation has exited, the
+   worker can finish a claim its parent took. A conversation that is
+   still running keeps its claim.
    Another seat's claim is still refused, and the refusal names who
    has it. The claim is taken and this section is printed before the
    pack or recall is asked. Claims this seat already has in this
