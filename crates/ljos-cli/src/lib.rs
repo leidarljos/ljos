@@ -45386,9 +45386,10 @@ fn sitting_wide(word: &str) -> bool {
 }
 
 /// A ticket id in `text` that is not `issue`, when `issue` itself is not
-/// named. The note is about that other ticket.
+/// named. The note is about that other ticket. The ids are the
+/// [`name_tokens`] of `text`, compared in Unicode lowercase.
 fn names_another_ticket(issue: &str, text: &str) -> bool {
-    let issue = issue.trim().to_ascii_lowercase();
+    let issue = issue.trim().to_lowercase();
     let Some((prefix, _)) = issue.rsplit_once('-') else {
         return false;
     };
@@ -45398,10 +45399,8 @@ fn names_another_ticket(issue: &str, text: &str) -> bool {
     let prefix = format!("{prefix}-");
     let mut other = false;
     let mut here = false;
-    for token in text
-        .to_ascii_lowercase()
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
-    {
+    for token in name_tokens(text) {
+        let token = text[token].to_lowercase();
         if token == issue {
             here = true;
         } else if token.starts_with(&prefix) && token.len() > prefix.len() {
@@ -45486,8 +45485,10 @@ fn sitting_memory_weight(issue: &str, atom: &Value, now: &str, seat: &str) -> Op
 /// Subject words for one sitting, built once and shared by every atom.
 struct SittingSubject {
     terms: Vec<String>,
-    /// Multi-part names from the title, such as `review_order`. A lesson
-    /// that contains one of these clears the rule.
+    /// Multi-part names from the title, such as `review_order`, and from
+    /// the body when one shares a piece with the project name, such as
+    /// `sha-2` on `sha-1`. A lesson that contains one of these clears the
+    /// rule.
     identifiers: Vec<String>,
 }
 
@@ -45655,11 +45656,81 @@ fn sitting_subject(issue: &str, ticket: &str) -> SittingSubject {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let title = ticket.lines().next().unwrap_or("");
-    SittingSubject {
-        terms: drop_project_terms(sitting_subject_terms(&body), project),
-        identifiers: title_identifiers(title),
+    let body = strip_project_tokens(&body, project);
+    let title = strip_project_tokens(ticket.lines().next().unwrap_or(""), project);
+    let mut identifiers = title_identifiers(&title);
+    let want = name_pieces(project);
+    for ident in title_identifiers(&body) {
+        if name_pieces(&ident).iter().any(|piece| want.contains(piece))
+            && !identifiers.contains(&ident)
+        {
+            identifiers.push(ident);
+        }
     }
+    SittingSubject {
+        terms: sitting_subject_terms(&body, project),
+        identifiers,
+    }
+}
+
+fn name_joiner(c: char) -> bool {
+    c == '-' || c == '_'
+}
+
+/// The byte ranges of the name tokens in `text`. A token is a run of
+/// Unicode alphanumeric characters, or several such runs joined by `-`
+/// or `_`. Every other character is a boundary, and so is a joiner at
+/// either end, so `sha-2.txt` is `sha-2` and `txt`, and `-oak-` is `oak`.
+/// The project strip, the identifiers and the lesson match all read
+/// tokens from here.
+fn name_tokens(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut start = None;
+    let mut end = 0;
+    for (at, c) in text.char_indices() {
+        if c.is_alphanumeric() {
+            start.get_or_insert(at);
+            end = at + c.len_utf8();
+        } else if !(name_joiner(c) && start.is_some()) {
+            if let Some(start) = start.take() {
+                out.push(start..end);
+            }
+        }
+    }
+    if let Some(start) = start {
+        out.push(start..end);
+    }
+    out
+}
+
+/// The lowercase pieces of a name, split at `-`, `_` and a change of
+/// case. `oak-tree`, `OAK_TREE` and `OakTree` are all `oak`, `tree`.
+/// Short pieces and stop words stay, so `a-b` is `a`, `b`.
+fn name_pieces(name: &str) -> Vec<String> {
+    name.split(name_joiner)
+        .filter(|piece| !piece.is_empty())
+        .flat_map(identifier_run_parts)
+        .collect()
+}
+
+/// `text` without the [`name_tokens`] whose [`name_pieces`] equal the
+/// project's. `sha-2` on project `sha-1` and `oak_2` on project `oak`
+/// stay, and every other byte is kept as written.
+fn strip_project_tokens(text: &str, project: &str) -> String {
+    let want = name_pieces(project);
+    if want.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut kept = 0;
+    for token in name_tokens(text) {
+        if name_pieces(&text[token.clone()]) == want {
+            out.push_str(&text[kept..token.start]);
+            kept = token.end;
+        }
+    }
+    out.push_str(&text[kept..]);
+    out
 }
 
 /// `terms` without the project name. A title such as `Fix the kiln draft`
@@ -45678,37 +45749,27 @@ fn drop_project_terms(terms: Vec<String>, project: &str) -> Vec<String> {
         .collect()
 }
 
-/// `review_order` and `review-order` from a title. The parts are weak
-/// words, and the joined name is the term a lesson has to contain.
+/// `review_order` and `review-order` from a title: the [`name_tokens`]
+/// that have a joiner. The parts are weak words, and the joined name is
+/// the term a lesson has to contain. Each is kept as written, so
+/// `sha-2.txt` gives `sha-2` and `école-2` stays `école-2`.
 fn title_identifiers(title: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for raw in title.split_whitespace() {
-        let token = raw.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-');
-        if !multipart_name(token) {
-            continue;
-        }
-        let lower = token.to_ascii_lowercase();
-        if !out.contains(&lower) {
-            out.push(lower);
+    let mut out: Vec<String> = Vec::new();
+    for token in name_tokens(title) {
+        let token = &title[token];
+        if token.contains(name_joiner) && !out.iter().any(|seen| seen == token) {
+            out.push(token.to_string());
         }
     }
     out
 }
 
-fn multipart_name(token: &str) -> bool {
-    let parts: Vec<&str> = token
-        .split(['_', '-'])
-        .filter(|part| !part.is_empty())
-        .collect();
-    parts.len() > 1
-        && parts
-            .iter()
-            .all(|part| part.chars().all(|c| c.is_ascii_alphanumeric()))
-}
-
+/// Whether one of the [`name_tokens`] of `text` is `ident`, in any case.
 fn text_has_identifier(text: &str, ident: &str) -> bool {
-    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
-        .any(|token| !token.is_empty() && token.eq_ignore_ascii_case(ident))
+    let want = ident.to_lowercase();
+    name_tokens(text)
+        .into_iter()
+        .any(|token| text[token].to_lowercase() == want)
 }
 
 fn sitting_project_name(issue: &str) -> String {
@@ -45722,8 +45783,10 @@ fn sitting_project_name(issue: &str) -> String {
 /// no kiln. `release`, `docs` and `record` stay, the same words lesson
 /// search keeps. When the issue's text and history have no strong word,
 /// the older list is the subject, so a lesson that repeats that text stays.
-fn sitting_subject_terms(ticket: &str) -> Vec<String> {
-    let terms = sitting_terms(ticket);
+/// The project name is taken out first: `Review the kiln` on `kiln` has
+/// no strong word, so `review` is its subject.
+fn sitting_subject_terms(ticket: &str, project: &str) -> Vec<String> {
+    let terms = drop_project_terms(sitting_terms(ticket), project);
     let kept: Vec<String> = terms
         .iter()
         .filter(|term| !word_rank::term_is_weak(term))
@@ -72169,7 +72232,7 @@ playbook: sit
     #[test]
     fn a_sitting_keeps_a_short_title_and_drops_a_faded_note() {
         let now = "2026-11-20T12:00:00Z";
-        let terms = super::sitting_subject_terms("Kiln damper\nljos");
+        let terms = super::sitting_subject_terms("Kiln damper\nljos", "");
         assert!(
             !terms.iter().any(|word| word == "ljo" || word == "ljos"),
             "the project name stayed in the subject words: {terms:?}"
@@ -72610,8 +72673,9 @@ lesson, due yesterday, seat ada
         );
     }
 
-    /// The project name still counts when the title itself says it.
-    /// `Fix the kiln draft` and `The kiln damper needs oil.` share `kiln`.
+    /// The project name does not count even when the title says it.
+    /// `Fix the kiln draft` and `The kiln damper needs oil.` share only
+    /// `kiln`, so the oil lesson stays out and a draft lesson stays in.
     #[test]
     fn a_project_name_in_the_title_is_not_a_subject_word() {
         let now = "2026-11-20T12:00:00Z";
@@ -72651,6 +72715,924 @@ lesson, due yesterday, seat ada
             kept.contains(draft),
             "due dropped a lesson that shares the title's other word:\n{kept}"
         );
+    }
+
+    fn subject_lesson(id: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "kind": "lesson",
+            "text": text,
+            "ts": "2026-11-18T12:00:00Z",
+            "due_at": "2026-11-19T12:00:00Z",
+            "origin": "user-declared",
+            "source": {"seat": "ada", "basis": "person"},
+            "entities": ["seat:ada"],
+        })
+    }
+
+    /// Whether the due list and the timeline for `title` on `issue` each
+    /// show `text`.
+    fn subject_shows(issue: &str, title: &str, text: &str) -> (bool, bool) {
+        let now = "2026-11-20T12:00:00Z";
+        let atom = subject_lesson("row", text);
+        let ticket = super::sitting_ticket_text(issue, title);
+        let (due, _) =
+            super::sitting_due_text(issue, &ticket, std::slice::from_ref(&atom), now, "ada");
+        let timeline = super::related_memory_events(issue, title, std::slice::from_ref(&atom))
+            .into_iter()
+            .any(|event| event.text.contains(text));
+        (due.contains(text), timeline)
+    }
+
+    /// The project name comes out before weak words are judged.
+    /// `Review the kiln` on `kiln` keeps `review` as its subject, the same
+    /// as `Review` on `demo`.
+    #[test]
+    fn a_weak_title_beside_the_project_name_keeps_its_weak_words() {
+        let weekly = "Review lessons weekly.";
+        let oil = "The kiln damper needs oil.";
+        for (issue, title) in [("kiln-lk1e", "Review the kiln"), ("demo-lk1e", "Review")] {
+            assert_eq!(
+                subject_shows(issue, title, weekly),
+                (true, true),
+                "{issue} {title:?} dropped {weekly:?}"
+            );
+        }
+        assert_eq!(
+            subject_shows("kiln-lk1e", "Review the kiln", oil),
+            (false, false),
+            "Review the kiln kept {oil:?}"
+        );
+        for title in ["kiln", "Kiln", "Fix the kilns"] {
+            assert_eq!(
+                subject_shows("kiln-lk1e", title, oil),
+                (false, false),
+                "{title:?} kept {oil:?}"
+            );
+        }
+    }
+
+    /// A project name written as `oak-tree` or `oak_tree` in the title is
+    /// not an identifier, the same as `oak tree`. A title identifier with
+    /// another part still keeps the lesson that names it.
+    #[test]
+    fn a_hyphenated_project_name_in_the_title_is_not_an_identifier() {
+        let issue = "oak-tree-lk1e";
+        for (title, text) in [
+            ("Fix the oak-tree draft", "The oak-tree damper needs oil."),
+            ("Fix the oak_tree draft", "The oak_tree damper needs oil."),
+            ("Fix the oak tree draft", "The oak tree damper needs oil."),
+            ("Fix the OAK-TREE draft", "The oak-tree damper needs oil."),
+        ] {
+            assert_eq!(
+                subject_shows(issue, title, text),
+                (false, false),
+                "{title:?} kept {text:?}"
+            );
+        }
+        assert_eq!(
+            subject_shows(
+                issue,
+                "Fix the oak-tree draft",
+                "The draft pulls cold air in."
+            ),
+            (true, true),
+            "Fix the oak-tree draft dropped the draft lesson"
+        );
+        assert_eq!(
+            subject_shows(issue, "Fix oak_loader crash", "oak_loader must run weekly."),
+            (true, true),
+            "Fix oak_loader crash dropped the identifier lesson"
+        );
+    }
+
+    /// A title token is the project name only when its pieces, split at
+    /// `-`, `_` and a change of case and folded to lower case, equal the
+    /// project's pieces. Short pieces and stop words count. Every row is
+    /// checked before the test fails, so the message lists each miss.
+    #[test]
+    fn a_title_token_is_the_project_name_only_when_every_piece_matches() {
+        let rows = [
+            (
+                "sha-1-lk1e",
+                "Fix sha-2 crash",
+                "sha-2 must run weekly.",
+                true,
+            ),
+            (
+                "x-tree-lk1e",
+                "Fix a-tree crash",
+                "a-tree must run weekly.",
+                true,
+            ),
+            (
+                "oak-lk1e",
+                "Fix oak_2 crash",
+                "oak_2 must run weekly.",
+                true,
+            ),
+            (
+                "v2-api-lk1e",
+                "Fix v3-api crash",
+                "v3-api must run weekly.",
+                true,
+            ),
+            (
+                "for-oak-lk1e",
+                "Fix to-oak crash",
+                "to-oak must run weekly.",
+                true,
+            ),
+            (
+                "a-b-lk1e",
+                "Fix the a-b draft",
+                "The a-b damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix the OakTree draft",
+                "The OakTree damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix the Oak_Tree draft",
+                "The OakTree damper needs oil.",
+                false,
+            ),
+        ];
+        let misses: Vec<String> = rows
+            .iter()
+            .filter(|(issue, title, text, keep)| {
+                subject_shows(issue, title, text) != (*keep, *keep)
+            })
+            .map(|(issue, title, text, keep)| format!("{issue} {title:?} {text:?} keep={keep}"))
+            .collect();
+        assert!(misses.is_empty(), "wrong rows:\n{}", misses.join("\n"));
+    }
+
+    /// The piece rule applies to the issue's body as well as its title.
+    /// `sha-2` in the body on project `sha-1` keeps the lesson that names
+    /// it, and `a-b` in the body on project `a-b` does not.
+    #[test]
+    fn a_body_token_is_the_project_name_only_when_every_piece_matches() {
+        let now = "2026-11-20T12:00:00Z";
+        let rows = [
+            (
+                "sha-1-lk1e",
+                "sha-2 fails on start.",
+                "sha-2 must run weekly.",
+                true,
+            ),
+            (
+                "x-tree-lk1e",
+                "a-tree fails on start.",
+                "a-tree must run weekly.",
+                true,
+            ),
+            (
+                "oak-lk1e",
+                "oak_2 fails on start.",
+                "oak_2 must run weekly.",
+                true,
+            ),
+            (
+                "v2-api-lk1e",
+                "v3-api fails on start.",
+                "v3-api must run weekly.",
+                true,
+            ),
+            (
+                "for-oak-lk1e",
+                "to-oak fails on start.",
+                "to-oak must run weekly.",
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "See https://example.com/sha-2/x.",
+                "sha-2 must run weekly.",
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "sha-1 fails on start.",
+                "sha-1 must run weekly.",
+                false,
+            ),
+            (
+                "a-b-lk1e",
+                "The a-b draft is cold.",
+                "The a-b damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "The OakTree draft is cold.",
+                "The OakTree damper needs oil.",
+                false,
+            ),
+        ];
+        let misses: Vec<String> = rows
+            .iter()
+            .filter(|(issue, body, text, keep)| {
+                let project = super::sitting_project_name(issue);
+                let ticket = super::sitting_cue_parts("Fix the crash", body, &[], &project);
+                let atom = subject_lesson("row", text);
+                let atoms = std::slice::from_ref(&atom);
+                let (due, _) = super::sitting_due_text(issue, &ticket, atoms, now, "ada");
+                let rows = super::sitting_subject_rows(issue, &ticket, atoms, now, "ada");
+                (due.contains(text), !rows.is_empty()) != (*keep, *keep)
+            })
+            .map(|(issue, body, text, keep)| format!("{issue} {body:?} {text:?} keep={keep}"))
+            .collect();
+        assert!(misses.is_empty(), "wrong rows:\n{}", misses.join("\n"));
+    }
+
+    /// A URL or a path in the title is split at `/`, and each segment is
+    /// judged by the piece rule.
+    #[test]
+    fn a_url_segment_in_the_title_is_judged_by_its_pieces() {
+        let rows = [
+            (
+                "sha-1-lk1e",
+                "Fix https://example.com/sha-2/issues crash",
+                "sha-2 must run weekly.",
+                true,
+            ),
+            (
+                "oak-lk1e",
+                "Fix crates/oak_2/src crash",
+                "oak_2 must run weekly.",
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix https://example.com/sha-1/issues crash",
+                "sha-1 must run weekly.",
+                false,
+            ),
+            (
+                "a-b-lk1e",
+                "Fix crates/a-b/src draft",
+                "The a-b damper needs oil.",
+                false,
+            ),
+        ];
+        let misses: Vec<String> = rows
+            .iter()
+            .filter(|(issue, title, text, keep)| {
+                subject_shows(issue, title, text) != (*keep, *keep)
+            })
+            .map(|(issue, title, text, keep)| format!("{issue} {title:?} {text:?} keep={keep}"))
+            .collect();
+        assert!(misses.is_empty(), "wrong rows:\n{}", misses.join("\n"));
+    }
+
+    /// One row of a token table: issue, title, body, lesson, and whether
+    /// the due list and the subject rows show the lesson. An empty body
+    /// reads the title through [`subject_shows`].
+    type TokenRow = (&'static str, &'static str, &'static str, &'static str, bool);
+
+    fn token_row_misses(rows: &[TokenRow]) -> Vec<String> {
+        let now = "2026-11-20T12:00:00Z";
+        rows.iter()
+            .filter(|(issue, title, body, text, keep)| {
+                let shown = if body.is_empty() {
+                    subject_shows(issue, title, text)
+                } else {
+                    let project = super::sitting_project_name(issue);
+                    let ticket = super::sitting_cue_parts(title, body, &[], &project);
+                    let atom = subject_lesson("row", text);
+                    let atoms = std::slice::from_ref(&atom);
+                    let (due, _) = super::sitting_due_text(issue, &ticket, atoms, now, "ada");
+                    let rows = super::sitting_subject_rows(issue, &ticket, atoms, now, "ada");
+                    (due.contains(text), !rows.is_empty())
+                };
+                shown != (*keep, *keep)
+            })
+            .map(|(issue, title, body, text, keep)| {
+                format!("{issue} {title:?} {body:?} {text:?} keep={keep}")
+            })
+            .collect()
+    }
+
+    /// A name token is a run of letters and digits, or runs joined by `-`
+    /// or `_`. Every other character ends it, and the token is kept byte
+    /// for byte, whatever script its letters are in.
+    #[test]
+    fn a_name_token_ends_at_any_other_character_and_keeps_its_letters() {
+        let cases: [(&str, &[&str]); 9] = [
+            ("Fix sha-2.txt crash", &["sha-2"]),
+            ("Fix sha_2::init and user@sha-2's", &["sha_2", "sha-2"]),
+            ("Fix https://example.com/sha-2?x=1#frag", &["sha-2"]),
+            ("Fix -oak--tree- crash", &["oak--tree"]),
+            ("Fix école-2 crash", &["école-2"]),
+            ("Fix café-2:8080 and to-école.", &["café-2", "to-école"]),
+            ("Fix CAFÉ-2 and 窯-2.txt", &["CAFÉ-2", "窯-2"]),
+            ("Fix v3.api and oak.tree", &[]),
+            ("Fix OakTree crash", &[]),
+        ];
+        for (title, want) in cases {
+            assert_eq!(super::title_identifiers(title), want, "{title:?}");
+        }
+        for (text, project, want) in [
+            ("Fix sha-1.txt crash", "sha-1", "Fix .txt crash"),
+            ("Fix sha-1.2 crash", "sha-1", "Fix .2 crash"),
+            ("Mail oak-tree@example.com", "oak-tree", "Mail @example.com"),
+            ("Fix école-2 crash", "école-1", "Fix école-2 crash"),
+            ("Fix the ÉcoleTree draft", "école-tree", "Fix the  draft"),
+        ] {
+            assert_eq!(
+                super::strip_project_tokens(text, project),
+                want,
+                "{text:?} on {project:?}"
+            );
+        }
+        assert!(super::text_has_identifier("café-2 must run.", "CAFÉ-2"));
+        assert!(!super::text_has_identifier("cole-2 must run.", "école-2"));
+    }
+
+    /// A title token beside `.`, `:`, `@`, `'`, `?`, `#` or any other
+    /// punctuation is judged on its own pieces. `sha-2` there keeps its
+    /// lesson on project `sha-1`, and the project name there is removed.
+    /// `v3.api` is the words `v3` and `api`, not the name `v3-api`, and
+    /// `sha-1.2` is the project token `sha-1` and the digit `2`. The
+    /// `sha-1-2` lesson names this issue, since a lesson that names only
+    /// another `sha-1-` id is dropped as another ticket's.
+    #[test]
+    fn a_title_token_beside_punctuation_is_judged_on_its_own_pieces() {
+        let sha2 = "sha-2 must run weekly.";
+        let rows: &[TokenRow] = &[
+            ("sha-1-lk1e", "Fix sha-2.txt crash", "", sha2, true),
+            ("sha-1-lk1e", "Fix file.sha-2 crash", "", sha2, true),
+            ("sha-1-lk1e", "Fix sha-2.0 crash", "", sha2, true),
+            ("sha-1-lk1e", "Fix sha-2:8080 crash", "", sha2, true),
+            ("sha-1-lk1e", "Fix sha-2:details crash", "", sha2, true),
+            ("sha-1-lk1e", "Fix sha-2@example.com crash", "", sha2, true),
+            (
+                "sha-1-lk1e",
+                "Mail user@sha-2 about the draft",
+                "",
+                sha2,
+                true,
+            ),
+            ("sha-1-lk1e", "Fix sha-2's crash", "", sha2, true),
+            (
+                "sha-1-lk1e",
+                "Fix https://example.com/sha-2.txt crash",
+                "",
+                sha2,
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix https://example.com/files/sha-2.txt/raw crash",
+                "",
+                sha2,
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix https://example.com/sha-2?x=1 crash",
+                "",
+                sha2,
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix https://example.com/sha-2#frag crash",
+                "",
+                sha2,
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix https://example.com/sha-2/issues crash",
+                "",
+                sha2,
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix https://example.com/sha-2/issues.",
+                "",
+                sha2,
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix https://example.com:8080/sha-2/issues",
+                "",
+                sha2,
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix sha-2 at https://example.com/sha-1",
+                "",
+                sha2,
+                true,
+            ),
+            ("sha-1-lk1e", "Fix sha-2: crash", "", sha2, true),
+            ("sha-1-lk1e", "Fix @sha-2 crash", "", sha2, true),
+            ("sha-1-lk1e", "Fix sha-2, crash", "", sha2, true),
+            ("sha-1-lk1e", "Fix the sha-2.", "", sha2, true),
+            ("sha-1-lk1e", "Fix (sha-2) crash", "", sha2, true),
+            ("sha-1-lk1e", "Fix \"sha-2\" crash", "", sha2, true),
+            ("sha-1-lk1e", "Fix sha-2; crash", "", sha2, true),
+            ("sha-1-lk1e", "Fix [sha-2] crash", "", sha2, true),
+            ("sha-1-lk1e", "Fix sha-2\u{2026} crash", "", sha2, true),
+            ("sha-1-lk1e", "Fix sha-2 crash", "", sha2, true),
+            (
+                "sha-1-lk1e",
+                "Fix sha_2::init crash",
+                "",
+                "sha_2 must run weekly.",
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix sha-1-2 crash",
+                "",
+                "On sha-1-lk1e, sha-1-2 must run weekly.",
+                true,
+            ),
+            (
+                "x-tree-lk1e",
+                "Fix a-tree crash",
+                "",
+                "a-tree must run weekly.",
+                true,
+            ),
+            (
+                "oak-lk1e",
+                "Fix oak_2 crash",
+                "",
+                "oak_2 must run weekly.",
+                true,
+            ),
+            (
+                "oak-lk1e",
+                "Fix crates/oak_2/src crash",
+                "",
+                "oak_2 must run weekly.",
+                true,
+            ),
+            (
+                "v2-api-lk1e",
+                "Fix v3-api crash",
+                "",
+                "v3-api must run weekly.",
+                true,
+            ),
+            (
+                "for-oak-lk1e",
+                "Fix to-oak crash",
+                "",
+                "to-oak must run weekly.",
+                true,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix tree-oak crash",
+                "",
+                "tree-oak must run weekly.",
+                true,
+            ),
+            (
+                "12-34-lk1e",
+                "Fix 12-35 crash",
+                "",
+                "12-35 must run weekly.",
+                true,
+            ),
+            (
+                "demo-lk1e",
+                "Fix review_order",
+                "",
+                "review_order must run weekly.",
+                true,
+            ),
+            (
+                "v2-api-lk1e",
+                "Fix v3.api crash",
+                "",
+                "v3-api must run weekly.",
+                false,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix sha-1.2 crash",
+                "",
+                "sha-1.2 must run weekly.",
+                false,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix sha-1 crash",
+                "",
+                "sha-1 must run weekly.",
+                false,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix sha-1.txt crash",
+                "",
+                "sha-1 must run weekly.",
+                false,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix sha-1. crash",
+                "",
+                "sha-1 must run weekly.",
+                false,
+            ),
+            (
+                "sha-1-lk1e",
+                "Mail sha-1@example.com about the draft",
+                "",
+                "sha-1 must run weekly.",
+                false,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix https://example.com/sha-1/issues crash",
+                "",
+                "sha-1 must run weekly.",
+                false,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix the damper",
+                "",
+                "On sha-1-wxyz the damper needs oil.",
+                false,
+            ),
+            (
+                "a-b-lk1e",
+                "Fix the a-b draft",
+                "",
+                "The a-b damper needs oil.",
+                false,
+            ),
+            (
+                "a-b-lk1e",
+                "Fix the a-b, draft",
+                "",
+                "The a-b damper needs oil.",
+                false,
+            ),
+            (
+                "a-b-lk1e",
+                "Fix crates/a-b/src draft",
+                "",
+                "The a-b damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix the OakTree draft",
+                "",
+                "The OakTree damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix the OakTree. draft",
+                "",
+                "The OakTree damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix the Oak_Tree draft",
+                "",
+                "The OakTree damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix the OAK_TREE draft",
+                "",
+                "The oak-tree damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix the oak-tree draft",
+                "",
+                "The oak-tree damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix the -oak-tree- draft",
+                "",
+                "The oak-tree damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix the oak--tree draft",
+                "",
+                "The oak-tree damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix the oak__tree draft",
+                "",
+                "The oak-tree damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix oak-tree.txt draft",
+                "",
+                "The oak-tree damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix oak-tree:draft crash",
+                "",
+                "The oak-tree damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Mail oak-tree@example.com about the draft",
+                "",
+                "The oak-tree damper needs oil.",
+                false,
+            ),
+            (
+                "http-server-lk1e",
+                "Fix the HTTPServer draft",
+                "",
+                "The HTTPServer damper needs oil.",
+                false,
+            ),
+            (
+                "12-34-lk1e",
+                "Fix 12_34 crash",
+                "",
+                "12_34 must run weekly.",
+                false,
+            ),
+        ];
+        let misses = token_row_misses(rows);
+        assert!(misses.is_empty(), "wrong rows:\n{}", misses.join("\n"));
+    }
+
+    /// The same token rule reads the issue's body.
+    #[test]
+    fn a_body_token_beside_punctuation_is_judged_on_its_own_pieces() {
+        let sha2 = "sha-2 must run weekly.";
+        let rows: &[TokenRow] = &[
+            (
+                "sha-1-lk1e",
+                "Fix the crash",
+                "sha-2.txt fails on start.",
+                sha2,
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix the crash",
+                "file.sha-2 fails on start.",
+                sha2,
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix the crash",
+                "sha-2@example.com fails on start.",
+                sha2,
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix the crash",
+                "sha-2:8080 fails on start.",
+                sha2,
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix the crash",
+                "sha-2's start fails.",
+                sha2,
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix the crash",
+                "sha-2, then start fails.",
+                sha2,
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix the crash",
+                "See https://example.com/sha-2?x=1 now.",
+                sha2,
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix the crash",
+                "sha-2 fails on start.",
+                sha2,
+                true,
+            ),
+            (
+                "oak-lk1e",
+                "Fix the crash",
+                "oak_2 fails on start.",
+                "oak_2 must run weekly.",
+                true,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix the crash",
+                "sha-1 fails on start.",
+                "sha-1 must run weekly.",
+                false,
+            ),
+            (
+                "sha-1-lk1e",
+                "Fix the crash",
+                "sha-1.txt fails on start.",
+                "sha-1 must run weekly.",
+                false,
+            ),
+            (
+                "a-b-lk1e",
+                "Fix the crash",
+                "The a-b draft is cold.",
+                "The a-b damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix the crash",
+                "Mail oak-tree@example.com about it.",
+                "The oak-tree damper needs oil.",
+                false,
+            ),
+            (
+                "oak-tree-lk1e",
+                "Fix the crash",
+                "The OakTree draft is cold.",
+                "The OakTree damper needs oil.",
+                false,
+            ),
+        ];
+        let misses = token_row_misses(rows);
+        assert!(misses.is_empty(), "wrong rows:\n{}", misses.join("\n"));
+    }
+
+    /// A letter outside ASCII is part of the token, in the title and the
+    /// body. `école-2` on `école-1` keeps `école-2`, not `cole-2`, and an
+    /// exact project name in any script is still removed. Another ticket's
+    /// id is read from the same tokens, so `café-1-wxyz` is another
+    /// `café-1` ticket and `école-2` is not a `cole` ticket.
+    #[test]
+    fn a_name_token_keeps_letters_outside_ascii() {
+        let rows: &[TokenRow] = &[
+            (
+                "cole-lk1e",
+                "Fix école-2 crash",
+                "",
+                "école-2 must run weekly.",
+                true,
+            ),
+            (
+                "café-1-lk1e",
+                "Fix the damper",
+                "",
+                "On café-1-wxyz the damper needs oil.",
+                false,
+            ),
+            (
+                "école-lk1e",
+                "Fix the damper",
+                "",
+                "On école-wxyz the damper needs oil.",
+                false,
+            ),
+            (
+                "café-1-lk1e",
+                "Fix café-2 crash",
+                "",
+                "café-2 must run weekly.",
+                true,
+            ),
+            (
+                "café-1-lk1e",
+                "Fix CAFÉ-2 crash",
+                "",
+                "café-2 must run weekly.",
+                true,
+            ),
+            (
+                "café-1-lk1e",
+                "Fix café-2.txt crash",
+                "",
+                "café-2 must run weekly.",
+                true,
+            ),
+            (
+                "café-1-lk1e",
+                "Fix the crash",
+                "café-2 fails on start.",
+                "café-2 must run weekly.",
+                true,
+            ),
+            (
+                "for-école-lk1e",
+                "Fix to-école crash",
+                "",
+                "to-école must run weekly.",
+                true,
+            ),
+            (
+                "for-école-lk1e",
+                "Fix the crash",
+                "to-école fails.",
+                "to-école must run weekly.",
+                true,
+            ),
+            (
+                "école-1-lk1e",
+                "Fix école-2 crash",
+                "",
+                "école-2 must run weekly.",
+                true,
+            ),
+            (
+                "école-1-lk1e",
+                "Fix the crash",
+                "école-2:8080 fails.",
+                "école-2 must run weekly.",
+                true,
+            ),
+            (
+                "école-1-lk1e",
+                "Fix école-2 crash",
+                "",
+                "cole-2 must run weekly.",
+                false,
+            ),
+            (
+                "σίγμα-1-lk1e",
+                "Fix σίγμα-2 crash",
+                "",
+                "σίγμα-2 must run weekly.",
+                true,
+            ),
+            (
+                "窯-1-lk1e",
+                "Fix 窯-2.txt crash",
+                "",
+                "窯-2 must run weekly.",
+                true,
+            ),
+            (
+                "木-tree-lk1e",
+                "Fix 木-leaf crash",
+                "",
+                "木-leaf must run weekly.",
+                true,
+            ),
+            (
+                "école-tree-lk1e",
+                "Fix the ÉcoleTree draft",
+                "",
+                "The ÉcoleTree damper needs oil.",
+                false,
+            ),
+            (
+                "木-tree-lk1e",
+                "Fix the 木-tree draft",
+                "",
+                "The 木-tree damper needs oil.",
+                false,
+            ),
+            (
+                "σίγμα-1-lk1e",
+                "Fix the Σίγμα-1 draft",
+                "",
+                "The σίγμα-1 damper needs oil.",
+                false,
+            ),
+        ];
+        let misses = token_row_misses(rows);
+        assert!(misses.is_empty(), "wrong rows:\n{}", misses.join("\n"));
     }
 
     /// A tombstone is not a due card, a timeline row or a recall hit, even
