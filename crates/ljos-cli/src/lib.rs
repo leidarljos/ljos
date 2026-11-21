@@ -13651,7 +13651,7 @@ impl StopTurn {
 }
 
 /// An agy stop whose execution loop has actually ended. Mid-loop stops
-/// omit `fullyIdle`, and those must not finish the claim.
+/// omit `fullyIdle`, and those must not run the session finish.
 #[must_use]
 pub fn stop_is_idle(input: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(input.trim()) else {
@@ -68455,7 +68455,7 @@ mod tests {
             "the after hook keeps the command the before hook saw"
         );
         assert!(
-            text.contains("A zero exit still cites it"),
+            text.contains("reaches it when the result also carries stderr"),
             "stderr on a clean commit is not a failed commit"
         );
         assert!(

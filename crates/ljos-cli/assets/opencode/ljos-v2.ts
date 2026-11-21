@@ -184,8 +184,8 @@ export default Plugin.define({
       if (id && said) held.set(id, prior ? `${prior}\n${said}` : said)
     })
 
-    // The commit is cited here, after it exits. A zero exit still cites it
-    // when the result also carries stderr.
+    // The hook sees the commit here, after it exits. A zero exit still
+    // reaches it when the result also carries stderr.
     await ctx.tool.hook("execute.after", async (event: any) => {
       const seat = seatTool(event.tool)
       if (!seat) return

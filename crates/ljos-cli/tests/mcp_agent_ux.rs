@@ -361,11 +361,15 @@ fn claim_file_and_deed_each_describe_their_own_call() {
         ),
         "{claim}"
     );
-    let deed = description_of(&tools, "ljos_deed");
+    assert!(!claim.contains("first write"), "{claim}");
+    let start = description_of(&tools, "ljos_start");
+    assert!(!start.contains("Shutdown finishes"), "{start}");
     assert!(
-        deed.contains("A git commit is cited as a deed for you"),
-        "{deed}"
+        start.contains("Shutdown and idle leave the claim"),
+        "{start}"
     );
+    let deed = description_of(&tools, "ljos_deed");
+    assert!(deed.contains("A git commit is not cited for you"), "{deed}");
 
     let prompt = session.request(
         "prompts/get",
