@@ -993,3 +993,70 @@ fn ci_test_hermetic_walks_nested_writes_under_every_tmp_name() {
         assert!(err.contains(&needle), "stderr missing {needle}: {err}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn ci_test_hermetic_hashes_tmp_file_content() {
+    // SAFETY: geteuid is always safe to call and has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    let case = hermetic_case_dir("ci-herm-tmp-hash-");
+    let home = case.path().join("home");
+    let tmp = case.path().join("tmp");
+    let ref_file = case.path().join("ref-file");
+    let ref_dir = case.path().join("ref-dir");
+    let rt = tmp.join(format!("ljos-{uid}"));
+    let keep = tmp.join("tmp.keep");
+    for d in [&home, &rt, &keep] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let state = rt.join("state.txt");
+    let blob = keep.join("blob.txt");
+    std::fs::write(&state, "alpha-01\n").unwrap();
+    std::fs::write(&blob, "alpha-01\n").unwrap();
+
+    // A. Same-length overwrite with the mtime restored.
+    let out_overwrite = run_hermetic(
+        &home,
+        &tmp,
+        &format!(
+            "touch -r '{f}' '{r}' && printf 'bravo-02\\n' > '{f}' && touch -r '{r}' '{f}'",
+            f = state.display(),
+            r = ref_file.display()
+        ),
+    );
+    assert_eq!(
+        out_overwrite.status.code(),
+        Some(1),
+        "same-length overwrite with restored mtime in /tmp must fail"
+    );
+    let err_overwrite = String::from_utf8_lossy(&out_overwrite.stderr);
+    assert!(
+        err_overwrite.contains("state.txt (content)"),
+        "stderr missing content change for state.txt: {err_overwrite}"
+    );
+
+    // B. Same-size replace with the file and directory mtimes restored, so
+    // a reused inode leaves only the content changed.
+    let out_replace = run_hermetic(
+        &home,
+        &tmp,
+        &format!(
+            "touch -r '{f}' '{r}' && touch -r '{d}' '{rd}' && rm '{f}' && \
+             printf 'bravo-02\\n' > '{f}' && touch -r '{r}' '{f}' && touch -r '{rd}' '{d}'",
+            f = blob.display(),
+            d = keep.display(),
+            r = ref_file.display(),
+            rd = ref_dir.display()
+        ),
+    );
+    assert_eq!(
+        out_replace.status.code(),
+        Some(1),
+        "same-size replace with restored mtimes in /tmp must fail"
+    );
+    let err_replace = String::from_utf8_lossy(&out_replace.stderr);
+    assert!(
+        err_replace.contains("tmp.keep/blob.txt (") && err_replace.contains("content"),
+        "stderr missing content change for blob.txt: {err_replace}"
+    );
+}

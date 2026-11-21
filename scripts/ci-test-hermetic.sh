@@ -3,8 +3,8 @@
 # scratch directories with XDG_*_HOME unset. Scan HOME, ljos-owned locations
 # under the runner's real HOME (hashing regular files and walking pre-existing
 # symlinks that resolve inside it), and suite-writable /tmp entries
-# (/tmp/ljos-$UID and uid-owned ljos-*, .tmp*, tmp.*, each walked in full),
-# ignoring concurrent foreign host activity.
+# (/tmp/ljos-$UID and uid-owned ljos-*, .tmp*, tmp.*, each walked in full
+# with regular files hashed), ignoring concurrent foreign host activity.
 set -eu
 
 if [ "$#" -lt 1 ]; then
@@ -340,6 +340,7 @@ scan_tmp() {
   err_file=$2
   PYTHONDONTWRITEBYTECODE=1 python3 - "$tmp_root" "$suite_tmp_name" "$out_file" "$err_file" <<'PY'
 import errno
+import hashlib
 import json
 import os
 import stat
@@ -361,6 +362,32 @@ queue = []
 def inside_root(path):
     return os.path.realpath(path).startswith(root_prefix)
 
+def file_digest(path):
+    # O_NONBLOCK keeps a FIFO swapped in after the stat from blocking.
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EPERM):
+            return "unreadable"
+        if exc.errno != errno.ENOENT:
+            errors.append(f"{path}: {exc.strerror}")
+        return None
+    h = hashlib.sha256()
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb") as fp:
+            fd = -1
+            for chunk in iter(lambda: fp.read(65536), b""):
+                h.update(chunk)
+    except OSError as exc:
+        errors.append(f"{path}: {exc.strerror}")
+        return None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    return h.hexdigest()
+
 def record_tmp(path, rel, walk_children):
     try:
         st = os.lstat(path)
@@ -375,7 +402,7 @@ def record_tmp(path, rel, walk_children):
             target = os.readlink(path)
         except OSError as exc:
             errors.append(f"{path}: {exc.strerror}")
-        entries[rel] = ["l", mode, st.st_uid, st.st_ino, st.st_size, st.st_mtime_ns, target]
+        entries[rel] = ["l", mode, st.st_uid, st.st_ino, st.st_size, st.st_mtime_ns, target, None]
         # A link to the root itself or out of it is recorded by its target
         # string only, so foreign trees are never walked.
         if not inside_root(path):
@@ -385,32 +412,35 @@ def record_tmp(path, rel, walk_children):
             tst = os.stat(path)
         except OSError as exc:
             if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
-                entries[target_key] = ["unresolved", exc.errno, None, None, None, None, None]
+                entries[target_key] = ["unresolved", exc.errno, None, None, None, None, None, None]
             else:
                 errors.append(f"{path}: {exc.strerror}")
             return
         tmode = stat.S_IMODE(tst.st_mode)
         if stat.S_ISDIR(tst.st_mode):
-            entries[target_key] = ["d", tmode, tst.st_uid, tst.st_ino, tst.st_size, tst.st_mtime_ns, None]
+            entries[target_key] = ["d", tmode, tst.st_uid, tst.st_ino, tst.st_size, tst.st_mtime_ns, None, None]
             if walk_children:
                 dir_key = (tst.st_dev, tst.st_ino)
                 if dir_key not in visited_dirs:
                     visited_dirs.add(dir_key)
                     queue.append((path, rel))
         else:
-            tkind = "f" if stat.S_ISREG(tst.st_mode) else "o"
-            entries[target_key] = [tkind, tmode, tst.st_uid, tst.st_ino, tst.st_size, tst.st_mtime_ns, None]
+            if stat.S_ISREG(tst.st_mode):
+                tkind, digest = "f", file_digest(path)
+            else:
+                tkind, digest = "o", None
+            entries[target_key] = [tkind, tmode, tst.st_uid, tst.st_ino, tst.st_size, tst.st_mtime_ns, None, digest]
     elif stat.S_ISDIR(st.st_mode):
-        entries[rel] = ["d", mode, st.st_uid, st.st_ino, st.st_size, st.st_mtime_ns, None]
+        entries[rel] = ["d", mode, st.st_uid, st.st_ino, st.st_size, st.st_mtime_ns, None, None]
         if walk_children:
             dir_key = (st.st_dev, st.st_ino)
             if dir_key not in visited_dirs:
                 visited_dirs.add(dir_key)
                 queue.append((path, rel))
     elif stat.S_ISREG(st.st_mode):
-        entries[rel] = ["f", mode, st.st_uid, st.st_ino, st.st_size, st.st_mtime_ns, None]
+        entries[rel] = ["f", mode, st.st_uid, st.st_ino, st.st_size, st.st_mtime_ns, None, file_digest(path)]
     else:
-        entries[rel] = ["o", mode, st.st_uid, st.st_ino, st.st_size, st.st_mtime_ns, None]
+        entries[rel] = ["o", mode, st.st_uid, st.st_ino, st.st_size, st.st_mtime_ns, None, None]
 
 if os.path.isdir(tmp_root):
     try:
@@ -444,7 +474,7 @@ while queue:
         it = sorted(os.scandir(cur_dir), key=lambda e: e.name)
     except OSError as exc:
         if exc.errno in (errno.EACCES, errno.EPERM):
-            entries[cur_rel + " -> unreadable"] = ["unresolved", exc.errno, None, None, None, None, None]
+            entries[cur_rel + " -> unreadable"] = ["unresolved", exc.errno, None, None, None, None, None, None]
         elif exc.errno in (errno.ENOENT, errno.ENOTDIR):
             pass
         else:
@@ -481,7 +511,7 @@ with open(sys.argv[3], encoding="utf-8") as fp:
 
 added = [k for k in sorted(after) if k not in before]
 modified = []
-labels = ("type", "mode", "uid", "inode", "size", "mtime", "target")
+labels = ("type", "mode", "uid", "inode", "size", "mtime", "target", "content")
 for k in sorted(before):
     if k not in after:
         continue
