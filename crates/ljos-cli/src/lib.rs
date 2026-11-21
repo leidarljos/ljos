@@ -49251,7 +49251,7 @@ fn exclude_tracker_lock(common: &Path) {
     let exclude = common.join("info").join("exclude");
     let text = std::fs::read_to_string(&exclude).unwrap_or_default();
     let mut missing = Vec::new();
-    for name in [TRACKER_LOCK, TRACKER_PENDING] {
+    for name in [TRACKER_LOCK, TRACKER_PENDING, TRACKER_BATCH_FILE] {
         let line = format!("/{name}");
         if !text.lines().any(|l| l.trim() == line) {
             missing.push(line);
@@ -51101,15 +51101,177 @@ fn persist_tracker_writes(
                 } else {
                     (&[][..], &[][..], None)
                 };
-                out.push_str(&persist_one_tracker_file(file, list, also, others, message));
+                out.push_str(&persist_one_tracker_file(
+                    file,
+                    list,
+                    also,
+                    others,
+                    message,
+                    may_hold_tracker_writes(list, also),
+                ));
             }
             return out;
         }
     }
     format!(
         "{split}{}",
-        persist_one_tracker_file(path, writes, also, others, message)
+        persist_one_tracker_file(
+            path,
+            writes,
+            also,
+            others,
+            message,
+            may_hold_tracker_writes(writes, also)
+        )
     )
+}
+
+/// Whether these writes may wait for the batch commit. Only notes wait.
+/// A claim, a ballot, a finish or a filing is how other hosts learn who
+/// holds an issue, what a panel decided and what is closed, so it commits
+/// and pushes at once and carries the held notes with it. Writes with
+/// `also` paths at the checkout root commit at once.
+fn may_hold_tracker_writes(writes: &[(String, String)], also: &[String]) -> bool {
+    also.is_empty()
+        && !writes.is_empty()
+        && writes.iter().all(|(_, verb)| verb.starts_with("noted"))
+}
+
+/// A note within this many seconds of the checkout's last tracker commit
+/// stays on disk and on the pending list for the next commit.
+/// `LJOS_TRACKER_BATCH_SECS` sets it; `0` commits every write.
+const TRACKER_BATCH_SECS: u64 = 60;
+
+fn tracker_batch_window() -> std::time::Duration {
+    std::time::Duration::from_secs(
+        std::env::var("LJOS_TRACKER_BATCH_SECS")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(TRACKER_BATCH_SECS),
+    )
+}
+
+/// The batch state at the checkout root: when this checkout last made a
+/// tracker commit, then `path REL` for each file the window held and
+/// `write ISSUE VERB by SEAT` for each write. Read and written under the
+/// tracker commit lock. The held paths are on the pending list too, so a
+/// push commits them; a write carries these paths and not another seat's
+/// deferred ones.
+pub const TRACKER_BATCH_FILE: &str = ".ljos-commit.batch";
+
+struct TrackerBatch {
+    last: Option<u64>,
+    paths: Vec<String>,
+    held: Vec<String>,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn read_tracker_batch(root: &Path) -> TrackerBatch {
+    let text = std::fs::read_to_string(root.join(TRACKER_BATCH_FILE)).unwrap_or_default();
+    let mut lines = text.lines();
+    let last = lines.next().and_then(|line| line.trim().parse().ok());
+    let mut batch = TrackerBatch {
+        last,
+        paths: Vec::new(),
+        held: Vec::new(),
+    };
+    for line in lines {
+        if let Some(rel) = line.strip_prefix("path ") {
+            batch.paths.push(rel.trim().to_string());
+        } else if let Some(write) = line.strip_prefix("write ") {
+            batch.held.push(write.trim().to_string());
+        }
+    }
+    batch
+}
+
+fn write_tracker_batch(root: &Path, batch: &TrackerBatch) {
+    let mut text = format!("{}\n", batch.last.unwrap_or(0));
+    for rel in &batch.paths {
+        text.push_str(&format!("path {rel}\n"));
+    }
+    for line in &batch.held {
+        text.push_str(&format!("write {line}\n"));
+    }
+    let _ = tracker_tmp::replace_file(&root.join(TRACKER_BATCH_FILE), &text);
+}
+
+/// `message` with the writes in `held` named in the body. With no write
+/// of its own (`alone`), the subject counts the held writes.
+fn batch_message(message: &str, alone: bool, held: &[String], seat: &str) -> String {
+    if held.is_empty() {
+        return message.to_string();
+    }
+    let (subject, body) = message.split_once("\n\n").unwrap_or((message, ""));
+    let subject = if alone {
+        format!("chore(issues): {} held writes by {seat}", held.len())
+    } else {
+        format!("{subject} with {} held", held.len())
+    };
+    let mut out = format!("{subject}\n\n");
+    if !body.is_empty() {
+        out.push_str(body.trim_end());
+        out.push('\n');
+    }
+    out.push_str(&held.join("\n"));
+    out
+}
+
+/// `fallback` for a commit of the pending list, or a message naming the
+/// writes the batch window held when there are some.
+pub(crate) fn held_writes_message(dir: &Path, fallback: &str) -> String {
+    match worktree_root(dir) {
+        Some(root) => batch_message(
+            fallback,
+            true,
+            &read_tracker_batch(&root).held,
+            &tracker_seat(),
+        ),
+        None => fallback.to_string(),
+    }
+}
+
+/// After a commit of the pending list: the held writes are in it.
+pub(crate) fn landed_held_writes(dir: &Path, made: &PathCommit) {
+    let Some(root) = worktree_root(dir) else {
+        return;
+    };
+    let mut batch = read_tracker_batch(&root);
+    match made {
+        PathCommit::Made => batch.last = Some(unix_now()),
+        PathCommit::AlreadyIn => {}
+        PathCommit::Deferred(_) | PathCommit::Refused(_) => return,
+    }
+    if batch.held.is_empty() && batch.paths.is_empty() && !matches!(made, PathCommit::Made) {
+        return;
+    }
+    batch.paths.clear();
+    batch.held.clear();
+    write_tracker_batch(&root, &batch);
+}
+
+/// Commit the tracker writes the batch window held in the checkout that
+/// holds the tracker, and push them as a write would. Run at the end of a
+/// session, so a held write does not wait for the next sitting.
+pub fn flush_held_tracker_writes() -> String {
+    let Ok(layout) = vissue_core::Layout::resolve(None, None) else {
+        return String::new();
+    };
+    let Some(root) = worktree_root(layout.root()) else {
+        return String::new();
+    };
+    for rel in read_tracker_batch(&root).paths {
+        let said = persist_one_tracker_file(&root.join(&rel), &[], &[], &[], None, false);
+        if !said.contains("nothing to commit") {
+            return said;
+        }
+    }
+    String::new()
 }
 
 fn persist_one_tracker_file(
@@ -51118,6 +51280,7 @@ fn persist_one_tracker_file(
     also: &[String],
     others: &[(PathBuf, Vec<(String, String)>)],
     message: Option<&str>,
+    may_hold: bool,
 ) -> String {
     sweep_tracker_temps(path);
     let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
@@ -51248,7 +51411,57 @@ fn persist_one_tracker_file(
         || format!("chore(issues): {} by {seat}", named.join(", ")),
         str::to_string,
     );
-    let committed = commit_paths(dir, &live, &message);
+    let batch_root = worktree_root(dir);
+    let committed = match batch_root.as_deref() {
+        Some(root) => {
+            let prefix = worktree_prefix(dir);
+            let mut rels: Vec<String> = live
+                .iter()
+                .map(|rel| at_worktree(&prefix, rel))
+                .filter(|rel| !rel.is_empty())
+                .collect();
+            let mut batch = read_tracker_batch(root);
+            let window = tracker_batch_window();
+            let recent = batch
+                .last
+                .is_some_and(|at| unix_now().saturating_sub(at) < window.as_secs());
+            if may_hold && !window.is_zero() && recent && !rels.is_empty() {
+                pending_add(root, &rels);
+                for rel in &rels {
+                    if !batch.paths.contains(rel) {
+                        batch.paths.push(rel.clone());
+                    }
+                }
+                batch
+                    .held
+                    .extend(named.iter().map(|write| format!("{write} by {seat}")));
+                write_tracker_batch(root, &batch);
+                drop(held);
+                return format!(
+                    "tracker git: held {} for the batch commit; the next write after {}s, any other write, a push or the session end commits it\n{ignored_note}",
+                    named.join(", "),
+                    window.as_secs()
+                );
+            }
+            for rel in &batch.paths {
+                if !rels.contains(rel) {
+                    rels.push(rel.clone());
+                }
+            }
+            let message = batch_message(&message, writes.is_empty(), &batch.held, &seat);
+            let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
+            let committed = commit_paths(root, &refs, &message);
+            if matches!(committed, PathCommit::Made | PathCommit::AlreadyIn) {
+                batch.last = Some(unix_now());
+                batch.paths.clear();
+                batch.held.clear();
+                write_tracker_batch(root, &batch);
+            }
+            (committed, message)
+        }
+        None => (commit_paths(dir, &live, &message), message),
+    };
+    let (committed, message) = committed;
     let message = message.lines().next().unwrap_or_default().to_string();
     if matches!(committed, PathCommit::Made | PathCommit::AlreadyIn) {
         commit_seat_pin(dir, &seat);
@@ -57036,6 +57249,9 @@ pub(crate) fn test_env_lock() -> EnvLock {
         }
         let runtime = tempfile::tempdir().expect("private runtime dir");
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", runtime.path()) };
+        // A test that writes twice reads two commits. One that batches
+        // sets the window itself.
+        unsafe { std::env::set_var("LJOS_TRACKER_BATCH_SECS", "0") };
         // The login's git config would hand every git this test starts,
         // and every git its children start, the machine's signing, hooks
         // and identity.
@@ -60463,6 +60679,145 @@ mod tests {
             assert!(!dir.path().join("Software/probe/issues").exists());
         }
         for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT", "LJOS_TRACKER_SPLIT_BYTES"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    fn commit_count(root: &Path) -> usize {
+        git_text(root, &["rev-list", "--count", "HEAD"])
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    /// Inside the batch window a burst of notes is held on disk and on the
+    /// pending list instead of making one commit each. A claim commits at
+    /// once and carries the held notes, named in the body, and leaves
+    /// another seat's deferred file out. The session end commits what is
+    /// still held.
+    #[test]
+    fn tracker_writes_in_the_batch_window_share_one_commit() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seeded_tracker(root);
+        std::env::set_var("VISSUE_ROOT", root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        std::env::set_var("LJOS_TRACKER_BATCH_SECS", "600");
+        let layout = vissue_core::Layout::new(root, "Software");
+        let seeded = commit_count(root);
+
+        vissue_core::ops::note(&layout, "probe-a1b2", "note 0").unwrap();
+        let said = persist_tracker("probe-a1b2", "noted");
+        assert!(said.contains("committed"), "{said}");
+        assert_eq!(commit_count(root), seeded + 1);
+        for at in 1..=20 {
+            vissue_core::ops::note(&layout, "probe-a1b2", &format!("note {at}")).unwrap();
+            let said = persist_tracker("probe-a1b2", "noted");
+            assert!(said.contains("held probe-a1b2 noted"), "{said}");
+        }
+        assert_eq!(commit_count(root), seeded + 1, "a held write committed");
+        assert!(std::fs::read_to_string(root.join(super::TRACKER_PENDING))
+            .unwrap()
+            .contains("Software/probe/issues.org"));
+
+        // Another seat's deferred file on the shared pending list.
+        std::fs::write(root.join("other.org"), "theirs\n").unwrap();
+        let pending = root.join(super::TRACKER_PENDING);
+        let listed = std::fs::read_to_string(&pending).unwrap();
+        std::fs::write(&pending, format!("{listed}other.org\n")).unwrap();
+        let text = std::fs::read_to_string(root.join("Software/probe/issues.org")).unwrap();
+        std::fs::write(
+            root.join("Software/probe/issues.org"),
+            text.replacen("TODO", "STARTED", 1),
+        )
+        .unwrap();
+        let said = persist_tracker("probe-a1b2", "claimed");
+        assert!(said.contains("committed"), "{said}");
+        assert_eq!(commit_count(root), seeded + 2);
+        let body = git_text(root, &["log", "-1", "--format=%B"]);
+        assert!(
+            body.starts_with("chore(issues): probe-a1b2 claimed by saddle with 20 held\n\n"),
+            "{body}"
+        );
+        assert_eq!(
+            body.matches("probe-a1b2 noted by saddle").count(),
+            20,
+            "{body}"
+        );
+        let shown = git_text(root, &["show", "HEAD:Software/probe/issues.org"]);
+        assert!(shown.contains("note 20"), "{shown}");
+        let files = git_text(root, &["show", "--name-only", "--format=", "HEAD"]);
+        assert_eq!(files.trim(), "Software/probe/issues.org");
+        assert_eq!(std::fs::read_to_string(&pending).unwrap(), "other.org\n");
+        assert!(git_text(
+            root,
+            &["status", "--porcelain", "--", "Software/probe/issues.org"]
+        )
+        .is_empty());
+
+        vissue_core::ops::note(&layout, "probe-a1b2", "late note").unwrap();
+        let said = persist_tracker("probe-a1b2", "noted");
+        assert!(said.contains("held"), "{said}");
+        let said = flush_held_tracker_writes();
+        assert!(said.contains("committed"), "{said}");
+        assert_eq!(commit_count(root), seeded + 3);
+        let subject = git_text(root, &["log", "-1", "--format=%s"]);
+        assert_eq!(subject.trim(), "chore(issues): 1 held writes by saddle");
+        assert!(git_text(
+            root,
+            &["status", "--porcelain", "--", "Software/probe/issues.org"]
+        )
+        .is_empty());
+        assert!(flush_held_tracker_writes().is_empty());
+        for var in [
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_SEAT",
+            "LJOS_TRACKER_BATCH_SECS",
+        ] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// The first write after the window commits, with what was held.
+    #[test]
+    fn a_write_after_the_batch_window_commits() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seeded_tracker(root);
+        std::env::set_var("VISSUE_ROOT", root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        std::env::set_var("LJOS_TRACKER_BATCH_SECS", "1");
+        let layout = vissue_core::Layout::new(root, "Software");
+        let seeded = commit_count(root);
+        vissue_core::ops::note(&layout, "probe-a1b2", "one").unwrap();
+        assert!(persist_tracker("probe-a1b2", "noted").contains("committed"));
+        vissue_core::ops::note(&layout, "probe-a1b2", "two").unwrap();
+        assert!(persist_tracker("probe-a1b2", "noted").contains("held"));
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        vissue_core::ops::note(&layout, "probe-a1b2", "three").unwrap();
+        let said = persist_tracker("probe-a1b2", "noted");
+        assert!(said.contains("committed"), "{said}");
+        assert_eq!(commit_count(root), seeded + 2);
+        let subject = git_text(root, &["log", "-1", "--format=%s"]);
+        assert_eq!(
+            subject.trim(),
+            "chore(issues): probe-a1b2 noted by saddle with 1 held"
+        );
+        for var in [
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_SEAT",
+            "LJOS_TRACKER_BATCH_SECS",
+        ] {
             std::env::remove_var(var);
         }
     }

@@ -4583,8 +4583,10 @@ fn run_hook(hook: HookArgs) -> Result<()> {
     }
     // At the end of a session the memories it used fire together,
     // and the transcript is read, in a detached process. This
-    // process does not wait on the pack or the tracker.
+    // process does not wait on the pack. It waits on the tracker
+    // only to commit writes the batch window still holds.
     if call.event == "SessionEnd" {
+        let _ = ljos_cli::flush_held_tracker_writes();
         ljos_cli::extract::at_session_end(&input, call.session.as_deref());
         return Ok(());
     }

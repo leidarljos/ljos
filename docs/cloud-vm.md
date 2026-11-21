@@ -14,7 +14,7 @@ This tree's `ljos` answers `cloud up`, and `scripts/install.sh --cloud` runs tha
 
 `LJOS_TRACKER_REMOTE` is the https git URL of the shared tracker. Unset, `cloud up` installs the binaries and does not turn push mode on.
 
-`LJOS_TRACKER_GIT=push` commits each tracker write, fetches, rebases with the per-issue field merge, and pushes. It retries a few times and never forces. A failed push stays committed. The next write and the end of the session try again. `commit` commits and does not fetch or push. `off` skips the commit.
+`LJOS_TRACKER_GIT=push` commits each tracker write, fetches, rebases with the per-issue field merge, and pushes. It retries a few times and never forces. A failed push stays committed. The next write and the end of the session try again. A note within `LJOS_TRACKER_BATCH_SECS` (60 by default) of the last tracker commit waits for the next one. A claim, a ballot or a finish never waits. `commit` commits and does not fetch or push. `off` skips the commit.
 
 `ljos send` and `ljos reply` in push mode push the sealed log from the detached wake before the wake fires, so the woken seat does not read an empty inbox. The send does not wait on that push. A failed push is a line in the wake log, and the wake still runs.
 

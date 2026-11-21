@@ -112,6 +112,8 @@ fn two_seats_keep_their_notes_and_a_seatless_write_is_refused() {
         .env("VISSUE_NO_ROUTE", "1")
         .env("LJOS_SEAT", "hlebot")
         .env("LJOS_TRACKER_GIT", "commit")
+        // Each note's own commit names its seat.
+        .env("LJOS_TRACKER_BATCH_SECS", "0")
         .env("PACKSET_URL", "off")
         .env("LJOS_ASK_PACK", "off")
         .env("LJOS_SYNC_HOST", "runner")

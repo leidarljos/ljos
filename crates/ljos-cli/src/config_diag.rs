@@ -777,6 +777,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_TRACKER_BATCH_SECS",
+        default: "60 seconds",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_TRACKER_DIR",
         default: "unset",
         group: "ljos",

@@ -208,11 +208,12 @@ fn prepare_for_push(dir: &Path) -> Result<(), String> {
 /// none are waiting. The caller does not already hold the tracker lock.
 fn land_deferred(dir: &Path) {
     let _held = crate::tracker_commit_lock(dir);
-    let _ = crate::commit_paths(
+    let message = crate::held_writes_message(
         dir,
-        &[],
         "chore(tracker): commit writes deferred while git held the index",
     );
+    let made = crate::commit_paths(dir, &[], &message);
+    crate::landed_held_writes(dir, &made);
 }
 
 /// `git push` while this process holds the tracker lock. A hook that runs
