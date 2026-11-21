@@ -543,10 +543,6 @@ const CHUNK_DROP: &str = "ljos_drop";
 /// into a snapshot instead of growing another segment.
 const MAX_CHUNKS: u32 = 64;
 
-/// Segments kept beside one snapshot. The next change past this folds them
-/// into a new snapshot. A normal sync does not fold before then.
-const SEGMENT_LIMIT: usize = 64;
-
 /// The key of a segment's first line. A segment holds the atoms added,
 /// changed or dropped since the snapshot, and the line names the host,
 /// the scope, the segment's number and the snapshot it applies over.
@@ -555,7 +551,7 @@ const SEG_HEADER: &str = "ljos_seg";
 
 thread_local! {
     /// Set for the `ljos sync --compact` call. A normal sync leaves it false,
-    /// so segments are not folded early.
+    /// so segments are never folded by a sync on its own.
     static SYNC_COMPACT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -651,8 +647,6 @@ struct LogView {
     body: String,
     /// Chunks applied, when the log is still a legacy base plus chunks.
     chunks_read: u32,
-    /// Segments applied after the snapshot.
-    segments_read: u32,
     /// Why the piece after the last one read was left unread, when one is
     /// there.
     stopped: Option<String>,
@@ -683,8 +677,9 @@ impl LogView {
 /// A chunk counts whole or not at all. One that does not open, names
 /// another host, scope, base or number, or holds a line that is neither
 /// an atom nor a drop ends the read, and the view is the base with the
-/// chunks before it. Export diffs against the same view, so its next
-/// chunk carries what the unread one held. With no chunk applied the body
+/// chunks before it. Export does not diff against a view that ended
+/// early, as what is new since the unread piece cannot be told. With no
+/// chunk applied the body
 /// is `base_body` as sealed, byte for byte.
 fn read_chunks(
     base_body: &str,
@@ -756,7 +751,6 @@ fn read_chunks(
     LogView {
         body,
         chunks_read,
-        segments_read: 0,
         stopped,
     }
 }
@@ -932,6 +926,16 @@ pub(crate) fn open_dir_beneath(
     rel: &str,
     create: bool,
 ) -> Result<Option<std::fs::File>> {
+    open_dir_beneath_mode(root, rel, create, 0o777)
+}
+
+/// [`open_dir_beneath`], making a missing component with `mode`.
+fn open_dir_beneath_mode(
+    root: &Path,
+    rel: &str,
+    create: bool,
+    mode: libc::mode_t,
+) -> Result<Option<std::fs::File>> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::OpenOptionsExt;
     let flags =
@@ -955,7 +959,7 @@ pub(crate) fn open_dir_beneath(
         let mut fd = open(&dir);
         if fd < 0 && create && last_errno() == Some(libc::ENOENT) {
             // SAFETY: as above; mkdirat makes one directory entry.
-            if unsafe { libc::mkdirat(dir.as_raw_fd(), cname.as_ptr(), 0o777) } < 0
+            if unsafe { libc::mkdirat(dir.as_raw_fd(), cname.as_ptr(), mode) } < 0
                 && last_errno() != Some(libc::EEXIST)
             {
                 return Err(std::io::Error::last_os_error())
@@ -1053,13 +1057,33 @@ thread_local! {
 /// with no symlink at any component. The directory is fsynced once the
 /// new name is in place.
 pub(crate) fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
+    write_beneath_mode(root, rel, bytes, false)
+}
+
+/// [`write_beneath`] for a file only this user may read: the file is
+/// 0600, and its directory is made or left 0700, as `age.key` is.
+fn write_private_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
+    write_beneath_mode(root, rel, bytes, true)
+}
+
+fn write_beneath_mode(root: &Path, rel: &str, bytes: &[u8], private: bool) -> Result<()> {
     use std::io::Write;
     use std::os::fd::AsRawFd;
     let _durable = crate::bookkeep::durable_write();
     let (parent, name) = split_rel(rel);
     std::fs::create_dir_all(root).with_context(|| format!("sync: {}", root.display()))?;
-    let dir = open_dir_beneath(root, parent, true)?
+    let (dir_mode, file_mode) = if private {
+        (0o700, 0o600)
+    } else {
+        (0o777, 0o666)
+    };
+    let dir = open_dir_beneath_mode(root, parent, true, dir_mode)?
         .with_context(|| format!("sync: {} was not made", root.join(parent).display()))?;
+    // SAFETY: dir is an open directory fd owned here.
+    if private && unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("sync: {}", root.join(parent).display()));
+    }
     // The directory fd is what the write uses. A symlink swapped in for a
     // parent after this open is not followed.
     before_dir_write();
@@ -1080,7 +1104,7 @@ pub(crate) fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> 
         &ctmp,
         &shown,
         libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-        0o666,
+        file_mode,
     )
     .with_context(|| format!("sync: {}", shown.display()))?;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
@@ -1456,6 +1480,8 @@ fn export_named_scope(
         StoreOut::Migrated { rel } => {
             format!("sync: migrated {count} {scope_name} atoms into {rel}\n")
         }
+        StoreOut::Unread { why } => unread_line(scope_name, &why),
+        StoreOut::Resealed { rel, why } => resealed_line(scope_name, &why, &rel, &recipients_said),
         StoreOut::Wrote { rel, changes } => {
             if changes == 0 {
                 format!("sync: exported {count} {scope_name} atoms to {rel}, {recipients_said}\n")
@@ -1479,6 +1505,31 @@ enum StoreOut {
         rel: String,
         changes: usize,
     },
+    /// A piece of this machine's log did not open here, and this machine
+    /// is not a recipient, so what is new since it cannot be told and a
+    /// new seal would not open either. Nothing was written or removed.
+    Unread {
+        why: String,
+    },
+    /// A piece of this machine's log did not open here, so the atoms were
+    /// sealed whole into the new snapshot `rel`, which does. The pieces
+    /// before it are left in place.
+    Resealed {
+        rel: String,
+        why: String,
+    },
+}
+
+fn unread_line(scope_name: &str, why: &str) -> String {
+    format!(
+        "sync: warning: {why}, and this machine's key is not a recipient of the {scope_name} log, so its new atoms wait; add the key `ljos sync --key` prints to .ljos/sync.toml\n"
+    )
+}
+
+fn resealed_line(scope_name: &str, why: &str, rel: &str, recipients_said: &str) -> String {
+    format!(
+        "sync: warning: {why}, so this machine's {scope_name} atoms were sealed whole into {rel}, {recipients_said}\n"
+    )
 }
 
 /// The directory a host's snapshot and segments live in.
@@ -1517,35 +1568,61 @@ struct SealedPiece {
 }
 
 fn sealed_pieces(root: &Path, stem: &str) -> Vec<SealedPiece> {
-    let mut out = Vec::new();
-    for name in list_beneath(root, stem).unwrap_or_default() {
-        let rel = format!("{stem}/{name}");
-        if let Some(rest) = name
-            .strip_prefix("snap-")
-            .and_then(|rest| rest.strip_suffix(".jsonl.age"))
-        {
-            if let Ok(seq) = rest.parse::<u32>() {
-                out.push(SealedPiece {
-                    seq,
-                    snap: true,
-                    rel,
-                });
-            }
-        } else if let Some(rest) = name.strip_prefix("seg-") {
-            let rest = rest.strip_suffix(".jsonl.age").unwrap_or(rest);
-            if let Some((seq, _)) = rest.split_once('-') {
-                if let Ok(seq) = seq.parse::<u32>() {
-                    out.push(SealedPiece {
-                        seq,
-                        snap: false,
-                        rel,
-                    });
-                }
-            }
-        }
-    }
+    let mut out: Vec<SealedPiece> = list_beneath(root, stem)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|name| sealed_piece(stem, name))
+        .collect();
     out.sort_by_key(|piece| (piece.seq, !piece.snap));
     out
+}
+
+/// The snapshot or segment `name` below `stem`, by its file name.
+fn sealed_piece(stem: &str, name: &str) -> Option<SealedPiece> {
+    let rel = format!("{stem}/{name}");
+    if let Some(rest) = name
+        .strip_prefix("snap-")
+        .and_then(|rest| rest.strip_suffix(".jsonl.age"))
+    {
+        let seq = rest.parse::<u32>().ok()?;
+        return Some(SealedPiece {
+            seq,
+            snap: true,
+            rel,
+        });
+    }
+    let rest = name.strip_prefix("seg-")?;
+    let rest = rest.strip_suffix(".jsonl.age").unwrap_or(rest);
+    let (seq, _) = rest.split_once('-')?;
+    Some(SealedPiece {
+        seq: seq.parse::<u32>().ok()?,
+        snap: false,
+        rel,
+    })
+}
+
+/// The seq a new snapshot or segment below `stem` takes: one past every
+/// piece here and every piece `HEAD` has, so no new path is one `HEAD`
+/// already names. 0 when there are none.
+fn next_seq(root: &Path, stem: &str, pieces: &[SealedPiece]) -> u32 {
+    let listed = git(
+        root,
+        &["ls-tree", "--name-only", "-z", "HEAD", &format!("{stem}/")],
+    )
+    .ok()
+    .filter(|out| out.status.success())
+    .map(|out| out.stdout)
+    .unwrap_or_default();
+    let in_head = listed
+        .split(|b| *b == 0)
+        .filter_map(|rel| std::str::from_utf8(rel).ok())
+        .filter_map(|rel| sealed_piece(stem, rel.rsplit('/').next()?));
+    pieces
+        .iter()
+        .map(|piece| piece.seq)
+        .chain(in_head.map(|piece| piece.seq))
+        .max()
+        .map_or(0, |n| n + 1)
 }
 
 fn seg_header(host: &str, scope_name: &str, seq: u32, over: u32) -> String {
@@ -1587,23 +1664,143 @@ fn migrate_legacy(root: &Path, log_rel: &str) -> Result<Option<String>> {
     Ok(Some(snap))
 }
 
-fn plaintext_matches(root: &Path, stem: &str, plain: &str) -> bool {
-    let want = format!("{}\n", blob_digest(plain.as_bytes()));
-    read_beneath(root, &plain_hash_rel(stem))
-        .ok()
-        .flatten()
-        .is_some_and(|have| have == want.as_bytes())
-}
-
+/// Write the plaintext hash beside the log when it does not say `plain`
+/// already. Peers and the wake read that it exists; no sync reads what it
+/// says, since a checkout can carry any hash there.
 fn write_plain_hash(root: &Path, stem: &str, plain: &str) -> Result<()> {
     let line = format!("{}\n", blob_digest(plain.as_bytes()));
-    write_beneath(root, &plain_hash_rel(stem), line.as_bytes())
+    let rel = plain_hash_rel(stem);
+    if read_beneath(root, &rel).ok().flatten().as_deref() == Some(line.as_bytes()) {
+        return Ok(());
+    }
+    write_beneath(root, &rel, line.as_bytes())
+}
+
+/// The key that signs what this home keeps of sealed logs: 32 random
+/// bytes in `sync/kept.key` below the state root, mode 0600. A kept file
+/// is taken only when this key signed it, so one written by hand or copied
+/// from another home is not. None when there is no key; then nothing kept
+/// is used. A read never makes one: see [`make_kept_key`].
+fn kept_key() -> Option<[u8; 32]> {
+    let kept = read_beneath(&state_base(), KEPT_KEY_REL).ok().flatten()?;
+    <[u8; 32]>::try_from(kept.as_slice()).ok()
+}
+
+/// [`kept_key`], made on first use by a write of the sync state.
+fn make_kept_key() -> Option<[u8; 32]> {
+    if let Some(key) = kept_key() {
+        return Some(key);
+    }
+    let base = state_base();
+    let mut key = [0u8; 32];
+    getrandom::fill(&mut key).ok()?;
+    write_private_beneath(&base, KEPT_KEY_REL, &key).ok()?;
+    Some(key)
+}
+
+const KEPT_KEY_REL: &str = "sync/kept.key";
+
+/// HMAC-SHA256 of `parts`, each with its length before it, under `key`.
+fn kept_tag(key: &[u8; 32], parts: &[&[u8]]) -> String {
+    use sha2::Digest as _;
+    let mut inner_pad = [0x36u8; 64];
+    let mut outer_pad = [0x5cu8; 64];
+    for (n, byte) in key.iter().enumerate() {
+        inner_pad[n] ^= byte;
+        outer_pad[n] ^= byte;
+    }
+    let mut inner = sha2::Sha256::new();
+    inner.update(inner_pad);
+    for part in parts {
+        inner.update((part.len() as u64).to_le_bytes());
+        inner.update(part);
+    }
+    let mut outer = sha2::Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner.finalize());
+    hex::encode(outer.finalize())
+}
+
+fn tags_equal(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
+/// Digest of the names and bytes of every snapshot and segment of the log
+/// at `stem`, as they are in the checkout. None when one cannot be read.
+fn pieces_digest(root: &Path, stem: &str) -> Option<String> {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    for piece in sealed_pieces(root, stem) {
+        let bytes = read_beneath(root, &piece.rel).ok().flatten()?;
+        hasher.update((piece.rel.len() as u64).to_le_bytes());
+        hasher.update(piece.rel.as_bytes());
+        hasher.update(sha2::Sha256::digest(&bytes));
+    }
+    Some(hex::encode(hasher.finalize()))
+}
+
+/// Where below the state root this home notes what the log at `stem` in
+/// the checkout at `root` opens to: `sync/logs/<digest>`.
+fn log_note_rel(root: &Path, stem: &str) -> String {
+    use sha2::Digest as _;
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(root.as_os_str().as_encoded_bytes());
+    hasher.update([0]);
+    hasher.update(stem.as_bytes());
+    format!("sync/logs/{}", hex::encode(hasher.finalize()))
+}
+
+/// Note that the pieces of the log at `stem`, as they are now, open to
+/// `plain`. Written after this sync sealed them or read them whole.
+fn note_log(root: &Path, stem: &str, plain: &str) {
+    let Some(key) = make_kept_key() else {
+        return;
+    };
+    let Some(pieces) = pieces_digest(root, stem) else {
+        return;
+    };
+    let plain = blob_digest(plain.as_bytes());
+    let tag = kept_tag(&key, &[b"log", pieces.as_bytes(), plain.as_bytes()]);
+    let line = format!("{tag} {pieces} {plain}\n");
+    let rel = log_note_rel(root, stem);
+    if read_beneath(&state_base(), &rel).ok().flatten().as_deref() != Some(line.as_bytes()) {
+        let _ = write_private_beneath(&state_base(), &rel, line.as_bytes());
+    }
+}
+
+/// Whether this home noted that the log at `stem`, with the bytes its
+/// pieces have now, opens to `plain`. The note is keyed to those bytes
+/// and signed with [`kept_key`], so a piece that changed, a note from
+/// elsewhere, or a hash in the checkout never makes a sync skip its log.
+fn log_noted(root: &Path, stem: &str, plain: &str) -> bool {
+    let Some(key) = kept_key() else {
+        return false;
+    };
+    let Ok(Some(kept)) = read_beneath(&state_base(), &log_note_rel(root, stem)) else {
+        return false;
+    };
+    let Ok(kept) = String::from_utf8(kept) else {
+        return false;
+    };
+    let mut words = kept.split_whitespace();
+    let (Some(tag), Some(pieces), Some(noted)) = (words.next(), words.next(), words.next()) else {
+        return false;
+    };
+    let want = kept_tag(&key, &[b"log", pieces.as_bytes(), noted.as_bytes()]);
+    tags_equal(tag, &want)
+        && noted == blob_digest(plain.as_bytes())
+        && pieces_digest(root, stem).as_deref() == Some(pieces)
 }
 
 /// The atom lines of `host`'s `scope_name` log: the legacy file and its
 /// chunks when no snapshot has been written, otherwise the newest snapshot
-/// and the segments after it, in sequence order. A segment that does not
-/// open ends the read. The same last-line-wins rule as [`read_chunks`].
+/// and the segments after it, in sequence order. A snapshot or segment
+/// that does not open, as when age cannot authenticate it, ends the read. The same last-line-wins rule as [`read_chunks`].
 fn read_log_view(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Result<LogView> {
     let stem = log_stem_dir(log_rel);
     let pieces = sealed_pieces(root, &stem);
@@ -1617,25 +1814,33 @@ fn read_log_view(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Re
             return Ok(LogView {
                 body: String::new(),
                 chunks_read: 0,
-                segments_read: 0,
                 stopped: Some(format!("{} could not be read", snap.rel)),
             });
         };
-        let body = match open_log(root, &bytes, host, scope_name, &snap.rel)? {
-            Opened::Atoms(body) => body,
-            Opened::Miss => {
+        let body = match open_log(root, &bytes, host, scope_name, &snap.rel) {
+            Ok(Opened::Atoms(body)) => body,
+            Err(err) => {
                 return Ok(LogView {
                     body: String::new(),
                     chunks_read: 0,
-                    segments_read: 0,
+                    stopped: Some(format!(
+                        "{} did not open ({})",
+                        snap.rel,
+                        err.to_string().replace('\n', " ")
+                    )),
+                });
+            }
+            Ok(Opened::Miss) => {
+                return Ok(LogView {
+                    body: String::new(),
+                    chunks_read: 0,
                     stopped: Some(format!("{} is not sealed to this machine", snap.rel)),
                 });
             }
-            Opened::Refused(line) | Opened::Hidden { line, .. } => {
+            Ok(Opened::Refused(line) | Opened::Hidden { line, .. }) => {
                 return Ok(LogView {
                     body: String::new(),
                     chunks_read: 0,
-                    segments_read: 0,
                     stopped: Some(line.trim().to_string()),
                 });
             }
@@ -1655,7 +1860,6 @@ fn read_log_view(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Re
         return Ok(LogView {
             body: String::new(),
             chunks_read: 0,
-            segments_read: 0,
             stopped: None,
         });
     };
@@ -1671,13 +1875,11 @@ fn read_log_view(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Re
         Opened::Miss => Ok(LogView {
             body: String::new(),
             chunks_read: 0,
-            segments_read: 0,
             stopped: Some(format!("{log_rel} is not sealed to this machine")),
         }),
         Opened::Refused(line) | Opened::Hidden { line, .. } => Ok(LogView {
             body: String::new(),
             chunks_read: 0,
-            segments_read: 0,
             stopped: Some(line.trim().to_string()),
         }),
     }
@@ -1693,7 +1895,6 @@ fn apply_segments<'a>(
 ) -> Result<LogView> {
     let mut lines = lines_by_id(body);
     let mut stopped = None;
-    let mut applied = 0u32;
     for piece in pieces {
         let sealed = match fetch(&piece.rel) {
             Ok(Some(sealed)) => sealed,
@@ -1756,7 +1957,6 @@ fn apply_segments<'a>(
                 }
             }
         }
-        applied += 1;
     }
     let body = match lines {
         Some(map) => map.values().map(|line| format!("{line}\n")).collect(),
@@ -1765,7 +1965,6 @@ fn apply_segments<'a>(
     Ok(LogView {
         body,
         chunks_read: 0,
-        segments_read: applied,
         stopped,
     })
 }
@@ -1802,6 +2001,32 @@ fn atom_changes(
     changes
 }
 
+/// Keep `plain` as what `sealed` opens to here, the way an import keeps
+/// what age gave, so this machine's next export reads its own log without
+/// running `age -d` on every piece. Only when one of this machine's
+/// identities is a recipient: a file it could not open stays unopened.
+fn keep_sealed(sealed: &[u8], plain: &str, scope_name: &str, recipients: &[String]) {
+    let identities = identities_for_open(scope_name);
+    if !opens_here(&identities, recipients) {
+        return;
+    }
+    if let Some(key) = make_kept_key() {
+        let _ = write_private_beneath(
+            &state_base(),
+            &opened_mark_rel(sealed, &identities),
+            &mark_bytes(&key, sealed, Some(plain)),
+        );
+    }
+}
+
+/// Whether one of `identities` is among `recipients`, so a file sealed
+/// to them opens on this machine.
+fn opens_here(identities: &[PathBuf], recipients: &[String]) -> bool {
+    identities.iter().any(|identity| {
+        identity_recipient(identity).is_ok_and(|key| recipients.iter().any(|r| r.trim() == key))
+    })
+}
+
 fn seal_or_missing(plain: &str, recipients: &[String]) -> Result<Option<Vec<u8>>> {
     match seal_bytes(plain, recipients) {
         Ok(sealed) => Ok(Some(sealed)),
@@ -1818,11 +2043,16 @@ fn remove_pieces(root: &Path, pieces: &[SealedPiece]) -> Result<()> {
 }
 
 /// Write `body`, this host's atoms of `scope_name`, without sealing a blob
-/// again. The plaintext hash beside the log decides. A match writes
-/// nothing. A legacy `<stem>.jsonl.age` is copied once into `snap-0` and
-/// removed. Later atoms go into one new segment. At [`SEGMENT_LIMIT`]
-/// segments, or when [`compact_for_this_call`] is held, the segments fold
-/// into one new snapshot and the folded files are removed in the same write.
+/// again. A log whose pieces this home noted opening to `body`
+/// ([`log_noted`]) writes nothing; otherwise the pieces are read and only
+/// what differs is sealed. A legacy `<stem>.jsonl.age` is copied once into `snap-0` and
+/// removed. Later atoms go into one new segment. A sealed piece is not
+/// removed or sealed again by a sync. When one does not open here, the
+/// atoms are sealed whole into a new snapshot once, and the pieces before
+/// it stay; when this machine is not a recipient, nothing is written.
+/// Only while
+/// [`compact_for_this_call`] is held do the segments fold into one new
+/// snapshot, and the folded files are removed in the same write.
 fn store_log(
     root: &Path,
     primary_scope: &str,
@@ -1835,10 +2065,11 @@ fn store_log(
     let stem = log_stem_dir(&log_rel);
     let plain = log_header(&host, scope_name) + body;
     let compact = compact_requested();
-    if plaintext_matches(root, &stem, &plain) && read_beneath(root, &log_rel)?.is_none() {
+    if read_beneath(root, &log_rel)?.is_none() && log_noted(root, &stem, &plain) {
         let pieces = sealed_pieces(root, &stem);
         let segs = pieces.iter().filter(|piece| !piece.snap).count();
         if !compact || segs == 0 {
+            write_plain_hash(root, &stem, &plain)?;
             return Ok(StoreOut::Unchanged);
         }
     }
@@ -1846,29 +2077,36 @@ fn store_log(
         return Ok(StoreOut::MissingAge);
     }
     let migrated = migrate_legacy(root, &log_rel)?;
-    if plaintext_matches(root, &stem, &plain) {
-        if migrated.is_some() {
-            write_plain_hash(root, &stem, &plain)?;
-            remember_digest(root, &log_rel, &plain, recipients)?;
-            return Ok(StoreOut::Migrated {
-                rel: migrated.unwrap_or_else(|| snap_file_rel(&stem, 0)),
-            });
+    let view = read_log_view(root, &log_rel, &host, scope_name)?;
+    // The view is the newest snapshot and every segment after it, and
+    // that snapshot covers every older piece. A compaction folds from it
+    // and removes them all, so it needs the view whole and nothing else.
+    if let (true, Some(why)) = (compact, &view.stopped) {
+        bail!("{}", compact_refused_line(scope_name, why));
+    }
+    if let Some(why) = &view.stopped {
+        if !opens_here(&identities_for_open(scope_name), recipients) {
+            return Ok(StoreOut::Unread { why: why.clone() });
         }
         let pieces = sealed_pieces(root, &stem);
-        let segs = pieces.iter().filter(|piece| !piece.snap).count();
-        if !compact || segs == 0 {
-            return Ok(StoreOut::Unchanged);
-        }
+        let out = seal_snapshot(root, &stem, scope_name, &plain, recipients, &pieces, false)?;
+        return Ok(match out {
+            StoreOut::Wrote { rel, .. } => StoreOut::Resealed {
+                rel,
+                why: why.clone(),
+            },
+            other => other,
+        });
     }
-    let view = read_log_view(root, &log_rel, &host, scope_name)?;
     let (Some(had), Some(has)) = (lines_by_id(&view.body), lines_by_id(body)) else {
         return seal_snapshot(
             root,
             &stem,
+            scope_name,
             &plain,
             recipients,
             &sealed_pieces(root, &stem),
-            0,
+            true,
         );
     };
     let changes = atom_changes(&had, &has);
@@ -1879,26 +2117,28 @@ fn store_log(
         .map(|piece| piece.seq)
         .max();
     let segs = pieces.iter().filter(|piece| !piece.snap).count();
-    if changes.is_empty() && view.stopped.is_none() && !(compact && segs > 0) {
+    if changes.is_empty() && !(compact && segs > 0) {
         write_plain_hash(root, &stem, &plain)?;
+        note_log(root, &stem, &plain);
+        if migrated.is_some() {
+            remember_digest(root, &log_rel, &plain, recipients)?;
+        }
         return Ok(match migrated {
             Some(rel) => StoreOut::Migrated { rel },
             None => StoreOut::Unchanged,
         });
     }
-    if snap_seq.is_none() || compact || segs >= SEGMENT_LIMIT {
-        return seal_snapshot(root, &stem, &plain, recipients, &pieces, changes.len());
+    if snap_seq.is_none() || compact {
+        let out = seal_snapshot(root, &stem, scope_name, &plain, recipients, &pieces, true)?;
+        return Ok(match out {
+            StoreOut::Wrote { rel, .. } => StoreOut::Wrote {
+                rel,
+                changes: changes.len(),
+            },
+            other => other,
+        });
     }
-    if view.stopped.is_some() {
-        let good = last_good_seq(snap_seq.unwrap_or(0), &pieces, view.segments_read);
-        let stale: Vec<SealedPiece> = pieces
-            .iter()
-            .filter(|piece| !piece.snap && piece.seq > good)
-            .cloned()
-            .collect();
-        remove_pieces(root, &stale)?;
-    }
-    let seq = pieces.iter().map(|piece| piece.seq).max().unwrap_or(0) + 1;
+    let seq = next_seq(root, &stem, &pieces);
     let over = snap_seq.unwrap_or(0);
     let mut segment = seg_header(&host, scope_name, seq, over);
     for (id, line) in &changes {
@@ -1913,12 +2153,21 @@ fn store_log(
     };
     let rel = seg_file_rel(&stem, seq, &hash8_of(segment.as_bytes()));
     write_beneath(root, &rel, &sealed)?;
+    keep_sealed(&sealed, &segment, scope_name, recipients);
     write_plain_hash(root, &stem, &plain)?;
+    note_log(root, &stem, &plain);
     remember_digest(root, &log_rel, &plain, recipients)?;
     Ok(StoreOut::Wrote {
         rel,
         changes: changes.len(),
     })
+}
+
+/// Why `ljos sync --compact` removed nothing from `scope_name`'s log.
+fn compact_refused_line(scope_name: &str, why: &str) -> String {
+    format!(
+        "sync: --compact refused: {why}, and no newer snapshot of the {scope_name} log that opens on this machine covers it, so no snapshot or segment was removed; when this machine's key is not a recipient, add the key `ljos sync --key` prints to .ljos/sync.toml"
+    )
 }
 
 fn remember_digest(root: &Path, log_rel: &str, plain: &str, recipients: &[String]) -> Result<()> {
@@ -1929,42 +2178,87 @@ fn remember_digest(root: &Path, log_rel: &str, plain: &str, recipients: &[String
     write_beneath(root, &format!("{stem}.digest"), digest.as_bytes())
 }
 
-/// The sequence of the last segment [`read_log_view`] applied, or `snap`
-/// when none was.
-fn last_good_seq(snap: u32, pieces: &[SealedPiece], applied: u32) -> u32 {
-    pieces
-        .iter()
-        .filter(|piece| !piece.snap && piece.seq > snap)
-        .take(usize::try_from(applied).unwrap_or(usize::MAX))
-        .map(|piece| piece.seq)
-        .last()
-        .unwrap_or(snap)
-}
-
 fn seal_snapshot(
     root: &Path,
     stem: &str,
+    scope_name: &str,
     plain: &str,
     recipients: &[String],
     pieces: &[SealedPiece],
-    changes: usize,
+    remove: bool,
 ) -> Result<StoreOut> {
-    let seq = pieces
-        .iter()
-        .map(|piece| piece.seq)
-        .max()
-        .map_or(0, |n| n + 1);
-    // A first snapshot is seq 0 when nothing is stored yet.
-    let seq = if pieces.is_empty() { 0 } else { seq };
+    let seq = next_seq(root, stem, pieces);
     let Some(sealed) = seal_or_missing(plain, recipients)? else {
         return Ok(StoreOut::MissingAge);
     };
     let rel = snap_file_rel(stem, seq);
     write_beneath(root, &rel, &sealed)?;
-    remove_pieces(root, pieces)?;
+    if remove && !pieces.is_empty() {
+        if let Some(why) = unfit_replacement(root, &rel, plain, scope_name) {
+            remove_beneath(root, &rel)?;
+            bail!("sync: --compact refused: {why}, so no snapshot or segment was removed");
+        }
+    }
+    keep_sealed(&sealed, plain, scope_name, recipients);
+    if remove {
+        remove_pieces(root, pieces)?;
+    }
     write_plain_hash(root, stem, plain)?;
+    note_log(root, stem, plain);
     remember_digest(root, &format!("{stem}.jsonl.age"), plain, recipients)?;
-    Ok(StoreOut::Wrote { rel, changes })
+    Ok(StoreOut::Wrote { rel, changes: 0 })
+}
+
+/// Why the snapshot a compaction wrote at `rel` cannot take the place of
+/// the pieces it removes. It must be a path `HEAD` does not have, so the
+/// commit adds it beside those removals, and read again from disk with
+/// `age -d` it must give `plain`: every atom the pack lists.
+fn unfit_replacement(root: &Path, rel: &str, plain: &str, scope_name: &str) -> Option<String> {
+    if in_head(root, rel) {
+        return Some(format!("{rel} is already in HEAD"));
+    }
+    let opened = match read_beneath(root, rel) {
+        Ok(Some(bytes)) => open_sealed_bytes_with_age(&bytes, &identities_for_open(scope_name)),
+        _ => return Some(format!("{rel} could not be read again")),
+    };
+    let opened = match opened {
+        Ok(Some(opened)) => opened,
+        Ok(None) => return Some(format!("{rel} is not sealed to this machine")),
+        Err(err) => {
+            return Some(format!(
+                "{rel} did not open again ({})",
+                err.to_string().replace('\n', " ")
+            ));
+        }
+    };
+    if opened == plain {
+        return None;
+    }
+    let count = |text: &str| {
+        split_header(text)
+            .map_or(text, |(_, _, body)| body)
+            .lines()
+            .count()
+    };
+    let (read, want) = (count(&opened), count(plain));
+    Some(if read == want {
+        format!("{rel} read again does not give the {want} atoms the pack lists")
+    } else {
+        format!("{rel} read again gives {read} atoms, not the {want} the pack lists")
+    })
+}
+
+/// A snapshot or segment of this machine's logs that differs from `HEAD`
+/// in the checkout and is still there. A commit does not stage it, so a
+/// compaction that would commit removals beside it stops.
+fn unstaged_piece(root: &Path, scope: &Scope) -> Option<String> {
+    let me = host();
+    scope.all_scopes().into_iter().find_map(|named| {
+        let [log_rel, _] = host_log_rels_for_scope(&me, &scope.name, named.name);
+        sealed_changed_from_head(root, &log_stem_dir(&log_rel))
+            .into_iter()
+            .find(|rel| root.join(rel).exists())
+    })
 }
 
 /// Snapshot sequence, segment count and sealed bytes of this machine's log,
@@ -2150,6 +2444,14 @@ fn seal_ticket_scope(
         if recipients.len() == 1 { "" } else { "s" }
     );
     let view = read_log_view(root, &log_rel, &host, scope_name)?;
+    if let Some(why) = &view.stopped {
+        return Ok((
+            format!(
+                "sync: {issue}: warning: {why}; the atoms stay in the pack, and `ljos sync` seals the {scope_name} log\n"
+            ),
+            false,
+        ));
+    }
     let desired = if view.body.is_empty() {
         ticket
     } else {
@@ -2187,6 +2489,11 @@ fn seal_ticket_scope(
                 has.len()
             ),
             matches!(stored, StoreOut::Migrated { .. }),
+        ),
+        StoreOut::Unread { why } => (unread_line(scope_name, &why), false),
+        StoreOut::Resealed { rel, why } => (
+            resealed_line(scope_name, &why, &rel, &recipients_said),
+            true,
         ),
         StoreOut::Wrote { rel, changes } => {
             let n = if changes == 0 { has.len() } else { changes };
@@ -3433,25 +3740,57 @@ fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<Stri
     // with nothing new. The taken records already hold this plaintext at
     // rest in the same state tree, and the mark is read and written the
     // way they are, below the state root with no symlink followed. A miss
-    // is kept as an empty mark; an error is not kept. Only an import
+    // is kept as a `miss` mark; an error is not kept. Only an import
     // keeps one: the doctor's other reads leave the state as they found
     // it, and a mark that cannot be read is opened again.
+    // A mark is taken only when it is signed with [`kept_key`] over this
+    // ciphertext and what it says. One that is not is opened with age, and
+    // an import writes it again.
     let rel = opened_mark_rel(bytes, identities);
-    match read_beneath(&state_base(), &rel) {
-        Ok(Some(kept)) if kept.is_empty() => return Ok(None),
-        Ok(Some(kept)) => {
-            if let Ok(text) = String::from_utf8(kept) {
-                return Ok(Some(text));
+    if let Some(key) = kept_key() {
+        if let Ok(Some(kept)) = read_beneath(&state_base(), &rel) {
+            if let Some(opened) = read_mark(&key, bytes, &kept) {
+                return Ok(opened);
             }
         }
-        Ok(None) | Err(_) => {}
     }
     let opened = open_sealed_bytes_with_age(bytes, identities)?;
     if KEEP_OPENED.with(std::cell::Cell::get) {
-        let body: &[u8] = opened.as_deref().map_or(&[], str::as_bytes);
-        let _ = write_beneath(&state_base(), &rel, body);
+        if let Some(key) = make_kept_key() {
+            let mark = mark_bytes(&key, bytes, opened.as_deref());
+            let _ = write_private_beneath(&state_base(), &rel, &mark);
+        }
     }
     Ok(opened)
+}
+
+/// A mark: the tag, a space, `open` or `miss`, a newline, and what age
+/// gave.
+fn mark_bytes(key: &[u8; 32], sealed: &[u8], opened: Option<&str>) -> Vec<u8> {
+    use sha2::Digest as _;
+    let kind = if opened.is_some() { "open" } else { "miss" };
+    let plain = opened.unwrap_or("");
+    let sum = sha2::Sha256::digest(sealed);
+    let tag = kept_tag(key, &[b"mark", &sum, kind.as_bytes(), plain.as_bytes()]);
+    format!("{tag} {kind}\n{plain}").into_bytes()
+}
+
+/// What a mark says `sealed` opens to, when its tag is right.
+fn read_mark(key: &[u8; 32], sealed: &[u8], kept: &[u8]) -> Option<Option<String>> {
+    use sha2::Digest as _;
+    let kept = std::str::from_utf8(kept).ok()?;
+    let (first, plain) = kept.split_once('\n')?;
+    let (tag, kind) = first.split_once(' ')?;
+    let sum = sha2::Sha256::digest(sealed);
+    let want = kept_tag(key, &[b"mark", &sum, kind.as_bytes(), plain.as_bytes()]);
+    if !tags_equal(tag, &want) {
+        return None;
+    }
+    match kind {
+        "open" => Some(Some(plain.to_string())),
+        "miss" if plain.is_empty() => Some(None),
+        _ => None,
+    }
 }
 
 thread_local! {
@@ -4599,7 +4938,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
         let mine: Vec<String> = scope
             .all_scopes()
             .into_iter()
-            .flat_map(|named| host_log_paths(&me, &scope.name, named.name))
+            .flat_map(|named| host_log_paths(root, &me, &scope.name, named.name))
             .collect();
         for rel in mine {
             if stageable_path(root, &rel) {
@@ -4779,7 +5118,7 @@ fn commits_to_push(root: &Path) -> bool {
 /// not even a commit already waiting.
 fn commit_log(root: &Path, scope: &str, push: bool) -> String {
     let host = host();
-    let files = host_log_paths(&host, scope, scope);
+    let files = host_log_paths(root, &host, scope, scope);
     let files: Vec<&str> = files
         .iter()
         .filter(|rel| stageable_path(root, rel))
@@ -4791,12 +5130,78 @@ fn commit_log(root: &Path, scope: &str, push: bool) -> String {
 
 /// The paths a commit of `host`'s log of `scope_name` stages: the legacy
 /// file (so a migration's deletion is committed), its digest, its old
-/// chunk directory, and the snapshot directory.
-fn host_log_paths(host: &str, primary_scope: &str, scope_name: &str) -> Vec<String> {
+/// chunk directory, and each snapshot, segment and plaintext hash in the
+/// snapshot directory, on disk or tracked. The temp file of a write that
+/// was cut off is in that directory too, and is not staged. A snapshot or
+/// segment in `HEAD` is sealed once: one that differs from `HEAD` here is
+/// not staged, and one that is gone only by `ljos sync --compact`.
+fn host_log_paths(root: &Path, host: &str, primary_scope: &str, scope_name: &str) -> Vec<String> {
     let [log, digest] = host_log_rels_for_scope(host, primary_scope, scope_name);
     let chunks = chunk_dir_rel(&log);
     let stem = log_stem_dir(&log);
-    vec![log, digest, chunks, stem]
+    let mut paths = vec![log, digest, chunks];
+    for name in list_beneath(root, &stem).unwrap_or_default() {
+        if log_piece_name(&name) {
+            paths.push(format!("{stem}/{name}"));
+        }
+    }
+    let tracked = git(root, &["ls-files", "-z", "--", &stem]).ok();
+    for rel in tracked
+        .iter()
+        .filter(|out| out.status.success())
+        .flat_map(|out| out.stdout.split(|b| *b == 0))
+        .filter_map(|rel| std::str::from_utf8(rel).ok())
+        .filter(|rel| !rel.is_empty())
+    {
+        if !paths.iter().any(|path| path == rel) {
+            paths.push(rel.to_string());
+        }
+    }
+    let changed = sealed_changed_from_head(root, &stem);
+    let compact = compact_requested();
+    paths.retain(|rel| !changed.contains(rel) || (compact && !root.join(rel).exists()));
+    paths
+}
+
+/// The snapshots and segments below `stem` whose file here is not what
+/// `HEAD` has: changed, or gone.
+fn sealed_changed_from_head(root: &Path, stem: &str) -> BTreeSet<String> {
+    let Ok(out) = git(
+        root,
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--diff-filter=MDT",
+            "--relative",
+            "HEAD",
+            "--",
+            stem,
+        ],
+    ) else {
+        return BTreeSet::new();
+    };
+    if !out.status.success() {
+        return BTreeSet::new();
+    }
+    out.stdout
+        .split(|b| *b == 0)
+        .filter_map(|rel| std::str::from_utf8(rel).ok())
+        .filter(|rel| {
+            rel.rsplit('/')
+                .next()
+                .is_some_and(|name| name != "plain.sha256" && log_piece_name(name))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// A file the snapshot directory keeps: a snapshot, a segment, or the
+/// plaintext hash.
+fn log_piece_name(name: &str) -> bool {
+    name == "plain.sha256"
+        || ((name.starts_with("snap-") || name.starts_with("seg-")) && name.ends_with(".jsonl.age"))
 }
 
 fn commit_logs(root: &Path, scope: &Scope, push: bool) -> String {
@@ -4805,7 +5210,7 @@ fn commit_logs(root: &Path, scope: &Scope, push: bool) -> String {
     let mut refs: Vec<String> = scope
         .all_scopes()
         .into_iter()
-        .flat_map(|named_scope| host_log_paths(&me, &scope.name, named_scope.name))
+        .flat_map(|named_scope| host_log_paths(root, &me, &scope.name, named_scope.name))
         .filter(|rel| stageable_path(root, rel))
         .collect();
     for rel in stale_scope_rels(root, scope) {
@@ -5440,8 +5845,17 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
     if export_log {
         let client = crate::pack()?;
         let atoms = crate::atoms_lean(&client, &client.workspace())?;
+        let said = if scope.scopes.is_empty() {
+            export(&root, &scope, &atoms)?
+        } else {
+            export_all(&root, &scope, &atoms)?
+        };
+        if let Some(rel) = unstaged_piece(&root, &scope).filter(|_| compact_requested()) {
+            bail!(
+                "{said}sync: --compact refused: {rel} differs from HEAD and a commit does not stage it, so nothing was committed"
+            );
+        }
         if scope.scopes.is_empty() {
-            let said = export(&root, &scope, &atoms)?;
             out.push_str(&said);
             out.push_str(&commit_if_sealed(
                 &root,
@@ -5450,7 +5864,6 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
                 mode == TrackerGit::Push,
             ));
         } else {
-            let said = export_all(&root, &scope, &atoms)?;
             out.push_str(&said);
             out.push_str(&commit_if_sealed_scopes(
                 &root,
@@ -9702,10 +10115,10 @@ mod tests {
 
     /// A chunk cut short after it was written, as by a torn write or a
     /// checkout that stopped, never reaches the view: a peer reads the base
-    /// and the chunks before it. The next export finds the files changed
-    /// under its digest and seals that chunk again.
+    /// and the chunks before it. The next export leaves the cut file in
+    /// place and seals the log whole into a new snapshot, once.
     #[test]
-    fn a_cut_chunk_is_left_unread_and_sealed_again() {
+    fn a_cut_chunk_is_left_unread_and_sealed_over() {
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9735,13 +10148,19 @@ mod tests {
         assert!(out.contains("did not open"), "{out}");
 
         let said = fix.sync(&atoms);
-        assert!(
-            said.contains("unchanged since the last export"),
-            "an unchanged plaintext rewrote the cut segment: {said}"
-        );
+        assert!(said.contains("sealed whole into"), "{said}");
+        assert!(said.contains("/snap-"), "{said}");
+        let again = fix.sync(&atoms);
+        assert!(again.contains("unchanged since the last export"), "{again}");
         atoms.push(note(204));
         let said = fix.sync(&atoms);
-        assert!(said.contains("seg-"), "{said}");
+        assert!(said.contains("1 changed"), "{said}");
+        assert_eq!(
+            std::fs::read(&cut).unwrap(),
+            &bytes[..bytes.len() / 2],
+            "{said}"
+        );
+        assert_ne!(fix.base_blob(), base, "{said}");
         let (view, out) = fix.peer_view();
         assert_eq!(
             view,
@@ -9749,15 +10168,13 @@ mod tests {
             "{out}"
         );
         assert_eq!(out, "");
-        assert_eq!(fix.base_blob(), base);
     }
 
-    /// Sixty-five syncs that each add a note leave the base blob as it
-    /// was. The chunks fold as they go, so the log never holds more than
-    /// log2 of its base over one chunk header, and after each sync a peer
-    /// reads every atom.
+    /// Seventy syncs that each add a note leave the base blob as it was
+    /// and add one segment each, with no fold past 64. After each sync a
+    /// peer reads every atom. `--compact` folds them into one snapshot.
     #[test]
-    fn sixty_five_syncs_fold_chunks_over_one_base() {
+    fn seventy_syncs_add_seventy_segments_over_one_base() {
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9768,7 +10185,7 @@ mod tests {
         let mut atoms: Vec<Value> = (0..300).map(note).collect();
         fix.sync(&atoms);
         let base = fix.base_blob();
-        for n in 1..=SEGMENT_LIMIT {
+        for n in 1..=70 {
             atoms.push(note(300 + n));
             let said = fix.sync(&atoms);
             assert_eq!(
@@ -9783,23 +10200,21 @@ mod tests {
             let (view, out) = fix.peer_view();
             assert_eq!(view, lines(&atoms), "sync {n}: {out}");
         }
-        atoms.push(note(300 + SEGMENT_LIMIT + 1));
-        let said = fix.sync(&atoms);
-        assert_ne!(
-            fix.base_blob(),
-            base,
-            "the sync past {SEGMENT_LIMIT} segments did not fold: {said}"
-        );
+        let said = {
+            let _compact = compact_for_this_call();
+            fix.sync(&atoms)
+        };
+        assert_ne!(fix.base_blob(), base, "--compact did not fold: {said}");
         assert!(!fix.chunk(1).is_file(), "the fold left a segment: {said}");
         let (view, out) = fix.peer_view();
         assert_eq!(view, lines(&atoms), "{out}");
     }
 
-    /// A log an older ljos left at 64 one-note chunks, the most a reader
-    /// opens, takes the next note by folding its chunks rather than by a
-    /// whole seal, and a peer reads every atom.
+    /// A log left at 64 one-note segments takes the next note as a 65th
+    /// segment, with the snapshot and the 64 left as they are, and a peer
+    /// reads every atom.
     #[test]
-    fn a_log_at_sixty_four_chunks_folds_instead_of_sealing_whole() {
+    fn a_log_at_sixty_four_segments_takes_a_sixty_fifth() {
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9827,14 +10242,16 @@ mod tests {
         let (view, out) = fix.peer_view();
         assert_eq!(view, lines(&atoms), "{out}");
 
+        let first = std::fs::read(fix.chunk(1)).unwrap();
         atoms.push(note(400));
         let said = fix.sync(&atoms);
-        assert_ne!(
+        assert_eq!(
             fix.base_blob(),
             base,
-            "64 segments and one more note did not fold: {said}"
+            "64 segments and one more note folded: {said}"
         );
-        assert!(!fix.chunk(1).exists(), "the fold left a segment: {said}");
+        assert_eq!(std::fs::read(fix.chunk(1)).unwrap(), first, "{said}");
+        assert!(fix.chunk(MAX_CHUNKS + 1).is_file(), "{said}");
         let (view, out) = fix.peer_view();
         assert_eq!(view, lines(&atoms), "{out}");
     }
@@ -10966,11 +11383,12 @@ mod tests {
         assert!(!primary.contains("cloud only"), "{primary}");
     }
 
-    /// The plaintext hash, not the ciphertext, decides a repeat. Replacing
-    /// the sealed bytes under the same atoms writes nothing, and an older
-    /// two-field digest does not seal the log again once that hash is stored.
+    /// The sealed bytes this home noted, not the plaintext hash beside the
+    /// log, decide a repeat. An older two-field digest does not seal the log
+    /// again. Sealed bytes replaced under the same atoms are read again, and
+    /// a machine that is not a recipient writes nothing and says why.
     #[test]
-    fn a_log_replaced_under_the_same_atoms_is_sealed_again() {
+    fn a_log_replaced_under_the_same_atoms_is_read_again() {
         let dir = tempfile::tempdir().unwrap();
         let _env = hold_env(dir.path());
         let scope: Scope =
@@ -10989,21 +11407,6 @@ mod tests {
         let sealed = snap_text(&root, &log_rel);
         let said = run();
         assert!(said.contains("unchanged since the last export"), "{said}");
-        let stem = log_stem_dir(&log_rel);
-        let snap = sealed_pieces(&root, &stem)
-            .into_iter()
-            .find(|piece| piece.snap)
-            .unwrap();
-        std::fs::write(root.join(&snap.rel), "another seal\n").unwrap();
-        let said = run();
-        assert!(
-            said.contains("unchanged since the last export"),
-            "a replaced ciphertext of the same atoms was sealed again: {said}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(root.join(&snap.rel)).unwrap(),
-            "another seal\n"
-        );
         let older = format!(
             "{} {}\n",
             crate::work_id(&sealed),
@@ -11012,6 +11415,20 @@ mod tests {
         std::fs::write(root.join(&digest_rel), older).unwrap();
         let said = run();
         assert!(said.contains("unchanged since the last export"), "{said}");
+        let stem = log_stem_dir(&log_rel);
+        let snap = sealed_pieces(&root, &stem)
+            .into_iter()
+            .find(|piece| piece.snap)
+            .unwrap();
+        std::fs::write(root.join(&snap.rel), "another seal\n").unwrap();
+        let said = run();
+        assert!(said.contains("warning"), "{said}");
+        assert!(!said.contains("unchanged since the last export"), "{said}");
+        assert_eq!(
+            std::fs::read_to_string(root.join(&snap.rel)).unwrap(),
+            "another seal\n"
+        );
+        assert_eq!(sealed_pieces(&root, &stem).len(), 1, "{said}");
     }
 
     #[test]

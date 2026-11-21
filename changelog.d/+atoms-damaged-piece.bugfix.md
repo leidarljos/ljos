@@ -1,0 +1,3 @@
+A sync staged every snapshot and segment of this machine's atom log as it was in the checkout, so a sealed piece that was changed or removed there was committed that way, even by a sync with nothing new.
+A committed snapshot or segment that differs from `HEAD` is now left out of the commit, and only `ljos sync --compact` commits a removal.
+A new snapshot or segment now takes the seq one past every piece in the checkout and in `HEAD`, and `ljos sync --compact` removes a piece only after it reads its new snapshot again and that snapshot, at a path `HEAD` does not have, opens to every atom the pack lists; a snapshot or segment that still differs from `HEAD` after the fold stops the compaction before it commits.

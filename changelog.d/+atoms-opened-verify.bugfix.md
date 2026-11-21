@@ -1,0 +1,2 @@
+A sync trusted any plaintext it had kept of a sealed atom log, so a changed or stale kept file could drop a new atom or keep a removed one, and the plaintext hash written after it kept the error after the files were removed.
+A kept plaintext is now used only when its signature, made with a random key kept in `sync/kept.key` below the state directory, agrees with the ciphertext it names, and is read again with `age -d` otherwise.

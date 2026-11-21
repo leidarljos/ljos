@@ -1,0 +1,2 @@
+A snapshot of this machine's atom log that `age` could not authenticate stopped every sync with new atoms with `failed to decrypt and authenticate payload chunk`.
+The next sync now seals the atoms the pack lists whole into one new snapshot once and prints a warning, as it does for a segment that does not open, so a peer takes the same atoms as from a log that opens, and an atom the pack no longer lists is dropped as on any sync.
