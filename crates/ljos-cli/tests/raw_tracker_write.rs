@@ -64,7 +64,7 @@ fn a_raw_tracker_write_under_a_runner_warns_with_the_ljos_verb() {
         ),
         (
             "vissue cancel ljos-ab12",
-            "ljos finish ljos-ab12 --status cancelled",
+            "ljos finish ljos-ab12 --status cancelled --close",
         ),
         ("vissue claim ljos-ab12", "ljos sitting ljos-ab12"),
         ("vissue release ljos-ab12", "ljos release ljos-ab12"),
@@ -78,6 +78,10 @@ fn a_raw_tracker_write_under_a_runner_warns_with_the_ljos_verb() {
         (
             "VISSUE_AGENT=saddle vissue update ljos-ab12 -s done",
             "ljos finish ljos-ab12 --lesson \"...\"",
+        ),
+        (
+            "vissue update ljos-ab12 -s cancelled",
+            "ljos finish ljos-ab12 --status cancelled --close",
         ),
         (
             "vissue update ljos-ab12 -s STARTED",
@@ -96,9 +100,11 @@ fn a_raw_tracker_write_under_a_runner_warns_with_the_ljos_verb() {
         if instead.starts_with("ljos finish") {
             assert!(
                 said.contains(&format!("so run `{instead}`.")),
-                "{line} still offers a close:\n{said}"
+                "{line} named more than the finish:\n{said}"
             );
-            assert!(!said.contains("--close"), "{line}:\n{said}");
+            if !instead.contains("--close") {
+                assert!(!said.contains("--close"), "{line}:\n{said}");
+            }
         }
     }
 }
@@ -332,7 +338,7 @@ fn a_vissue_mcp_write_under_a_runner_warns() {
         (
             serde_json::json!({"id": "ljos-ab12"}),
             "mcp__vissue__vissue_cancel",
-            "ljos finish ljos-ab12 --status cancelled",
+            "ljos finish ljos-ab12 --status cancelled --close",
         ),
         (
             serde_json::json!({"id": "ljos-ab12"}),
@@ -376,7 +382,7 @@ fn a_vissue_mcp_write_under_a_runner_warns() {
             said.contains(instead),
             "{tool} did not name {instead}:\n{said}"
         );
-        if instead.starts_with("ljos finish") {
+        if instead.starts_with("ljos finish") && !instead.contains("--close") {
             assert!(!said.contains("--close"), "{tool}:\n{said}");
         }
     }

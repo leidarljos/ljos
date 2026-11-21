@@ -32258,10 +32258,13 @@ fn raw_tracker_write(line: &str) -> Option<Rule> {
 }
 
 /// The tracker verb a command writes with and the ljos command to run
-/// instead, its issue carried over. `None` for a read. A close, a cancel,
-/// or a state of DONE or CANCELLED maps to a finish with no `--close`.
-/// That finish ends the sitting and leaves the ticket open, so it is not
-/// the same write, and its `--status cancelled` records nothing.
+/// instead, its issue carried over. `None` for a read. A close or a state
+/// of DONE maps to a finish with no `--close`. That finish ends the
+/// sitting and leaves the ticket open, so it is not the same write. A
+/// cancel or a state of CANCELLED maps to `--status cancelled --close`,
+/// since a cancelled finish with no `--close` only releases the claim.
+/// A runner is refused on that close unless a standing grant covers this
+/// seat and this ticket.
 fn tracker_write_instead(words: &[String]) -> Option<(String, String)> {
     let (at, _) = prefix_end(words);
     let words = &words[at..];
@@ -32299,13 +32302,13 @@ fn tracker_write_instead(words: &[String]) -> Option<(String, String)> {
         "claim" => format!("ljos sitting {id}"),
         "release" => format!("ljos release {id}"),
         "close" => format!("ljos finish {id} --lesson \"...\""),
-        "cancel" => format!("ljos finish {id} --status cancelled"),
+        "cancel" => format!("ljos finish {id} --status cancelled --close"),
         "update" => match value(&["-s", "--state"])
             .map(str::to_ascii_uppercase)
             .as_deref()
         {
             Some("DONE") => format!("ljos finish {id} --lesson \"...\""),
-            Some("CANCELLED") => format!("ljos finish {id} --status cancelled"),
+            Some("CANCELLED") => format!("ljos finish {id} --status cancelled --close"),
             Some("STARTED") => format!("ljos sitting {id}"),
             _ => format!("ljos note {id} \"...\""),
         },
