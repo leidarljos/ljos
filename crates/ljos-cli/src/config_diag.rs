@@ -327,6 +327,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_CLAIM_NOW",
+        default: "unset, the clock",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_CLOUD_AGE_SECRET",
         default: "unset",
         group: "ljos",

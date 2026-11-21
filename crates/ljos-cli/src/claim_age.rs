@@ -87,9 +87,22 @@ pub fn suffix(who: Option<&str>, stamp: Option<&str>, now: DateTime<FixedOffset>
 
 /// Now in this machine's zone, as a fixed offset the age math can share
 /// with a stamp.
+///
+/// `LJOS_CLAIM_NOW`, an RFC 3339 instant, is now instead, so a test that
+/// prints a claim age does not depend on how long its runs take. A value
+/// that does not parse is ignored.
 #[must_use]
 pub fn now_here() -> DateTime<FixedOffset> {
-    chrono::Local::now().fixed_offset()
+    now_from(std::env::var("LJOS_CLAIM_NOW").ok().as_deref())
+}
+
+/// `raw` as an instant in this machine's zone, or the clock when it does
+/// not parse. Org stamps are local wall time, so the instant must carry
+/// the local offset, whatever offset `raw` was written in.
+fn now_from(raw: Option<&str>) -> DateTime<FixedOffset> {
+    raw.and_then(|raw| DateTime::parse_from_rfc3339(raw.trim()).ok())
+        .map(|at| at.with_timezone(&chrono::Local).fixed_offset())
+        .unwrap_or_else(|| chrono::Local::now().fixed_offset())
 }
 
 #[cfg(test)]
@@ -158,5 +171,32 @@ mod tests {
         assert_eq!(at("[2026-11-16 Mon 12:00]", now).as_deref(), Some("3h"));
         assert_eq!(at("[2026-11-14 Sat 15:00]", now).as_deref(), Some("2d"));
         assert_eq!(days("[2026-11-14 Sat 15:00]", now), Some(2));
+    }
+
+    #[test]
+    fn two_writings_of_one_instant_age_the_same() {
+        let utc = now_from(Some("2026-11-21T03:15:30+00:00"));
+        let east = now_from(Some(" 2026-11-21T05:15:30+02:00 "));
+        assert_eq!(utc, east);
+        assert_eq!(utc.offset(), east.offset());
+        let here = chrono::Utc
+            .with_ymd_and_hms(2026, 11, 21, 3, 15, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        let stamp = here.format("[%Y-%m-%d %a %H:%M]").to_string();
+        assert_eq!(at(&stamp, utc).as_deref(), Some("just now"));
+        assert_eq!(at(&stamp, east).as_deref(), Some("just now"));
+        assert_eq!(days(&stamp, east), Some(0));
+    }
+
+    #[test]
+    fn an_unparsable_instant_is_the_clock() {
+        for raw in [None, Some(""), Some("  "), Some("2026-11-21"), Some("soon")] {
+            let before = chrono::Local::now().fixed_offset();
+            let now = now_from(raw);
+            let after = chrono::Local::now().fixed_offset();
+            assert!(before <= now && now <= after, "{raw:?}: {now}");
+            assert_eq!(now.offset(), before.offset(), "{raw:?}");
+        }
     }
 }
