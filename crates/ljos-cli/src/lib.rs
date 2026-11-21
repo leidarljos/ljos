@@ -41359,9 +41359,10 @@ fn graph_holds(issue: &str) -> bool {
 
 /// Hand a session node back before it is terminal: ready again, assignee
 /// cleared, generation moved. A node the claim graph no longer holds (a
-/// lease reclaim freed it, a completion ended it, the graph never had it)
-/// still hands back a tracker heading left STARTED under this holder or
-/// under nobody.
+/// lease reclaim freed it, the graph never had it) still hands back a
+/// tracker heading left STARTED under this holder or under nobody. A node
+/// a completion already ended is left as it is, and the release prints
+/// nothing.
 ///
 /// # Errors
 ///
