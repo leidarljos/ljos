@@ -270,6 +270,53 @@ fn a_taken_back_batch_leaves_the_issues_lock_file() {
 }
 
 #[test]
+fn a_commit_another_writer_holds_off_stamps_no_project() {
+    use std::os::unix::io::AsRawFd as _;
+    let world = World::new();
+    other_project(&world);
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(world.tracker().join(".ljos-commit.lock"))
+        .unwrap();
+    // SAFETY: flock on a descriptor this test owns until it returns.
+    assert_eq!(
+        unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let before = world.commits();
+    let file = world.write(
+        "rows.jsonl",
+        format!(
+            "{{\"title\": \"Under demo\", \"parent\": \"{ISSUE}\"}}\n{{\"title\": \"Under other\", \"parent\": \"other-c3d4\"}}\n"
+        ),
+    );
+    let filed = world
+        .command(env!("CARGO_BIN_EXE_ljos"))
+        .env("LJOS_TRACKER_LOCK_WAIT", "0")
+        .args(["file", "--from", &file])
+        .output()
+        .unwrap();
+    assert!(filed.status.success(), "{}", said(&filed));
+    assert!(
+        stderr(&filed).contains("so this write is on disk and not committed"),
+        "{}",
+        said(&filed)
+    );
+    assert_eq!(world.commits(), before);
+    for project in ["demo", "other"] {
+        let org = std::fs::read_to_string(
+            world
+                .tracker()
+                .join(format!("Software/{project}/issues.org")),
+        )
+        .unwrap();
+        assert!(!org.contains("Filed by"), "{project} was stamped: {org}");
+    }
+    drop(held);
+}
+
+#[test]
 fn a_csv_header_named_twice_is_refused_and_nothing_is_filed() {
     let world = World::new();
     let before = world.commits();
