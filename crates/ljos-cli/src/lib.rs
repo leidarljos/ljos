@@ -69184,11 +69184,12 @@ mod tests {
         std::env::remove_var("LJOS_SEAT");
     }
 
-    /// A claim another conversation of this seat left, named on the tracker
-    /// as `Claimed by <seat>`, is taken over the way `ljos claim` takes it
-    /// over. Passing `--assignee` of the seat does not.
+    /// `complete` takes over a claim another conversation of this seat
+    /// left, named on the tracker as `Claimed by <seat>`, the way
+    /// `ljos claim` takes it over, then completes it. Passing `--assignee`
+    /// of the seat does not.
     #[test]
-    fn finish_takes_over_a_claim_another_conversation_of_this_seat_left() {
+    fn complete_takes_over_a_claim_another_conversation_of_this_seat_left() {
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("holder");
@@ -69228,8 +69229,8 @@ mod tests {
         if let Some(parent) = hold.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        // The graph line is not this process's scope, so the finish path
-        // that completes as the old actor does not apply. The seat line is
+        // The graph line is not this process's scope, so the path that
+        // completes as the old actor does not apply. The seat line is
         // what `ljos claim` uses.
         std::fs::write(
             &hold,
@@ -69241,7 +69242,7 @@ mod tests {
         let said = with_fake_on_path(&bin, || {
             super::complete_as(issue, Some("done"), new_name, None, true)
         });
-        let said = said.expect("finish takes over this seat's claim");
+        let said = said.expect("complete takes over this seat's claim");
         assert!(
             said.contains("completed"),
             "the claim graph did not complete under this conversation: {said}"
@@ -69257,7 +69258,7 @@ mod tests {
         );
         assert!(
             calls.contains(&format!("complete {new_actor}")),
-            "finish did not complete as this conversation: {calls}"
+            "complete did not complete as this conversation: {calls}"
         );
         assert_eq!(std::fs::read_to_string(&state).unwrap(), new_actor);
         for var in [
