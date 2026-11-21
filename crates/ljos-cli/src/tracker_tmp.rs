@@ -4,7 +4,8 @@
 //! beside it and renaming that over it. A write that fails, panics or
 //! returns early drops the guard, and the drop removes the temporary. A
 //! process killed between the write and the rename leaves one behind;
-//! [`sweep_stale`] removes those once they are an hour old.
+//! [`sweep_stale`] removes those once they are an hour old and the
+//! process named in them is gone.
 
 use std::collections::HashSet;
 use std::io::Write as _;
@@ -13,8 +14,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// A temporary younger than this may belong to a writer that is still
-/// running, so the sweep leaves it.
+/// The sweep leaves a temporary younger than this even when its writer is
+/// gone. Age alone never removes one: a writer stopped for an hour, or a
+/// clock stepped forward, still owns its temporary.
 pub(crate) const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -113,8 +115,35 @@ pub(crate) fn is_temp_name(name: &str) -> bool {
         .is_some_and(|at| at > 0 && at + ".tmp.".len() < rest.len())
 }
 
-/// Remove temporaries in `dir` older than [`STALE_AFTER`]. Returns how
-/// many went. A file that cannot be read or removed is left.
+/// The writer pid in a temporary's name: the digits after `.tmp.` up to
+/// the first `-`. Both this module and vissue put it there.
+pub(crate) fn temp_writer_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix('.')?;
+    let at = rest.find(".tmp.")?;
+    let suffix = &rest[at + ".tmp.".len()..];
+    let pid = suffix.split('-').next()?;
+    if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    pid.parse().ok().filter(|pid| *pid > 0)
+}
+
+/// Whether a process with `pid` exists. One owned by another user still
+/// counts: `kill` then fails with `EPERM`.
+fn writer_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 only probes for the process; nothing is delivered.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Remove temporaries in `dir` older than [`STALE_AFTER`] whose writer pid
+/// is no longer running. Returns how many went. A file with no pid in its
+/// name, or that cannot be read or removed, is left.
 pub(crate) fn sweep_stale(dir: &Path) -> usize {
     sweep_older_than(dir, STALE_AFTER)
 }
@@ -142,8 +171,12 @@ fn sweep_older_than(dir: &Path, age: Duration) -> usize {
     let mut gone = 0;
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if !name.to_str().is_some_and(is_temp_name) {
+        let Some(name) = name.to_str().filter(|name| is_temp_name(name)) else {
             continue;
+        };
+        match temp_writer_pid(name) {
+            Some(pid) if !writer_alive(pid) => {}
+            _ => continue,
         }
         let Ok(meta) = entry.metadata() else {
             continue;
@@ -164,7 +197,7 @@ fn sweep_older_than(dir: &Path, age: Duration) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn temps(dir: &Path) -> Vec<String> {
@@ -226,31 +259,82 @@ mod tests {
         assert!(temps(dir.path()).is_empty());
     }
 
+    /// The pid of a process that has exited and been reaped.
+    pub(crate) fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    fn age(path: &Path, by: Duration) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - by)
+            .unwrap();
+    }
+
     #[test]
     fn the_sweep_takes_old_temporaries_and_leaves_young_ones_and_others() {
         let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join(".issues.org.tmp.1-2-3");
-        let young = dir.path().join(".issues.org.tmp.4-5-6");
+        let gone = dead_pid();
+        let old = dir.path().join(format!(".issues.org.tmp.{gone}-2-3"));
+        let young = dir.path().join(format!(".issues.org.tmp.{gone}-5-6"));
         let board = dir.path().join("issues.org");
         let dotted = dir.path().join(".ljos-commit.pending");
         let bare = dir.path().join(".tmp.x");
         for path in [&old, &young, &board, &dotted, &bare] {
             std::fs::write(path, "x").unwrap();
         }
-        let hour_ago = SystemTime::now() - STALE_AFTER - Duration::from_secs(5);
         for path in [&old, &board, &dotted, &bare] {
-            std::fs::File::options()
-                .write(true)
-                .open(path)
-                .unwrap()
-                .set_modified(hour_ago)
-                .unwrap();
+            age(path, STALE_AFTER + Duration::from_secs(5));
         }
         assert_eq!(sweep_stale(dir.path()), 1);
         assert!(!old.exists());
         for path in [&young, &board, &dotted, &bare] {
             assert!(path.exists(), "{} was swept", path.display());
         }
+    }
+
+    /// A writer that is still running after an hour, stopped or slow or
+    /// behind a clock step, keeps its temporary. So does one whose name
+    /// carries no pid. A dead writer's goes.
+    #[test]
+    fn the_sweep_leaves_an_old_temporary_whose_writer_is_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let mine = dir
+            .path()
+            .join(format!(".issues.org.tmp.{}-1-0", std::process::id()));
+        let init = dir.path().join(".issues.org.tmp.1-1-0");
+        let vissue = dir
+            .path()
+            .join(format!(".issues.org.tmp.{}-7", std::process::id()));
+        let unnamed = dir.path().join(".issues.org.tmp.x-1-0");
+        let dead = dir
+            .path()
+            .join(format!(".issues.org.tmp.{}-1-0", dead_pid()));
+        for path in [&mine, &init, &vissue, &unnamed, &dead] {
+            std::fs::write(path, "half a board").unwrap();
+            age(path, STALE_AFTER * 3);
+        }
+        assert_eq!(sweep_stale(dir.path()), 1);
+        for path in [&mine, &init, &vissue, &unnamed] {
+            assert!(path.exists(), "{} was swept", path.display());
+        }
+        assert!(!dead.exists());
+    }
+
+    #[test]
+    fn the_writer_pid_is_the_number_before_the_first_dash() {
+        assert_eq!(temp_writer_pid(".issues.org.tmp.123-45-6"), Some(123));
+        assert_eq!(temp_writer_pid(".pins.tmp.77-1"), Some(77));
+        assert_eq!(temp_writer_pid(".pins.tmp.77"), Some(77));
+        assert_eq!(temp_writer_pid(".pins.tmp.x-1"), None);
+        assert_eq!(temp_writer_pid(".pins.tmp.0-1"), None);
+        assert_eq!(temp_writer_pid(".pins.tmp.-1"), None);
+        assert_eq!(temp_writer_pid("pins.tmp.1-1"), None);
     }
 
     #[test]

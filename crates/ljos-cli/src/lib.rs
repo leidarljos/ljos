@@ -60493,8 +60493,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let issues = seeded_tracker(dir.path());
         let probe = issues.parent().unwrap();
-        let old = probe.join(".issues.org.tmp.77-1-0");
-        let young = probe.join(".issues.org.tmp.77-2-1");
+        let gone = tracker_tmp::tests::dead_pid();
+        let old = probe.join(format!(".issues.org.tmp.{gone}-1-0"));
+        let young = probe.join(format!(".issues.org.tmp.{gone}-2-1"));
         for path in [&old, &young] {
             std::fs::write(path, "half a board").unwrap();
         }
