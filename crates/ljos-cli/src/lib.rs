@@ -45383,9 +45383,10 @@ fn sitting_wide(word: &str) -> bool {
 }
 
 /// A ticket id in `text` that is not `issue`, when `issue` itself is not
-/// named. The note is about that other ticket.
+/// named. The note is about that other ticket. The ids are the
+/// [`name_tokens`] of `text`, compared in Unicode lowercase.
 fn names_another_ticket(issue: &str, text: &str) -> bool {
-    let issue = issue.trim().to_ascii_lowercase();
+    let issue = issue.trim().to_lowercase();
     let Some((prefix, _)) = issue.rsplit_once('-') else {
         return false;
     };
@@ -45395,10 +45396,8 @@ fn names_another_ticket(issue: &str, text: &str) -> bool {
     let prefix = format!("{prefix}-");
     let mut other = false;
     let mut here = false;
-    for token in text
-        .to_ascii_lowercase()
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
-    {
+    for token in name_tokens(text) {
+        let token = text[token].to_lowercase();
         if token == issue {
             here = true;
         } else if token.starts_with(&prefix) && token.len() > prefix.len() {
@@ -73164,6 +73163,13 @@ lesson, due yesterday, seat ada
                 false,
             ),
             (
+                "sha-1-lk1e",
+                "Fix the damper",
+                "",
+                "On sha-1-wxyz the damper needs oil.",
+                false,
+            ),
+            (
                 "a-b-lk1e",
                 "Fix the a-b draft",
                 "",
@@ -73390,10 +73396,33 @@ lesson, due yesterday, seat ada
 
     /// A letter outside ASCII is part of the token, in the title and the
     /// body. `école-2` on `école-1` keeps `école-2`, not `cole-2`, and an
-    /// exact project name in any script is still removed.
+    /// exact project name in any script is still removed. Another ticket's
+    /// id is read from the same tokens, so `café-1-wxyz` is another
+    /// `café-1` ticket and `école-2` is not a `cole` ticket.
     #[test]
     fn a_name_token_keeps_letters_outside_ascii() {
         let rows: &[TokenRow] = &[
+            (
+                "cole-lk1e",
+                "Fix école-2 crash",
+                "",
+                "école-2 must run weekly.",
+                true,
+            ),
+            (
+                "café-1-lk1e",
+                "Fix the damper",
+                "",
+                "On café-1-wxyz the damper needs oil.",
+                false,
+            ),
+            (
+                "école-lk1e",
+                "Fix the damper",
+                "",
+                "On école-wxyz the damper needs oil.",
+                false,
+            ),
             (
                 "café-1-lk1e",
                 "Fix café-2 crash",
