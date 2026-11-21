@@ -801,6 +801,22 @@ fn current_deadline(method: &str) -> String {
         .unwrap_or_else(|| deadline_stamp(admission_retry_budget(method, budget())))
 }
 
+#[cfg(test)]
+thread_local! {
+    static RETRY_JITTER: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    static RETRY_AFTER_WAITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The spread added to a `Retry-After` wait, so seats that were refused
+/// together do not ask again on the same instant.
+fn retry_jitter() -> Duration {
+    #[cfg(test)]
+    if let Some(fixed) = RETRY_JITTER.with(std::cell::Cell::get) {
+        return fixed;
+    }
+    Duration::from_millis((std::process::id() as u64).wrapping_mul(17) % 80)
+}
+
 fn retry_after_of(header: Option<&str>) -> Option<Duration> {
     let raw = header?.trim();
     if raw.is_empty() {
@@ -1813,8 +1829,11 @@ impl PacksetClient {
                 .filter(|wait| !deadline_passed() && retry_room(*wait))
             {
                 Some(wait) => {
-                    let jitter_ms = (std::process::id() as u64).wrapping_mul(17) % 80;
-                    std::thread::sleep(wait.saturating_add(Duration::from_millis(jitter_ms)));
+                    #[cfg(test)]
+                    RETRY_AFTER_WAITS.with(|n| n.set(n.get() + 1));
+                    let room = held_remaining().unwrap_or_default().saturating_sub(wait);
+                    let jitter = retry_jitter().min(room / 2);
+                    std::thread::sleep(wait.saturating_add(jitter));
                     if deadline_passed() {
                         return Err(degrade(&answer.body, method, true));
                     }
@@ -3573,6 +3592,18 @@ mod tests {
         }
     }
 
+    struct FixedJitter(Option<std::time::Duration>);
+    impl FixedJitter {
+        fn set(jitter: std::time::Duration) -> Self {
+            Self(super::RETRY_JITTER.with(|cell| cell.replace(Some(jitter))))
+        }
+    }
+    impl Drop for FixedJitter {
+        fn drop(&mut self) {
+            super::RETRY_JITTER.with(|cell| cell.set(self.0));
+        }
+    }
+
     fn set_pack_timeout_ms(ms: &str) -> TimeoutGuard {
         let prev = std::env::var_os("PACKSET_TIMEOUT_MS");
         unsafe { std::env::set_var("PACKSET_TIMEOUT_MS", ms) };
@@ -3776,7 +3807,10 @@ mod tests {
         use std::sync::Arc;
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
-        let _restore = set_pack_timeout_ms("100");
+        // Each stall is twice the call budget, and the budget leaves room for
+        // the 50 ms busy pause on a slow runner.
+        let _restore = set_pack_timeout_ms("300");
+        let _jitter = FixedJitter::set(std::time::Duration::ZERO);
         unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
 
         #[derive(Clone, Copy, Debug)]
@@ -3929,8 +3963,11 @@ mod tests {
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(mut sock) = stream else { break };
-                    let _ = sock.set_read_timeout(Some(std::time::Duration::from_millis(500)));
-                    loop {
+                    let sends_bg = Arc::clone(&sends_bg);
+                    let gate_bg = Arc::clone(&gate_bg);
+                    // A stalled socket must not hold up the next accept.
+                    std::thread::spawn(move || loop {
+                        let _ = sock.set_read_timeout(Some(std::time::Duration::from_millis(1000)));
                         let mut buf = [0u8; 4096];
                         let Ok(n) = sock.read(&mut buf) else { break };
                         if n == 0 {
@@ -3942,7 +3979,7 @@ mod tests {
                             if matches!(kind, CaseResponse::PreWireGateEagain)
                                 && !gate_bg.swap(true, Ordering::SeqCst)
                             {
-                                std::thread::sleep(std::time::Duration::from_millis(200));
+                                std::thread::sleep(std::time::Duration::from_millis(600));
                                 break;
                             }
                             let _ = sock.write_all(
@@ -3960,7 +3997,7 @@ mod tests {
                                 }
                                 CaseResponse::PostWireEagain => {
                                     if idx == 0 {
-                                        std::thread::sleep(std::time::Duration::from_millis(200));
+                                        std::thread::sleep(std::time::Duration::from_millis(600));
                                         break;
                                     }
                                     let _ = sock.write_all(
@@ -3999,7 +4036,7 @@ mod tests {
                             break;
                         }
                         break;
-                    }
+                    });
                 }
             });
 
@@ -4009,8 +4046,13 @@ mod tests {
             } else {
                 unsafe { std::env::remove_var("PACKSET_TOKEN") };
             }
-            let _busy = super::BusyRetry::enter();
-            let _remember = super::RememberRetry::enter();
+            // Only the busy cases hold the memory retry guards. With them
+            // held, a 503 on GET or POST /v1/atoms is asked again by
+            // ask_until_free and never reaches the Retry-After branch.
+            let busy = matches!(case.response, CaseResponse::Busy503);
+            let _busy = busy.then(super::BusyRetry::enter);
+            let _remember = busy.then(super::RememberRetry::enter);
+            let waits_before = super::RETRY_AFTER_WAITS.with(std::cell::Cell::get);
             let client = super::PacksetClient::new(format!("http://{addr}"));
             let body = if case.method == "GET" || case.method == "DELETE" {
                 None
@@ -4023,7 +4065,7 @@ mod tests {
                 &[],
                 body,
                 bearer,
-                std::time::Duration::from_millis(120),
+                std::time::Duration::from_millis(400),
             );
             assert_eq!(
                 res.is_ok(),
@@ -4039,6 +4081,13 @@ mod tests {
                 "case ({}, {:?}) send count mismatch",
                 case.method,
                 case.response
+            );
+            let waits = super::RETRY_AFTER_WAITS.with(std::cell::Cell::get) - waits_before;
+            let want = usize::from(matches!(case.response, CaseResponse::RetryAfter503));
+            assert_eq!(
+                waits, want,
+                "case ({}, {:?}) Retry-After branch ran {waits} time(s)",
+                case.method, case.response
             );
         }
     }
