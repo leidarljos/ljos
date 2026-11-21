@@ -704,13 +704,6 @@ impl HeldDeadline {
         HELD_DEADLINE.with(|cell| *cell.borrow_mut() = Some(stamp));
         Self { prev, active: true }
     }
-
-    fn refresh(&self, budget: Duration) {
-        if self.active {
-            let stamp = deadline_stamp(budget);
-            HELD_DEADLINE.with(|cell| *cell.borrow_mut() = Some(stamp));
-        }
-    }
 }
 
 impl Drop for HeldDeadline {
@@ -1606,9 +1599,8 @@ struct AttemptErr {
     bytes_sent: bool,
 }
 
-struct RetryCtx<'a> {
+struct RetryCtx {
     outer_clock: Option<Instant>,
-    held: Option<&'a HeldDeadline>,
 }
 
 enum Gate {
@@ -1774,7 +1766,7 @@ impl PacksetClient {
         }
         let budget = tightened(method, timeout);
         let outer_clock = clock_deadline();
-        let held = HeldDeadline::enter(budget);
+        let _held = HeldDeadline::enter(budget);
         let call = Wire {
             method,
             path,
@@ -1797,16 +1789,8 @@ impl PacksetClient {
             None
         };
         let _call_budget = CallRetryBudget::enter();
-        let answer = self.exchange_resilient(
-            addr,
-            &call,
-            allow,
-            budget,
-            RetryCtx {
-                outer_clock,
-                held: Some(&held),
-            },
-        )?;
+        let answer =
+            self.exchange_resilient(addr, &call, allow, budget, RetryCtx { outer_clock })?;
         let answer = match answer.status {
             408 => return Err(degrade(&answer.body, method, true)),
             503 if crate::pack_warming(&answer.body) => answer,
@@ -1834,16 +1818,7 @@ impl PacksetClient {
                     if deadline_passed() {
                         return Err(degrade(&answer.body, method, true));
                     }
-                    self.exchange_resilient(
-                        addr,
-                        &call,
-                        allow,
-                        budget,
-                        RetryCtx {
-                            outer_clock,
-                            held: None,
-                        },
-                    )?
+                    self.exchange_resilient(addr, &call, allow, budget, RetryCtx { outer_clock })?
                 }
                 None => return Err(degrade(&answer.body, method, deadline_passed())),
             },
@@ -1876,7 +1851,7 @@ impl PacksetClient {
         call: &Wire<'_>,
         allow: bool,
         budget: Duration,
-        ctx: RetryCtx<'_>,
+        ctx: RetryCtx,
     ) -> Result<Answer, Error> {
         let wrap_io = |io: std::io::Error, bytes_sent: bool| {
             if bytes_sent && is_write(call.method) {
@@ -1899,14 +1874,8 @@ impl PacksetClient {
         }
         let _retrying = TransientRetry::enter();
         let mut pause = RETRY_FIRST;
-        let mut retries = 0u32;
         let mut per_try = budget;
         loop {
-            if retries > 0 {
-                if let Some(held) = ctx.held {
-                    held.refresh(per_try);
-                }
-            }
             let attempt_started = Instant::now();
             let res = {
                 let _clock = PackClock::enter(per_try);
@@ -1930,7 +1899,6 @@ impl PacksetClient {
                             transient_charge(wait);
                             if let Some(next_room) = transient_room(ctx.outer_clock) {
                                 per_try = budget.min(next_room);
-                                retries = retries.saturating_add(1);
                                 pause = pause.saturating_mul(2).min(RETRY_CAP);
                                 continue;
                             }
@@ -1981,16 +1949,8 @@ impl PacksetClient {
             if deadline_passed() {
                 return Err(crate::reported_busy_error());
             }
-            let next = self.exchange_resilient(
-                addr,
-                call,
-                allow,
-                timeout,
-                RetryCtx {
-                    outer_clock,
-                    held: None,
-                },
-            )?;
+            let next =
+                self.exchange_resilient(addr, call, allow, timeout, RetryCtx { outer_clock })?;
             if crate::response_is_starting(Some(next.status), &next.body) {
                 return Err(crate::starting_transport_error());
             }
@@ -3652,6 +3612,61 @@ mod tests {
         let atoms = client.atoms_of_kind("seat", "lesson").unwrap();
         assert_eq!(atoms.len(), 1);
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    /// A transient retry resends the deadline the call started with; it
+    /// does not stamp a later one.
+    #[test]
+    fn a_transient_retry_keeps_the_first_deadline() {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let _restore = set_pack_timeout_ms("120");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_bg = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { break };
+                let seen_bg = Arc::clone(&seen_bg);
+                std::thread::spawn(move || {
+                    let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    let mut buf = [0u8; 4096];
+                    let Ok(n) = sock.read(&mut buf) else { return };
+                    let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    let first = {
+                        let mut seen = seen_bg.lock().unwrap();
+                        seen.push(req);
+                        seen.len() == 1
+                    };
+                    if first {
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                        return;
+                    }
+                    let body = r#"{"atoms":[{"id":"a1"}]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes());
+                });
+            }
+        });
+        let client = super::PacksetClient::new(format!("http://{addr}"));
+        let atoms = client.atoms_of_kind("seat", "lesson").unwrap();
+        assert_eq!(atoms.len(), 1);
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        let first = deadline_of(&seen[0]);
+        assert!(first > 0, "{}", seen[0]);
+        assert_eq!(
+            deadline_of(&seen[1]),
+            first,
+            "the retry moved X-Packset-Deadline"
+        );
     }
 
     #[test]
