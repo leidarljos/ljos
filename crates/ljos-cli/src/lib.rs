@@ -40989,8 +40989,9 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
         }
         Err(e) => {
             let text = e.to_string();
-            // A tracker id maps to one node. When an earlier sitting finished
-            // it, this is a new sitting on the same work: reopen, then claim.
+            // A tracker id maps to one node. When a completion ended it
+            // (`ljos complete`, or `finish --close`), this is a new sitting
+            // on the same work: reopen, then claim.
             if ["status done", "status failed", "status cancelled"]
                 .iter()
                 .any(|s| text.contains(s))

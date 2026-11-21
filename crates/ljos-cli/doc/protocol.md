@@ -569,8 +569,10 @@ under equal weights is a count; under calibrated rows it is not.
   named. `ljos playbook ISSUE NAME` or `ljos sitting ISSUE --playbook NAME`.
 - `playbook: ISSUE is bound to NAME until finish or release`: mid-sitting
   turns re-read that note. A new task is a new sitting.
-- A claim on an issue whose earlier sitting finished reopens its session
-  node and takes it: a new sitting on old work, with the ledger kept.
+- A claim on an issue whose session node was completed, by `ljos complete`
+  or `finish --close`, reopens the node and takes it: a new sitting on old
+  work, with the ledger kept. A node a plain `finish` handed back is ready
+  and is claimed as it is.
 - `not a deed accession`: `--why` on `forget` and `trust` takes accessions
   from `deedar`, never free text.
 - `the pack writer did not answer`: the pack is down, not empty.
