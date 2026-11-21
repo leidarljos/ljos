@@ -53873,8 +53873,24 @@ pub fn tcb_check(argv: &[String]) -> Option<String> {
 
 /// [`tcb_check`] for a command that will run in `cwd`.
 fn tcb_check_in(argv: &[String], cwd: Option<&Path>) -> Option<String> {
+    tcb_check_in_with_env(argv, cwd, &[])
+}
+
+/// [`tcb_check`] for a command that will run in `cwd`, passing `extra_env`
+/// only to the spawned `ljos-policyd` child process.
+pub fn tcb_check_in_with_env(
+    argv: &[String],
+    cwd: Option<&Path>,
+    extra_env: &[(&str, &str)],
+) -> Option<String> {
     let bin = policyd_bin()?;
-    Some(tcb_answer_in(&bin, argv, guard_timeout(), cwd))
+    Some(tcb_answer_in_with_env(
+        &bin,
+        argv,
+        guard_timeout(),
+        cwd,
+        extra_env,
+    ))
 }
 
 /// What `bin check -- argv` says within `deadline`, as a verdict line.
@@ -53898,6 +53914,16 @@ pub fn tcb_answer_in(
     argv: &[String],
     deadline: std::time::Duration,
     cwd: Option<&Path>,
+) -> String {
+    tcb_answer_in_with_env(bin, argv, deadline, cwd, &[])
+}
+
+fn tcb_answer_in_with_env(
+    bin: &Path,
+    argv: &[String],
+    deadline: std::time::Duration,
+    cwd: Option<&Path>,
+    extra_env: &[(&str, &str)],
 ) -> String {
     use std::io::Read as _;
     // A missing file is not a fault. CI and a fresh install have no
@@ -53957,6 +53983,9 @@ pub fn tcb_answer_in(
         // the command will run in. The hook already has that directory.
         if let Some(dir) = run_dir.as_deref() {
             cmd.current_dir(dir);
+        }
+        for (k, v) in extra_env {
+            cmd.env(k, v);
         }
         cmd.spawn()
     };
