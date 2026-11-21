@@ -18,6 +18,7 @@
 | =LJOS_HUD_SOCKET= | summon socket; else =$XDG_RUNTIME_DIR/ljos/hud.sock= |
 | =LJOS_TRACKER_GIT= | =commit= commits the ticket's =issues.org=, and the sitting's and finish's sealed sync log, without pushing; =off= skips the commit and push, and the sync in passing; unset, commit and push. A landed commit or push is not printed. A refusal is one sentence. =--verbose= prints the lines. =ljos sync= by hand always pushes |
 | =LJOS_TRACKER_PUSH_WAIT= | seconds the tracker push after a claim or finish waits; 5 when unset |
+| =LJOS_CLAIM_NOW= | the instant claim ages are counted to, in RFC 3339 such as =2026-11-16T12:00:00+00:00= in any offset, for tests that print a claim age; unset or unparsable, the clock |
 | =LJOS_SEARCH_BUSY_WAIT= | seconds =ljos search=, =ljos recall=, and =ljos remember= keep asking a pack that reports busy; 2 when unset, =0= does not wait. A =Retry-After= or a JSON =retry_ms= sets one pause when it is longer |
 | =LJOS_SEARCH_WAIT= | seconds =ljos search= waits for an encoder that is still loading; 3 when unset, =0= does not wait. Rows shown while it loads are word matches, and the line reports the load time when known or says the encoder has not answered yet. When nothing is shown, the line names how long to wait before running the search again |
 | =LJOS_SEARCH_WARMUP_WAIT= | seconds =ljos search= waits when the encoder is loading and the reported remaining time fits; 5 when unset, =0= does not wait. The wait stays inside =LJOS_CALL_TIMEOUT=. A longer or unknown load keeps =LJOS_SEARCH_WAIT= |
@@ -84,6 +85,7 @@ ljos reads =ljos.toml= from the user config (~/.config/ljos/ljos.toml), then the
 - =LJOS_CAPTURE= default on
 - =LJOS_CARDS_DIR= default unset
 - =LJOS_CITE= default unset
+- =LJOS_CLAIM_NOW= default unset, the clock
 - =LJOS_CLOUD_AGE_SECRET= default unset
 - =LJOS_CONFIG= default unset
 - =LJOS_DEBUG= default unset
