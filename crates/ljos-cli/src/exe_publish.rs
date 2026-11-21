@@ -128,13 +128,13 @@ pub fn copy_executable(src: &Path, dest: &Path) -> Result<(), Error> {
 /// directory so the new name survives a crash.
 #[cfg(unix)]
 fn settle(tmp: &Path, path: &Path) -> Result<(), Error> {
-    flush(tmp);
+    let _ = flush(tmp);
     if let Err(err) = std::fs::rename(tmp, path) {
         let _ = std::fs::remove_file(tmp);
         return Err(err);
     }
     if let Some(parent) = dir_of(path) {
-        flush(parent);
+        let _ = flush(parent);
     }
     Ok(())
 }
@@ -144,16 +144,15 @@ thread_local! {
     static FLUSHED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// `sync_all` on `path`, a file or a directory. Errors are dropped: the
-/// rename has already happened or is about to, and a flush cannot undo it.
+/// `sync_all` on `path`, a file or a directory. `settle` drops the error:
+/// the rename has already happened or is about to, and a flush cannot
+/// undo it.
 #[cfg(unix)]
-fn flush(path: &Path) {
-    if let Ok(file) = std::fs::File::open(path) {
-        if file.sync_all().is_ok() {
-            #[cfg(test)]
-            FLUSHED.with(|done| done.borrow_mut().push(path.to_path_buf()));
-        }
-    }
+fn flush(path: &Path) -> Result<(), Error> {
+    std::fs::File::open(path)?.sync_all()?;
+    #[cfg(test)]
+    FLUSHED.with(|done| done.borrow_mut().push(path.to_path_buf()));
+    Ok(())
 }
 
 fn dir_of(path: &Path) -> Option<&Path> {
@@ -245,6 +244,16 @@ mod tests {
             assert_eq!(done[0].parent(), Some(dir.path()), "{step}");
             assert_eq!(done[1], dir.path(), "{step} flushed {done:?}");
         }
+    }
+
+    /// `/dev/null` opens but cannot be synced, so a flush that skips the
+    /// sync returns Ok here.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_flush_reaches_the_sync() {
+        let err = flush(Path::new("/dev/null")).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(22), "{err}");
+        assert!(flush(Path::new("/")).is_ok());
     }
 
     /// Many threads publish one stub and start it. A writer that leaves a
@@ -399,6 +408,40 @@ fn dir(path: &Path) {
         assert!(write_then_exec(fine).is_empty());
     }
 
+    #[test]
+    fn the_site_scan_follows_a_hook_name_through_lets() {
+        let chain = r#"
+fn chain(dir: &Path) {
+    let name = "pre-push";
+    let path = dir.join(name);
+    fs::write(&path, "x").unwrap();
+    let name = "notes.txt";
+    let path = dir.join(name);
+    fs::write(&path, "x").unwrap();
+}
+"#;
+        assert_eq!(write_then_exec(chain), vec![5]);
+    }
+
+    #[test]
+    fn the_site_scan_names_a_helper_given_a_hook_path() {
+        let helper = r##"
+fn helper_write(path: &Path) {
+    fs::write(path, "#!/bin/sh\n").unwrap();
+}
+fn install(dir: &Path) {
+    helper_write(&dir.join("pre-push"));
+}
+fn note(path: &Path) {
+    fs::write(path, "x").unwrap();
+}
+fn notes(dir: &Path) {
+    note(&dir.join("notes.txt"));
+}
+"##;
+        assert_eq!(write_then_exec(helper), vec![3, 6]);
+    }
+
     fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -439,21 +482,54 @@ fn dir(path: &Path) {
         let mut lists: Vec<(String, Vec<String>)> = Vec::new();
         let mut hook_loop = None;
         let mut hook_vars: Vec<String> = Vec::new();
+        let mut fn_name = String::new();
+        let mut param_vars: Vec<(String, usize)> = Vec::new();
+        let mut param_writes: Vec<(String, usize, usize)> = Vec::new();
+        let mut hook_calls: Vec<(usize, String, usize)> = Vec::new();
         for (i, line) in code.iter().enumerate() {
             let head = line.trim_start();
             let item = ["pub(crate) ", "pub ", "async ", "const ", "unsafe "]
                 .iter()
                 .fold(head, |rest, pre| rest.strip_prefix(pre).unwrap_or(rest));
-            if item.starts_with("fn ") {
+            if let Some(sig) = item.strip_prefix("fn ") {
                 writes.clear();
                 lists.clear();
                 hook_loop = None;
                 hook_vars.clear();
+                fn_name = idents(sig).next().unwrap_or("").to_string();
+                param_vars = args_after(&joined(i, 6), "(")
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(n, arg)| {
+                        let name = arg.split(':').next()?.split_whitespace().last()?;
+                        Some((name.to_string(), n))
+                    })
+                    .collect();
             }
             if let Some((name, value)) = let_binding(&joined(i, 4)) {
+                let hook = names_hook(&value) || mentions(&value, &hook_vars);
+                let from = param_of(&value, &param_vars);
                 hook_vars.retain(|bound| *bound != name);
-                if names_hook(&value) {
-                    hook_vars.push(name);
+                param_vars.retain(|(bound, _)| *bound != name);
+                if hook {
+                    hook_vars.push(name.clone());
+                }
+                if let Some(n) = from {
+                    param_vars.push((name, n));
+                }
+            }
+            let ahead = joined(i, 4);
+            for (at, _) in line.match_indices('(') {
+                let before = &line[..at];
+                let callee = before.rsplit(|c: char| !is_ident(c)).next().unwrap_or("");
+                let lead = before[..before.len() - callee.len()].chars().next_back();
+                if callee.is_empty() || matches!(lead, Some('.' | ':')) {
+                    continue;
+                }
+                for (n, arg) in args_after(&ahead[at..], "(").iter().enumerate() {
+                    if names_hook(arg) || mentions(arg, &hook_vars) {
+                        hook_calls.push((i, callee.to_string(), n));
+                    }
                 }
             }
             if let Some(rest) = head.strip_prefix("for ") {
@@ -468,7 +544,6 @@ fn dir(path: &Path) {
                     ));
                 }
             }
-            let ahead = joined(i, 4);
             let target = if line.contains("fs::write(") {
                 arg_after(&ahead, "fs::write(", 0)
             } else if line.contains("File::create(") {
@@ -483,9 +558,12 @@ fn dir(path: &Path) {
             if let Some(target) = target.filter(|t| !t.is_empty()) {
                 if hook_loop.is_some_and(|at| i - at <= 20)
                     || names_hook(&target)
-                    || hook_vars.contains(&target)
+                    || mentions(&target, &hook_vars)
                 {
                     hits.push(i + 1);
+                }
+                if let Some(n) = param_of(&target, &param_vars) {
+                    param_writes.push((fn_name.clone(), n, i));
                 }
                 writes.push((i, target));
             }
@@ -513,9 +591,44 @@ fn dir(path: &Path) {
                 }
             }
         }
+        for (line, callee, n) in &hook_calls {
+            for (name, param, at) in &param_writes {
+                if name == callee && param == n {
+                    hits.extend([line + 1, at + 1]);
+                }
+            }
+        }
         hits.sort_unstable();
         hits.dedup();
         hits
+    }
+
+    fn is_ident(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
+    }
+
+    /// The identifiers in `text` outside string literals.
+    fn idents(text: &str) -> impl Iterator<Item = &str> {
+        text.split('"')
+            .step_by(2)
+            .flat_map(|code| code.split(|c: char| !is_ident(c)))
+            .filter(|word| !word.is_empty())
+    }
+
+    /// Whether `text` uses one of `names` as a whole identifier.
+    fn mentions(text: &str, names: &[String]) -> bool {
+        idents(text).any(|word| names.iter().any(|name| name == word))
+    }
+
+    /// The parameter index behind the first name in `text` that is a
+    /// parameter or a `let` bound from one.
+    fn param_of(text: &str, vars: &[(String, usize)]) -> Option<usize> {
+        idents(text).find_map(|word| {
+            vars.iter()
+                .rev()
+                .find(|(name, _)| name == word)
+                .map(|(_, n)| *n)
+        })
     }
 
     /// A string literal in `text` whose last path part is a git hook name.
@@ -559,7 +672,17 @@ fn dir(path: &Path) {
     /// The `n`th top-level argument after `open`, without spaces or a
     /// leading `&`.
     fn arg_after(text: &str, open: &str, n: usize) -> Option<String> {
-        let rest = &text[text.find(open)? + open.len()..];
+        args_after(text, open)
+            .get(n)
+            .map(|arg| squeeze(arg).trim_start_matches('&').to_string())
+    }
+
+    /// The top-level arguments after the first `open` in `text`.
+    fn args_after(text: &str, open: &str) -> Vec<String> {
+        let Some(at) = text.find(open) else {
+            return Vec::new();
+        };
+        let rest = &text[at + open.len()..];
         let mut args = vec![String::new()];
         let mut depth = 0usize;
         let mut quoted = false;
@@ -583,8 +706,7 @@ fn dir(path: &Path) {
             }
             args.last_mut().unwrap().push(c);
         }
-        args.get(n)
-            .map(|arg| squeeze(arg).trim_start_matches('&').to_string())
+        args
     }
 
     fn mode_of(text: &str) -> Option<u32> {
