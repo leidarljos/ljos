@@ -558,7 +558,7 @@ under equal weights is a count; under calibrated rows it is not.
 
 - `claim: assignee busy HEX`: that name still has that node.
   `ljos release HEX --assignee NAME` hands it back, `ljos complete HEX`
-  finishes it. Occupancy is per issue, so a second ticket does not take
+  completes it. Occupancy is per issue, so a second ticket does not take
   this path.
 - `already held by NAME; the sitting resumes`: not a refusal. A second
   `sitting` on the issue you hold renews the lease and goes on. Held by
