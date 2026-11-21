@@ -87,9 +87,16 @@ pub fn suffix(who: Option<&str>, stamp: Option<&str>, now: DateTime<FixedOffset>
 
 /// Now in this machine's zone, as a fixed offset the age math can share
 /// with a stamp.
+///
+/// `LJOS_CLAIM_NOW`, an RFC 3339 instant, is now instead, so a test that
+/// prints a claim age does not depend on how long its runs take. A value
+/// that does not parse is ignored.
 #[must_use]
 pub fn now_here() -> DateTime<FixedOffset> {
-    chrono::Local::now().fixed_offset()
+    std::env::var("LJOS_CLAIM_NOW")
+        .ok()
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw.trim()).ok())
+        .unwrap_or_else(|| chrono::Local::now().fixed_offset())
 }
 
 #[cfg(test)]

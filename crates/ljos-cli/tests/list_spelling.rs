@@ -11,6 +11,31 @@ struct Board {
     dir: tempfile::TempDir,
     root: std::path::PathBuf,
     home: std::path::PathBuf,
+    claim_now: String,
+}
+
+/// The claim's own `CLAIMED_AT` as the instant ages are counted to.
+///
+/// The stamp is wall time to the minute, so with the real clock the age
+/// turns from `just now` to `1m` at the next minute, which can fall
+/// between two runs a test compares. ljos reads the stamp in the offset
+/// of now, so the stamp's wall time at `+00:00` is the same instant.
+fn claim_clock(layout: &vissue_core::Layout, project: &str, id: &str) -> String {
+    let path = layout.project_issues_path(project);
+    let doc = vissue_core::IssueDoc::parse_file(project, &path).unwrap();
+    let heading = doc
+        .headings
+        .iter()
+        .find(|heading| heading.id == id)
+        .unwrap();
+    let stamp = heading
+        .claimed_at()
+        .unwrap_or_else(|| panic!("{id} has no CLAIMED_AT"));
+    let text = stamp.trim_matches(|c: char| matches!(c, '[' | '<' | ']' | '>'));
+    let mut parts = text.split_whitespace();
+    let date = parts.next().unwrap();
+    let clock = parts.find(|part| part.contains(':')).unwrap();
+    format!("{date}T{clock}:00+00:00")
 }
 
 impl Board {
@@ -23,6 +48,7 @@ impl Board {
         std::fs::create_dir_all(dir.path().join("run")).unwrap();
         let layout = vissue_core::Layout::new(&root, "Software");
         std::fs::create_dir_all(layout.projects_dir()).unwrap();
+        let mut claim_now = None;
         for (project, title) in [
             ("probe", "tune the kiln"),
             ("probe", "mend the door"),
@@ -41,9 +67,15 @@ impl Board {
             .unwrap();
             if title == "mend the door" {
                 vissue_core::ops::claim_as(&layout, made.trim(), false, "saddle").unwrap();
+                claim_now = Some(claim_clock(&layout, project, made.trim()));
             }
         }
-        Self { dir, root, home }
+        Self {
+            dir,
+            root,
+            home,
+            claim_now: claim_now.unwrap(),
+        }
     }
 
     fn ljos(&self, args: &[&str]) -> Output {
@@ -64,6 +96,7 @@ impl Board {
             .env("PACKSET_URL", "off")
             .env("LJOS_ASK_PACK", "off")
             .env("LJOS_USER_RULES_SYNC", "off")
+            .env("LJOS_CLAIM_NOW", &self.claim_now)
             .output()
             .unwrap()
     }
@@ -142,6 +175,7 @@ fn list_and_ls_succeed_and_name_the_open_tickets() {
         assert!(out.stderr.is_empty(), "{text}");
         let page = String::from_utf8_lossy(&out.stdout);
         assert!(page.starts_with("ready  shown 4 of 4\n"), "{text}");
+        assert!(page.contains("claimed just now by saddle"), "{text}");
         for title in [
             "tune the kiln",
             "mend the door",
