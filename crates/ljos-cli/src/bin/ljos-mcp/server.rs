@@ -1309,7 +1309,7 @@ pub struct GuardArgs {
     pub cwd: Option<String>,
 }
 
-/// A session node to finish.
+/// A session node to complete.
 #[derive(Deserialize, JsonSchema)]
 pub struct FinishArgs {
     /// The tracker id of the issue, or a 32-hex claim-graph id.
