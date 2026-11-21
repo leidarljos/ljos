@@ -146,6 +146,10 @@ esac
     }
 
     fn sitting_with_tracker(&self, budget_secs: u64, tracker_git: &str) -> Child {
+        self.sitting_with_env(budget_secs, tracker_git, &[])
+    }
+
+    fn sitting_with_env(&self, budget_secs: u64, tracker_git: &str, env: &[(&str, &str)]) -> Child {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["sitting", &self.issue, "--verbose"])
             .current_dir(self._dir.path())
@@ -167,6 +171,7 @@ esac
             .env("LJOS_SITTING_CLAIM_WAIT", budget_secs.to_string())
             .env("LJOS_USER_RULES_SYNC", "off")
             .env("PACKSET_URL", "off")
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -299,6 +304,35 @@ fn a_held_tracker_git_lock_exits_before_the_claim() {
     );
     assert!(
         out.contains("tracker git lock") || err.contains("tracker git lock"),
+        "stdout:\n{out}\nstderr:\n{err}"
+    );
+    assert_eq!(board.state(), "TODO", "{out}\n{err}");
+}
+
+#[test]
+fn a_lock_wait_shorter_than_the_claim_budget_is_the_limit_named() {
+    let board = Board::new();
+    let _held = board.hold_issue_lock();
+    let started = Instant::now();
+    let mut child = board.sitting_with_env(
+        RELEASED_CLAIM_BUDGET_SECS,
+        "off",
+        &[("LJOS_TRACKER_LOCK_WAIT", "1")],
+    );
+    let (_, stdout) = first_line(&mut child);
+    let (status, out, err) = finish(
+        child,
+        stdout,
+        HELD_LOCK_LIMIT.saturating_sub(started.elapsed()),
+    );
+    assert_eq!(status.code(), Some(0), "stdout:\n{out}\nstderr:\n{err}");
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("for 1s, until LJOS_TRACKER_LOCK_WAIT ran out; nothing was claimed"),
+        "stdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(
+        !said.contains("claim budget"),
         "stdout:\n{out}\nstderr:\n{err}"
     );
     assert_eq!(board.state(), "TODO", "{out}\n{err}");

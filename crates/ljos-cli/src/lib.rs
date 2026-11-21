@@ -46811,13 +46811,35 @@ fn sitting_budget_left(step: &str, total: std::time::Duration) -> Result<()> {
     Ok(())
 }
 
+/// How long a sitting may wait for a tracker lock, and the limit that sets
+/// it. With no wall budget armed, the claim budget `total` stands in.
+fn sitting_lock_limit(total: std::time::Duration) -> (std::time::Duration, &'static str) {
+    let claim = WALL_DEADLINE.with(|cell| {
+        cell.get()
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+    });
+    let wall = match (claim, tool_bound::remaining()) {
+        (Some(claim), Some(tool)) if tool < claim => (tool, "the tool budget"),
+        (None, Some(tool)) => (tool, "the tool budget"),
+        (Some(claim), _) => (claim, "the claim budget"),
+        (None, None) => (total, "the claim budget"),
+    };
+    let lock = tracker_lock_wait();
+    if lock < wall.0 {
+        (lock, "LJOS_TRACKER_LOCK_WAIT")
+    } else {
+        wall
+    }
+}
+
 fn wait_for_sitting_lock(path: &Path, what: &str, total: std::time::Duration) -> Result<()> {
-    let left = wall_left().unwrap_or(total).min(tracker_lock_wait());
-    let Some(held) = CommitLock::acquire_by(path, std::time::Instant::now() + left) else {
+    let (left, limit) = sitting_lock_limit(total);
+    let started = std::time::Instant::now();
+    let Some(held) = CommitLock::acquire_by(path, started + left) else {
         bail!(
-            "sitting: another tracker writer held the {what} at {} past the {}s claim budget; nothing was claimed",
+            "sitting: another tracker writer held the {what} at {} for {}s, until {limit} ran out; nothing was claimed",
             path.display(),
-            total.as_secs()
+            started.elapsed().as_secs()
         );
     };
     drop(held);
