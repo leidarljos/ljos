@@ -1,1 +1,0 @@
-`ljos seat add`, `ljos sync` and `ljos mesh pull` no longer create the default tracker directory under the data home when a checkout has its own untracked `vissue.toml` and `ljos onboard` has not run.

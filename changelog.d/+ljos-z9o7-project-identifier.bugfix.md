@@ -1,3 +1,0 @@
-A project name written with a hyphen or an underscore in a sitting title, such as `oak-tree` on project `oak-tree`, counted as a title identifier, so `Fix the oak-tree draft` kept `The oak-tree damper needs oil.`.
-A title word is now the project name when its pieces, split at a hyphen, an underscore or a change of case and taken in lower case, are exactly the project's pieces, so `OAK_TREE`, `OakTree` and `a-b` on project `a-b` are left out too.
-A word with any other piece, such as `sha-2` on project `sha-1`, `oak_2` on project `oak` or `to-oak` on project `for-oak`, still keeps the lesson that names it, in the title, in the issue's body, or as one segment of a URL or a path such as `https://example.com/sha-2/issues`.

@@ -5,6 +5,94 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.45.4 (2026-11-21)
+
+### Features
+
+- An atom sync (kkma) now adds only a segment of the new atoms, and only a compacting sync folds the log into a new snapshot. A large store no longer pays for the whole log on every sync, and one piece that does not open no longer stops an export or drops atoms.
+- `ljos deed --show ACCESSION [--out FILE]` prints a stored file's bytes, or writes them to a file, after `deedar evidence` passes and the copy in the store hashes to the digest the deed names.
+  A missing or altered copy exits 1, names the deed, and prints nothing.
+  The `ljos_deed_show` MCP tool reads the same way.
+- `ljos file --from FILE` files one ticket per row of a JSONL or CSV file (title, body, tags, parent, priority, type) in one tracker commit and prints the new ids one per line, so 150 rows are one commit rather than 150.
+  A row that cannot be filed files none of them: the error names the row and the tickets written before it are taken back.
+  The `ljos_file_from` MCP tool takes the rows inline or a file path.
+- `ljos table ISSUE --add FILE.csv [--name NAME]` checks a CSV (a header row, the same column count on every row, UTF-8, at most 8 MiB), stores it in `deedar` and cites it on the ticket in one tracker commit, so a scoreboard is one deed rather than one ticket per row.
+  Adding the same name again makes the next version, which supersedes the one before, and `ljos current` on an older accession names the newer one.
+  `ljos table ISSUE` lists the tables with rows, columns, version and accession, and `--show NAME [--version N] [--csv|--json]` prints one after the same check `ljos deed --show` makes.
+  The `ljos_table` MCP tool does the same.
+
+### Fixes
+
+- A project name written with a hyphen or an underscore in a sitting title, such as `oak-tree` on project `oak-tree`, counted as a title identifier, so `Fix the oak-tree draft` kept `The oak-tree damper needs oil.`.
+  A title word is now the project name when its pieces, split at a hyphen, an underscore or a change of case and taken in lower case, are exactly the project's pieces, so `OAK_TREE`, `OakTree` and `a-b` on project `a-b` are left out too.
+  A word with any other piece, such as `sha-2` on project `sha-1`, `oak_2` on project `oak` or `to-oak` on project `for-oak`, still keeps the lesson that names it, in the title, in the issue's body, or as one segment of a URL or a path such as `https://example.com/sha-2/issues`.
+- A sitting read another ticket's id from a lesson with ASCII letters only, so `On café-1-wxyz the damper needs oil.` on `café-1-lk1e` was shown as if it were about this issue, and `école-2 must run weekly.` on project `cole` was dropped as a `cole` ticket.
+  That id is now one of the same words the rest of the sitting reads, compared in lower case in any script, so the first lesson stays out like `On sha-1-wxyz the damper needs oil.` on `sha-1-lk1e`, and the second is shown.
+- A sitting title or body word beside a dot, a colon, an `@`, an apostrophe, a `?` or a `#`, such as `sha-2` in `sha-2.txt`, `sha-2:8080` or `sha-2@example.com` on project `sha-1`, was not an identifier, so the lesson that names it was dropped, and a letter outside ASCII was cut from the word, so `école-2` was recorded as `cole-2` and `café-2` was dropped.
+  A word is now a run of letters and digits in any script, or such runs joined by `-` or `_`, every other character ends it, and the word is kept as written, so those lessons are shown and `a-b`, `OakTree` and `sha-1` on their own projects are still removed.
+- A sitting title whose only strong word was the project name, such as `Review the kiln` on project `kiln`, ended with no subject words and dropped a lesson such as `Review lessons weekly.`.
+  The project name now comes out before weak words are judged, so that title has `review` as its subject, the same as `Review` on another project.
+- A sitting's due list kept a lesson that only shared weak words such as review and order, and the due count listed those lessons with this issue.
+  Due cards keep a lesson whose share of the issue's subject words, times the memory's weight, reaches 0.34.
+  This seat's own lesson weighs 1.15, so a share of about 30 percent clears it, and a lesson of weight 1 needs 34 percent.
+  The project name is not a subject word, in the title or on its own line, and a lesson that shares only that name stays out.
+  An identifier in the title, such as review_order, keeps a lesson that contains that name.
+  The timeline lists those related memories.
+  The sitting's recall list uses that same rule, so a lesson that only shares weak words is not what the seat remembers for the task.
+  A lesson filed on another issue in the same project follows that rule, and only a tag for this issue skips it.
+  When the issue's text and history together have no strong word, the older word list is the subject.
+  A pack read that fails still applies the same rule to the slot's word matches.
+  When none of the due lessons name the issue, the verbose due section says nothing relevant is due, and the short form leaves that line out.
+  An empty pack still says this seat has remembered nothing yet.
+- A snapshot of this machine's atom log that `age` could not authenticate stopped every sync with new atoms with `failed to decrypt and authenticate payload chunk`.
+  The next sync now seals the atoms the pack lists whole into one new snapshot once and prints a warning, as it does for a segment that does not open, so a peer takes the same atoms as from a log that opens, and an atom the pack no longer lists is dropped as on any sync.
+- A sync past 64 atom segments folded them into a new snapshot, so the whole log was sealed into the tracker again every 64 changes.
+  A sync now only adds a segment of the new atoms, and only `ljos sync --compact` folds.
+- A sync skipped this machine's atom log whenever `plain.sha256` matched its atoms, so a changed hash in the checkout hid an added or dropped atom and was committed as it was.
+  A sync now skips the log only when this home noted, in a signed note keyed to the bytes of the snapshots and segments, that they open to those atoms, and never reads what `plain.sha256` says.
+- A sync staged every snapshot and segment of this machine's atom log as it was in the checkout, so a sealed piece that was changed or removed there was committed that way, even by a sync with nothing new.
+  A committed snapshot or segment that differs from `HEAD` is now left out of the commit, and only `ljos sync --compact` commits a removal.
+  A new snapshot or segment now takes the seq one past every piece in the checkout and in `HEAD`, and `ljos sync --compact` removes a piece only after it reads its new snapshot again and that snapshot, at a path `HEAD` does not have, opens to every atom the pack lists; a snapshot or segment that still differs from `HEAD` after the fold stops the compaction before it commits.
+- A sync staged this machine's whole atom directory, so the temp file of a write that was cut off was committed, even by a sync with no new atoms.
+  A sync now stages only the snapshots, segments and plaintext hash.
+- A sync trusted any plaintext it had kept of a sealed atom log, so a changed or stale kept file could drop a new atom or keep a removed one, and the plaintext hash written after it kept the error after the files were removed.
+  A kept plaintext is now used only when its signature, made with a random key kept in `sync/kept.key` below the state directory, agrees with the ciphertext it names, and is read again with `age -d` otherwise.
+- A sync whose own atom log did not open on this machine removed the unread segments and sealed the rest of the log again, up to the whole log in one new segment.
+  It now removes nothing and seals the atoms whole into one new snapshot once, or, when this machine's key is not a recipient, writes nothing and prints a warning that names `ljos sync --key`.
+- A tracker write such as `ljos note` waits up to `LJOS_TRACKER_LOCK_WAIT` seconds, 20 when unset, for another writer's commit lock, as the docs say.
+  It waited two seconds, while a background push keeps that lock until git exits, so a note during a push was left uncommitted until `ljos sync`.
+- Atoms that waited while this machine's own atom log did not open were not exported by later syncs, even after this machine was a recipient again; only `ljos sync --compact` sealed them.
+  A sync now seals them whole into one new snapshot once this machine can open what it seals.
+- Drain PTY reader threads after child exit in terminal tests and make `search_raw_rows` and `old_terminal` deterministic offline without network fetches.
+- Each sync ran `age -d` on every snapshot and segment of this machine's own log to find what was new, and a large log that did not open in time left the sync unable to add atoms.
+  A sync now keeps the plaintext of each piece it seals, so its next sync reads its own log without `age -d`.
+- The plaintexts a sync keeps of sealed atom logs were written as files of mode 0644 in a directory of mode 0755.
+  They are now files of mode 0600 in a directory of mode 0700, as `age.key` is.
+- Tighten identity-gate coverage for `noreply@github.com` committers, seed `old_terminal` from documented legacy atom fixtures, assert legacy atoms stay unverified through `ljos doctor`, punctuate the busy pack doctor row like other command tails, and make person gate and key tests assert PTY output that `finish_reading` drains.
+- `ljos file --from` files a row with no parent under the held issue, as `ljos file` does, and says so on stderr; `--top` now works with `--from` to file such rows at the top. Before, the batch ignored the hold and refused rows with no project.
+- `ljos file --from` files each row in its parent's project, as `ljos file --parent` does, instead of putting every row in the project of the first parent; a refused row takes back every project the batch wrote.
+- `ljos file --from` refuses a CSV whose header names a column twice once spaces are trimmed, such as `title` and `title `, naming both columns, instead of keeping the second one's values.
+- `ljos file -p .` and `-p ..`, a project name that folds to one of them under Unicode NFKC such as U+2024, and the same name on an MCP tool, are refused as project names, so a ticket is no longer written to `issues.org` beside the prefix directory, in the prefix directory, or under a dot-named project directory.
+- `ljos mcp` refuses a tool call whose arguments include a name the schema does not list, names the unknown name and the accepted ones, and does not run the tool. Tools that take an issue id accept `id` as an alias for `issue`.
+- `ljos seat add` and `ljos seat grant` run in a directory that only vissue would guess as the tracker now stop with the `No tracker found` line, and no longer write `vissue.toml` and a commit lock into a product checkout.
+- `ljos seat add`, `ljos sync` and `ljos mesh pull` no longer create the default tracker directory under the data home when a checkout has its own untracked `vissue.toml` and `ljos onboard` has not run.
+- `ljos sync --compact` removed every snapshot and segment of this machine's atom log even when one did not open on this machine, so atoms that only those pieces carried were lost.
+  It now exits non-zero, names `ljos sync --key`, and removes nothing when the newest snapshot or a segment after it does not open in full.
+  A damaged older piece no longer blocks it: once a sync has sealed the atoms whole into a newer snapshot that opens, `ljos sync --compact` folds from that snapshot and removes the damaged piece with the rest.
+- `ljos sync` run in a checkout where no tracker is named now stops with the `No tracker found` line, and no longer writes `.gitattributes` and a commit lock into that checkout.
+- `ljos table --add` no longer fails with `deed frozen` when a second table's name differs from the first only in case, `.`, `_` or `-`, such as `Scores` and `scores`: it passes deedar an accession of its own, with a short digest for a name deedar would fold, and refuses an accession another deed already uses.
+
+### Documentation
+
+- The MCP reference says `ljos_start` and `ljos_sitting` claim on the call, not on the first write.
+- The vote docs now explain that candidate authors can cast labelled ballots that advice reads and the verdict leaves out.
+
+### Miscellaneous
+
+- Accept commits authored by the owner with the GitHub web-flow committer in `scripts/identity-gate.sh` and quiet its missing-revision fallback probe.
+- Cover `ljos_start` claim takeover between a bare seat and its `SEAT@TAG` session holder in both call orders against the pinned `vissue` and `claimdag` binaries.
+
+
 ## 0.45.3 (2026-11-19)
 
 ### Fixes

@@ -1,2 +1,0 @@
-A sitting read another ticket's id from a lesson with ASCII letters only, so `On café-1-wxyz the damper needs oil.` on `café-1-lk1e` was shown as if it were about this issue, and `école-2 must run weekly.` on project `cole` was dropped as a `cole` ticket.
-That id is now one of the same words the rest of the sitting reads, compared in lower case in any script, so the first lesson stays out like `On sha-1-wxyz the damper needs oil.` on `sha-1-lk1e`, and the second is shown.
