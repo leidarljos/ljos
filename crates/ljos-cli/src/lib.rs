@@ -56662,13 +56662,10 @@ mod tests {
 
     impl SeatDir {
         fn new(name: &str) -> Self {
-            use std::os::unix::fs::PermissionsExt;
-            let dir = crate::test_seat_root::seat_root(crate::bookkeep::path_is_temp)
-                .join(format!("ljos-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-            Self(dir)
+            Self(crate::test_seat_root::seat_dir(
+                crate::bookkeep::path_is_temp,
+                &format!("ljos-{name}"),
+            ))
         }
 
         fn path(&self) -> &std::path::Path {

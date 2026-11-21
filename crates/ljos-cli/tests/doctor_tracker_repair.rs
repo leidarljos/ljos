@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::Command;
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -184,7 +184,7 @@ fn doctor_names_a_broken_tracker_and_leaves_a_healthy_one_unchanged() {
     std::fs::write(other.join("Software/issues.org"), "* TODO a\n").unwrap();
     git(&other, &["add", "."]);
     git(&other, &["commit", "-q", "-m", "seed"]);
-    let head = Command::new("git")
+    let head = ljos_test_boot::git()
         .arg("-C")
         .arg(&other)
         .args(["symbolic-ref", "HEAD"])

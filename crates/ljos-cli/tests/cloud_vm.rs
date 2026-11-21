@@ -68,7 +68,7 @@ fn sh_ok(dir: &Path, script: &str) -> String {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -363,7 +363,7 @@ fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
     // the test's cwd, that is this checkout.
     let gitconfig = root.path().join("gitconfig");
     fs::write(&gitconfig, b"").unwrap();
-    let init = Command::new("git")
+    let init = ljos_test_boot::git()
         .arg("-C")
         .arg(&seat)
         .args(["init", "-q"])
@@ -1244,7 +1244,7 @@ fn a_tracker_token_stays_private_and_answers_for_the_clone() {
         git(&tracker, &["config", "--get", "remote.origin.url"]).trim(),
         "https://x-access-token@github.com/example/tracker"
     );
-    let mut fill = Command::new("git")
+    let mut fill = ljos_test_boot::git()
         .arg("-C")
         .arg(&tracker)
         .args(["credential", "fill"])
@@ -1263,7 +1263,7 @@ fn a_tracker_token_stays_private_and_answers_for_the_clone() {
     assert!(answer.contains("password=tracker-secret\n"), "{answer}");
 
     fs::write(&file, "rotated\n").unwrap();
-    let mut fill = Command::new("git")
+    let mut fill = ljos_test_boot::git()
         .arg("-C")
         .arg(&tracker)
         .args(["credential", "fill"])
@@ -4933,7 +4933,7 @@ fn pin_at(repo: &Path, seat: &str, unix: &str) -> String {
     text.push_str(&format!("{seat} {public}\n"));
     fs::write(&pins, text).unwrap();
     git(repo, &["add", ".ljos-seat-keys"]);
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(repo)
         .args(["commit", "-q", "-m", &format!("pin {seat}")])
@@ -5486,7 +5486,7 @@ fn commit_dated(repo: &Path, paths: &[&str], message: &str, unix: &str) {
     let mut args = vec!["add", "--"];
     args.extend_from_slice(paths);
     git(repo, &args);
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(repo)
         .args(["commit", "-q", "-m", message])

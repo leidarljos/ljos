@@ -17,7 +17,7 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("/usr/bin/git")
+    let out = ljos_test_boot::git_at("/usr/bin/git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -45,7 +45,7 @@ fn record_evidence(repo: &Path) {
 }
 
 fn head(dir: &Path) -> String {
-    let out = Command::new("/usr/bin/git")
+    let out = ljos_test_boot::git_at("/usr/bin/git")
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "HEAD"])
@@ -73,19 +73,10 @@ impl Drop for Scratch {
 }
 
 fn habitat() -> (Scratch, Habitat) {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let dir = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp)
-        .join(format!("ljos-harness-hooks-{}-{nanos}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let dir = Scratch(dir);
+    let dir = Scratch(seat_root::seat_dir(
+        ljos_cli::bookkeep::path_is_temp,
+        "ljos-harness-hooks",
+    ));
     let tracker = dir.0.join("tracker");
     let repo = dir.0.join("repo");
     let bin = dir.0.join("bin");

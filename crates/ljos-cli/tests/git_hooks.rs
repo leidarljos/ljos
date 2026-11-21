@@ -6,22 +6,12 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "common/seat_root.rs"]
 mod seat_root;
 
 fn work_root() -> PathBuf {
-    static N: AtomicU64 = AtomicU64::new(0);
-    let path = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp)
-        .join("example-host-books-tests")
-        .join(format!(
-            "{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-    fs::create_dir_all(&path).unwrap();
-    path
+    seat_root::seat_dir(ljos_cli::bookkeep::path_is_temp, "example-host-books")
 }
 
 struct Hab {
@@ -119,12 +109,13 @@ impl Hab {
     }
 
     fn git(&self, dir: &Path, args: &[&str]) -> Output {
-        let out = Command::new("/usr/bin/git")
+        let out = ljos_test_boot::git_at("/usr/bin/git")
             .arg("-C")
             .arg(dir)
             .args(args)
             .current_dir(dir)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .envs(self.base_env())
             .output()
             .unwrap();
@@ -181,11 +172,12 @@ impl Drop for Hab {
 }
 
 fn git_bare(dir: &Path, args: &[&str]) {
-    let out = Command::new("/usr/bin/git")
+    let out = ljos_test_boot::git_at("/usr/bin/git")
         .arg("-C")
         .arg(dir)
         .args(args)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", dir)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -804,12 +796,13 @@ fn write_hook(path: &Path, body: &str) {
 }
 
 fn git_status(hab: &Hab, args: &[&str]) -> Output {
-    Command::new("/usr/bin/git")
+    ljos_test_boot::git_at("/usr/bin/git")
         .arg("-C")
         .arg(&hab.repo)
         .args(args)
         .current_dir(&hab.repo)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .envs(hab.base_env())
         .output()
         .unwrap()
@@ -930,12 +923,13 @@ fn commit_with(
     fs::write(hab.repo.join(name), "x\n").unwrap();
     let env = commit_env(hab, extra, drop_seat);
     let run = |args: &[&str]| {
-        let out = Command::new("/usr/bin/git")
+        let out = ljos_test_boot::git_at("/usr/bin/git")
             .arg("-C")
             .arg(&hab.repo)
             .args(args)
             .current_dir(&hab.repo)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .envs(env.clone())
             .output()
             .unwrap();
@@ -989,12 +983,13 @@ fn a_tracker_commit_is_checked_as_a_tracker_write() {
             .chain(seat.map(|s| ("LJOS_SEAT".to_string(), s.to_string())))
             .collect();
         let run = |args: &[&str]| {
-            let out = Command::new("/usr/bin/git")
+            let out = ljos_test_boot::git_at("/usr/bin/git")
                 .arg("-C")
                 .arg(&hab.tracker)
                 .args(args)
                 .current_dir(&hab.tracker)
                 .env_clear()
+                .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
                 .envs(env.clone())
                 .output()
                 .unwrap();
@@ -1177,19 +1172,20 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
     );
     let runner = [("SEAT_SESSION_ID", "5b0c2a71-9d1e-4f3a-8c6b-2e7f1a0d9c43")];
     let push = |dest: &str| {
-        Command::new("/usr/bin/git")
+        ljos_test_boot::git_at("/usr/bin/git")
             .arg("-C")
             .arg(&hab.repo)
             .args(["push", "-q", "origin", dest])
             .current_dir(&hab.repo)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .envs(commit_env(&hab, &runner, false))
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap()
     };
     let sent = |branch: &str| {
-        Command::new("/usr/bin/git")
+        ljos_test_boot::git_at("/usr/bin/git")
             .arg("--git-dir")
             .arg(&bare)
             .args([
@@ -1199,6 +1195,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
                 &format!("refs/heads/{branch}"),
             ])
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", "/usr/bin:/bin")
             .output()
             .unwrap()
@@ -1248,11 +1245,12 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
     fs::write(&path, format!("{}{old}{}", &stub[..begin], &stub[end..])).unwrap();
     // The current hook already sent develop. Git does not run pre-push
     // when the remote has the commit, so drop that ref and send it again.
-    let dropped = Command::new("/usr/bin/git")
+    let dropped = ljos_test_boot::git_at("/usr/bin/git")
         .arg("--git-dir")
         .arg(&bare)
         .args(["update-ref", "-d", "refs/heads/develop"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
@@ -1279,11 +1277,12 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
 
     install(&hab);
     fs::write(hab.repo.join("again.txt"), "z\n").unwrap();
-    let add = Command::new("/usr/bin/git")
+    let add = ljos_test_boot::git_at("/usr/bin/git")
         .arg("-C")
         .arg(&hab.repo)
         .args(["add", "again.txt"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .envs(hab.base_env())
         .output()
         .unwrap();
@@ -1292,11 +1291,12 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         "{}",
         String::from_utf8_lossy(&add.stderr)
     );
-    let commit = Command::new("/usr/bin/git")
+    let commit = ljos_test_boot::git_at("/usr/bin/git")
         .arg("-C")
         .arg(&hab.repo)
         .args(["commit", "-q", "-m", "after reinstall"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .envs(hab.base_env())
         .output()
         .unwrap();
@@ -1305,11 +1305,12 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         "{}",
         String::from_utf8_lossy(&commit.stderr)
     );
-    let remote = Command::new("/usr/bin/git")
+    let remote = ljos_test_boot::git_at("/usr/bin/git")
         .arg("--git-dir")
         .arg(&bare)
         .args(["rev-parse", "refs/heads/develop"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
@@ -1322,11 +1323,12 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
     );
     assert!(err.contains("sitting-gate"), "{err}");
     assert!(!err.contains("predates this gate"), "{err}");
-    let remote = Command::new("/usr/bin/git")
+    let remote = ljos_test_boot::git_at("/usr/bin/git")
         .arg("--git-dir")
         .arg(&bare)
         .args(["rev-parse", "refs/heads/develop"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
@@ -1349,12 +1351,13 @@ fn a_git_hook_notes_only_a_seat_vissue_toml_lists() {
         fs::write(hab.repo.join(name), "x\n").unwrap();
         let env = commit_env(&hab, extra, drop_seat);
         let run = |args: &[&str]| {
-            Command::new("/usr/bin/git")
+            ljos_test_boot::git_at("/usr/bin/git")
                 .arg("-C")
                 .arg(&hab.repo)
                 .args(args)
                 .current_dir(&hab.repo)
                 .env_clear()
+                .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
                 .envs(env.clone())
                 .output()
                 .unwrap()

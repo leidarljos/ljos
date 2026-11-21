@@ -72,7 +72,7 @@ impl Case {
         }
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let init = Command::new("git")
+        let init = ljos_test_boot::git()
             .args(["init", "-q"])
             .current_dir(&repo)
             .status()
@@ -84,14 +84,14 @@ impl Case {
             ("commit.gpgsign", "false"),
             ("core.hooksPath", "/dev/null"),
         ] {
-            let out = Command::new("git")
+            let out = ljos_test_boot::git()
                 .args(["config", key, value])
                 .current_dir(&repo)
                 .output()
                 .unwrap();
             assert!(out.status.success(), "{key}");
         }
-        let made = Command::new("git")
+        let made = ljos_test_boot::git()
             .args(["commit", "-q", "--allow-empty", "-m", "seed"])
             .current_dir(&repo)
             .output()
@@ -101,7 +101,7 @@ impl Case {
             "{}",
             String::from_utf8_lossy(&made.stderr)
         );
-        let head = Command::new("git")
+        let head = ljos_test_boot::git()
             .args(["rev-parse", "HEAD"])
             .current_dir(&repo)
             .output()

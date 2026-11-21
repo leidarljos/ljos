@@ -14,10 +14,7 @@ struct SeatHome(PathBuf);
 
 impl SeatHome {
     fn new(name: &str) -> Self {
-        let dir = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp)
-            .join(format!("ljos-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("seat home");
+        let dir = seat_root::seat_dir(ljos_cli::bookkeep::path_is_temp, &format!("ljos-{name}"));
         Self(dir)
     }
 

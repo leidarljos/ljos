@@ -74,7 +74,7 @@ impl Tracker {
                 std::env::remove_var("LJOS_CONFIG");
             }
         }
-        let _ = Command::new("git")
+        let _ = ljos_test_boot::git()
             .arg("-C")
             .arg(&root)
             .args(["init", "-q"])

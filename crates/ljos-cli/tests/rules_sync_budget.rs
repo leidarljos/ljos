@@ -33,15 +33,7 @@ impl Drop for Hab {
 }
 
 fn hab(name: &str) -> Hab {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let root = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp).join(format!(
-        "m5s-{name}-{}-{}",
-        std::process::id(),
-        nanos % 1_000_000_000
-    ));
+    let root = seat_root::seat_dir(ljos_cli::bookkeep::path_is_temp, &format!("m5s-{name}"));
     let hab = Hab {
         home: root.join("home"),
         run: root.join("run"),
@@ -57,7 +49,7 @@ fn hab(name: &str) -> Hab {
 }
 
 fn git(cwd: &Path, args: &[&str]) {
-    let status = Command::new("git")
+    let status = ljos_test_boot::git()
         .arg("-c")
         .arg("core.hooksPath=/dev/null")
         .arg("-C")
@@ -89,7 +81,7 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
         .expect("age public key")
         .to_string();
     let bare = h.root.join("remote.git");
-    let status = Command::new("git")
+    let status = ljos_test_boot::git()
         .args(["init", "-q", "--bare", "-b", "main"])
         .arg(&bare)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -97,7 +89,7 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
         .unwrap();
     assert!(status.success());
     let other = h.root.join("other");
-    let status = Command::new("git")
+    let status = ljos_test_boot::git()
         .args(["clone", "-q"])
         .arg(&bare)
         .arg(&other)
@@ -116,7 +108,7 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
     git(&other, &["commit", "-q", "-m", "scope"]);
     git(&other, &["push", "-q", "origin", "HEAD:main"]);
     let tracker = h.root.join("tracker");
-    let status = Command::new("git")
+    let status = ljos_test_boot::git()
         .args(["clone", "-q"])
         .arg(&bare)
         .arg(&tracker)

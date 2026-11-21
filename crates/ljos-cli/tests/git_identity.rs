@@ -62,7 +62,7 @@ impl Seat {
             std::fs::create_dir_all(dir.path().join(sub)).unwrap();
         }
         let seat = Self { dir };
-        let init = Command::new("git")
+        let init = ljos_test_boot::git()
             .args(["init", "-q"])
             .current_dir(seat.tracker())
             .env("GIT_CONFIG_GLOBAL", "/dev/null")

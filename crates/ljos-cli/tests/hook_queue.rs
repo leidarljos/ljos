@@ -89,7 +89,7 @@ impl Drop for Hab {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("/usr/bin/git")
+    let out = ljos_test_boot::git_at("/usr/bin/git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -106,17 +106,9 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn hab(name: &str) -> Hab {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
     // Short: the server's socket lives under this root, and a socket path
     // has at most 103 bytes.
-    let root = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp).join(format!(
-        "hq-{name}-{}-{}",
-        std::process::id(),
-        nanos % 1_000_000_000
-    ));
+    let root = seat_root::seat_dir(ljos_cli::bookkeep::path_is_temp, &format!("hq-{name}"));
     let hab = Hab {
         tracker: root.join("tracker"),
         repo: root.join("repo"),

@@ -80,15 +80,10 @@ struct Seat {
 
 impl Seat {
     fn new(name: &str) -> Self {
-        let root = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp).join(format!(
-            "ljos-down-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = seat_root::seat_dir(
+            ljos_cli::bookkeep::path_is_temp,
+            &format!("ljos-down-{name}"),
+        );
         for sub in [
             "home", "bin", "bare", "state", "config", "data", "run", "tmp", "other",
         ] {

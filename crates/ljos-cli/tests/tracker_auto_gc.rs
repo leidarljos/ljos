@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn git(dir: &Path, args: &[&str]) -> Output {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(dir)
         .args(args)

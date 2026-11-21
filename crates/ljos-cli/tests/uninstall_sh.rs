@@ -107,9 +107,10 @@ fn uninstall(home: &Path, args: &[&str]) -> Output {
 }
 
 fn hooks_path(home: &Path) -> String {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .args(["config", "--global", "--get", "core.hooksPath"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin")
         .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))

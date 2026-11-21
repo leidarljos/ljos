@@ -71,7 +71,7 @@ fn start_packsetd(
 }
 
 fn git(cfg: &Path, dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -91,7 +91,7 @@ fn git(cfg: &Path, dir: &Path, args: &[&str]) -> String {
 }
 
 fn git_at(cfg: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .args(args)
         .env("GIT_CONFIG_GLOBAL", cfg)
         .env("GIT_CONFIG_SYSTEM", cfg)
@@ -425,7 +425,7 @@ fn log_in_commit(host: &str) -> String {
 }
 
 fn open_log(world: &World, host: &str) -> String {
-    let listed = Command::new("git")
+    let listed = ljos_test_boot::git()
         .arg("--git-dir")
         .arg(&world.origin)
         .args([
@@ -445,7 +445,7 @@ fn open_log(world: &World, host: &str) -> String {
         .find(|line| line.contains("/snap-"))
         .unwrap_or_else(|| panic!("no snapshot for {host} in {listed}"));
     let spec = format!("HEAD:{snap}");
-    let show = Command::new("git")
+    let show = ljos_test_boot::git()
         .arg("--git-dir")
         .arg(&world.origin)
         .args(["show", &spec])
@@ -685,7 +685,7 @@ fn a_refused_push_still_wakes_and_is_logged() {
         log.contains("push refused"),
         "the wake log does not record the refusal: {log}"
     );
-    let remote = Command::new("git")
+    let remote = ljos_test_boot::git()
         .arg("--git-dir")
         .arg(&world.origin)
         .args(["cat-file", "-e", "HEAD:.ljos/atoms/sender.jsonl.age"])

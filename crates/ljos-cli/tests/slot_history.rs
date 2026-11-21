@@ -14,7 +14,7 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .arg("-C")
         .arg(repo)
         .args(args)

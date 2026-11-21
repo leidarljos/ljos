@@ -13,7 +13,7 @@ use std::process::{Command, Output};
 
 fn git_repo(at: &Path) {
     std::fs::create_dir_all(at).unwrap();
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .args(["init", "-q"])
         .current_dir(at)
         .output()
@@ -218,7 +218,7 @@ fn a_file_does_not_commit_into_the_product_when_vissue_root_is_unset() {
     git_repo(&product);
     std::fs::write(product.join("README"), "a product\n").unwrap();
     let git = |args: &[&str]| {
-        let out = Command::new("git")
+        let out = ljos_test_boot::git()
             .args(args)
             .current_dir(&product)
             .env("GIT_CONFIG_GLOBAL", dir.path().join("gitconfig"))
@@ -302,7 +302,7 @@ fn a_file_does_not_commit_into_the_product_when_vissue_root_is_unset() {
 }
 
 fn git_stdout(at: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = ljos_test_boot::git()
         .args(args)
         .current_dir(at)
         .output()

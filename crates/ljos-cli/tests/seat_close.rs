@@ -107,7 +107,7 @@ impl World {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, ORG).unwrap();
         let git = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = ljos_test_boot::git()
                 .arg("-C")
                 .arg(&tracker)
                 .args(args)

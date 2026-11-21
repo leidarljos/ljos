@@ -32,7 +32,7 @@ fn keygen(path: &Path) -> String {
 }
 
 fn git(cwd: &Path, args: &[&str]) {
-    let status = Command::new("git")
+    let status = ljos_test_boot::git()
         .arg("-C")
         .arg(cwd)
         .args(args)

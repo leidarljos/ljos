@@ -803,10 +803,11 @@ fn git_config_is_byte_identical_after_up_and_down() {
     )
     .unwrap();
     let git = |args: &[&str]| {
-        let out = Command::new("git")
+        let out = ljos_test_boot::git()
             .args(args)
             .current_dir(&repo)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", world.path("home"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
