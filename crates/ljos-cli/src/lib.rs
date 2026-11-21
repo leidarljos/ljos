@@ -49803,7 +49803,7 @@ pub fn stamp_note_seat(issue: &str) {
         return;
     };
     let seat = tracker_seat();
-    if logbook_opens_with_note_seat(&path, issue, &seat) {
+    if logbook_opens_with_seat(&path, issue, "noted", &seat) {
         return;
     }
     let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
@@ -49828,7 +49828,7 @@ pub fn stamp_note_seat(issue: &str) {
         }
         return;
     };
-    if logbook_opens_with_note_seat(&path, issue, &seat) {
+    if logbook_opens_with_seat(&path, issue, "noted", &seat) {
         return;
     }
     if !stamp_seat_logbook(&path, issue, "noted", &seat) {
@@ -49838,9 +49838,9 @@ pub fn stamp_note_seat(issue: &str) {
     let _ = commit_paths(dir, &[name], &message);
 }
 
-/// Whether the first logbook line of `issue` is `- Noted by SEAT`.
-fn logbook_opens_with_note_seat(path: &Path, issue: &str, seat: &str) -> bool {
-    let want = format!("- Noted by {seat} ");
+/// Whether the first logbook line of `issue` is `- {Verb} by SEAT`.
+fn logbook_opens_with_seat(path: &Path, issue: &str, verb: &str, seat: &str) -> bool {
+    let want = format!("- {} by {} ", verb_heading(verb), seat.trim());
     if let Some(board) = ledger_board(path) {
         return vissue_core::IssueDoc::parse_file(&board_project(&board), &board)
             .ok()
@@ -51034,8 +51034,8 @@ enum SplitStep {
     WriteOn,
     /// The tracker lock this write took for the split, kept for the write's
     /// own commit so no other writer lands between them. `carried` when a
-    /// split commit may already hold this write's change, so the seat line
-    /// is stamped on a clean file too.
+    /// split commit may already hold this write's change, so the write
+    /// commits its seat line at once instead of waiting for the batch.
     Held {
         lock: CommitLock,
         line: String,
@@ -51055,12 +51055,17 @@ fn split_landed(board: &Path) -> bool {
     git_ok_stdout(dir, &["cat-file", "-e", "HEAD:./issues/.ledger"]).is_some()
 }
 
-/// Stamp each write's seat line on the file at `path`, for a write whose
-/// commit waits.
-fn stamp_waiting_writes(path: &Path, writes: &[(String, String)]) {
+/// Stamp each write's seat line on the file at `path`. Every persist of a
+/// write stamps, whether it commits, waits or finds its change already in
+/// HEAD, since another writer's commit does not name this seat. A line
+/// already at the top of that issue's logbook is the same write retried
+/// and is not stamped twice.
+fn stamp_write_seats(path: &Path, writes: &[(String, String)]) {
     let seat = tracker_seat();
     for (issue, verb) in writes {
-        stamp_seat_logbook(path, issue, verb, &seat);
+        if !logbook_opens_with_seat(path, issue, verb, &seat) {
+            stamp_seat_logbook(path, issue, verb, &seat);
+        }
     }
 }
 
@@ -51193,7 +51198,7 @@ fn prepare_split(path: &Path, writes: &[(String, String)]) -> SplitStep {
     };
     let lock_wait = tracker_lock_budget();
     let Some(lock) = tracker_commit_lock_by(dir, std::time::Instant::now() + lock_wait.wait) else {
-        stamp_waiting_writes(path, writes);
+        stamp_write_seats(path, writes);
         let mut rels = vec!["issues.org"];
         if vissue_core::ledger::is_ledger(&board) {
             rels.push("issues");
@@ -51235,7 +51240,7 @@ fn prepare_split(path: &Path, writes: &[(String, String)]) -> SplitStep {
             },
             PathCommit::Refused(why) | PathCommit::Deferred(why) => {
                 let _ = pending_add(&top, &rels);
-                stamp_waiting_writes(path, writes);
+                stamp_write_seats(path, writes);
                 SplitStep::Deferred(format!(
                     "tracker git: the split of {board_rel} into per-issue files is not in a commit ({why}); {}\n",
                     deferred_commit_line("this write")
@@ -51444,7 +51449,6 @@ fn persist_tracker_writes(
                     message,
                     !carried && may_hold_tracker_writes(list, also),
                     lock.take(),
-                    carried,
                 ));
             }
             return out;
@@ -51460,7 +51464,6 @@ fn persist_tracker_writes(
             message,
             !carried && may_hold_tracker_writes(writes, also),
             lock,
-            carried,
         )
     )
 }
@@ -51690,7 +51693,7 @@ fn flush_held_tracker_writes_in(root: &Path) -> String {
         if !path.exists() {
             continue;
         }
-        let said = persist_one_tracker_file(&path, &[], &[], &[], None, false, None, false);
+        let said = persist_one_tracker_file(&path, &[], &[], &[], None, false, None);
         if !said.contains("nothing to commit") {
             return said;
         }
@@ -51712,9 +51715,10 @@ fn flush_held_tracker_writes_in(root: &Path) -> String {
 }
 
 /// Commit the writes to the one file at `path`. `lock` is the tracker lock
-/// when the caller already took it. `stamp_clean` stamps the seat lines on
-/// a file git sees as clean too: a split commit that carried the change
-/// did not name the seat.
+/// when the caller already took it. Each write's seat line is stamped
+/// before the status is read, so a file another writer's commit already
+/// carried, such as a board split, commits the line that commit did not
+/// name.
 fn persist_one_tracker_file(
     path: &Path,
     writes: &[(String, String)],
@@ -51723,7 +51727,6 @@ fn persist_one_tracker_file(
     message: Option<&str>,
     may_hold: bool,
     lock: Option<CommitLock>,
-    stamp_clean: bool,
 ) -> String {
     sweep_tracker_temps(path);
     let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
@@ -51781,10 +51784,16 @@ fn persist_one_tracker_file(
     let Some(held) =
         lock.or_else(|| tracker_commit_lock_by(dir, std::time::Instant::now() + lock_wait.wait))
     else {
+        // A write across projects stamps no project until it holds the
+        // lock, so none keeps a seat line the others lack.
+        if others.is_empty() {
+            stamp_write_seats(path, writes);
+        }
         let refs: Vec<&str> = specs.iter().map(String::as_str).collect();
         note_deferred_paths(dir, &refs);
         return tracker_lock_busy(dir, lock_wait);
     };
+    stamp_write_seats(path, writes);
     let mut live: Vec<&str> = Vec::new();
     let mut ignored_note = String::new();
     if also.is_empty() {
@@ -51812,22 +51821,7 @@ fn persist_one_tracker_file(
     let mut status_args = vec!["status", "--porcelain", "--"];
     status_args.extend(live.iter().copied());
     let seat = tracker_seat();
-    let mut stamped = false;
-    let mut status = git(&status_args);
-    if stamp_clean
-        && also.is_empty()
-        && !writes.is_empty()
-        && status
-            .as_ref()
-            .is_ok_and(|o| o.status.success() && o.stdout.is_empty())
-    {
-        for (issue, verb) in writes {
-            stamp_seat_logbook(path, issue, verb, &seat);
-        }
-        stamped = true;
-        status = git(&status_args);
-    }
-    match status {
+    match git(&status_args) {
         Ok(o) if o.status.success() && o.stdout.is_empty() => {
             // An ignored file has an empty status, the same shape as a
             // clean tracked file. The ignore rule is what keeps the write
@@ -51854,11 +51848,6 @@ fn persist_one_tracker_file(
         Ok(o) if o.status.success() => {}
         Ok(o) => return format!("tracker git: {}\n", tracker_git_said(dir, &o)),
         Err(e) => return format!("tracker git: {e}\n"),
-    }
-    if !stamped {
-        for (issue, verb) in writes {
-            stamp_seat_logbook(path, issue, verb, &seat);
-        }
     }
     for (other, list) in others {
         for (issue, verb) in list {
@@ -59859,7 +59848,8 @@ mod tests {
     }
 
     /// A tracker write reaches git: the ticket's file alone is committed, a
-    /// clean file is left alone, and the switch turns it off.
+    /// clean file commits only the write's seat line, and the switch turns
+    /// it off.
     #[test]
     fn a_tracker_write_is_committed_alone() {
         let _env = env_guard();
@@ -59890,6 +59880,18 @@ mod tests {
         std::env::remove_var("ISSUE_ROOT");
         std::env::set_var("LJOS_TRACKER_GIT", "commit");
         std::env::set_var("LJOS_SEAT", "saddle");
+        let said = super::persist_tracker("probe-a1b2", "claimed");
+        assert!(
+            said.contains("committed chore(issues): probe-a1b2 claimed by saddle"),
+            "{said}"
+        );
+        let stamped = run(&["show", "--format=", "--unified=0", "HEAD"]);
+        let added: Vec<&str> = stamped
+            .lines()
+            .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+            .collect();
+        assert_eq!(added.len(), 3, "{stamped}");
+        assert!(added[1].starts_with("+- Claimed by saddle ["), "{stamped}");
         assert!(super::persist_tracker("probe-a1b2", "claimed").contains("nothing to commit"));
 
         std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
@@ -61674,6 +61676,56 @@ mod tests {
         clear_probe_env();
     }
 
+    /// Writes that land on the board before another writer splits it, and
+    /// persist only once that split is in HEAD, find their issue files
+    /// clean: the split commit carried them. Each persist still commits its
+    /// seat line, so a note from `attach_to_issue` or a claim names its
+    /// seat. Persisting the same write again stamps nothing more.
+    #[test]
+    fn a_write_persisted_after_another_writers_split_commits_its_seat_line() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let issues = big_board(&root, 300);
+        probe_env(&root);
+        let layout = vissue_core::Layout::new(&root, "Software");
+        vissue_core::ops::note(&layout, "probe-b007", "first look").unwrap();
+        vissue_core::ops::note(&layout, "probe-b123", "taking this").unwrap();
+        vissue_core::ledger::migrate(&layout, false).unwrap();
+        let made = super::commit_paths(
+            &root,
+            &["Software/probe/issues.org", "Software/probe/issues"],
+            "chore(issues): split by another writer",
+        );
+        assert_eq!(made, super::PathCommit::Made);
+        assert!(vissue_core::ledger::is_ledger(&issues));
+        for (id, verb, line) in [
+            ("probe-b007", "noted", "- Noted by saddle"),
+            ("probe-b123", "claimed", "- Claimed by saddle"),
+        ] {
+            let said = persist_tracker(id, verb);
+            assert!(said.contains("committed"), "{id} {verb}: {said}");
+            let subject = git_text(&root, &["log", "-1", "--format=%s"]);
+            assert_eq!(
+                subject.trim(),
+                format!("chore(issues): {id} {verb} by saddle")
+            );
+            let at = format!("HEAD:Software/probe/issues/{id}.org");
+            let shown = git_text(&root, &["show", &at]);
+            assert_eq!(shown.matches(line).count(), 1, "{shown}");
+            let left = board_left(&root);
+            assert!(left.is_empty(), "{said}\n{left}");
+        }
+        let said = persist_tracker("probe-b007", "noted");
+        assert!(said.contains("nothing to commit"), "{said}");
+        let shown = git_text(
+            &root,
+            &["show", "HEAD:Software/probe/issues/probe-b007.org"],
+        );
+        assert_eq!(shown.matches("- Noted by saddle").count(), 1, "{shown}");
+        clear_probe_env();
+    }
+
     fn drop_pack_index(root: &Path) {
         let run = |args: &[&str]| {
             let out = git_at(root).args(args).output().unwrap();
@@ -61738,8 +61790,9 @@ mod tests {
 
     /// A pack with no index, or HEAD naming a missing commit, replaces git's
     /// raw object error with the repository path and `ljos doctor`. The
-    /// file that was written stays. Doctor prints the repair and does not
-    /// run it. A healthy checkout gains no new text.
+    /// file that was written stays, with the write's seat line. Doctor
+    /// prints the repair and does not run it. A healthy checkout gains no
+    /// new text.
     #[test]
     fn a_broken_tracker_names_the_repair_and_keeps_the_file() {
         let _env = env_guard();
@@ -61755,7 +61808,9 @@ mod tests {
         std::fs::write(&issues, body).unwrap();
         let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
         assert_repair_line(&said, packed.path());
-        assert_eq!(std::fs::read_to_string(&issues).unwrap(), body);
+        let kept = std::fs::read_to_string(&issues).unwrap();
+        assert!(kept.starts_with(body), "{kept}");
+        assert!(kept.contains("- Claimed by saddle ["), "{kept}");
         assert_eq!(std::fs::read(packed.path().join(".git/index")).ok(), index);
         let id = format!(
             "vissue 0.16.2\nprotocol: 1\nroot={}\nprefix=Software\n",
@@ -61792,7 +61847,9 @@ mod tests {
         std::fs::write(&issues, body).unwrap();
         let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
         assert_repair_line(&said, missing.path());
-        assert_eq!(std::fs::read_to_string(&issues).unwrap(), body);
+        let kept = std::fs::read_to_string(&issues).unwrap();
+        assert!(kept.starts_with(body), "{kept}");
+        assert!(kept.contains("- Claimed by saddle ["), "{kept}");
         let id = format!(
             "vissue 0.16.2\nprotocol: 1\nroot={}\nprefix=Software\n",
             missing.path().display()
