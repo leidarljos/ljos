@@ -225,8 +225,18 @@ pub fn read_rows(path: &Path) -> Result<Vec<Row>> {
     Ok(rows)
 }
 
-/// Every regular file under `dir`, with its bytes.
-fn snapshot(dir: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+/// A lock file is never removed or rewritten. A writer may hold it or wait
+/// on it, and a new file under its name lets a second writer in beside the
+/// first.
+fn is_lock(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "lock")
+}
+
+/// Files by path, with their bytes.
+type Files = BTreeMap<PathBuf, Vec<u8>>;
+
+/// Every regular file under `dir` but the lock files, with its bytes.
+fn snapshot(dir: &Path) -> Result<Files> {
     let mut out = BTreeMap::new();
     if !dir.exists() {
         return Ok(out);
@@ -238,7 +248,7 @@ fn snapshot(dir: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
             let kind = entry.file_type()?;
             if kind.is_dir() {
                 stack.push(entry.path());
-            } else if kind.is_file() {
+            } else if kind.is_file() && !is_lock(&entry.path()) {
                 out.insert(entry.path(), std::fs::read(entry.path())?);
             }
         }
@@ -247,8 +257,9 @@ fn snapshot(dir: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
 }
 
 /// Put `dir` back to `before`: files written since are restored, files
-/// made since are removed.
-fn restore(dir: &Path, before: &BTreeMap<PathBuf, Vec<u8>>) -> Result<()> {
+/// made since are removed. Lock files are left as they are. The caller
+/// holds the project's issues lock.
+fn restore(dir: &Path, before: &Files) -> Result<()> {
     for (path, _) in snapshot(dir)? {
         if !before.contains_key(&path) {
             std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
@@ -344,14 +355,85 @@ pub struct Filed {
     pub persisted: String,
 }
 
-/// One project file the batch writes, as it was and as this batch last
-/// left it.
+/// One project directory the batch writes, as it was and as this batch
+/// last left it.
 struct Board {
     project: String,
     issues: PathBuf,
     dir: PathBuf,
-    before: BTreeMap<PathBuf, Vec<u8>>,
-    ours: Vec<u8>,
+    before: Files,
+    ours: Files,
+    /// The board in `ours`, rendered as `vissue` writes it.
+    board: String,
+}
+
+/// Run `f` under the issues lock of `issues`.
+fn locked<R>(issues: &Path, f: impl FnOnce() -> Result<R>) -> Result<R> {
+    crate::with_wall_bounded_issues_lock(issues, || f().map_err(vissue_core::Error::from))
+        .map_err(anyhow::Error::from)
+}
+
+/// The board at `issues`, a single file or a ledger, rendered with its
+/// cookies filled and without the heading `drop`. `None` when `drop` is
+/// not on it.
+fn rendered(project: &str, issues: &Path, drop: Option<&str>) -> Result<Option<String>> {
+    let mut doc = vissue_core::IssueDoc::parse_file(project, issues)
+        .with_context(|| format!("reading {}", issues.display()))?;
+    if let Some(id) = drop {
+        if doc.remove(id).is_none() {
+            return Ok(None);
+        }
+    }
+    doc.refresh_statistics();
+    Ok(Some(doc.render_string()))
+}
+
+impl Board {
+    /// After `id` was filed here, and under the issues lock: the directory
+    /// and board if `id` is the only change since `ours`, else `None`. A
+    /// create writes `issues.org` or the ledger beside it and nothing else
+    /// in the directory.
+    fn only_filed(&self, id: &str) -> Result<Option<(Files, String)>> {
+        let now = snapshot(&self.dir)?;
+        let ledger = self.dir.join("issues");
+        let board_file = |path: &Path| path == self.issues || path.starts_with(&ledger);
+        let elsewhere = self
+            .ours
+            .iter()
+            .any(|(path, bytes)| !board_file(path) && now.get(path) != Some(bytes))
+            || now
+                .keys()
+                .any(|path| !board_file(path) && !self.ours.contains_key(path));
+        if elsewhere
+            || rendered(&self.project, &self.issues, Some(id))?.as_deref()
+                != Some(self.board.as_str())
+        {
+            return Ok(None);
+        }
+        let board = rendered(&self.project, &self.issues, None)?.unwrap_or_default();
+        Ok(Some((now, board)))
+    }
+}
+
+/// Put every board back as it was, holding all their issues locks from
+/// the check to the last write. `Some(dir)` names a directory another
+/// writer changed since this batch last wrote it; then nothing is put
+/// back.
+fn roll_back(boards: &[Board]) -> Result<Option<PathBuf>> {
+    let paths: Vec<&Path> = boards.iter().map(|b| b.issues.as_path()).collect();
+    let under_lock = || -> Result<Option<PathBuf>> {
+        for b in boards {
+            if snapshot(&b.dir)? != b.ours {
+                return Ok(Some(b.dir.clone()));
+            }
+        }
+        for b in boards {
+            restore(&b.dir, &b.before)?;
+        }
+        Ok(None)
+    };
+    vissue_core::store::with_issues_locks(&paths, || under_lock().map_err(vissue_core::Error::from))
+        .map_err(anyhow::Error::from)
 }
 
 /// File every placed row and commit the tracker once.
@@ -397,38 +479,26 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
             .parent()
             .map(Path::to_path_buf)
             .context("file --from: the project file has no directory")?;
-        let before = snapshot(&dir)?;
-        let ours = std::fs::read(&issues).unwrap_or_default();
+        let (before, board) = locked(&issues, || {
+            Ok((
+                snapshot(&dir)?,
+                rendered(&project, &issues, None)?.unwrap_or_default(),
+            ))
+        })?;
         at_board.push(boards.len());
         boards.push(Board {
             project,
             issues,
             dir,
+            ours: before.clone(),
             before,
-            ours,
+            board,
         });
     }
-    let read = |path: &Path| std::fs::read(path).unwrap_or_default();
-    // Another writer that changes a project file mid-batch ends it, and its
-    // row is never put back over.
-    let changed = |boards: &[Board]| {
-        boards
-            .iter()
-            .find(|b| read(&b.issues) != b.ours)
-            .map(|b| b.issues.display().to_string())
-    };
     let mut ids: Vec<String> = Vec::with_capacity(placed.len());
     for (at, place) in placed.iter().enumerate() {
         let line = at + 1;
         let board = at_board[at];
-        if read(&boards[board].issues) != boards[board].ours {
-            bail!(
-                "file --from: another writer changed {} before row {line}, so the batch stopped; the {} tickets filed are on the tracker and not committed: {}",
-                boards[board].issues.display(),
-                ids.len(),
-                ids.join(" ")
-            );
-        }
         let row = &place.row;
         let kind = row.kind.clone().or_else(|| defaults.kind.clone());
         let tags = row.tags.clone().or_else(|| defaults.tags.clone());
@@ -448,26 +518,37 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
         );
         match made {
             Ok(text) => {
-                ids.push(text.trim().to_string());
-                boards[board].ours = read(&boards[board].issues);
-            }
-            Err(e) => {
-                if let Some(path) = changed(&boards) {
+                let id = text.trim().to_string();
+                ids.push(id.clone());
+                // Another writer that changes a project directory mid-batch
+                // ends it, and its change is never put back over.
+                let b = &boards[board];
+                let Some((ours, filed)) = locked(&b.issues, || b.only_filed(&id))? else {
                     bail!(
-                        "file --from: row {line}: {e}; another writer changed {path} meanwhile, so the {} tickets filed are on the tracker and not committed: {}",
+                        "file --from: another writer changed {} while row {line} was filed, so the batch stopped; the {} tickets filed are on the tracker and not committed: {}",
+                        b.dir.display(),
                         ids.len(),
                         ids.join(" ")
                     );
-                }
-                let mut undone = format!(
-                    "nothing was filed: the {} tickets written before it were taken back",
-                    ids.len()
-                );
+                };
+                boards[board].ours = ours;
+                boards[board].board = filed;
+            }
+            Err(e) => {
+                let undone = match roll_back(&boards) {
+                    Ok(Some(dir)) => bail!(
+                        "file --from: row {line}: {e}; another writer changed {} meanwhile, so the {} tickets filed are on the tracker and not committed: {}",
+                        dir.display(),
+                        ids.len(),
+                        ids.join(" ")
+                    ),
+                    Ok(None) => format!(
+                        "nothing was filed: the {} tickets written before it were taken back",
+                        ids.len()
+                    ),
+                    Err(r) => format!("putting the tracker back failed: {r:#}"),
+                };
                 for b in &boards {
-                    if let Err(r) = restore(&b.dir, &b.before) {
-                        undone = format!("putting {} back failed: {r:#}", b.dir.display());
-                        break;
-                    }
                     // A poller may have read the rows written so far;
                     // the log is append-only, so the undo is one more write.
                     let _ = vissue_core::events::emit_issues_write(
@@ -520,6 +601,35 @@ mod tests {
             e.contains("header columns 2 (\" body\") and 3 (\"body\")"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn a_roll_back_keeps_the_lock_file_and_never_puts_back_over_another_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let issues = dir.join("issues.org");
+        let read = || std::fs::read_to_string(&issues).unwrap();
+        std::fs::write(&issues, "before\n").unwrap();
+        let before = snapshot(&dir).unwrap();
+        std::fs::write(&issues, "ours\n").unwrap();
+        std::fs::write(dir.join("issues.org.lock"), "").unwrap();
+        let board = Board {
+            project: "demo".into(),
+            issues: issues.clone(),
+            dir: dir.clone(),
+            before,
+            ours: snapshot(&dir).unwrap(),
+            board: String::new(),
+        };
+        std::fs::write(&issues, "theirs\n").unwrap();
+        let boards = std::slice::from_ref(&board);
+        assert_eq!(roll_back(boards).unwrap(), Some(dir.clone()));
+        assert_eq!(read(), "theirs\n");
+        std::fs::write(&issues, "ours\n").unwrap();
+        assert_eq!(roll_back(boards).unwrap(), None);
+        assert_eq!(read(), "before\n");
+        assert!(dir.join("issues.org.lock").is_file());
     }
 
     #[test]

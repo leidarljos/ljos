@@ -19,15 +19,17 @@ fn jsonl(rows: usize) -> String {
 }
 
 /// The tracker files without vissue's change log, which records the rows
-/// written and the undo as writes and is never rewound.
+/// written and the undo as writes and is never rewound, and without the
+/// lock files, which are never removed.
 fn tracked(world: &World) -> Vec<(std::path::PathBuf, Vec<u8>)> {
     world
         .tracker_files()
         .into_iter()
         .filter(|(path, _)| {
-            !path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(".vault-events"))
+            !path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with(".vault-events") || name.ends_with(".lock")
+            })
         })
         .collect()
 }
@@ -242,6 +244,29 @@ fn a_refused_row_takes_back_every_project_it_wrote() {
     );
     assert_eq!(tracked(&world), files);
     assert_eq!(world.commits(), before);
+}
+
+#[test]
+fn a_taken_back_batch_leaves_the_issues_lock_file() {
+    let world = World::new();
+    let lock = world.tracker().join("Software/demo/issues.org.lock");
+    assert!(!lock.exists(), "{}", lock.display());
+    let mut rows = jsonl(3);
+    rows.push_str("{\"title\": \"Row 4\", \"parent\": \"demo-0000\"}\n");
+    let file = world.write("bad-parent.jsonl", rows);
+    let filed = world.ljos(&["file", "--from", &file, "-p", "demo"]);
+    assert_eq!(filed.status.code(), Some(1), "{}", said(&filed));
+    assert!(
+        stderr(&filed)
+            .contains("nothing was filed: the 3 tickets written before it were taken back"),
+        "{}",
+        said(&filed)
+    );
+    assert!(
+        lock.is_file(),
+        "a writer waiting on {} would lock a different file",
+        lock.display()
+    );
 }
 
 #[test]
