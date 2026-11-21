@@ -36918,9 +36918,10 @@ pub fn failing(rows: &[Habitat]) -> Vec<&str> {
 }
 
 /// Rows a sitting opens without. With no encoder the pack ranks by words
-/// alone and `finish` declines to fire a weak island, so the loop still
-/// holds. A binary that was never installed stays `info`. A child that
-/// died after answering once is [`ENCODER_DEGRADED`] and prints `warn`.
+/// alone and a verbose `finish` declines to fire a weak island, so the
+/// loop still holds. A plain finish fires no island. A binary that was
+/// never installed stays `info`. A child that died after answering once
+/// is [`ENCODER_DEGRADED`] and prints `warn`.
 const SITTING_DEGRADED: &[&str] = &["packset-embed", "encoder"];
 
 /// Tools a sitting opens without. `ljos claim` never asks them. Missing,
