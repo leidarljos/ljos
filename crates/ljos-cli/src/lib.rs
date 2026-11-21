@@ -55875,9 +55875,9 @@ pub(crate) fn strip_guard_bin(cmd: &mut std::process::Command) {
 /// waits on a terminal for a credential.
 pub(crate) fn git_cmd() -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
+    fence_git(&mut cmd);
     strip_guard_bin(&mut cmd);
     no_git_prompt(&mut cmd);
-    fence_git(&mut cmd);
     cmd
 }
 
