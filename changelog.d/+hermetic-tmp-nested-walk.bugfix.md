@@ -1,0 +1,1 @@
+Walk every uid-owned `ljos-*`, `.tmp*` and `tmp.*` entry under `/tmp` in full in `scripts/ci-test-hermetic.sh`, so a test that writes below a pre-existing subdirectory there fails the run instead of passing.

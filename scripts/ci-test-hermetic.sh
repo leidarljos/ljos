@@ -3,8 +3,8 @@
 # scratch directories with XDG_*_HOME unset. Scan HOME, ljos-owned locations
 # under the runner's real HOME (hashing regular files and walking pre-existing
 # symlinks that resolve inside it), and suite-writable /tmp entries
-# (/tmp/ljos-$UID and uid-owned ljos-*, .tmp*, tmp.*), ignoring concurrent
-# foreign host activity.
+# (/tmp/ljos-$UID and uid-owned ljos-*, .tmp*, tmp.*, each walked in full),
+# ignoring concurrent foreign host activity.
 set -eu
 
 if [ "$#" -lt 1 ]; then
@@ -365,7 +365,8 @@ def record_tmp(path, rel, walk_children):
     try:
         st = os.lstat(path)
     except OSError as exc:
-        errors.append(f"{path}: {exc.strerror}")
+        if exc.errno != errno.ENOENT:
+            errors.append(f"{path}: {exc.strerror}")
         return
     mode = stat.S_IMODE(st.st_mode)
     if stat.S_ISLNK(st.st_mode):
@@ -434,7 +435,8 @@ if os.path.isdir(tmp_root):
                 errors.append(f"{entry.path}: {exc.strerror}")
                 continue
             if st.st_uid == uid:
-                record_tmp(entry.path, name, False)
+                # Another wrapper's live TMPDIR is checked by that run.
+                record_tmp(entry.path, name, not name.startswith("ljos-hermetic-tmp."))
 
 while queue:
     cur_dir, cur_rel = queue.pop()
@@ -443,6 +445,8 @@ while queue:
     except OSError as exc:
         if exc.errno in (errno.EACCES, errno.EPERM):
             entries[cur_rel + " -> unreadable"] = ["unresolved", exc.errno, None, None, None, None, None]
+        elif exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            pass
         else:
             errors.append(f"{cur_dir}: {exc.strerror}")
         continue

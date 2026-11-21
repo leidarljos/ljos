@@ -951,3 +951,45 @@ fn ci_test_hermetic_bounds_symlink_walks_to_scan_root() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn ci_test_hermetic_walks_nested_writes_under_every_tmp_name() {
+    let case = hermetic_case_dir("ci-herm-tmp-deep-");
+    let home = case.path().join("home");
+    let tmp = case.path().join("tmp");
+    std::fs::create_dir_all(&home).unwrap();
+    let names = ["tmp.preexisting", "ljos-othername", ".tmpdeep"];
+    for name in names {
+        std::fs::create_dir_all(tmp.join(name).join("sub/deep")).unwrap();
+    }
+
+    let out_clean = run_hermetic(&home, &tmp, "true");
+    assert!(
+        out_clean.status.success(),
+        "untouched nested /tmp dirs failed a clean run: {}",
+        String::from_utf8_lossy(&out_clean.stderr)
+    );
+
+    let cmd = names
+        .iter()
+        .map(|name| {
+            format!(
+                ": > '{}'",
+                tmp.join(name).join("sub/deep/new.txt").display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let out = run_hermetic(&home, &tmp, &cmd);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "nested writes under allowlisted /tmp names must fail"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    for name in names {
+        let needle = format!("{name}/sub/deep/new.txt");
+        assert!(err.contains(&needle), "stderr missing {needle}: {err}");
+    }
+}
