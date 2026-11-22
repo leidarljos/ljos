@@ -61678,17 +61678,58 @@ mod tests {
         clear_probe_env();
     }
 
+    /// The directory that lists this process's descriptors.
+    #[cfg(not(target_os = "macos"))]
+    const FD_DIR: &str = "/proc/self/fd";
+    /// macOS has no `/proc`. Its `/dev/fd` entries are not links, so the
+    /// path comes from `fcntl(F_GETPATH)`.
+    #[cfg(target_os = "macos")]
+    const FD_DIR: &str = "/dev/fd";
+
+    #[cfg(not(target_os = "macos"))]
+    fn fd_target(entry: &std::fs::DirEntry) -> Option<PathBuf> {
+        std::fs::read_link(entry.path()).ok()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fd_target(entry: &std::fs::DirEntry) -> Option<PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        let fd: libc::c_int = entry.file_name().to_str()?.parse().ok()?;
+        let mut buf = vec![0u8; libc::PATH_MAX as usize];
+        // SAFETY: F_GETPATH writes at most PATH_MAX bytes into `buf`.
+        if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } == -1 {
+            return None;
+        }
+        let len = buf.iter().position(|byte| *byte == 0)?;
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len])))
+    }
+
     /// How many descriptors this process holds on `path`.
     fn open_count(path: &Path) -> usize {
         let want = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        std::fs::read_dir("/proc/self/fd")
+        std::fs::read_dir(FD_DIR)
             .map(|entries| {
                 entries
                     .flatten()
-                    .filter(|entry| std::fs::read_link(entry.path()).is_ok_and(|at| at == want))
+                    .filter(|entry| fd_target(entry).is_some_and(|at| at == want))
                     .count()
             })
             .unwrap_or(0)
+    }
+
+    /// The lock wait below counts descriptors on the lock file. A listing
+    /// this platform does not have would count none and wait out its 50 s.
+    #[test]
+    fn open_count_sees_a_file_this_process_holds_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(dir.path()).unwrap().join("held");
+        std::fs::write(&path, "x").unwrap();
+        assert_eq!(open_count(&path), 0);
+        let one = std::fs::File::open(&path).unwrap();
+        let two = std::fs::File::open(&path).unwrap();
+        assert_eq!(open_count(&path), 2);
+        drop((one, two));
+        assert_eq!(open_count(&path), 0);
     }
 
     /// A write that waited on the lock while another writer split its board
