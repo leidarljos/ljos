@@ -754,6 +754,9 @@ fn printed_path_lines_preserve_shell_metacharacters() {
 
 #[test]
 fn fish_command_hints_preserve_quotes_and_backslashes() {
+    let Some(fish) = installer_shell("fish") else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let progs = dir.path().join("progs");
     let home = dir.path().join("home");
@@ -762,7 +765,6 @@ fn fish_command_hints_preserve_quotes_and_backslashes() {
     for name in PROGRAMS {
         script(&progs, name, "#!/bin/sh\nexit 0\n");
     }
-    let fish = on_path("fish").expect("fish is required for installer shell tests");
 
     for (case, bin) in [
         ("apostrophe", dir.path().join("bin'quote")),
