@@ -2379,18 +2379,10 @@ fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Re
         bail!("the encoder archives lack bin/packset-embed or {ENCODER_LIB}/{ENCODER_SONAME}; nothing was installed");
     }
     // A running encoder keeps the inode it opened, so the new files are
-    // renamed in. chmod and the destination directory happen first: a
-    // failure after the runtime rename used to leave the new runtime and
-    // delete the old one with the stage. Both names move aside, then both
-    // new names move in, and either failure puts the previous pair back.
-    use std::os::unix::fs::PermissionsExt;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    if let Err(err) = fs::set_permissions(&new_bin, fs::Permissions::from_mode(0o755)) {
-        bail!("encoder install failed ({err}); nothing was installed");
-    }
+    // renamed in. The destination directory is made first: a failure after
+    // the runtime rename used to leave the new runtime and delete the old
+    // one with the stage. Both names move aside, then both new names move
+    // in, and either failure puts the previous pair back.
     if let Err(err) = fs::create_dir_all(bin_dir) {
         bail!("encoder install failed ({err}); nothing was installed");
     }
@@ -2415,6 +2407,8 @@ fn path_present(path: &Path) -> Result<bool> {
 
 /// Stage both names, swap both, and roll both back. The stage directory is
 /// removed by the caller, so a backup that is still there at return is gone.
+/// The binary is published onto `bin` with mode `0o755` rather than
+/// renamed and chmodded, so no name in the stage is ever made executable.
 fn swap_encoder(
     stage: &Path,
     new_lib: &Path,
@@ -2477,11 +2471,11 @@ fn swap_encoder(
     if let Err(err) = fs::rename(new_lib, lib) {
         return fail(bin_aside, &err.to_string());
     }
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "renames a path that is not a git hook"
-    )]
-    if let Err(err) = fs::rename(new_bin, bin) {
+    if let Err(err) = crate::publish(
+        bin,
+        crate::Content::CopyOf(new_bin),
+        crate::Mode::Exactly(0o755),
+    ) {
         // The new runtime is occupying the live name. Move it back into the
         // stage, or delete it, so the previous runtime can return.
         #[expect(
@@ -4490,6 +4484,45 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, [side.clone(), dest.clone()]);
+    }
+
+    /// The encoder binary was chmodded by path in the stage and renamed
+    /// onto its name. It is now published there, so a link at that name is
+    /// replaced and its target keeps its bytes and mode.
+    #[test]
+    fn an_encoder_install_follows_no_link_at_the_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let new_lib = stage.join("tree/lib");
+        fs::create_dir_all(&new_lib).unwrap();
+        crate::write_file(new_lib.join(ENCODER_SONAME), "runtime\n").unwrap();
+        let new_bin = stage.join("tree/packset-embed");
+        crate::install_executable_mode(&new_bin, "#!/bin/sh\necho new\n", 0o600).unwrap();
+        let victim = dir.path().join("victim");
+        crate::install_executable_mode(&victim, "keep\n", 0o700).unwrap();
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir(&bin_dir).unwrap();
+        let bin = bin_dir.join("packset-embed");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "plants a link that is not a git hook"
+        )]
+        std::os::unix::fs::symlink(&victim, &bin).unwrap();
+        let lib = dir.path().join("lib");
+        swap_encoder(&stage, &new_lib, &new_bin, &lib, &bin).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep\n");
+        assert_eq!(
+            fs::symlink_metadata(&victim).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
+        let meta = fs::symlink_metadata(&bin).unwrap();
+        assert!(meta.file_type().is_file(), "{meta:?}");
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o755);
+        assert_eq!(fs::read_to_string(&bin).unwrap(), "#!/bin/sh\necho new\n");
+        assert_eq!(
+            fs::read_to_string(lib.join(ENCODER_SONAME)).unwrap(),
+            "runtime\n"
+        );
     }
 
     fn temp_of(path: &Path) -> PathBuf {
