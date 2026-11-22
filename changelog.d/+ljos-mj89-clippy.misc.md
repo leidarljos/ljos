@@ -1,0 +1,3 @@
+Code that names a git hook now runs under `#[deny(clippy::disallowed_methods)]`, and `clippy.toml` lists the calls that put a file at a path or start a program, so clippy refuses a hook write there by whatever import, binding, cast, closure or macro reaches the call.
+That code writes its other files with `ljos_cli::write_file`, which refuses a git hook file name and a symlink at the path, and starts programs with `ljos_cli::program`, which refuses `cp`, `mv`, `install` and `ln`.
+The text scanner that looked for hook writes by their call syntax is removed; a test keeps every function that names a git hook inside a deny scope.

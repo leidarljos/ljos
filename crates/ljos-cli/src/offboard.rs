@@ -79,6 +79,7 @@ impl OwnedPlace {
 }
 
 impl Journal {
+    #[deny(clippy::disallowed_methods)]
     pub(crate) fn begin(
         file: &Path,
         runner: &str,
@@ -107,6 +108,7 @@ impl Journal {
         })
     }
 
+    #[deny(clippy::disallowed_methods)]
     pub(crate) fn finish(mut self) -> Result<()> {
         for path in candidate_paths(
             &self.file,
@@ -274,6 +276,7 @@ fn add_tree_files(paths: &mut BTreeSet<PathBuf>, dir: &Path, predicate: impl Fn(
     }
 }
 
+#[deny(clippy::disallowed_methods)]
 fn candidate_paths(
     file: &Path,
     runner: &str,

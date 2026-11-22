@@ -467,6 +467,7 @@ mod tests {
     }
 
     #[test]
+    #[deny(clippy::disallowed_methods)]
     fn a_git_hook_is_not_a_command_that_probes_its_directory() {
         let args = |words: &[&str]| {
             words

@@ -4413,6 +4413,7 @@ fn seat_kind(cmd: &Cmd) -> ljos_cli::seat_resolve::Kind {
     }
 }
 
+#[deny(clippy::disallowed_methods)]
 fn run_hook(hook: HookArgs) -> Result<()> {
     let HookArgs {
         limit,

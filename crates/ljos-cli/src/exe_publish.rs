@@ -30,6 +30,75 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 #[cfg(unix)]
 const EXE: &CStr = c"exe";
 
+/// Programs that copy, move or link the paths they are given.
+const WRITING_PROGRAMS: &[&str] = &["cp", "mv", "install", "ln"];
+
+/// Write `body` to `path`, a file that is not a git hook, without
+/// following a symlink at `path`.
+///
+/// Code that names a git hook denies `clippy::disallowed_methods`, which
+/// refuses `std::fs::write` and the other ways to put a file at a path.
+/// This is how that code writes its other files.
+///
+/// # Errors
+///
+/// The file name of `path` is a git hook name, `path` is a symlink, or the
+/// write fails.
+pub fn write_file(path: impl AsRef<Path>, body: impl AsRef<[u8]>) -> Result<(), Error> {
+    let path = path.as_ref();
+    if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+        if crate::git_hooks::HOOK_NAMES.contains(&name) {
+            return Err(Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "write file: {} is named like a git hook; publish it with install_executable",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?
+            .write_all(body.as_ref())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, body.as_ref())
+    }
+}
+
+/// A [`std::process::Command`] for `program`, which must not be a program
+/// that copies, moves or links files.
+///
+/// Code that names a git hook denies `clippy::disallowed_methods`, which
+/// refuses `Command::new`. This is how that code starts a program.
+///
+/// # Errors
+///
+/// The file name of `program` is `cp`, `mv`, `install` or `ln`.
+pub fn program(program: impl AsRef<std::ffi::OsStr>) -> Result<std::process::Command, Error> {
+    let program = program.as_ref();
+    let name = Path::new(program).file_name().unwrap_or(program);
+    if WRITING_PROGRAMS.iter().any(|writer| name == *writer) {
+        return Err(Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "program: {} writes the paths it is given; publish a hook with install_executable",
+                program.to_string_lossy()
+            ),
+        ));
+    }
+    Ok(std::process::Command::new(program))
+}
+
 /// What [`publish`] puts at the destination.
 #[derive(Clone, Copy, Debug)]
 pub enum Content<'a> {
@@ -1254,145 +1323,89 @@ mod tests {
         );
     }
 
+    #[test]
+    fn write_file_refuses_a_hook_name_and_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let notes = dir.path().join("notes.txt");
+        write_file(&notes, "x").unwrap();
+        assert_eq!(std::fs::read(&notes).unwrap(), b"x");
+        for name in ["pre-push", "update", "post-commit"] {
+            let err = write_file(dir.path().join("hooks").join(name), "x").unwrap_err();
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::InvalidInput,
+                "{name}: {err}"
+            );
+        }
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "SECRET").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        assert!(write_file(&link, "x").is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"SECRET");
+    }
+
+    #[test]
+    fn program_refuses_a_program_that_writes_paths() {
+        for name in ["cp", "/bin/mv", "install", "/usr/bin/ln"] {
+            let err = program(name).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::InvalidInput,
+                "{name}: {err}"
+            );
+        }
+        let out = program("true").unwrap().output().unwrap();
+        assert!(out.status.success());
+    }
+
     /// Files under `crates/` that may write an executable in this process,
     /// each with the reason it has to.
     const IN_PROCESS_EXECUTABLES: &[(&str, &str)] = &[];
 
-    /// Writes in a function that names a git hook whose file name the hook
-    /// scan cannot see, or that put back a hook this process never wrote:
-    /// file under `crates/`, function, target, and why it is not a hook
-    /// publish.
-    const NOT_A_HOOK: &[(&str, &str, &str, &str)] = &[
+    /// Where `clippy::disallowed_methods` is allowed or expected: file
+    /// under `crates/`, function, and why the call there is not a hook
+    /// published in place. `hook_write_forms.rs` expects the lint on every
+    /// form it holds and is not listed.
+    const ALLOWED_CALLS: &[(&str, &str, &str)] = &[
         (
             "ljos-cli/src/cloud_hook.rs",
             "unchain",
-            "&hook",
             "renames back the user's hook an earlier cloud up moved aside; no descriptor here wrote it",
         ),
         (
             "ljos-cli/src/git_hooks.rs",
+            "ensure_executable",
+            "opens a hook read-only with O_NOFOLLOW to fchmod it; nothing is written",
+        ),
+        (
+            "ljos-cli/src/git_hooks.rs",
             "chain_through_link",
-            "&hook",
             "a test symlink to a target hook_at publishes",
-        ),
-        (
-            "ljos-cli/src/lib.rs",
-            "finish",
-            "issue",
-            "an issue id; \"update\" here is a vissue verb",
-        ),
-        (
-            "ljos-cli/src/lib.rs",
-            "finish",
-            "&deed_paths",
-            "files the tracker lock guards; \"update\" here is a vissue verb",
-        ),
-        (
-            "ljos-cli/src/lib.rs",
-            "workflow_start",
-            "&id",
-            "an issue id for the tracker lock; \"update\" here is a vissue verb",
-        ),
-        (
-            "ljos-cli/src/lib.rs",
-            "workflow_start",
-            "parent",
-            "an issue id for the tracker lock; \"update\" here is a vissue verb",
-        ),
-        (
-            "ljos-cli/src/lib.rs",
-            "reopen",
-            "issue",
-            "an issue id for the tracker lock; \"update\" here is a vissue verb",
-        ),
-        (
-            "ljos-cli/src/lib.rs",
-            "bump_plan",
-            "&first.id",
-            "an issue id for the tracker lock; \"update\" here is a vissue verb",
-        ),
-        (
-            "ljos-cli/src/offboard.rs",
-            "finish",
-            "&state.bytes",
-            "store_backup names the backup after the sha256 of the bytes",
-        ),
-        (
-            "ljos-cli/src/main.rs",
-            "run_hook",
-            "&input",
-            "relay names an openhands-started marker after the session id",
-        ),
-        (
-            "ljos-cli/tests/gate_identity.rs",
-            "a_tmux_pane_is_not_judged_as_the_last_conversation_to_name_tmux",
-            "&file",
-            "the {who}.sh script",
-        ),
-        (
-            "ljos-cli/tests/gate_identity.rs",
-            "a_tmux_pane_is_not_judged_as_the_last_conversation_to_name_tmux",
-            "&x_go",
-            "the x.go file",
-        ),
-        (
-            "ljos-cli/tests/gate_identity.rs",
-            "a_tmux_pane_is_not_judged_as_the_last_conversation_to_name_tmux",
-            "&z_go",
-            "the z.go file",
-        ),
-        (
-            "ljos-cli/tests/gate_identity.rs",
-            "one_shot_bash_c_commit_from_unstamped_parent_is_allowed_when_sitting_is_live",
-            "&hold",
-            "a hold- file under the run directory",
-        ),
-        (
-            "ljos-cli/tests/mail_wake_push.rs",
-            "world",
-            "&gitconfig",
-            "the gitconfig file",
         ),
     ];
 
-    /// A file written in this process and then given an exec bit, or a git
-    /// hook rewritten where it lies, can be started while a forked child
-    /// still has it open. Each of those goes through this module instead.
+    /// The lint attribute that puts code in a deny scope.
+    const DENY: &str = "deny(clippy::disallowed_methods)";
+
+    /// An attribute that sets one of `LEVELS` on one of `LINTS` turns the
+    /// lint off or keeps it from failing a build.
+    const LEVELS: &[&str] = &["allow(", "expect(", "warn("];
+    const LINTS: &[&str] = &["clippy::disallowed_methods", "clippy::style", "clippy::all"];
+
+    /// A file written in this process and then given an exec bit can be
+    /// started while a forked child still has it open. Each of those goes
+    /// through this module instead.
     #[test]
     fn executables_are_published_through_this_module() {
         let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let mut files = Vec::new();
-        rust_sources(crates, &mut files);
-        assert!(files.len() > 100, "found {} sources", files.len());
         let mut hits = Vec::new();
-        let mut sources = Vec::new();
-        for file in &files {
-            let rel = file.strip_prefix(crates).unwrap().to_string_lossy();
-            if rel.ends_with("exe_publish.rs")
-                || IN_PROCESS_EXECUTABLES.iter().any(|(path, _)| rel == *path)
-            {
+        for (rel, text) in crate_sources(crates) {
+            if IN_PROCESS_EXECUTABLES.iter().any(|(path, _)| rel == *path) {
                 continue;
             }
-            let text = std::fs::read_to_string(file).unwrap();
             for line in write_then_exec(&text) {
                 hits.push(format!("crates/{rel}:{line}"));
-            }
-            sources.push((rel.to_string(), text));
-        }
-        let mut used = vec![false; NOT_A_HOOK.len()];
-        for hit in hook_writes(&sources) {
-            let path = &sources[hit.file].0;
-            let known = NOT_A_HOOK.iter().position(|(file, func, target, _)| {
-                file == path && *func == hit.func && *target == hit.target
-            });
-            match known {
-                Some(n) => used[n] = true,
-                None => {
-                    hits.push(format!("crates/{path}:{} {}", hit.line, hit.target));
-                    if let Some((file, line)) = hit.writer {
-                        hits.push(format!("crates/{}:{line} writes it", sources[file].0));
-                    }
-                }
             }
         }
         assert!(
@@ -1400,19 +1413,409 @@ mod tests {
             "publish these with install_executable, install_executable_mode or copy_executable:\n{}",
             hits.join("\n")
         );
-        let stale: Vec<_> = NOT_A_HOOK
+    }
+
+    /// Clippy refuses the calls in `clippy.toml` inside a deny scope, by
+    /// what each call resolves to. Which code is hook code is what clippy
+    /// cannot tell, so every function that names a git hook must be in a
+    /// deny scope: its own `#[deny(clippy::disallowed_methods)]`, one on a
+    /// function around it, or `#![deny(..)]` on its file. A function that
+    /// names a hook only as text takes the attribute too; it costs nothing
+    /// there. Nothing may turn the lint back off except at `ALLOWED_CALLS`.
+    #[test]
+    fn hook_code_is_in_a_deny_scope() {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let sources = crate_sources(crates);
+        assert!(sources.len() > 100, "found {} sources", sources.len());
+        let scan = scopes(&sources);
+        let mut hits: Vec<String> = scan
+            .outside
             .iter()
-            .zip(&used)
+            .map(|(file, line, func)| {
+                format!("crates/{}:{line} {func} names a git hook", sources[*file].0)
+            })
+            .collect();
+        let mut allowed = vec![false; ALLOWED_CALLS.len()];
+        for (file, line, func, attr) in &scan.overrides {
+            let path = &sources[*file].0;
+            if path.ends_with("/hook_write_forms.rs") && attr.starts_with("#[expect(") {
+                continue;
+            }
+            match ALLOWED_CALLS
+                .iter()
+                .position(|(known, name, _)| known == path && name == func)
+            {
+                Some(n) => allowed[n] = true,
+                None => hits.push(format!("crates/{path}:{line} {func} has {attr}")),
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "put these in a {DENY} scope, or list an allow in ALLOWED_CALLS:\n{}",
+            hits.join("\n")
+        );
+        let stale: Vec<_> = ALLOWED_CALLS
+            .iter()
+            .zip(&allowed)
             .filter(|(_, used)| !**used)
             .collect();
         assert!(
             stale.is_empty(),
-            "NOT_A_HOOK entries no write matches: {stale:?}"
+            "ALLOWED_CALLS entries nothing matches: {stale:?}"
         );
     }
 
     #[test]
-    fn the_site_scan_names_a_write_then_chmod_and_a_hook_rewrite() {
+    fn the_scope_check_names_hook_code_outside_a_deny_scope() {
+        let hooks = r#"
+pub const HOOK: &str = "pre-push";
+pub fn hook_path(dir: &Path) -> PathBuf {
+    dir.join(HOOK)
+}
+#[deny(clippy::disallowed_methods)]
+fn scoped(dir: &Path) {
+    fn inner(dir: &Path) -> PathBuf {
+        dir.join("post-commit")
+    }
+}
+fn verb(issue: &str) {
+    vissue(&["update", issue]);
+    post("/v1/atoms/update");
+}
+fn update_hook(dir: &Path) {
+    dir.join("update");
+}
+fn listed(dir: &Path) {
+    for name in HOOK_NAMES {}
+}
+fn quiet(dir: &Path) {
+    #[allow(
+        dead_code,
+        clippy::disallowed_methods,
+        reason = "x"
+    )]
+    let _ = dir;
+}
+"#;
+        let user = r#"
+fn caller(dir: &Path) {
+    let _ = crate::hooks::hook_path(dir);
+}
+fn other(dir: &Path) {
+    let _ = dir.join("notes.txt");
+}
+"#;
+        let denied = r#"
+#![deny(clippy::disallowed_methods)]
+fn put(dir: &Path) {
+    let _ = dir.join("pre-commit");
+}
+"#;
+        let sources = [
+            ("ljos-cli/src/hooks.rs".to_string(), hooks.to_string()),
+            ("ljos-cli/src/user.rs".to_string(), user.to_string()),
+            ("ljos-cli/src/denied.rs".to_string(), denied.to_string()),
+        ];
+        let scan = scopes(&sources);
+        let outside: Vec<_> = scan
+            .outside
+            .iter()
+            .map(|(file, line, func)| (*file, *line, func.as_str()))
+            .collect();
+        assert_eq!(
+            outside,
+            vec![
+                (0, 3, "hook_path"),
+                (0, 16, "update_hook"),
+                (0, 19, "listed"),
+                (1, 2, "caller"),
+            ]
+        );
+        let overrides: Vec<_> = scan
+            .overrides
+            .iter()
+            .map(|(file, line, func, _)| (*file, *line, func.as_str()))
+            .collect();
+        assert_eq!(overrides, vec![(0, 23, "quiet")]);
+    }
+
+    /// The sources under `crates/` other than this file, by path under
+    /// `crates/`.
+    fn crate_sources(crates: &Path) -> Vec<(String, String)> {
+        let mut files = Vec::new();
+        rust_sources(crates, &mut files);
+        files
+            .iter()
+            .filter(|file| !file.ends_with("exe_publish.rs"))
+            .map(|file| {
+                let rel = file.strip_prefix(crates).unwrap().to_string_lossy();
+                (rel.to_string(), std::fs::read_to_string(file).unwrap())
+            })
+            .collect()
+    }
+
+    /// What `scopes` found: functions that name a hook outside a deny
+    /// scope, and attributes that turn the lint off, each as file index,
+    /// one-based line and function.
+    struct Scopes {
+        outside: Vec<(usize, usize, String)>,
+        overrides: Vec<(usize, usize, String, String)>,
+    }
+
+    struct Source {
+        text: String,
+        code: String,
+        literals: Vec<(usize, usize)>,
+        lines: Vec<usize>,
+        funcs: Vec<Func>,
+    }
+
+    struct Func {
+        name: String,
+        at: usize,
+        body: (usize, usize),
+        returns_path: bool,
+    }
+
+    /// A function names a hook when a string in it is a git hook file
+    /// name, or it uses `HOOK_NAMES`, a constant that names a hook, or a
+    /// function that returns a path and names a hook.
+    fn scopes(sources: &[(String, String)]) -> Scopes {
+        let srcs: Vec<Source> = sources
+            .iter()
+            .map(|(_, text)| {
+                let (code, literals) = blank(text);
+                let lines = std::iter::once(0)
+                    .chain(text.match_indices('\n').map(|(at, _)| at + 1))
+                    .collect();
+                let funcs = functions(&code);
+                Source {
+                    text: text.clone(),
+                    code,
+                    literals,
+                    lines,
+                    funcs,
+                }
+            })
+            .collect();
+        let mut markers = vec!["HOOK_NAMES".to_string()];
+        for src in &srcs {
+            markers.extend(hook_consts(src));
+        }
+        loop {
+            let more: Vec<String> = srcs
+                .iter()
+                .flat_map(|src| src.funcs.iter().map(move |f| (src, f)))
+                .filter(|(src, f)| {
+                    f.returns_path && !markers.contains(&f.name) && names_hook(src, f, &markers)
+                })
+                .map(|(_, f)| f.name.clone())
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            markers.extend(more);
+            markers.sort_unstable();
+            markers.dedup();
+        }
+        let mut outside = Vec::new();
+        let mut overrides = Vec::new();
+        for (n, src) in srcs.iter().enumerate() {
+            let line = |at: usize| src.lines.partition_point(|&start| start <= at);
+            let attrs = lint_attrs(&src.code);
+            let file_denied = attrs
+                .iter()
+                .any(|(_, attr)| attr.starts_with("#![") && attr.contains(DENY));
+            let denied: Vec<&Func> = src
+                .funcs
+                .iter()
+                .filter(|f| squeeze(attributes(&src.code, f.at)).contains(DENY))
+                .collect();
+            for f in &src.funcs {
+                let scoped = file_denied
+                    || denied
+                        .iter()
+                        .any(|d| d.body.0 <= f.body.0 && f.body.1 <= d.body.1);
+                if !scoped && names_hook(src, f, &markers) {
+                    outside.push((n, line(f.at), f.name.clone()));
+                }
+            }
+            for (at, attr) in attrs {
+                if !(LEVELS.iter().any(|level| attr.contains(level))
+                    && LINTS.iter().any(|lint| attr.contains(lint)))
+                {
+                    continue;
+                }
+                let func = src
+                    .funcs
+                    .iter()
+                    .filter(|f| f.body.0 <= at && at < f.body.1)
+                    .min_by_key(|f| f.body.1 - f.body.0)
+                    .or_else(|| src.funcs.iter().find(|f| f.at > at))
+                    .map_or(String::new(), |f| f.name.clone());
+                overrides.push((n, line(at), func, attr));
+            }
+        }
+        outside.sort_unstable();
+        overrides.sort_unstable();
+        Scopes { outside, overrides }
+    }
+
+    fn names_hook(src: &Source, f: &Func, markers: &[String]) -> bool {
+        let (s, e) = f.body;
+        src.literals
+            .iter()
+            .any(|&(ls, le)| s <= ls && le <= e && is_hook_name(src, ls, le))
+            || markers.iter().any(|m| has_word(&src.code[s..e], m))
+    }
+
+    /// Whether the string at `s..e` is a git hook file name. `update` is
+    /// also a tracker verb and a part of URL paths, so it counts only as
+    /// `hooks/update` or as the name given to `join` or `push`.
+    fn is_hook_name(src: &Source, s: usize, e: usize) -> bool {
+        let literal = &src.text[s..e];
+        let leaf = literal.rsplit('/').next().unwrap_or(literal);
+        if !crate::git_hooks::HOOK_NAMES.contains(&leaf) {
+            return false;
+        }
+        leaf != "update"
+            || literal.ends_with("hooks/update")
+            || (literal == "update" && {
+                let before = src.code[..s.saturating_sub(1)].trim_end();
+                before.ends_with("join(") || before.ends_with("push(")
+            })
+    }
+
+    /// Each attribute in `code`, `#[..]` or `#![..]`, with its offset and
+    /// its text without whitespace.
+    fn lint_attrs(code: &str) -> Vec<(usize, String)> {
+        let b = code.as_bytes();
+        let mut out = Vec::new();
+        for (at, _) in code.match_indices('#') {
+            let open = match b.get(at + 1) {
+                Some(b'[') => at + 1,
+                Some(b'!') if b.get(at + 2) == Some(&b'[') => at + 2,
+                _ => continue,
+            };
+            let mut depth = 0usize;
+            let Some(close) = (open..b.len()).find(|&j| {
+                match b[j] {
+                    b'[' => depth += 1,
+                    b']' => depth -= 1,
+                    _ => {}
+                }
+                depth == 0
+            }) else {
+                continue;
+            };
+            out.push((at, squeeze(&code[at..=close])));
+        }
+        out
+    }
+
+    /// The attributes, doc comments and blank lines just above the line
+    /// at `at`, and that line up to `at`.
+    fn attributes(code: &str, at: usize) -> &str {
+        let mut start = code[..at].rfind('\n').map_or(0, |n| n + 1);
+        while start > 0 {
+            let prev = code[..start - 1].rfind('\n').map_or(0, |n| n + 1);
+            let line = code[prev..start - 1].trim();
+            if !(line.is_empty() || line.starts_with("#[")) {
+                break;
+            }
+            start = prev;
+        }
+        &code[start..at]
+    }
+
+    /// Every `fn` with a body in `code`.
+    fn functions(code: &str) -> Vec<Func> {
+        let b = code.as_bytes();
+        let mut out = Vec::new();
+        for at in word_uses(code, "fn") {
+            let rest = &code[at + 2..];
+            let name: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|&c| is_ident(c))
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            let mut k = at + 2 + (rest.len() - rest.trim_start().len()) + name.len();
+            if b.get(k) == Some(&b'<') {
+                let Some(close) = close_angle(code, k) else {
+                    continue;
+                };
+                k = close + 1;
+            }
+            if b.get(k) != Some(&b'(') {
+                continue;
+            }
+            let mut depth = 0usize;
+            let Some(close) = (k..b.len()).find(|&j| {
+                match b[j] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                depth == 0
+            }) else {
+                continue;
+            };
+            let Some(open) = (close..b.len()).find(|&j| {
+                match b[j] {
+                    b'(' | b'[' => depth += 1,
+                    b')' | b']' => depth = depth.saturating_sub(1),
+                    b'{' | b';' if depth == 0 => return true,
+                    _ => {}
+                }
+                false
+            }) else {
+                continue;
+            };
+            if b[open] == b';' {
+                continue;
+            }
+            let end = close_of(code, open).unwrap_or(b.len() - 1);
+            out.push(Func {
+                name,
+                at,
+                body: (open, end + 1),
+                returns_path: code[close..open].contains("Path"),
+            });
+        }
+        out
+    }
+
+    /// Constants and statics whose value names a hook.
+    fn hook_consts(src: &Source) -> Vec<String> {
+        let mut out = Vec::new();
+        for item in ["const", "static"] {
+            for at in word_uses(&src.code, item) {
+                let rest = src.code[at + item.len()..].trim_start();
+                let rest = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
+                let name: String = rest.chars().take_while(|&c| is_ident(c)).collect();
+                let typed = rest[name.len()..].trim_start().starts_with(':');
+                let Some(end) = src.code[at..].find(';').map(|n| at + n) else {
+                    continue;
+                };
+                if !name.is_empty()
+                    && typed
+                    && src
+                        .literals
+                        .iter()
+                        .any(|&(s, e)| s > at && e <= end && is_hook_name(src, s, e))
+                {
+                    out.push(name);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_site_scan_names_a_write_then_chmod() {
         let chmod = r##"
 fn stub(bin: &Path) {
     fs::write(bin.join("a"), "#!/bin/sh\n").unwrap();
@@ -1438,29 +1841,6 @@ fn server(path: &Path) {
 }
 "#;
         assert_eq!(write_then_exec(open), vec![3]);
-        let hook = r#"
-fn strip(dir: &Path) {
-    for name in HOOK_NAMES {
-        let path = dir.join(name);
-        fs::write(&path, "x")?;
-    }
-}
-"#;
-        assert_eq!(hook_lines(hook), vec![5]);
-        let named = r#"
-fn rewrite(ours: &Path, share: &Path) {
-    std::fs::write(ours.join("pre-push"), &stale).unwrap();
-    let path = share.join("ljos/git-hooks/pre-push");
-    let stub = fs::read_to_string(&path).unwrap();
-    fs::write(&path, stub).unwrap();
-    let notes = share.join("notes.txt");
-    fs::write(&notes, "x").unwrap();
-}
-fn later(path: &Path) {
-    fs::write(&path, "x").unwrap();
-}
-"#;
-        assert_eq!(hook_lines(named), vec![3, 6]);
         let fine = r#"
 fn dir(path: &Path) {
     std::fs::write(path.join("f"), "x").unwrap();
@@ -1469,332 +1849,6 @@ fn dir(path: &Path) {
 }
 "#;
         assert!(write_then_exec(fine).is_empty());
-        assert!(hook_lines(fine).is_empty());
-    }
-
-    #[test]
-    fn the_site_scan_names_a_hook_put_by_rename_or_link() {
-        let put = r#"
-fn put(dir: &Path, tmp: &Path) {
-    std::fs::rename(tmp, dir.join("pre-push")).unwrap();
-    std::fs::hard_link(tmp, dir.join("pre-commit")).unwrap();
-    std::os::unix::fs::symlink(tmp, dir.join("post-commit")).unwrap();
-    std::fs::rename(tmp, dir.join("notes.txt")).unwrap();
-}
-"#;
-        assert_eq!(hook_lines(put), vec![3, 4, 5]);
-    }
-
-    #[test]
-    fn the_site_scan_names_a_rename_or_link_by_a_used_name() {
-        let aliased = r#"
-use std::fs::{hard_link as link, rename as mv};
-use std::os::unix::fs as unix_fs;
-use std::os::unix::fs::symlink;
-use std::fs as files;
-fn put(dir: &Path, tmp: &Path) {
-    mv(tmp, dir.join("pre-push")).unwrap();
-    link(tmp, dir.join("pre-commit")).unwrap();
-    symlink(tmp, dir.join("post-commit")).unwrap();
-    unix_fs::symlink(tmp, dir.join("pre-push")).unwrap();
-    files::rename(tmp, dir.join("pre-commit")).unwrap();
-    rename(tmp, dir.join("post-commit")).unwrap();
-    mv(dir.join("pre-push"), dir.join("notes.txt")).unwrap();
-    let _ = std::fs::symlink_metadata(dir.join("pre-push"));
-}
-"#;
-        assert_eq!(hook_lines(aliased), vec![7, 8, 9, 10, 11, 12]);
-    }
-
-    #[test]
-    fn the_site_scan_names_a_hook_opened_through_an_alias_from_outside() {
-        let aliased = r#"
-use std::fs::OpenOptions as Oo;
-use std::fs::File as F;
-fn put(dir: &Path) {
-    let a = Oo::new().write(true).create(true).open(dir.join("pre-push")).unwrap();
-    let b = F::options().append(true).open(dir.join("pre-commit")).unwrap();
-    let c = Oo::new().write(true).open(dir.join("notes.txt")).unwrap();
-}
-"#;
-        assert_eq!(hook_lines(aliased), vec![5, 6]);
-    }
-
-    #[test]
-    fn the_site_scan_names_a_hook_put_by_a_writing_program() {
-        let run = r#"
-use std::process::Command;
-fn put(dir: &Path, tmp: &Path) {
-    Command::new("cp").arg(tmp).arg(dir.join("pre-push")).status().unwrap();
-    Command::new("/bin/mv").arg("--").arg(tmp).arg(dir.join("pre-commit")).status().unwrap();
-    Command::new("install")
-        .args(["-m", "755"])
-        .args([tmp, &dir.join("post-commit")])
-        .status()
-        .unwrap();
-    let mut ln = Command::new("ln");
-    ln.arg("-sf");
-    ln.arg(tmp).arg(dir.join("pre-push"));
-    ln.status().unwrap();
-    Command::new("cp").arg("-t").arg(dir).arg(tmp).status().unwrap();
-    Command::new("cp").arg(tmp).arg(dir.join("notes.txt")).status().unwrap();
-    Command::new("git").arg("hook").arg("run").arg("pre-push").status().unwrap();
-}
-"#;
-        assert_eq!(hook_lines(run), vec![4, 5, 6, 13, 15]);
-    }
-
-    #[test]
-    fn the_site_scan_names_a_hook_written_by_a_macro_from_outside() {
-        let wrapped = r#"
-macro_rules! put {
-    ($path:expr) => {
-        std::fs::write($path, "x").unwrap()
-    };
-}
-macro_rules! outer {
-    ($path:expr) => {
-        put!($path)
-    };
-}
-fn install(dir: &Path) {
-    put!(dir.join("pre-push"));
-    outer!(dir.join("post-commit"));
-    put!(dir.join("notes.txt"));
-    println!("{}", dir.join("pre-push").display());
-}
-"#;
-        assert_eq!(hook_lines(wrapped), vec![13, 14]);
-    }
-
-    #[test]
-    fn the_site_scan_names_a_hook_renamed_by_a_macro_from_outside() {
-        let wrapped = r#"
-macro_rules! mv {
-    ($from:expr, $to:expr) => {
-        std::fs::rename($from, $to).unwrap()
-    };
-}
-fn install(dir: &Path) {
-    mv!(dir.join("pre-push.tmp"), dir.join("pre-push"));
-    mv!(dir.join("a.tmp"), dir.join("notes.txt"));
-}
-"#;
-        assert_eq!(hook_lines(wrapped), vec![8]);
-    }
-
-    #[test]
-    fn the_site_scan_names_a_hook_put_by_libc() {
-        let raw = r#"
-fn put(tmp: &CStr) {
-    let hook = CString::new("hooks/pre-push").unwrap();
-    unsafe { libc::symlink(tmp.as_ptr(), hook.as_ptr()) };
-    unsafe { libc::rename(tmp.as_ptr(), hook.as_ptr()) };
-    unsafe { libc::link(tmp.as_ptr(), hook.as_ptr()) };
-    let fd = unsafe { libc::openat(-100, hook.as_ptr(), libc::O_WRONLY | libc::O_CREAT, 0o755) };
-    let fd = unsafe { libc::openat(-100, hook.as_ptr(), libc::O_RDONLY) };
-    let note = CString::new("notes.txt").unwrap();
-    unsafe { libc::symlink(tmp.as_ptr(), note.as_ptr()) };
-}
-"#;
-        assert_eq!(hook_lines(raw), vec![4, 5, 6, 7]);
-    }
-
-    #[test]
-    fn the_site_scan_names_a_hook_put_through_a_function_value() {
-        let held = r#"
-use std::fs::rename;
-fn put(dir: &Path, tmp: &Path) {
-    let f = std::fs::rename;
-    f(tmp, dir.join("pre-push")).unwrap();
-    let g = rename;
-    g(tmp, dir.join("pre-commit")).unwrap();
-    apply(std::fs::write, dir.join("post-commit"));
-    f(tmp, dir.join("notes.txt")).unwrap();
-}
-"#;
-        assert_eq!(hook_lines(held), vec![5, 7, 8]);
-    }
-
-    #[test]
-    fn the_site_scan_follows_a_hook_name_through_lets() {
-        let chain = r#"
-fn chain(dir: &Path) {
-    let name = "pre-push";
-    let path = dir.join(name);
-    fs::write(&path, "x").unwrap();
-    let other = "notes.txt";
-    let note = dir.join(other);
-    fs::write(&note, "x").unwrap();
-    let path = dir.join("notes.txt");
-    fs::write(&path, "x").unwrap();
-}
-"#;
-        assert_eq!(hook_lines(chain), vec![5, 10]);
-    }
-
-    #[test]
-    fn the_site_scan_names_a_helper_given_a_hook_path() {
-        let helper = r##"
-fn helper_write(path: &Path) {
-    fs::write(path, "#!/bin/sh\n").unwrap();
-}
-fn install(dir: &Path) {
-    helper_write(&dir.join("pre-push"));
-}
-fn note(path: &Path) {
-    fs::write(path, "x").unwrap();
-}
-fn notes(dir: &Path) {
-    note(&dir.join("notes.txt"));
-}
-"##;
-        assert_eq!(hook_lines(helper), vec![3, 6]);
-    }
-
-    #[test]
-    fn the_site_scan_names_a_hook_pushed_onto_a_path() {
-        let pushed = r#"
-fn pushed(dir: &Path, src: &Path) {
-    let mut path = dir.join("notes");
-    path.push("pre-push");
-    fs::write(&path, "x").unwrap();
-    let mut dest = dir.to_path_buf();
-    dest.push("post-update");
-    std::fs::copy(src, &dest).unwrap();
-}
-fn pushed_name(dir: &Path) {
-    let name = "pre-push";
-    let mut path = dir.join("hooks");
-    path.push(name);
-    fs::write(&path, "x").unwrap();
-}
-fn pushed_notes(dir: &Path) {
-    let mut path = dir.to_path_buf();
-    path.push("notes.txt");
-    fs::write(&path, "x").unwrap();
-}
-"#;
-        assert_eq!(hook_lines(pushed), vec![5, 8, 14]);
-    }
-
-    #[test]
-    fn the_site_scan_names_a_method_or_path_call_given_a_hook_path() {
-        let calls = r#"
-struct Place;
-impl Place {
-    fn place(&self, path: &Path) {
-        fs::write(path, "x").unwrap();
-    }
-    fn place_free(path: &Path) {
-        fs::write(path, "x").unwrap();
-    }
-}
-fn qualified_only(path: &Path) {
-    fs::write(path, "x").unwrap();
-}
-fn no_caller(path: &Path) {
-    fs::write(path, "x").unwrap();
-}
-fn install(place: &Place, dir: &Path) {
-    place.place(&dir.join("pre-push"));
-    Place::place(place, &dir.join("pre-push"));
-    Place::place_free(&dir.join("pre-push"));
-    crate::qualified_only(&dir.join("pre-push"));
-    place.place(&dir.join("notes.txt"));
-}
-"#;
-        assert_eq!(hook_lines(calls), vec![5, 8, 12, 18, 19, 20, 21]);
-    }
-
-    #[test]
-    fn the_site_scan_names_a_hook_behind_a_format_placeholder() {
-        let formatted = r#"
-fn formatted(dir: &Path) {
-    let name = "pre-push";
-    fs::write(dir.join(format!("{name}")), "x").unwrap();
-    fs::write(dir.join(format!("{name}.sample")), "x").unwrap();
-    fs::write(dir.join(format!("pre-{name}")), "x").unwrap();
-}
-"#;
-        assert_eq!(hook_lines(formatted), vec![4, 6]);
-    }
-
-    #[test]
-    fn the_site_scan_names_a_hook_opened_through_file_options() {
-        let opened = r#"
-fn opened(dir: &Path) {
-    let file = File::options()
-        .write(true)
-        .truncate(true)
-        .create(true)
-        .open(dir.join("commit-msg"))
-        .unwrap();
-}
-"#;
-        assert_eq!(hook_lines(opened), vec![7]);
-    }
-
-    #[test]
-    fn the_site_scan_follows_a_helper_into_another_file() {
-        let helper = r#"
-pub fn other_write(path: &Path) {
-    let path = path.to_path_buf();
-    fs::write(&path, "x").unwrap();
-}
-pub fn pass_on(path: &Path) {
-    other_write(path);
-}
-"#;
-        let caller = r#"
-fn install(dir: &Path) {
-    crate::other::other_write(&dir.join("pre-push"));
-    other::pass_on(&dir.join("pre-push"));
-    other::other_write(&dir.join("notes.txt"));
-}
-"#;
-        let sources = [
-            ("ljos-cli/src/other.rs".to_string(), helper.to_string()),
-            ("ljos-cli/src/install.rs".to_string(), caller.to_string()),
-        ];
-        let found: Vec<_> = hook_writes(&sources)
-            .into_iter()
-            .map(|hit| (hit.file, hit.line, hit.writer))
-            .collect();
-        assert_eq!(
-            found,
-            vec![(1, 3, Some((0, 4))), (1, 4, Some((0, 4)))],
-            "{found:?}"
-        );
-    }
-
-    #[test]
-    fn the_site_scan_follows_a_hook_name_out_of_another_file() {
-        let names = r#"
-pub const HOOK: &str = "pre-push";
-pub fn hook_path(dir: &Path) -> PathBuf {
-    dir.join("pre-push")
-}
-pub fn notes_path(dir: &Path) -> PathBuf {
-    dir.join("notes.txt")
-}
-"#;
-        let user = r#"
-fn put(dir: &Path) {
-    fs::write(dir.join(names::HOOK), "x").unwrap();
-    fs::write(crate::names::hook_path(dir), "x").unwrap();
-    fs::write(crate::names::notes_path(dir), "x").unwrap();
-}
-"#;
-        let sources = [
-            ("ljos-cli/src/names.rs".to_string(), names.to_string()),
-            ("ljos-cli/src/user.rs".to_string(), user.to_string()),
-        ];
-        let found: Vec<_> = hook_writes(&sources)
-            .into_iter()
-            .map(|hit| (hit.file, hit.line))
-            .collect();
-        assert_eq!(found, vec![(1, 3), (1, 4)]);
     }
 
     fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -1894,815 +1948,6 @@ fn put(dir: &Path) {
         hits.sort_unstable();
         hits.dedup();
         hits
-    }
-
-    /// A write the hook scan flags: a raw write, or a call into a function
-    /// that writes the path it is given, inside a function that names a git
-    /// hook, where the file name written is not shown to be something else.
-    #[derive(Debug)]
-    struct HookWrite {
-        file: usize,
-        line: usize,
-        func: String,
-        target: String,
-        /// For a call, the write it reaches.
-        writer: Option<(usize, usize)>,
-    }
-
-    /// One-based lines `hook_writes` flags in one file, writers included.
-    fn hook_lines(text: &str) -> Vec<usize> {
-        let sources = [("ljos-cli/src/sample.rs".to_string(), text.to_string())];
-        let mut lines: Vec<usize> = hook_writes(&sources)
-            .into_iter()
-            .flat_map(|hit| [Some(hit.line), hit.writer.map(|(_, line)| line)])
-            .flatten()
-            .collect();
-        lines.sort_unstable();
-        lines.dedup();
-        lines
-    }
-
-    /// Calls that open a path for writing in this process, or put a file
-    /// at a path by rename or link, with the argument that names the path.
-    /// Each also matches its `std::`-qualified form.
-    const RAW_WRITES: &[(&str, usize)] = &[
-        ("fs::write(", 0),
-        ("fs::copy(", 1),
-        ("fs::rename(", 1),
-        ("fs::hard_link(", 1),
-        ("fs::soft_link(", 1),
-        ("fs::symlink(", 1),
-        ("fs::symlink_file(", 1),
-        ("fs::symlink_dir(", 1),
-        ("File::create(", 0),
-        ("File::create_new(", 0),
-        ("libc::open(", 0),
-        ("libc::openat(", 1),
-        ("libc::creat(", 0),
-        ("libc::rename(", 1),
-        ("libc::renameat(", 3),
-        ("libc::renameat2(", 3),
-        ("libc::link(", 1),
-        ("libc::linkat(", 3),
-        ("libc::symlink(", 1),
-        ("libc::symlinkat(", 2),
-    ];
-
-    /// Flags that make a `libc::open` or `libc::openat` in `RAW_WRITES` a
-    /// write. Without one in the call it is taken for a read: the crate
-    /// opens many files by `openat` with a `flags` argument for reading.
-    const WRITE_FLAGS: &[&str] = &["O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND"];
-
-    /// Programs that write the paths a `Command` gives them.
-    const WRITING_PROGRAMS: &[&str] = &["cp", "mv", "install", "ln"];
-
-    /// The `fs::` calls of `RAW_WRITES` by their bare name, as a `use`
-    /// brings them in.
-    const BARE_WRITES: &[(&str, usize)] = &[
-        ("write", 0),
-        ("copy", 1),
-        ("rename", 1),
-        ("hard_link", 1),
-        ("soft_link", 1),
-        ("symlink", 1),
-        ("symlink_file", 1),
-        ("symlink_dir", 1),
-    ];
-
-    /// The write calls `code` can make, each with the argument that names
-    /// the path and whether it is a bare name: `RAW_WRITES`, `BARE_WRITES`,
-    /// and any of those, or `fs` or `File`, renamed by `use .. as ..`.
-    fn write_apis(code: &str) -> Vec<(String, usize, bool)> {
-        let mut out: Vec<_> = RAW_WRITES
-            .iter()
-            .map(|&(api, n)| (api.to_string(), n, false))
-            .chain(
-                BARE_WRITES
-                    .iter()
-                    .map(|&(name, n)| (format!("{name}("), n, true)),
-            )
-            .collect();
-        for (path, alias) in use_aliases(code) {
-            let last = path.rsplit("::").next().unwrap_or("");
-            if path.contains("fs::") {
-                if let Some(&(_, n)) = BARE_WRITES.iter().find(|(name, _)| *name == last) {
-                    out.push((format!("{alias}("), n, true));
-                }
-            }
-            for &(api, n) in RAW_WRITES {
-                let (module, call) = api.split_once("::").unwrap_or((api, ""));
-                if module == last {
-                    out.push((format!("{alias}::{call}"), n, false));
-                }
-            }
-        }
-        for at in word_uses(code, "let") {
-            let Some(end) = statement_end(code, at) else {
-                continue;
-            };
-            let Some((name, value)) = code[at + "let".len()..end].split_once('=') else {
-                continue;
-            };
-            let name = name.trim().trim_start_matches("mut ").trim();
-            let value = squeeze(value);
-            if name.is_empty() || !name.chars().all(is_ident) {
-                continue;
-            }
-            let held = out.iter().find(|(api, _, bare)| {
-                let api = api.trim_end_matches('(');
-                value == api
-                    || (!bare
-                        && value
-                            .strip_suffix(api)
-                            .is_some_and(|rest| rest.is_empty() || rest.ends_with("::")))
-            });
-            if let Some(&(_, n, _)) = held {
-                out.push((format!("{name}("), n, true));
-            }
-        }
-        out
-    }
-
-    /// `(path, alias)` for every `use path as alias;` item in `code`.
-    fn use_aliases(code: &str) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        for at in word_uses(code, "use") {
-            let Some(end) = statement_end(code, at) else {
-                continue;
-            };
-            let mut prefixes = vec![String::new()];
-            let mut part = String::new();
-            let mut items = Vec::new();
-            for c in code[at + "use".len()..end].chars().chain([',']) {
-                let prefix = prefixes.last().cloned().unwrap_or_default();
-                match c {
-                    '{' => {
-                        prefixes.push(format!("{prefix}{}", part.trim()));
-                        part.clear();
-                    }
-                    ',' | '}' => {
-                        items.push((prefix, std::mem::take(&mut part)));
-                        if c == '}' && prefixes.len() > 1 {
-                            prefixes.pop();
-                        }
-                    }
-                    _ => part.push(c),
-                }
-            }
-            for (prefix, item) in items {
-                let words: Vec<&str> = item.split_whitespace().collect();
-                let Some(pos) = words.iter().position(|w| *w == "as") else {
-                    continue;
-                };
-                let Some(&alias) = words.get(pos + 1) else {
-                    continue;
-                };
-                if alias == "_" || !alias.chars().all(is_ident) {
-                    continue;
-                }
-                out.push((
-                    format!("{prefix}{}", words[..pos].concat()),
-                    alias.to_string(),
-                ));
-            }
-        }
-        out
-    }
-
-    /// Names that build `OpenOptions` in `code`, with any `use .. as ..`
-    /// alias of `OpenOptions` or `File`.
-    fn openers(code: &str) -> Vec<String> {
-        let mut out = vec!["OpenOptions".to_string(), "File::options(".to_string()];
-        for (path, alias) in use_aliases(code) {
-            match path.rsplit("::").next() {
-                Some("OpenOptions") => out.push(alias),
-                Some("File") => out.push(format!("{alias}::options(")),
-                _ => {}
-            }
-        }
-        out
-    }
-
-    /// `Command::new(` and the same through any `use .. as ..` alias of
-    /// `Command`.
-    fn commands(code: &str) -> Vec<String> {
-        let mut out = vec!["Command::new(".to_string()];
-        for (path, alias) in use_aliases(code) {
-            if path.rsplit("::").next() == Some("Command") {
-                out.push(format!("{alias}::new("));
-            }
-        }
-        out
-    }
-
-    /// `name` and body span of every `macro_rules!` in `code`.
-    fn macro_defs(code: &str) -> Vec<(String, (usize, usize))> {
-        let b = code.as_bytes();
-        let mut out = Vec::new();
-        for at in word_uses(code, "macro_rules") {
-            let rest = code[at + "macro_rules".len()..].trim_start();
-            let Some(rest) = rest.strip_prefix('!') else {
-                continue;
-            };
-            let rest = rest.trim_start();
-            let name: String = rest.chars().take_while(|&c| is_ident(c)).collect();
-            let open = code.len() - rest.len() + name.len();
-            let Some(open) = (open..b.len()).find(|&j| !b[j].is_ascii_whitespace()) else {
-                continue;
-            };
-            let close = match b[open] {
-                b'{' => close_of(code, open),
-                b'(' | b'[' => Some(split_args(code, open, false).1),
-                _ => None,
-            };
-            if let (false, Some(close)) = (name.is_empty(), close) {
-                out.push((name, (open, close + 1)));
-            }
-        }
-        out
-    }
-
-    struct Source<'a> {
-        path: &'a str,
-        text: &'a str,
-        /// `text` with comments and the inside of literals blanked.
-        code: String,
-        literals: Vec<(usize, usize)>,
-        lines: Vec<usize>,
-        /// `write_apis` of `code`.
-        writes: Vec<(String, usize, bool)>,
-        /// `openers` of `code`.
-        openers: Vec<String>,
-        /// `commands` of `code`.
-        commands: Vec<String>,
-        /// Spans of the `use` statements in `code`.
-        uses: Vec<(usize, usize)>,
-    }
-
-    struct Func {
-        src: usize,
-        name: String,
-        params: Vec<String>,
-        returns_path: bool,
-        body: (usize, usize),
-    }
-
-    #[derive(Clone, Copy)]
-    enum Kind {
-        Bare,
-        Method,
-        Path,
-    }
-
-    struct Call {
-        name: String,
-        kind: Kind,
-        args: Vec<(usize, usize)>,
-        line: usize,
-    }
-
-    /// What a path's last component can be: shown not to be a hook name,
-    /// or unknown and drawn from these parameters.
-    #[derive(Clone)]
-    enum Leaf {
-        Safe,
-        From(Vec<usize>),
-    }
-
-    struct Scan<'a> {
-        srcs: Vec<Source<'a>>,
-        funcs: Vec<Func>,
-        named: std::collections::HashMap<String, Vec<usize>>,
-        /// Function names whose every return ends in a file name that is
-        /// not a hook.
-        returns: std::cell::RefCell<std::collections::HashMap<String, bool>>,
-        leaves: std::cell::RefCell<std::collections::HashMap<(usize, usize, usize, usize), Leaf>>,
-    }
-
-    /// Hook writes in `sources`, each a path under `crates/` and its text.
-    ///
-    /// A function names a hook when one of its literals ends in a hook name
-    /// or it uses `HOOK_NAMES` or a constant that names one. In such a
-    /// function every path given to a raw write, and every argument given
-    /// to a function that writes that parameter, must end in a file name
-    /// that is visibly not a hook. Anything else is flagged, so a hook name
-    /// that reaches the write by any route the scan does not follow is
-    /// flagged too.
-    fn hook_writes(sources: &[(String, String)]) -> Vec<HookWrite> {
-        let srcs: Vec<Source> = sources
-            .iter()
-            .map(|(path, text)| {
-                let (code, literals) = blank(text);
-                let lines = std::iter::once(0)
-                    .chain(text.match_indices('\n').map(|(at, _)| at + 1))
-                    .collect();
-                let writes = write_apis(&code);
-                let openers = openers(&code);
-                let commands = commands(&code);
-                let uses = word_uses(&code, "use")
-                    .into_iter()
-                    .filter_map(|at| Some((at, statement_end(&code, at)?)))
-                    .collect();
-                Source {
-                    path,
-                    text,
-                    code,
-                    literals,
-                    lines,
-                    writes,
-                    openers,
-                    commands,
-                    uses,
-                }
-            })
-            .collect();
-        let mut macros: Vec<String> = Vec::new();
-        loop {
-            let more: Vec<String> = srcs
-                .iter()
-                .flat_map(|src| {
-                    macro_defs(&src.code)
-                        .into_iter()
-                        .filter(|(name, span)| {
-                            !macros.contains(name) && !raw_sites(src, *span, &macros).is_empty()
-                        })
-                        .map(|(name, _)| name)
-                })
-                .collect();
-            if more.is_empty() {
-                break;
-            }
-            macros.extend(more);
-        }
-        let mut quals: Vec<String> = ["crate", "self", "super", "Self"]
-            .map(String::from)
-            .to_vec();
-        let mut markers = vec!["HOOK_NAMES".to_string()];
-        let mut funcs = Vec::new();
-        for (n, src) in srcs.iter().enumerate() {
-            let mut parts = src.path.split('/');
-            quals.extend(parts.next().map(|krate| krate.replace('-', "_")));
-            quals.extend(
-                parts
-                    .next_back()
-                    .and_then(|file| file.strip_suffix(".rs"))
-                    .map(String::from),
-            );
-            for item in ["struct", "enum", "trait", "mod", "type", "union"] {
-                quals.extend(words_after(&src.code, item));
-            }
-            markers.extend(hook_consts(src));
-            funcs.extend(functions(n, &src.code));
-        }
-        let mut named: std::collections::HashMap<String, Vec<usize>> = Default::default();
-        for (n, f) in funcs.iter().enumerate() {
-            named.entry(f.name.clone()).or_default().push(n);
-        }
-        let scan = Scan {
-            srcs,
-            funcs,
-            named,
-            returns: Default::default(),
-            leaves: Default::default(),
-        };
-        let (srcs, funcs) = (&scan.srcs, &scan.funcs);
-        let calls: Vec<Vec<Call>> = funcs
-            .iter()
-            .map(|f| calls_in(&srcs[f.src], f, &quals))
-            .collect();
-        let sites: Vec<Vec<((usize, usize), usize)>> = funcs
-            .iter()
-            .map(|f| raw_sites(&srcs[f.src], f.body, &macros))
-            .collect();
-        // Parameter, whether a method, the defining file, and the raw write
-        // the parameter reaches.
-        type Writer = (usize, bool, usize, usize, usize);
-        let mut writers: std::collections::HashMap<&str, Vec<Writer>> = Default::default();
-        let mut found = Vec::new();
-        for (n, f) in funcs.iter().enumerate() {
-            for &((s, e), line) in &sites[n] {
-                if let Leaf::From(params) = leaf(&scan, f, s, e, 0) {
-                    found.extend(params.into_iter().map(|p| (n, p, f.src, line)));
-                }
-            }
-        }
-        while !found.is_empty() {
-            for (n, param, file, line) in found.drain(..) {
-                let f = &funcs[n];
-                let known = writers.entry(f.name.as_str()).or_default();
-                if !known
-                    .iter()
-                    .any(|w| (w.0, w.1, w.2) == (param, is_method(f), f.src))
-                {
-                    known.push((param, is_method(f), f.src, file, line));
-                }
-            }
-            for (n, f) in funcs.iter().enumerate() {
-                for call in &calls[n] {
-                    for &(param, method, home, file, line) in
-                        writers.get(call.name.as_str()).into_iter().flatten()
-                    {
-                        let Some((s, e)) = arg_for(&scan, f, call, home, param, method) else {
-                            continue;
-                        };
-                        let Leaf::From(params) = leaf(&scan, f, s, e, 0) else {
-                            continue;
-                        };
-                        for p in params {
-                            let known = writers.get(f.name.as_str()).is_some_and(|known| {
-                                known
-                                    .iter()
-                                    .any(|w| (w.0, w.1, w.2) == (p, is_method(f), f.src))
-                            });
-                            if !known
-                                && !found
-                                    .iter()
-                                    .any(|x: &(usize, usize, usize, usize)| (x.0, x.1) == (n, p))
-                            {
-                                found.push((n, p, file, line));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        let names_hook = |f: &Func, markers: &[String]| {
-            let src = &srcs[f.src];
-            let body = &src.code[f.body.0..f.body.1];
-            src.literals
-                .iter()
-                .any(|&(s, e)| s >= f.body.0 && e <= f.body.1 && is_hook_leaf(&src.text[s..e]))
-                || markers.iter().any(|m| has_word(body, m))
-        };
-        loop {
-            let more: Vec<String> = funcs
-                .iter()
-                .filter(|f| f.returns_path && !markers.contains(&f.name))
-                .filter(|f| names_hook(f, &markers) && !returns_safe(&scan, &f.name, 0))
-                .map(|f| f.name.clone())
-                .collect();
-            if more.is_empty() {
-                break;
-            }
-            markers.extend(more);
-        }
-        let mut hits = Vec::new();
-        for (n, f) in funcs.iter().enumerate() {
-            let src = &srcs[f.src];
-            if !names_hook(f, &markers) {
-                continue;
-            }
-            let hit = |s: usize, e: usize, line: usize, writer| HookWrite {
-                file: f.src,
-                line,
-                func: f.name.clone(),
-                target: squeeze(&src.text[s..e]),
-                writer,
-            };
-            for &((s, e), line) in &sites[n] {
-                if !matches!(leaf(&scan, f, s, e, 0), Leaf::Safe) {
-                    hits.push(hit(s, e, line, None));
-                }
-            }
-            for call in &calls[n] {
-                for &(param, method, home, file, line) in
-                    writers.get(call.name.as_str()).into_iter().flatten()
-                {
-                    let Some((s, e)) = arg_for(&scan, f, call, home, param, method) else {
-                        continue;
-                    };
-                    if !matches!(leaf(&scan, f, s, e, 0), Leaf::Safe) {
-                        hits.push(hit(s, e, call.line, Some((file, line))));
-                    }
-                }
-            }
-        }
-        hits.sort_by_key(|hit| (hit.file, hit.line, hit.writer));
-        hits.dedup_by_key(|hit| (hit.file, hit.line, hit.writer));
-        hits
-    }
-
-    fn is_method(f: &Func) -> bool {
-        f.params.first().is_some_and(|p| p == "self")
-    }
-
-    fn is_hook_leaf(literal: &str) -> bool {
-        let leaf = literal.rsplit('/').next().unwrap_or(literal);
-        crate::git_hooks::HOOK_NAMES.contains(&leaf)
-    }
-
-    /// Whether a file name, with `{..}` for a part filled in at run time,
-    /// cannot be a hook name.
-    fn not_a_hook(leaf: &str) -> bool {
-        let hooks = crate::git_hooks::HOOK_NAMES;
-        match (leaf.find('{'), leaf.rfind('}')) {
-            (None, _) => !leaf.is_empty() && !hooks.contains(&leaf),
-            (Some(open), Some(close)) if open < close => {
-                let (head, tail) = (&leaf[..open], &leaf[close + 1..]);
-                (!head.is_empty() && !hooks.iter().any(|h| h.starts_with(head)))
-                    || (!tail.is_empty() && !hooks.iter().any(|h| h.ends_with(tail)))
-            }
-            _ => false,
-        }
-    }
-
-    /// The last component of the path `src.text[s..e]` in `f` evaluates to.
-    fn leaf(scan: &Scan, f: &Func, s: usize, e: usize, depth: usize) -> Leaf {
-        let key = (f.src, s, e, depth);
-        if let Some(known) = scan.leaves.borrow().get(&key) {
-            return known.clone();
-        }
-        let found = leaf_of(scan, f, s, e, depth);
-        scan.leaves.borrow_mut().insert(key, found.clone());
-        found
-    }
-
-    fn leaf_of(scan: &Scan, f: &Func, s: usize, e: usize, depth: usize) -> Leaf {
-        let src = &scan.srcs[f.src];
-        let code = &src.code;
-        let s = s + code[s..e].len() - code[s..e].trim_start_matches(['&', ' ', '\n', '\t']).len();
-        let mut e = s + code[s..e].trim_end().len();
-        while let Some(rest) = [
-            ".to_path_buf()",
-            ".clone()",
-            ".as_path()",
-            ".to_owned()",
-            ".as_ref()",
-            ".into()",
-            ".as_ptr()",
-            ".unwrap()",
-            "?",
-        ]
-        .iter()
-        .find_map(|suffix| code[s..e].strip_suffix(suffix))
-        {
-            e = s + rest.trim_end().len();
-        }
-        let expr = &code[s..e];
-        let from = |text: &str| Leaf::From(feeds(scan, f, text));
-        if let Some(lit) = literal(src, s, e) {
-            let name = lit.rsplit('/').next().unwrap_or(lit);
-            return if not_a_hook(name) {
-                Leaf::Safe
-            } else {
-                from(name)
-            };
-        }
-        if let Some(open) = expr.strip_prefix("format!(").map(|_| s + 7) {
-            let args = split_args(code, open, false).0;
-            if let Some(lit) = args.first().and_then(|&(a, b)| literal(src, a, b)) {
-                let name = lit.rsplit('/').next().unwrap_or(lit);
-                if not_a_hook(name) {
-                    return Leaf::Safe;
-                }
-                let rest = args[1..]
-                    .iter()
-                    .map(|&(a, b)| &code[a..b])
-                    .collect::<Vec<_>>();
-                return from(&format!("{name} {}", rest.join(" ")));
-            }
-        }
-        if !expr.is_empty() && expr.chars().all(is_ident) {
-            return binding(scan, f, expr, s, depth);
-        }
-        if let Some(open) = expr
-            .ends_with(')')
-            .then(|| open_of(code, s, e - 1))
-            .flatten()
-        {
-            let callee = code[s..open].trim_end();
-            let args = split_args(code, open, false).0;
-            if [
-                ".join",
-                ".with_file_name",
-                "Path::new",
-                "PathBuf::from",
-                "CString::new",
-            ]
-            .iter()
-            .any(|name| callee.ends_with(name))
-                && args.len() == 1
-            {
-                return leaf(scan, f, args[0].0, args[0].1, depth);
-            }
-            if callee.ends_with(".with_extension")
-                && args.len() == 1
-                && literal(src, args[0].0, args[0].1)
-                    .is_some_and(|ext| !ext.is_empty() && !ext.contains('{'))
-            {
-                return Leaf::Safe;
-            }
-            let name = &callee[callee.trim_end_matches(is_ident).len()..];
-            if !name.is_empty() && returns_safe(scan, name, depth) {
-                return Leaf::Safe;
-            }
-        }
-        from(expr)
-    }
-
-    /// Whether every function called `name` returns only paths whose last
-    /// component `leaf` shows is not a hook.
-    fn returns_safe(scan: &Scan, name: &str, depth: usize) -> bool {
-        if let Some(&known) = scan.returns.borrow().get(name) {
-            return known;
-        }
-        let Some(found) = scan.named.get(name) else {
-            return false;
-        };
-        if depth >= 4 {
-            return false;
-        }
-        scan.returns.borrow_mut().insert(name.to_string(), false);
-        let safe = found.iter().all(|&n| {
-            let f = &scan.funcs[n];
-            let code = &scan.srcs[f.src].code;
-            let (open, close) = (f.body.0 + 1, f.body.1 - 1);
-            let mut depth_here = 0usize;
-            let mut last = open;
-            for (at, c) in code[open..close].char_indices() {
-                match c {
-                    '(' | '[' | '{' => depth_here += 1,
-                    ')' | ']' | '}' => depth_here = depth_here.saturating_sub(1),
-                    ';' if depth_here == 0 => last = open + at + 1,
-                    _ => {}
-                }
-            }
-            let mut tails = vec![(last, close)];
-            for at in word_uses(&code[open..close], "return") {
-                let value = open + at + "return".len();
-                match statement_end(code, value) {
-                    Some(end) if end < close => tails.push((value, end)),
-                    _ => return false,
-                }
-            }
-            tails.iter().all(|&(s, e)| {
-                !code[s..e].trim().is_empty()
-                    && matches!(leaf(scan, f, s, e, depth + 1), Leaf::Safe)
-            })
-        });
-        scan.returns.borrow_mut().insert(name.to_string(), safe);
-        safe
-    }
-
-    /// Parameters of `f` that `text` names, as a word or a `{name}`
-    /// placeholder, or through the value of a `let` it names.
-    fn feeds(scan: &Scan, f: &Func, text: &str) -> Vec<usize> {
-        let code = &scan.srcs[f.src].code;
-        let body = &code[f.body.0..f.body.1];
-        let words = |text: &str| -> Vec<String> {
-            text.split(|c: char| !is_ident(c))
-                .filter(|w| !w.is_empty())
-                .map(String::from)
-                .collect()
-        };
-        let mut seen = words(text);
-        let mut next = 0;
-        while next < seen.len() {
-            let word = seen[next].clone();
-            next += 1;
-            for at in word_uses(body, &word) {
-                if let Some((s, e)) = let_value(code, f.body.0 + at, &word) {
-                    for found in words(&code[s..e]) {
-                        if !seen.contains(&found) {
-                            seen.push(found);
-                        }
-                    }
-                }
-            }
-        }
-        params_in(f, &seen.join(" "))
-    }
-
-    /// The value span of `let name = value;` or `let mut name = value;`
-    /// when `name` at `at` is bound there.
-    fn let_value(code: &str, at: usize, name: &str) -> Option<(usize, usize)> {
-        let before = code[..at].trim_end();
-        let before = before
-            .strip_suffix("mut")
-            .filter(|rest| !rest.ends_with(is_ident))
-            .map_or(before, str::trim_end);
-        if !ends_with_word(before, "let") {
-            return None;
-        }
-        let rest = &code[at + name.len()..];
-        let value = at + name.len() + rest.find('=')? + 1;
-        Some((value, statement_end(code, value)?))
-    }
-
-    /// What `v`, used at `at` in `f`, holds. Only a single `let` that is
-    /// not `mut`, before `at`, with `v` otherwise used only as `&v` or
-    /// `v.`, is followed; anything else may hold any path.
-    fn binding(scan: &Scan, f: &Func, v: &str, at: usize, depth: usize) -> Leaf {
-        let code = &scan.srcs[f.src].code;
-        let fallback = || Leaf::From(feeds(scan, f, v));
-        let uses = word_uses(&code[f.body.0..f.body.1], v)
-            .into_iter()
-            .map(|n| n + f.body.0)
-            .collect::<Vec<_>>();
-        let lets: Vec<usize> = uses
-            .iter()
-            .copied()
-            .filter(|&n| {
-                let before = code[..n].trim_end();
-                ends_with_word(before, "let") || ends_with_word(before, "mut")
-            })
-            .collect();
-        let [bound] = lets[..] else {
-            return fallback();
-        };
-        if depth >= 4 || bound >= at || ends_with_word(code[..bound].trim_end(), "mut") {
-            return fallback();
-        }
-        for &n in &uses {
-            let before = code[..n].trim_end();
-            let after = code[n + v.len()..].trim_start();
-            let borrowed = before.strip_suffix('&').is_some_and(|rest| {
-                let rest = rest.trim_end();
-                !rest.ends_with('|') && !ends_with_word(rest, "for")
-            });
-            let method = after.starts_with('.') && !after.starts_with("..");
-            let returned = n + v.len() + code[n + v.len()..].len() - after.len() + 1 == f.body.1;
-            if n != bound && n != at && !borrowed && !method && !returned {
-                return fallback();
-            }
-        }
-        match let_value(code, bound, v) {
-            Some((s, e)) => leaf(scan, f, s, e, depth + 1),
-            None => fallback(),
-        }
-    }
-
-    /// The text of a string literal that is exactly `src.text[s..e]`.
-    fn literal<'a>(src: &'a Source, s: usize, e: usize) -> Option<&'a str> {
-        let code = src.code[s..e].trim();
-        let s = s + src.code[s..e].find(code)?;
-        let e = s + code.len();
-        (code.len() >= 2
-            && code.starts_with('"')
-            && code.ends_with('"')
-            && !code[1..code.len() - 1].contains('"'))
-        .then(|| &src.text[s + 1..e - 1])
-    }
-
-    /// Indices of the parameters of `f` that `text` names, as a word or
-    /// as a `{name}` placeholder.
-    fn params_in(f: &Func, text: &str) -> Vec<usize> {
-        let words: Vec<&str> = text
-            .split(|c: char| !is_ident(c))
-            .filter(|w| !w.is_empty())
-            .collect();
-        f.params
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| *p != "self" && words.contains(&p.as_str()))
-            .map(|(n, _)| n)
-            .collect()
-    }
-
-    /// The span of the argument `call` in `f` passes for parameter `param`
-    /// of a function defined in file `home`, if the call can reach it.
-    fn arg_for(
-        scan: &Scan,
-        f: &Func,
-        call: &Call,
-        home: usize,
-        param: usize,
-        method: bool,
-    ) -> Option<(usize, usize)> {
-        let at = match (call.kind, method) {
-            (Kind::Bare, true) | (Kind::Method, false) => return None,
-            (Kind::Method, true) => param.checked_sub(1)?,
-            _ => param,
-        };
-        if !reaches(
-            &scan.srcs[f.src],
-            scan.srcs[home].path,
-            &call.name,
-            call.kind,
-        ) {
-            return None;
-        }
-        call.args.get(at).copied().filter(|(s, e)| s < e)
-    }
-
-    /// Whether a call by `name` of `kind` in `src` can reach a function
-    /// defined in `home`. A test file is its own crate: it reaches its own
-    /// functions, the shared modules beside it, and library functions by
-    /// path or through a `use`.
-    fn reaches(src: &Source, home: &str, name: &str, kind: Kind) -> bool {
-        if home.contains("/src/") {
-            return src.path.contains("/src/")
-                || !matches!(kind, Kind::Bare)
-                || src
-                    .code
-                    .lines()
-                    .any(|line| line.trim_start().starts_with("use ") && has_word(line, name));
-        }
-        let parts: Vec<&str> = home.split('/').collect();
-        src.path == home
-            || (parts.len() > 3
-                && parts[1] == "tests"
-                && src.path.starts_with(&format!("{}/tests/", parts[0])))
     }
 
     /// `text` with comments and the inside of string and char literals
@@ -2810,332 +2055,6 @@ fn put(dir: &Path) {
         (String::from_utf8_lossy(&out).into_owned(), literals)
     }
 
-    /// Every `fn` with a body in `code`.
-    fn functions(src: usize, code: &str) -> Vec<Func> {
-        let b = code.as_bytes();
-        let mut out = Vec::new();
-        for at in word_uses(code, "fn") {
-            let rest = &code[at + 2..];
-            let name: String = rest
-                .trim_start()
-                .chars()
-                .take_while(|&c| is_ident(c))
-                .collect();
-            if name.is_empty() {
-                continue;
-            }
-            let mut k = at + 2 + (rest.len() - rest.trim_start().len()) + name.len();
-            if b.get(k) == Some(&b'<') {
-                let Some(close) = close_angle(code, k) else {
-                    continue;
-                };
-                k = close + 1;
-            }
-            if b.get(k) != Some(&b'(') {
-                continue;
-            }
-            let (params, close) = split_args(code, k, true);
-            let mut depth = 0usize;
-            let Some(open) = (close + 1..b.len()).find(|&j| {
-                match b[j] {
-                    b'(' | b'[' => depth += 1,
-                    b')' | b']' => depth = depth.saturating_sub(1),
-                    b'{' | b';' if depth == 0 => return true,
-                    _ => {}
-                }
-                false
-            }) else {
-                continue;
-            };
-            if b[open] == b';' {
-                continue;
-            }
-            let end = close_of(code, open).unwrap_or(b.len() - 1);
-            let params = params
-                .iter()
-                .map(|&(s, e)| {
-                    let pattern = code[s..e].split(':').next().unwrap_or("");
-                    let name = pattern.split_whitespace().last().unwrap_or("");
-                    name.trim_start_matches('&').to_string()
-                })
-                .collect();
-            out.push(Func {
-                src,
-                name,
-                params,
-                returns_path: code[close..open].contains("Path"),
-                body: (open, end + 1),
-            });
-        }
-        out
-    }
-
-    /// Constants and statics whose value names a hook.
-    fn hook_consts(src: &Source) -> Vec<String> {
-        let mut out = Vec::new();
-        for item in ["const", "static"] {
-            for at in word_uses(&src.code, item) {
-                let rest = src.code[at + item.len()..].trim_start();
-                let rest = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
-                let name: String = rest.chars().take_while(|&c| is_ident(c)).collect();
-                let typed = rest[name.len()..].trim_start().starts_with(':');
-                let Some(end) = statement_end(&src.code, at) else {
-                    continue;
-                };
-                if !name.is_empty()
-                    && typed
-                    && !src.code[..at].ends_with('\'')
-                    && src
-                        .literals
-                        .iter()
-                        .any(|&(s, e)| s > at && e <= end && is_hook_leaf(&src.text[s..e]))
-                {
-                    out.push(name);
-                }
-            }
-        }
-        out
-    }
-
-    /// Spans of the paths the code in `span` opens for writing with a raw
-    /// call, and the line of each call: a write call, `OpenOptions`, a
-    /// writing program run by `Command`, a use of one of `macros`, or a
-    /// write function passed on as a value.
-    fn raw_sites(
-        src: &Source,
-        span: (usize, usize),
-        macros: &[String],
-    ) -> Vec<((usize, usize), usize)> {
-        let code = &src.code;
-        let body = &code[span.0..span.1];
-        let mut out = Vec::new();
-        let mut take = |open: usize, n: Option<usize>| {
-            let args = split_args(code, open, false).0;
-            let line = line_of(src, open);
-            match n {
-                Some(n) => out.extend(args.get(n).map(|&arg| (arg, line))),
-                None => out.extend(args.into_iter().map(|arg| (arg, line))),
-            }
-        };
-        for (api, n, bare) in &src.writes {
-            for (at, _) in body.match_indices(api.as_str()) {
-                let before = &body[..at];
-                let lead = before.chars().next_back();
-                let open = span.0 + at + api.len() - 1;
-                let read_only = (api.ends_with("::open(") || api.ends_with("::openat(")) && {
-                    let close = split_args(code, open, false).1;
-                    !WRITE_FLAGS
-                        .iter()
-                        .any(|flag| has_word(&code[open..close], flag))
-                };
-                if !read_only
-                    && (!bare
-                        || (!lead.is_some_and(|c| is_ident(c) || matches!(c, '.' | ':'))
-                            && !ends_with_word(before.trim_end(), "fn")))
-                {
-                    take(open, Some(*n));
-                }
-            }
-        }
-        let writable = [
-            ".write(",
-            ".append(",
-            ".create(",
-            ".create_new(",
-            ".truncate(",
-        ]
-        .iter()
-        .any(|flag| body.contains(flag));
-        let opens = src.openers.iter().enumerate().any(|(n, name)| {
-            if n < 2 {
-                body.contains(name.as_str())
-            } else {
-                has_word(body, name)
-            }
-        });
-        if writable && opens {
-            for (at, _) in body.match_indices(".open(") {
-                take(span.0 + at + 5, Some(0));
-            }
-        }
-        for name in macros {
-            for at in word_uses(body, name) {
-                let after = span.0 + at + name.len();
-                let Some(rest) = code[after..].strip_prefix('!') else {
-                    continue;
-                };
-                let open = after + 1 + rest.len() - rest.trim_start().len();
-                if matches!(code.as_bytes().get(open), Some(b'(' | b'[' | b'{')) {
-                    take(open, None);
-                }
-            }
-        }
-        for new in &src.commands {
-            for (at, _) in body.match_indices(new.as_str()) {
-                let open = span.0 + at + new.len() - 1;
-                let (args, close) = split_args(code, open, false);
-                let program = args.first().and_then(|&(s, e)| literal(src, s, e));
-                if !program
-                    .is_some_and(|p| WRITING_PROGRAMS.contains(&p.rsplit('/').next().unwrap_or(p)))
-                {
-                    continue;
-                }
-                let line = line_of(src, open);
-                let mut args: Vec<_> = command_args(code, close + 1)
-                    .into_iter()
-                    .map(|arg| (arg, line))
-                    .collect();
-                let lhs = code[..span.0 + at].trim_end().strip_suffix('=');
-                let var: String = lhs
-                    .map(|lhs| lhs.trim_end())
-                    .map(|lhs| &lhs[lhs.trim_end_matches(is_ident).len()..])
-                    .unwrap_or_default()
-                    .to_string();
-                if !var.is_empty() {
-                    for use_at in word_uses(&code[close..span.1], &var) {
-                        let from = close + use_at + var.len();
-                        let line = line_of(src, from);
-                        args.extend(command_args(code, from).into_iter().map(|arg| (arg, line)));
-                    }
-                }
-                let targeted = args.iter().any(|&((s, e), _)| {
-                    literal(src, s, e)
-                        .is_some_and(|a| a.starts_with("-t") || a.starts_with("--target-directory"))
-                });
-                if targeted {
-                    out.extend(args);
-                } else {
-                    out.extend(args.pop());
-                }
-            }
-        }
-        for (api, _, bare) in &src.writes {
-            let name = api.trim_end_matches('(');
-            if *bare {
-                continue;
-            }
-            for (at, _) in body.match_indices(name) {
-                let s = span.0 + at;
-                let e = s + name.len();
-                let mut ps = s;
-                while let Some(rest) = code[..ps].strip_suffix("::") {
-                    ps = rest.trim_end_matches(is_ident).len();
-                }
-                let before = code[..ps].trim_end();
-                let next = code[e..].trim_start().chars().next();
-                let bound = before.ends_with('=')
-                    && word_uses(before, "let")
-                        .last()
-                        .is_some_and(|&l| !code[l..ps].contains(';'));
-                if code[..s].ends_with(is_ident)
-                    || next.is_some_and(|c| c == '(' || c == ':' || is_ident(c))
-                    || src.uses.iter().any(|&(us, ue)| us <= s && e <= ue)
-                    || bound
-                {
-                    continue;
-                }
-                out.push(((ps, e), line_of(src, s)));
-            }
-        }
-        out
-    }
-
-    /// The path arguments of a `Command` chain that starts at `from`: each
-    /// `.arg(x)`, and each element of `.args([..])` or `.args(x)` itself.
-    fn command_args(code: &str, from: usize) -> Vec<(usize, usize)> {
-        let b = code.as_bytes();
-        let mut out = Vec::new();
-        let mut at = from;
-        loop {
-            let rest = &code[at..];
-            let next = at + rest.len() - rest.trim_start().len();
-            match b.get(next) {
-                Some(b'?') => {
-                    at = next + 1;
-                    continue;
-                }
-                Some(b'.') => {}
-                _ => break,
-            }
-            let name: String = code[next + 1..]
-                .chars()
-                .take_while(|&c| is_ident(c))
-                .collect();
-            let rest = &code[next + 1 + name.len()..];
-            let open = next + 1 + name.len() + rest.len() - rest.trim_start().len();
-            if name.is_empty() || b.get(open) != Some(&b'(') {
-                break;
-            }
-            let (args, close) = split_args(code, open, false);
-            match (name.as_str(), args.first()) {
-                ("arg", Some(&arg)) => out.push(arg),
-                ("args", Some(&(s, e))) => {
-                    let list = code[s..e].trim_start_matches(['&', ' ']);
-                    let list = list.strip_prefix("vec!").unwrap_or(list).trim_start();
-                    if list.starts_with('[') {
-                        out.extend(split_args(code, e - list.len(), false).0);
-                    } else {
-                        out.push((s, e));
-                    }
-                }
-                _ => {}
-            }
-            at = close + 1;
-        }
-        out
-    }
-
-    /// Calls in `f` by name, as `name(..)`, `.name(..)`, or `Path::name(..)`
-    /// where `Path` is one of `quals`.
-    fn calls_in(src: &Source, f: &Func, quals: &[String]) -> Vec<Call> {
-        let code = &src.code;
-        let mut out = Vec::new();
-        for (at, _) in code[f.body.0..f.body.1].match_indices('(') {
-            let open = f.body.0 + at;
-            let mut end = code[..open].trim_end().len();
-            if code[..end].ends_with('>') {
-                let Some(lt) = (0..end).rev().find(|&j| code.as_bytes()[j] == b'<') else {
-                    continue;
-                };
-                match code[..lt].strip_suffix("::") {
-                    Some(rest) => end = rest.len(),
-                    None => continue,
-                }
-            }
-            let name_at = code[..end].trim_end_matches(is_ident).len();
-            let name = &code[name_at..end];
-            if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
-                continue;
-            }
-            let before = code[..name_at].trim_end();
-            if ends_with_word(before, "fn") {
-                continue;
-            }
-            let kind = if before.ends_with('.') {
-                Kind::Method
-            } else if let Some(rest) = before.strip_suffix("::") {
-                let qual = &rest[rest.trim_end_matches(is_ident).len()..];
-                if !quals.iter().any(|q| q == qual) {
-                    continue;
-                }
-                Kind::Path
-            } else {
-                Kind::Bare
-            };
-            out.push(Call {
-                name: name.to_string(),
-                kind,
-                args: split_args(code, open, false).0,
-                line: line_of(src, open),
-            });
-        }
-        out
-    }
-
-    fn line_of(src: &Source, at: usize) -> usize {
-        src.lines.partition_point(|&start| start <= at)
-    }
-
     /// Start offsets of `word` as a whole word in `text`.
     fn word_uses(text: &str, word: &str) -> Vec<usize> {
         text.match_indices(word)
@@ -3156,39 +2075,6 @@ fn put(dir: &Path) {
         })
     }
 
-    fn ends_with_word(text: &str, word: &str) -> bool {
-        text.strip_suffix(word)
-            .is_some_and(|rest| !rest.ends_with(is_ident))
-    }
-
-    fn words_after(code: &str, item: &str) -> Vec<String> {
-        word_uses(code, item)
-            .into_iter()
-            .map(|at| {
-                code[at + item.len()..]
-                    .trim_start()
-                    .chars()
-                    .take_while(|&c| is_ident(c))
-                    .collect::<String>()
-            })
-            .filter(|name| !name.is_empty())
-            .collect()
-    }
-
-    /// The `;` that ends the statement starting at `from`.
-    fn statement_end(code: &str, from: usize) -> Option<usize> {
-        let mut depth = 0usize;
-        for (n, c) in code[from..].char_indices() {
-            match c {
-                '(' | '[' | '{' => depth += 1,
-                ')' | ']' | '}' => depth = depth.checked_sub(1)?,
-                ';' if depth == 0 => return Some(from + n),
-                _ => {}
-            }
-        }
-        None
-    }
-
     /// The `}` that closes the `{` at `open`.
     fn close_of(code: &str, open: usize) -> Option<usize> {
         let mut depth = 0usize;
@@ -3199,25 +2085,6 @@ fn put(dir: &Path) {
                     depth -= 1;
                     if depth == 0 {
                         return Some(open + n);
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
-    /// The `(` that opens the `)` at `close`, not before `from`.
-    fn open_of(code: &str, from: usize, close: usize) -> Option<usize> {
-        let b = code.as_bytes();
-        let mut depth = 0usize;
-        for j in (from..=close).rev() {
-            match b[j] {
-                b')' | b']' | b'}' => depth += 1,
-                b'(' | b'[' | b'{' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return (b[j] == b'(').then_some(j);
                     }
                 }
                 _ => {}
@@ -3242,47 +2109,6 @@ fn put(dir: &Path) {
             }
         }
         None
-    }
-
-    /// The top-level argument spans of the call whose `(` is at `open`, and
-    /// the offset of its `)`. `angles` also nests `<..>`, for parameter
-    /// lists.
-    fn split_args(code: &str, open: usize, angles: bool) -> (Vec<(usize, usize)>, usize) {
-        let b = code.as_bytes();
-        let mut spans = Vec::new();
-        let mut depth = 0usize;
-        let mut start = open + 1;
-        let mut j = open + 1;
-        while j < b.len() {
-            match b[j] {
-                b'(' | b'[' | b'{' => depth += 1,
-                b'<' if angles => depth += 1,
-                b'>' if angles && b[j - 1] != b'-' => depth = depth.saturating_sub(1),
-                b')' | b']' | b'}' => {
-                    if depth == 0 {
-                        break;
-                    }
-                    depth -= 1;
-                }
-                b',' if depth == 0 => {
-                    spans.push(trimmed(code, start, j));
-                    start = j + 1;
-                }
-                _ => {}
-            }
-            j += 1;
-        }
-        let last = trimmed(code, start, j.min(b.len()));
-        if last.0 < last.1 || !spans.is_empty() {
-            spans.push(last);
-        }
-        (spans, j)
-    }
-
-    fn trimmed(code: &str, s: usize, e: usize) -> (usize, usize) {
-        let text = &code[s..e];
-        let s = s + text.len() - text.trim_start().len();
-        (s, s + code[s..e].trim_end().len())
     }
 
     fn is_ident(c: char) -> bool {

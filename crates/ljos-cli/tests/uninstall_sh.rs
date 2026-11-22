@@ -33,6 +33,7 @@ fn read(path: &Path) -> String {
 /// A home as a seat leaves it: the editor harness and the terminal harness hooks beside other
 /// hooks, MCP entries, a skill, the git hooks, and a bin dir where the
 /// `ljos` binary is gone and `ljos-mcp` remains.
+#[deny(clippy::disallowed_methods)]
 fn hand_deleted_home() -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();

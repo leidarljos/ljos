@@ -34,6 +34,7 @@ const CHILD_MARK: &str = "PERSON_GATE_CHILD_MARK";
 
 /// The hook process. Inert unless the parent case started it.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn gate_child() {
     let Some(dir) = std::env::var_os(CHILD_DIR) else {
         return;
