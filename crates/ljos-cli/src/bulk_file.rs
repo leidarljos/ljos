@@ -319,9 +319,18 @@ fn refuse_links(issues: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Each file a batch wrote, with its bytes before the batch's first write
-/// to it: `None` for a file the batch made.
-type Touched = BTreeMap<PathBuf, Option<Vec<u8>>>;
+/// A file a batch wrote.
+#[derive(Debug, Clone, Default)]
+struct Touch {
+    /// Its bytes before the batch first wrote it; `None` for a file the
+    /// batch made.
+    was: Option<Vec<u8>>,
+    /// The ids the batch filed in it.
+    ids: Vec<String>,
+}
+
+/// Each file a batch wrote.
+type Touched = BTreeMap<PathBuf, Touch>;
 
 /// Replace the file at `path` with `bytes`, whole, through a new file
 /// beside it.
@@ -352,24 +361,25 @@ fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// Put back each file in `touched`: one the batch made is removed, one it
 /// rewrote gets its bytes back as they were. No other file is read or
-/// written. The caller holds the project's issues lock and has checked that
-/// each file is as the batch left it.
-fn restore(touched: &Touched) -> Result<()> {
-    for (path, was) in touched {
-        if !is_plain_file(path) {
-            bail!(
-                "{} is no longer a plain file, so it is not put back",
-                path.display()
-            );
-        }
-        match was {
-            None => std::fs::remove_file(path)
-                .with_context(|| format!("removing {}", path.display()))?,
-            Some(bytes) => write_bytes_atomically(path, bytes)
-                .with_context(|| format!("restoring {}", path.display()))?,
+/// written. A file that cannot be put back does not stop the rest; each is
+/// returned with why. The caller holds the project's issues lock and has
+/// checked that each file is as the batch left it.
+fn restore(touched: &Touched) -> Vec<(&Path, anyhow::Error)> {
+    let mut failed = Vec::new();
+    for (path, touch) in touched {
+        let put = if !is_plain_file(path) {
+            Err(anyhow::anyhow!("it is no longer a plain file"))
+        } else {
+            match &touch.was {
+                None => std::fs::remove_file(path).map_err(anyhow::Error::from),
+                Some(bytes) => write_bytes_atomically(path, bytes),
+            }
+        };
+        if let Err(e) = put {
+            failed.push((path.as_path(), e));
         }
     }
-    Ok(())
+    failed
 }
 
 /// A row with the project and parent it is filed under.
@@ -471,6 +481,7 @@ struct Own {
     now: Files,
     board: String,
     path: PathBuf,
+    id: String,
 }
 
 /// Run `f` under the issues lock of `issues`.
@@ -691,7 +702,12 @@ impl Board {
             return Ok(None);
         }
         let path = changed.clone();
-        Ok(Some(Own { now, board, path }))
+        Ok(Some(Own {
+            now,
+            board,
+            path,
+            id: want.id.to_string(),
+        }))
     }
 
     /// Take `own` as this batch's: the file it wrote is put back on a roll
@@ -701,31 +717,106 @@ impl Board {
             Some(Entry::File(bytes)) => Some(bytes.clone()),
             _ => None,
         };
-        self.touched.entry(own.path).or_insert(was);
+        self.touched
+            .entry(own.path)
+            .or_insert(Touch {
+                was,
+                ids: Vec::new(),
+            })
+            .ids
+            .push(own.id);
         self.ours = own.now;
         self.board = own.board;
     }
+
+    /// Every id the batch filed here.
+    fn ids(&self) -> impl Iterator<Item = &String> {
+        self.touched.values().flat_map(|touch| &touch.ids)
+    }
 }
 
-/// Put every board back as it was, holding all their issues locks from
-/// the check to the last write. `Some(dir)` names a directory another
-/// writer changed since this batch last wrote it; then nothing is put
-/// back.
-fn roll_back(boards: &[Board]) -> Result<Option<PathBuf>> {
-    let paths: Vec<&Path> = boards.iter().map(|b| b.issues.as_path()).collect();
-    let under_lock = || -> Result<Option<PathBuf>> {
-        for b in boards {
-            if snapshot(&b.dir)? != b.ours {
-                return Ok(Some(b.dir.clone()));
+/// What a roll back did.
+#[derive(Debug, Default)]
+struct Undo {
+    /// The boards, by index, it wrote a file back to.
+    wrote: Vec<usize>,
+    /// What it could not put back, and why.
+    failed: Vec<String>,
+    /// The ids still on the tracker.
+    kept: Vec<String>,
+}
+
+/// Put back each board the batch wrote, holding all their issues locks
+/// from the check to the last write. A board another writer changed since
+/// this batch last wrote it is left as it is. A board or file that cannot
+/// be put back does not stop the rest; the result names it and the ids it
+/// keeps on the tracker.
+fn roll_back(boards: &[Board]) -> Undo {
+    let written: Vec<(usize, &Board)> = boards
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| !b.touched.is_empty())
+        .collect();
+    if written.is_empty() {
+        return Undo::default();
+    }
+    let paths: Vec<&Path> = written.iter().map(|(_, b)| b.issues.as_path()).collect();
+    let under_lock = || {
+        let mut undo = Undo::default();
+        for &(at, b) in &written {
+            let changed = match snapshot(&b.dir) {
+                Ok(now) if now == b.ours => None,
+                Ok(_) => Some(format!("another writer changed {}", b.dir.display())),
+                Err(e) => Some(format!("{e:#}")),
+            };
+            if let Some(why) = changed {
+                undo.failed.push(why);
+                undo.kept.extend(b.ids().cloned());
+                continue;
+            }
+            let failed = restore(&b.touched);
+            if failed.len() < b.touched.len() {
+                undo.wrote.push(at);
+            }
+            for (path, e) in failed {
+                undo.failed.push(format!("{}: {e:#}", path.display()));
+                undo.kept.extend(b.touched[path].ids.iter().cloned());
             }
         }
-        for b in boards {
-            restore(&b.touched)?;
-        }
-        Ok(None)
+        undo
     };
-    vissue_core::store::with_issues_locks(&paths, || under_lock().map_err(vissue_core::Error::from))
-        .map_err(anyhow::Error::from)
+    vissue_core::store::with_issues_locks(&paths, || Ok(under_lock())).unwrap_or_else(|e| Undo {
+        failed: vec![format!("{e:#}")],
+        kept: written.iter().flat_map(|(_, b)| b.ids().cloned()).collect(),
+        ..Undo::default()
+    })
+}
+
+/// What a refused row's error says once `undo` has run over the batch
+/// that filed `ids`.
+fn undone(ids: &[String], undo: &Undo) -> String {
+    if undo.failed.is_empty() {
+        return format!(
+            "nothing was filed: the {} tickets written before it were taken back",
+            ids.len()
+        );
+    }
+    let kept: Vec<&str> = ids
+        .iter()
+        .filter(|id| undo.kept.contains(id))
+        .map(String::as_str)
+        .collect();
+    let mut out = format!(
+        "the batch could not put back {}, so {} of the {} tickets filed are on the tracker and not committed: {}",
+        undo.failed.join("; "),
+        kept.len(),
+        ids.len(),
+        kept.join(" ")
+    );
+    if kept.len() < ids.len() {
+        out.push_str("; the others were taken back");
+    }
+    out
 }
 
 /// File every placed row and commit the tracker once.
@@ -734,7 +825,8 @@ fn roll_back(boards: &[Board]) -> Result<Option<PathBuf>> {
 ///
 /// A project is not in the tracker or is projected from another tracker,
 /// or the tracker refuses a row. A refused row leaves the tracker as it
-/// was, unless another writer changed a project file meanwhile.
+/// was, but for a project another writer changed meanwhile or a file that
+/// could not be put back; the error names those and the tickets they keep.
 pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
     let layout = vissue_core::Layout::resolve(None, None)?;
     layout
@@ -846,29 +938,20 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
                 boards[board].accept(own);
             }
             Err(e) => {
-                let undone = match roll_back(&boards) {
-                    Ok(Some(dir)) => bail!(
-                        "file --from: row {line}: {e}; another writer changed {} meanwhile, so the {} tickets filed are on the tracker and not committed: {}",
-                        dir.display(),
-                        ids.len(),
-                        ids.join(" ")
-                    ),
-                    Ok(None) => format!(
-                        "nothing was filed: the {} tickets written before it were taken back",
-                        ids.len()
-                    ),
-                    Err(r) => format!("putting the tracker back failed: {r:#}"),
-                };
-                for b in &boards {
+                if ids.is_empty() {
+                    bail!("file --from: row {line}: {e}; nothing was written");
+                }
+                let undo = roll_back(&boards);
+                for &at in &undo.wrote {
                     // A poller may have read the rows written so far;
                     // the log is append-only, so the undo is one more write.
                     let _ = vissue_core::events::emit_issues_write(
                         &vissue_core::events::events_dir(&layout),
-                        &b.project,
-                        &b.issues,
+                        &boards[at].project,
+                        &boards[at].issues,
                     );
                 }
-                bail!("file --from: row {line}: {e}; {undone}");
+                bail!("file --from: row {line}: {e}; {}", undone(&ids, &undo));
             }
         }
     }
@@ -930,14 +1013,28 @@ mod tests {
             dir: dir.clone(),
             ours: snapshot(&dir).unwrap(),
             board: String::new(),
-            touched: Touched::from([(issues.clone(), Some(b"before\n".to_vec()))]),
+            touched: Touched::from([(
+                issues.clone(),
+                Touch {
+                    was: Some(b"before\n".to_vec()),
+                    ids: vec!["demo-a1".into()],
+                },
+            )]),
         };
         std::fs::write(&issues, "theirs\n").unwrap();
         let boards = std::slice::from_ref(&board);
-        assert_eq!(roll_back(boards).unwrap(), Some(dir.clone()));
+        let undo = roll_back(boards);
+        assert_eq!(
+            undo.failed,
+            [format!("another writer changed {}", dir.display())]
+        );
+        assert_eq!(undo.kept, ["demo-a1"]);
+        assert!(undo.wrote.is_empty());
         assert_eq!(read(), "theirs\n");
         std::fs::write(&issues, "ours\n").unwrap();
-        assert_eq!(roll_back(boards).unwrap(), None);
+        let undo = roll_back(boards);
+        assert!(undo.failed.is_empty() && undo.kept.is_empty());
+        assert_eq!(undo.wrote, [0]);
         assert_eq!(read(), "before\n");
         assert!(dir.join("issues.org.lock").is_file());
     }
@@ -957,7 +1054,7 @@ mod tests {
 
     /// What the batch puts back once the check under the lock has passed.
     fn put_back(board: &Board) {
-        restore(&board.touched).unwrap();
+        assert!(restore(&board.touched).is_empty());
     }
 
     #[test]
@@ -1063,13 +1160,88 @@ mod tests {
         (root, layout, board)
     }
 
+    /// A second project, `project`, holding one issue, and the batch's board
+    /// for it.
+    fn open(layout: &vissue_core::Layout, project: &str) -> Board {
+        let issues = layout.project_issues_path(project);
+        let dir = issues.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        file_in(layout, project, "old");
+        Board {
+            project: project.into(),
+            board: rendered(project, &issues).unwrap(),
+            ours: snapshot(&dir).unwrap(),
+            issues,
+            dir,
+            touched: Touched::new(),
+        }
+    }
+
+    #[test]
+    fn a_board_the_batch_never_wrote_does_not_hold_back_the_roll_back() {
+        let (_root, layout, mut board) = demo(false);
+        let before = board.ours.clone();
+        let other = open(&layout, "other");
+        let id = file(&layout, "new");
+        let own = board.only_filed(&want(&layout, &id)).unwrap().unwrap();
+        board.accept(own);
+        std::fs::write(&other.issues, "theirs\n").unwrap();
+        let dir = board.dir.clone();
+        let undo = roll_back(&[board, other]);
+        assert!(undo.failed.is_empty(), "{:?}", undo.failed);
+        assert_eq!(undo.wrote, [0]);
+        assert_eq!(snapshot(&dir).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(layout.project_issues_path("other")).unwrap(),
+            "theirs\n"
+        );
+    }
+
+    #[test]
+    fn a_roll_back_puts_back_every_board_it_can() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_root, layout, mut board) = demo(true);
+        let mut other = open(&layout, "other");
+        let before = other.ours.clone();
+        let id = file(&layout, "new");
+        let own = board.only_filed(&want(&layout, &id)).unwrap().unwrap();
+        board.accept(own);
+        let other_id = file_in(&layout, "other", "new");
+        let own = other
+            .only_filed(&want(&layout, &other_id))
+            .unwrap()
+            .unwrap();
+        other.accept(own);
+        let ledger = board.dir.join("issues");
+        let mode = |bits| std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(bits));
+        mode(0o555).unwrap();
+        let path = board.touched.keys().next().unwrap().clone();
+        let dir = other.dir.clone();
+        let undo = roll_back(&[board, other]);
+        mode(0o755).unwrap();
+        assert_eq!(snapshot(&dir).unwrap(), before);
+        assert_eq!(undo.wrote, [1]);
+        assert_eq!(undo.kept, std::slice::from_ref(&id));
+        let said = undone(&[id.clone(), other_id.clone()], &undo);
+        assert!(
+            said.contains(&format!("could not put back {}: ", path.display()))
+                && said.contains(&format!("1 of the 2 tickets filed are on the tracker and not committed: {id}; the others were taken back")),
+            "{said}"
+        );
+        assert!(!said.contains(&other_id), "{said}");
+    }
+
     const BODY: &str = "why, see [[id:nowhere]]";
     const TAGS: &str = "x,needs-review";
 
     fn file(layout: &vissue_core::Layout, title: &str) -> String {
+        file_in(layout, "demo", title)
+    }
+
+    fn file_in(layout: &vissue_core::Layout, project: &str, title: &str) -> String {
         let made = vissue_core::ops::create(
             layout,
-            "demo",
+            project,
             title,
             vissue_core::ops::CreateOpts {
                 issue_type: Some("task"),
@@ -1106,11 +1278,11 @@ mod tests {
 
     /// What `file_rows` does with a filed row and then a refused one:
     /// `None` when the filed row stopped the batch, else what `roll_back`
-    /// said.
-    fn refuse_next(board: &mut Board, want: &Want) -> Option<Option<PathBuf>> {
+    /// could not put back.
+    fn refuse_next(board: &mut Board, want: &Want) -> Option<Vec<String>> {
         let own = board.only_filed(want).unwrap()?;
         board.accept(own);
-        Some(roll_back(std::slice::from_ref(board)).unwrap())
+        Some(roll_back(std::slice::from_ref(board)).failed)
     }
 
     #[test]
@@ -1119,7 +1291,10 @@ mod tests {
             let (_root, layout, mut board) = demo(ledger);
             let before = board.ours.clone();
             let id = file(&layout, "new");
-            assert_eq!(refuse_next(&mut board, &want(&layout, &id)), Some(None));
+            assert_eq!(
+                refuse_next(&mut board, &want(&layout, &id)),
+                Some(Vec::new())
+            );
             assert_eq!(snapshot(&board.dir).unwrap(), before, "ledger {ledger}");
         }
     }

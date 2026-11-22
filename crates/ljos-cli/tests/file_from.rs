@@ -136,6 +136,30 @@ fn a_bad_row_leaves_the_tracker_unchanged() {
 }
 
 #[test]
+fn a_refused_first_row_says_nothing_was_written_and_logs_no_write() {
+    let world = World::new();
+    let events = world.tracker().join("Software/.vault-events.jsonl");
+    let log = || std::fs::read(&events).unwrap_or_default();
+    let before = log();
+    let files = tracked(&world);
+    let file = world.write(
+        "bad-first.jsonl",
+        "{\"title\": \"Row 1\", \"parent\": \"demo-0000\"}\n{\"title\": \"Row 2\"}\n",
+    );
+    let filed = world.ljos(&["file", "--from", &file, "-p", "demo"]);
+    assert_eq!(filed.status.code(), Some(1), "{}", said(&filed));
+    assert!(
+        stderr(&filed).contains("row 1: --parent demo-0000")
+            && stderr(&filed).contains("; nothing was written"),
+        "{}",
+        said(&filed)
+    );
+    assert!(!stderr(&filed).contains("0 tickets"), "{}", said(&filed));
+    assert_eq!(log(), before, "{}", String::from_utf8_lossy(&log()));
+    assert_eq!(tracked(&world), files);
+}
+
+#[test]
 fn the_mcp_tool_files_rows_in_one_commit() {
     let world = World::new();
     let before = world.commits();
