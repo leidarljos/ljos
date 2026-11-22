@@ -51920,11 +51920,13 @@ fn persist_one_tracker_file(
     // finds the line on disk and commits nothing. Such a write commits
     // now; a file that was already dirty keeps the batch hold. A read
     // that fails cannot show the file was dirty, so it commits now too.
-    let mut clean_args = vec!["status", "--porcelain", "--"];
-    clean_args.extend(specs.iter().map(String::as_str));
-    let dirty_before =
-        matches!(git(&clean_args), Ok(o) if o.status.success() && !o.stdout.is_empty());
-    let may_hold = may_hold && (writes.is_empty() || dirty_before);
+    // A write that may not wait, or that has no seat line, needs no read.
+    let may_hold = may_hold
+        && (writes.is_empty() || {
+            let mut clean_args = vec!["status", "--porcelain", "--"];
+            clean_args.extend(specs.iter().map(String::as_str));
+            matches!(git(&clean_args), Ok(o) if o.status.success() && !o.stdout.is_empty())
+        });
     stamp_write_seats(path, writes);
     let mut live: Vec<&str> = Vec::new();
     let mut ignored_note = String::new();
@@ -62051,6 +62053,50 @@ mod tests {
         assert!(out.status.success(), "{stderr}");
         assert!(stderr.contains("tracker git: commit refused"), "{stderr}");
         assert!(stderr.contains("no commit here"), "{stderr}");
+    }
+
+    /// A write the batch window could not hold, such as a claim, reads
+    /// the file's status once, not a second time to learn whether it was
+    /// already changed.
+    #[test]
+    fn a_write_that_cannot_wait_reads_the_status_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let issues = seeded_tracker(&root);
+        probe_env(&root);
+        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("git"))
+            .find(|git| git.is_file())
+            .expect("git on PATH");
+        let shim = tempfile::tempdir().unwrap();
+        let log = shim.path().join("status.log");
+        let git = shim.path().join("git");
+        std::fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = status ]; then echo \"$*\" >> '{}'; break; fi\ndone\nexec '{}' \"$@\"\n",
+                log.display(),
+                real.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let text = std::fs::read_to_string(&issues).unwrap();
+        std::fs::write(&issues, text.replacen("TODO", "STARTED", 1)).unwrap();
+        let said = {
+            let _bins = super::prepend_path(shim.path());
+            persist_tracker("probe-a1b2", "claimed")
+        };
+        assert!(said.contains("committed"), "{said}");
+        let reads = std::fs::read_to_string(&log).unwrap_or_default();
+        let on_board = reads
+            .lines()
+            .filter(|line| line.ends_with("status --porcelain -- issues.org"))
+            .count();
+        assert_eq!(on_board, 1, "{reads}");
+        clear_probe_env();
     }
 
     /// With no HEAD and a reset that fails, the staged issue files leave
