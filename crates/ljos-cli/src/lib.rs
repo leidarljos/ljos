@@ -74843,15 +74843,11 @@ lesson, due yesterday, seat ada
     /// stores are still prepared, or doctor names a tracker that is not there.
     #[test]
     fn a_seat_with_no_runner_still_gets_its_tracker() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let _g = env_guard();
         let _seat = HermeticSeat::new();
         let bin = _seat._dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let packset = bin.join("packset");
-        std::fs::write(&packset, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&packset, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&bin.join("packset"), "#!/bin/sh\nexit 0\n").unwrap();
         let path = format!("{}:/usr/bin:/bin", bin.display());
         let _env = HoldEnv::set(&[("PACKSET_URL", ""), ("PATH", &path)]);
         let steps =
