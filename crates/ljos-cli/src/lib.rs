@@ -15,9 +15,11 @@ use packset_client::Hit;
 use serde_json::Value;
 
 pub use exe_publish::{
-    change_mode, change_mode_of, copy_executable, copy_file, install_executable,
-    install_executable_mode, program, publish, write_file, Content, Mode,
+    change_mode, change_mode_of, copy_executable, copy_executable_new, copy_file,
+    install_executable, install_executable_mode, program, publish, write_file, Content, Mode,
 };
+#[cfg(unix)]
+pub use exe_publish::{publish_link, Moved};
 pub use pack_link::PacksetClient;
 
 /// `eprintln!` for a person: the line wraps to the terminal stderr is on,

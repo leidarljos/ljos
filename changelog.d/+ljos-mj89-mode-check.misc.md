@@ -1,8 +1,3 @@
-A test reads every workspace source as tokens.
-It refuses any mode change outside the publish module that could make a file executable.
-Formatting, comments and an `#[expect]` around a call do not hide a mode change from it, so a file written and then made executable through a descriptor is refused.
-Every other mode change goes through `ljos_cli::change_mode` or `ljos_cli::change_mode_of`.
-These helpers never follow a symlink and never give a file an execute bit it lacks.
-`clippy.toml` also lists `File::set_permissions` and the libc chmod calls, and `ljos_cli::program` also refuses `chmod`.
-`ljos_cli::copy_file` takes the place of `std::fs::copy` and does not give the copy the mode of its source.
-A data file that ljos rewrites keeps the mode of the old file without any execute bit.
+A source lint scans production Rust files and `build.rs` in every workspace member for common mode-publication mistakes, non-literal command programs, and shell programs.
+The lint does not see generated code, native code, or commands hidden in shell strings.
+It has 45 exceptions, each matched by file, item path, and exact hit count: one lets the `ljos-hud` summon socket set the mode of its private socket directory, and 44 let a named function build or start a program.

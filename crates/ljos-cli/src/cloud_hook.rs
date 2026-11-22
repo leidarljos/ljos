@@ -125,7 +125,11 @@ fn retire_old_hooks(seat: Option<&Path>) -> Vec<String> {
         said.extend(unchain(&dir));
     }
     let script = ours.join("pre-push");
-    if old_hook_script(&script) && fs::remove_file(&script).is_ok() {
+    let removed = {
+        let _lock = crate::exe_publish::HeldDirectory::open(&ours).ok();
+        old_hook_script(&script) && fs::remove_file(&script).is_ok()
+    };
+    if removed {
         said.push(format!(
             "hooks: removed {}, which an earlier cloud up installed",
             script.display()
@@ -203,6 +207,7 @@ fn old_hook_script(path: &Path) -> bool {
 /// The stub ran the hook it moved aside, then the old script. Putting
 /// that hook back under its own name is what the directory held before.
 fn unchain(dir: &Path) -> Option<String> {
+    let _lock = crate::exe_publish::HeldDirectory::open(dir).ok()?;
     let hook = dir.join("pre-push");
     if old_hook_script(&hook) {
         fs::remove_file(&hook).ok()?;

@@ -7,6 +7,8 @@
 //! builder made in another function and a macro body are all the call they
 //! resolve to. If clippy stops naming one, its expectation is unfulfilled
 //! and `cargo clippy -- -D warnings` fails.
+//! The calls are probes: reverting a denylist entry makes its expectation
+//! unfulfilled, which proves the gate notices the revert.
 #![allow(dead_code)]
 
 use std::fs::OpenOptions;
@@ -52,6 +54,51 @@ mod renamed_libc {
         let fd = unsafe { libc::openat(dir, hook.as_ptr(), flags, 0o755) };
         let _ = fd;
     }
+}
+
+#[cfg(unix)]
+fn rustix_paths(src: &Path, hook: &Path) {
+    use rustix::fs::{AtFlags, CWD};
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fixture: rustix::fs::symlink onto a hook path"
+    )]
+    rustix::fs::symlink(src, hook).ok();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fixture: rustix::fs::symlinkat onto a hook path"
+    )]
+    rustix::fs::symlinkat(src, CWD, hook).ok();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fixture: rustix::fs::rename onto a hook path"
+    )]
+    rustix::fs::rename(src, hook).ok();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fixture: rustix::fs::link onto a hook path"
+    )]
+    rustix::fs::link(src, hook).ok();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fixture: rustix::fs::linkat onto a hook path"
+    )]
+    rustix::fs::linkat(CWD, src, CWD, hook, AtFlags::empty()).ok();
+    #[cfg(any(
+        target_os = "android",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "tvos",
+        target_os = "visionos",
+        target_os = "watchos"
+    ))]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fixture: rustix::fs::renameat_with onto a hook path"
+    )]
+    rustix::fs::renameat_with(CWD, src, CWD, hook, rustix::fs::RenameFlags::NOREPLACE).ok();
 }
 
 fn typed_let_and_cast<'a>(hook: &'a Path, src: &'a Path) {

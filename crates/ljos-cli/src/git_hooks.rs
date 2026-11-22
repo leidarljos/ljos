@@ -178,10 +178,10 @@ pub fn uninstall() -> Result<()> {
             } else {
                 unset_global_hooks_path(&[])?;
             }
-            remove_owned_hooks(&dir);
+            remove_owned_hooks(&dir)?;
         }
         Some(path) => strip_user_hooks(Path::new(path))?,
-        None => remove_owned_hooks(&dir),
+        None => remove_owned_hooks(&dir)?,
     }
     Ok(())
 }
@@ -591,25 +591,6 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-/// The permission bits of the hook file at `path`, without setuid, setgid
-/// or sticky. Install and uninstall refuse a symlinked hook before they
-/// read a mode, so this is a regular file's own.
-fn file_mode(path: &Path) -> u32 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        match fs::symlink_metadata(path) {
-            Ok(meta) if meta.is_file() => meta.permissions().mode() & 0o777,
-            _ => 0o755,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        0o755
-    }
-}
-
 /// The mode a chained hook is published with. Git runs only an executable
 /// hook, so one with no execute bit gains one for its owner and for each
 /// class that can read it, and nothing else. A hook that has one keeps
@@ -621,33 +602,6 @@ fn chained_mode(mode: u32) -> u32 {
     } else {
         mode | ((mode & 0o444) >> 2) | 0o100
     }
-}
-
-/// Refuse when a hook in `dir` that `edits` would change is a symlink.
-///
-/// ljos edits a user's hook only as a file of its own. A link's target can
-/// be shared with other repositories or kept by a hook manager: editing it
-/// changes them too, and replacing the link left the ljos block in the
-/// target for uninstall to miss. Install refuses every linked hook and
-/// uninstall every linked hook whose target holds the block, both before
-/// either writes anything, so neither one changes a link or its target.
-fn refuse_linked_hooks(dir: &Path, verb: &str, edits: impl Fn(&Path) -> bool) -> Result<()> {
-    for name in HOOK_NAMES {
-        let path = dir.join(name);
-        let linked = fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink());
-        if linked && edits(&path) {
-            let target = fs::read_link(&path)
-                .map(|target| target.display().to_string())
-                .unwrap_or_else(|_| "a path that cannot be read".to_string());
-            bail!(
-                "git-hooks: {} is a symlink to {target}, and ljos does not edit a hook through a link \
-                 or replace one, so replace the link with a copy of its target and run \
-                 `ljos git-hooks {verb}` again",
-                path.display()
-            );
-        }
-    }
-    Ok(())
 }
 
 fn owned_installed(dir: &Path) -> bool {
@@ -711,40 +665,50 @@ fn hooks_reachable(configured: &Path, ours: &Path) -> bool {
 
 fn write_owned_hooks(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("git-hooks: {}", dir.display()))?;
-    for name in HOOK_NAMES {
-        let path = dir.join(name);
-        crate::install_executable(&path, hook_body(name))
-            .with_context(|| format!("git-hooks: {}", path.display()))?;
+    let held = crate::exe_publish::HeldDirectory::open(dir)
+        .with_context(|| format!("git-hooks: {}", dir.display()))?;
+    for &name in HOOK_NAMES {
+        held.read(name)
+            .with_context(|| format!("git-hooks: {}", dir.join(name).display()))?;
+    }
+    for &name in HOOK_NAMES {
+        held.publish(name, hook_body(name).as_bytes(), 0o755)
+            .with_context(|| format!("git-hooks: {}", dir.join(name).display()))?;
     }
     Ok(())
 }
 
 fn chain_user_hooks(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("git-hooks: {}", dir.display()))?;
-    refuse_linked_hooks(dir, "install", |_| true)?;
-    for name in HOOK_NAMES {
+    let held = crate::exe_publish::HeldDirectory::open(dir)
+        .with_context(|| format!("git-hooks: {}", dir.display()))?;
+    let mut entries = Vec::new();
+    for &name in HOOK_NAMES {
         let path = dir.join(name);
-        let existing = if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {
-            Some(fs::read(&path).with_context(|| format!("git-hooks: {}", path.display()))?)
-        } else {
-            None
-        };
-        if let Some(bytes) = &existing {
+        let existing = held
+            .read(name)
+            .with_context(|| format!("git-hooks: {}", path.display()))?;
+        entries.push((name, existing));
+    }
+    for (name, existing) in entries {
+        let path = dir.join(name);
+        if let Some(entry) = &existing {
+            let bytes = &entry.bytes;
             if bytes.contains(&0) || std::str::from_utf8(bytes).is_err() {
                 say!("ljos: {} is not a shell script; left it", path.display());
                 continue;
             }
         }
         let text = existing
-            .as_deref()
-            .map(|bytes| std::str::from_utf8(bytes).unwrap_or(""))
+            .as_ref()
+            .map(|entry| std::str::from_utf8(&entry.bytes).unwrap_or(""))
             .unwrap_or("");
         let next = merge_block(text, name);
-        let mode = file_mode(&path);
+        let mode = existing.as_ref().map_or(0o755, |entry| entry.mode);
         let published = if existing.is_none() {
-            crate::install_executable(&path, next)
+            held.publish(name, next.as_bytes(), 0o755)
         } else if next != text || chained_mode(mode) != mode {
-            crate::install_executable_mode(&path, next, chained_mode(mode))
+            held.publish(name, next.as_bytes(), chained_mode(mode))
         } else {
             Ok(())
         };
@@ -754,23 +718,47 @@ fn chain_user_hooks(dir: &Path) -> Result<()> {
 }
 
 fn strip_user_hooks(dir: &Path) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
+    match fs::symlink_metadata(dir) {
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("git-hooks: {}", dir.display())),
     }
-    refuse_linked_hooks(dir, "uninstall", |path| {
-        fs::read(path).is_ok_and(|bytes| {
-            std::str::from_utf8(&bytes).is_ok_and(|text| text.contains(BLOCK_BEGIN))
-        })
-    })?;
-    for name in HOOK_NAMES {
+    let held = crate::exe_publish::HeldDirectory::open(dir)
+        .with_context(|| format!("git-hooks: {}", dir.display()))?;
+    let mut entries = Vec::new();
+    for &name in HOOK_NAMES {
         let path = dir.join(name);
-        if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {
+        if held
+            .is_symlink(name)
+            .with_context(|| format!("git-hooks: {}", path.display()))?
+        {
+            let text = held
+                .followed_text(name)
+                .with_context(|| format!("git-hooks: {}", path.display()))?;
+            if text.contains(BLOCK_BEGIN) {
+                let err = match held.read(name) {
+                    Err(err) => err,
+                    Ok(_) => std::io::Error::other(format!(
+                        "install executable: {} is a symbolic link",
+                        path.display()
+                    )),
+                };
+                return Err(err).with_context(|| format!("git-hooks: {}", path.display()));
+            }
+            entries.push((name, None));
             continue;
         }
-        let Ok(bytes) = fs::read(&path) else {
+        let existing = held
+            .read(name)
+            .with_context(|| format!("git-hooks: {}", path.display()))?;
+        entries.push((name, existing));
+    }
+    for (name, existing) in entries {
+        let path = dir.join(name);
+        let Some(existing) = existing else {
             continue;
         };
-        let Ok(text) = std::str::from_utf8(&bytes) else {
+        let Ok(text) = std::str::from_utf8(&existing.bytes) else {
             continue;
         };
         if !text.contains(BLOCK_BEGIN) {
@@ -778,20 +766,39 @@ fn strip_user_hooks(dir: &Path) -> Result<()> {
         }
         let stripped = strip_all(text);
         if block_only(&stripped) {
-            fs::remove_file(&path).with_context(|| format!("git-hooks: {}", path.display()))?;
+            held.remove(name)
+                .with_context(|| format!("git-hooks: {}", path.display()))?;
         } else if stripped != text {
-            crate::install_executable_mode(&path, stripped, file_mode(&path))
+            held.publish(name, stripped.as_bytes(), existing.mode)
                 .with_context(|| format!("git-hooks: {}", path.display()))?;
         }
     }
     Ok(())
 }
 
-fn remove_owned_hooks(dir: &Path) {
-    for name in HOOK_NAMES {
-        let _ = fs::remove_file(dir.join(name));
+fn remove_owned_hooks(dir: &Path) -> Result<()> {
+    match fs::symlink_metadata(dir) {
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("git-hooks: {}", dir.display())),
+    }
+    let held = crate::exe_publish::HeldDirectory::open(dir)
+        .with_context(|| format!("git-hooks: {}", dir.display()))?;
+    let mut entries = Vec::new();
+    for &name in HOOK_NAMES {
+        let existing = held
+            .read(name)
+            .with_context(|| format!("git-hooks: {}", dir.join(name).display()))?;
+        entries.push((name, existing));
+    }
+    for (name, existing) in entries {
+        if existing.is_some() {
+            held.remove(name)
+                .with_context(|| format!("git-hooks: {}", dir.join(name).display()))?;
+        }
     }
     let _ = fs::remove_file(dir.join("previous-hooks-path"));
+    Ok(())
 }
 
 fn hook_body(name: &str) -> String {
@@ -1782,6 +1789,32 @@ mod tests {
         }
     }
 
+    /// A hooks directory the user configured may itself be a symlink.
+    /// Install writes into the directory it names, and uninstall removes
+    /// those hooks. A dangling link is not a directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_hooks_directory_is_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let linked = dir.path().join("hooks");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "plants the hooks directory link this test follows"
+        )]
+        std::os::unix::fs::symlink(&target, &linked).unwrap();
+        super::write_owned_hooks(&linked).unwrap();
+        let hook = target.join("pre-commit");
+        let text = std::fs::read_to_string(&hook).unwrap();
+        assert!(text.contains("# ljos:begin git-hook"), "{text}");
+        assert_eq!(std::fs::read_link(&linked).unwrap(), target);
+        super::remove_owned_hooks(&linked).unwrap();
+        assert!(std::fs::read_dir(&target).unwrap().next().is_none());
+        std::fs::remove_dir(&target).unwrap();
+        assert!(super::remove_owned_hooks(&linked).is_err());
+    }
+
     /// `path`'s permission bits, setuid, setgid and sticky included.
     #[cfg(unix)]
     fn mode_of(path: &std::path::Path) -> u32 {
@@ -1889,18 +1922,21 @@ mod tests {
                 super::chain_user_hooks(&hooks).expect_err("chained through a link")
             );
             assert!(err.contains("post-commit"), "{err}");
-            assert!(err.contains("is a symlink to"), "{err}");
-            assert!(err.contains("ljos git-hooks install"), "{err}");
+            assert!(err.contains(&target.display().to_string()), "{err}");
+            assert!(
+                err.contains("replace the link with a regular file"),
+                "{err}"
+            );
             left_as_it_was(&hooks, &target, text, mode, PRIOR);
         }
     }
 
     /// Uninstall rewrote a symlinked hook as a file of its own and left the
     /// block in the link's target. It now refuses a linked hook whose
-    /// target holds the block before it strips any hook.
+    /// target contains the block before it strips any hook.
     #[cfg(unix)]
     #[test]
-    fn uninstall_refuses_a_symlinked_hook_that_holds_the_block() {
+    fn uninstall_refuses_a_symlinked_hook_with_the_block() {
         let push = super::merge_block(PRIOR, "pre-push");
         let chained = super::merge_block(PRIOR, "post-commit");
         let (_dir, hooks, target) = linked_hooks(&push, &chained, 0o755);
@@ -1909,12 +1945,15 @@ mod tests {
             super::strip_user_hooks(&hooks).expect_err("stripped through a link")
         );
         assert!(err.contains("post-commit"), "{err}");
-        assert!(err.contains("is a symlink to"), "{err}");
-        assert!(err.contains("ljos git-hooks uninstall"), "{err}");
+        assert!(err.contains(&target.display().to_string()), "{err}");
+        assert!(
+            err.contains("replace the link with a regular file"),
+            "{err}"
+        );
         left_as_it_was(&hooks, &target, &chained, 0o755, &push);
     }
 
-    /// A linked hook without the block holds nothing of ljos, so uninstall
+    /// A linked hook without the block contains nothing from ljos, so uninstall
     /// strips the other hooks and leaves the link and its target.
     #[cfg(unix)]
     #[test]
@@ -1922,7 +1961,74 @@ mod tests {
         let push = super::merge_block(PRIOR, "pre-push");
         let (_dir, hooks, target) = linked_hooks(&push, PRIOR, 0o755);
         super::strip_user_hooks(&hooks).unwrap();
-        left_as_it_was(&hooks, &target, PRIOR, 0o755, PRIOR);
+        let link = hooks.join("post-commit");
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), PRIOR);
+        assert_eq!(mode_of(&target), 0o755, "the link's target changed mode");
+        let stripped = std::fs::read_to_string(hooks.join("pre-push")).unwrap();
+        assert_eq!(stripped, PRIOR);
+        assert!(!stripped.contains("# ljos:begin"));
+        for name in HOOK_NAMES {
+            if !matches!(*name, "pre-push" | "post-commit") {
+                assert!(!hooks.join(name).exists(), "{name} was made");
+            }
+        }
+    }
+
+    /// Two ljos edits of one hook at once. Uninstall reads `post-commit`,
+    /// and before it writes the stripped hook another edit appends a line
+    /// through the same directory. Without the directory lock that edit
+    /// finished in between and uninstall's write dropped it. With the lock
+    /// it waits, reads the stripped hook, and the hook keeps both edits.
+    #[cfg(unix)]
+    #[test]
+    fn two_concurrent_hook_edits_lose_neither() {
+        struct Unhook;
+        impl Drop for Unhook {
+            fn drop(&mut self) {
+                crate::exe_publish::set_entry_hook(None);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir(&hooks).unwrap();
+        let hook = hooks.join("post-commit");
+        crate::install_executable(&hook, super::merge_block(PRIOR, "post-commit")).unwrap();
+        let other = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let slot = std::rc::Rc::clone(&other);
+        let expected = hook.clone();
+        let shared = hooks.clone();
+        crate::exe_publish::set_entry_hook(Some(Box::new(move |path| {
+            if path != expected || slot.borrow().is_some() {
+                return;
+            }
+            let hooks = shared.clone();
+            let (done, finished) = std::sync::mpsc::channel();
+            let edit = std::thread::spawn(move || {
+                let held = crate::exe_publish::HeldDirectory::open(&hooks).unwrap();
+                let entry = held.read("post-commit").unwrap().unwrap();
+                let mut body = entry.bytes;
+                body.extend_from_slice(b"echo other\n");
+                held.publish("post-commit", &body, entry.mode).unwrap();
+                let _ = done.send(());
+            });
+            let _ = finished.recv_timeout(std::time::Duration::from_millis(500));
+            *slot.borrow_mut() = Some(edit);
+        })));
+        let _unhook = Unhook;
+        super::strip_user_hooks(&hooks).unwrap();
+        let edit = other.borrow_mut().take().expect("the other edit started");
+        edit.join().unwrap();
+        let text = std::fs::read_to_string(&hook).unwrap();
+        assert!(
+            !text.contains("# ljos:begin"),
+            "uninstall's edit was lost: {text}"
+        );
+        assert!(
+            text.contains("echo other"),
+            "the other edit was lost: {text}"
+        );
+        assert!(text.starts_with(PRIOR), "{text}");
     }
 
     /// The `pre-push` block a build before 64e489f5 wrote. `|| true`

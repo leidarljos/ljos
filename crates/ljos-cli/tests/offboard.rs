@@ -193,6 +193,44 @@ fn dry_run_and_one_runner_do_not_touch_other_files() {
     assert!(home.join(".aws/amazonq/mcp.json").is_file());
 }
 
+/// `~/.config/zed` is a symlink into another directory. Offboard restores
+/// the settings file through that link.
+#[test]
+fn offboard_restores_a_file_under_a_symlinked_config_dir() {
+    let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap();
+    let zed = shipped.harness.iter().find(|h| h.name == "zed").unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let real = home.join("dotfiles-zed");
+    fs::create_dir_all(&real).unwrap();
+    fs::create_dir_all(home.join(".config")).unwrap();
+    let link = home.join(".config/zed");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "plants the config directory link this test follows"
+    )]
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    seed_runner(home, zed);
+    let settings = real.join("settings.json");
+    let original = fs::read(&settings).unwrap();
+    let bin = fake_runner_commands(home);
+    let onboard = run(home, &bin, &["onboard", "--harness", "zed"]);
+    assert!(
+        onboard.status.success(),
+        "{}",
+        String::from_utf8_lossy(&onboard.stderr)
+    );
+    assert_ne!(fs::read(&settings).unwrap(), original);
+    let offboard = run(home, &bin, &["offboard"]);
+    assert!(
+        offboard.status.success(),
+        "{}",
+        String::from_utf8_lossy(&offboard.stderr)
+    );
+    assert_eq!(fs::read(&settings).unwrap(), original);
+    assert_eq!(fs::read_link(&link).unwrap(), real);
+}
+
 #[test]
 fn offboard_keeps_an_edit_made_after_onboarding() {
     let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap();

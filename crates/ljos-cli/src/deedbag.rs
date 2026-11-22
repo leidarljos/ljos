@@ -1158,7 +1158,7 @@ mod tests {
         let parent = std::fs::File::open(dir.path()).unwrap();
         let err = publish(&parent, "seat", scratch.path());
         crate::change_mode(&parent_dir, 0o755).unwrap();
-        crate::change_mode(&blocked, 0o644).unwrap();
+        crate::exe_publish::fixture_mode(&blocked, 0o644);
         let err = err.expect_err("publish of an unreadable tree succeeded");
         let text = format!("{err:#}");
         assert_eq!(

@@ -525,6 +525,7 @@ fn missing_manifest(error: &anyhow::Error) -> bool {
 }
 
 fn reverse_entry(entry: &Entry, dry: bool) -> Result<(Step, bool)> {
+    let _hooks = hooks_lock(&entry.path);
     let before = entry.before.as_deref().map(load_backup).transpose()?;
     let after = entry.after.as_deref().map(load_backup).transpose()?;
     let current = read_state(&entry.path);
@@ -594,6 +595,16 @@ fn reverse_entry(entry: &Entry, dry: bool) -> Result<(Step, bool)> {
         },
         true,
     ))
+}
+
+/// The lock on the directory of `path` when `path` is a git hook, so the
+/// hook is read and put back with no other ljos hook edit in between.
+fn hooks_lock(path: &Path) -> Option<crate::exe_publish::HeldDirectory> {
+    let name = path.file_name()?.to_str()?;
+    if !crate::git_hooks::HOOK_NAMES.contains(&name) {
+        return None;
+    }
+    crate::exe_publish::HeldDirectory::open(path.parent()?).ok()
 }
 
 fn reverse_changed(before: &[u8], after: &[u8], current: &[u8]) -> Option<Vec<u8>> {

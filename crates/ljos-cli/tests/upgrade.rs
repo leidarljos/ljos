@@ -269,45 +269,136 @@ fn an_install_already_at_the_release_is_left_alone() {
     );
 }
 
-/// The rollback copy is the previous release. Installing again must not
-/// replace it with the release just installed.
+/// A file, a directory or a dangling symlink at the rollback name is left
+/// as it is and is not taken for the rollback. The old binary is saved at
+/// the next free name, and the output names that copy.
 #[test]
-fn a_second_upgrade_keeps_the_older_rollback() {
+fn a_taken_rollback_name_is_left_and_the_old_binary_is_saved_beside_it() {
+    for kind in ["file", "directory", "dangling symlink"] {
+        let root = tempfile::tempdir().unwrap();
+        let rel = fixture_release(root.path());
+        let dir = root.path().join("bin");
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["ljos", "ljos-mcp"] {
+            executable(&dir.join(name), &says(name, "0.36.3"));
+            let taken = dir.join(format!("{name}.bak-pre-{}", version()));
+            match kind {
+                "file" => executable(&taken, &says(name, "0.36.2")),
+                "directory" => fs::create_dir(&taken).unwrap(),
+                _ => {
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "plants a dangling link at the rollback name"
+                    )]
+                    std::os::unix::fs::symlink(root.path().join("gone"), &taken).unwrap();
+                }
+            }
+        }
+        let old: Vec<Vec<u8>> = ["ljos", "ljos-mcp"]
+            .iter()
+            .map(|name| fs::read(dir.join(name)).unwrap())
+            .collect();
+
+        let out = run(root.path(), &dir, Some(&rel), version());
+        let said = text_of(&out);
+        assert!(out.status.success(), "{kind}: {said}");
+        for (name, before) in ["ljos", "ljos-mcp"].iter().zip(&old) {
+            let taken = dir.join(format!("{name}.bak-pre-{}", version()));
+            let meta = fs::symlink_metadata(&taken).unwrap();
+            match kind {
+                "file" => assert_eq!(fs::read(&taken).unwrap(), says(name, "0.36.2").as_bytes()),
+                "directory" => assert!(meta.is_dir(), "{kind}: {meta:?}"),
+                _ => assert_eq!(fs::read_link(&taken).unwrap(), root.path().join("gone")),
+            }
+            let saved = dir.join(format!("{name}.bak-pre-{}.1", version()));
+            let meta = fs::symlink_metadata(&saved)
+                .unwrap_or_else(|err| panic!("{kind}: no {}: {err}\n{said}", saved.display()));
+            assert!(meta.is_file(), "{kind}: {meta:?}");
+            assert_eq!(fs::read(&saved).unwrap(), *before, "{kind}: {name}");
+            assert!(
+                said.contains(&format!("{name} 0.36.3 saved as {}", saved.display())),
+                "{kind}: {said}"
+            );
+            assert_eq!(
+                version_line(&dir.join(name)),
+                format!("{name} {}", version())
+            );
+        }
+    }
+}
+
+/// Upgrade, roll one binary back, upgrade again. The second run exits 0.
+#[test]
+fn a_second_upgrade_after_a_partial_rollback_exits_0() {
     let root = tempfile::tempdir().unwrap();
     let rel = fixture_release(root.path());
     let dir = root.path().join("bin");
     fs::create_dir_all(&dir).unwrap();
     for name in ["ljos", "ljos-mcp"] {
-        executable(&dir.join(name), &says(name, "0.36.3"));
-        executable(
-            &dir.join(format!("{name}.bak-pre-{}", version())),
-            &says(name, "0.36.2"),
-        );
+        executable(&dir.join(name), &says(name, "0.1.0"));
     }
-    let kept: Vec<Vec<u8>> = ["ljos", "ljos-mcp"]
-        .iter()
-        .map(|name| fs::read(dir.join(format!("{name}.bak-pre-{}", version()))).unwrap())
-        .collect();
+    let first = run(root.path(), &dir, Some(&rel), version());
+    assert!(first.status.success(), "{}", text_of(&first));
+    let ljos_bytes = fs::read(dir.join("ljos")).unwrap();
+    let ljos_bak = fs::read(dir.join(format!("ljos.bak-pre-{}", version()))).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "puts one installed binary back to its rollback for the next upgrade"
+    )]
+    fs::rename(
+        dir.join(format!("ljos-mcp.bak-pre-{}", version())),
+        dir.join("ljos-mcp"),
+    )
+    .unwrap();
 
-    let out = run(root.path(), &dir, Some(&rel), version());
+    let second = run(root.path(), &dir, Some(&rel), version());
+    let said = text_of(&second);
+    assert!(second.status.success(), "{said}");
+    assert_eq!(fs::read(dir.join("ljos")).unwrap(), ljos_bytes);
+    assert_eq!(
+        fs::read(dir.join(format!("ljos.bak-pre-{}", version()))).unwrap(),
+        ljos_bak
+    );
+    assert_eq!(
+        version_line(&dir.join("ljos-mcp")),
+        format!("ljos-mcp {}", version())
+    );
+    assert_eq!(
+        version_line(&dir.join("ljos")),
+        format!("ljos {}", version())
+    );
+}
+
+/// `--dir` may be a symlink to the directory that holds the binaries.
+#[test]
+fn upgrade_follows_a_symlinked_dir() {
+    let root = tempfile::tempdir().unwrap();
+    let rel = fixture_release(root.path());
+    let real = root.path().join("real-bin");
+    fs::create_dir_all(&real).unwrap();
+    for name in ["ljos", "ljos-mcp"] {
+        executable(&real.join(name), &says(name, "0.1.0"));
+    }
+    let link = root.path().join("bin");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "plants the install directory link this test follows"
+    )]
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let out = run(root.path(), &link, Some(&rel), version());
     let said = text_of(&out);
     assert!(out.status.success(), "{said}");
-    assert!(
-        said.contains(&format!("installed ljos {} at", version())),
-        "{said}"
+    assert_eq!(
+        version_line(&real.join("ljos")),
+        format!("ljos {}", version())
     );
-    for (name, before) in ["ljos", "ljos-mcp"].iter().zip(&kept) {
-        let bak = dir.join(format!("{name}.bak-pre-{}", version()));
-        assert_eq!(
-            fs::read(&bak).unwrap(),
-            *before,
-            "{name} rollback was overwritten"
-        );
-        assert_eq!(
-            version_line(&dir.join(name)),
-            format!("{name} {}", version())
-        );
-    }
+    assert_eq!(
+        version_line(&real.join("ljos-mcp")),
+        format!("ljos-mcp {}", version())
+    );
+    assert!(real.join(format!("ljos.bak-pre-{}", version())).is_file());
+    assert_eq!(fs::read_link(&link).unwrap(), real);
 }
 
 fn install_built(dir: &Path, name: &str, bin: &Path) {

@@ -1,7 +1,8 @@
-A published executable is created, marked, and renamed into place through descriptors held on its parent directory and its stage directory, and written by a forked child instead of `/bin/sh`, `cat`, `cp` and `chmod`.
-This stops the owner of a shared sticky directory from having another file overwritten or made executable, or a symlink published, by renaming the stage directory and putting a symlink at its name.
-When the staged file cannot be flushed to disk, the publish fails before the rename.
-A failed publish removes only the staged file and the stage directory it made, and leaves any name someone else put there.
-A copied executable keeps the mode of its source without setuid, setgid and sticky, so `ljos upgrade` no longer turns a 700 binary into a 755 rollback copy.
-`ljos upgrade` and `ljos cloud up` publish each new binary straight onto its installed name.
-No copy waits at a guessable name such as `ljos.new` that another user could replace with a symlink.
+ljos opens the destination directory the user configured, following a symlink there, and keeps a descriptor to it.
+ljos creates, marks, syncs, renames and removes its own names relative to that descriptor and never follows a symlink at them.
+Temporary stage names use operating-system randomness and exclusive creation.
+ljos returns an error when a file or directory sync fails.
+The error says the new file is in place when a directory sync fails after a rename.
+`ljos upgrade` then says it replaced the binary or kept the rollback.
+On failure, cleanup removes the staged file and removes the stage directory when its original name still refers to it.
+Mode changes no longer retry through a pathname after an open is denied.

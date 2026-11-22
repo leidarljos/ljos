@@ -1795,7 +1795,8 @@ enum Cmd {
     /// The ljos archive is checked against its sha256, then each other seat
     /// program comes from the repository that publishes it. A missing release
     /// or a bad download is a warning and the rest still move. The old binary
-    /// is kept as NAME.bak-pre-VERSION.
+    /// is kept as NAME.bak-pre-VERSION, or NAME.bak-pre-VERSION.N when that
+    /// name is taken.
     ///
     /// Example: `ljos upgrade`
     Upgrade {

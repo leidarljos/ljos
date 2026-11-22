@@ -1,4 +1,17 @@
-//! Publish an executable without leaving a write descriptor in this process.
+//! Publish executable and secret files through one held directory descriptor.
+//!
+//! Threat model: ljos defends against path tricks: a symlink or another entry
+//! left at a path, a predictable temporary name, a crash midway, and a stale
+//! stage. It refuses to follow links. It does not defend against a concurrent
+//! hostile process running as the same user. Such a process can already
+//! rewrite the binary, hooks, and `~/.config` directly. Descriptor-relative
+//! operations, `O_EXCL`, `O_NOFOLLOW`, and file and directory `fsync` calls
+//! protect the in-scope cases.
+//!
+//! A directory the user named (`core.hooksPath`, an upgrade `--dir`, or a
+//! config directory) is trusted when it is a symlink. ljos opens that
+//! directory once, follows the symlink, and holds the directory by
+//! descriptor. `O_NOFOLLOW` stays on the names ljos creates or replaces.
 //!
 //! A descriptor opened here is copied into a child at fork and stays open
 //! until that child reaches exec. Starting the new file in that window fails
@@ -12,19 +25,18 @@
 //! relative to the held descriptors, so such a swap moves nothing this
 //! process writes, changes the mode of, or renames.
 
+#![allow(
+    clippy::disallowed_types,
+    reason = "this module is the sole owner of filesystem publication modes"
+)]
+
 #[cfg(unix)]
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::Error;
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::sync::atomic::{AtomicU64, Ordering};
-
-#[cfg(unix)]
-static NEXT: AtomicU64 = AtomicU64::new(1);
-
 /// The name of the file inside a stage directory.
 #[cfg(unix)]
 const EXE: &CStr = c"exe";
@@ -163,8 +175,10 @@ pub enum Mode {
 /// # Errors
 ///
 /// The source is not a regular file or cannot be read, `mode` is
-/// [`Mode::OfSource`] for bytes, the directory cannot be written, the
-/// short-lived writer fails, or `dest` was replaced after the rename.
+/// [`Mode::OfSource`] for bytes, the directory cannot be written, or the
+/// short-lived writer fails. Then nothing at `dest` changed. When the
+/// directory sync after the rename fails, the error says the file is in
+/// place.
 pub fn publish(dest: &Path, content: Content<'_>, mode: Mode) -> Result<(), Error> {
     if let (Mode::OfSource, Content::Bytes(_)) = (mode, content) {
         return Err(Error::new(
@@ -208,7 +222,7 @@ pub fn publish(dest: &Path, content: Content<'_>, mode: Mode) -> Result<(), Erro
             (Content::Bytes(body), None) => stage.fill(Fill::Bytes(body))?,
             (Content::CopyOf(_), None) => unreachable!("a copy opens its source above"),
         }
-        stage.settle(dest, mode)
+        stage.settle(dest, mode)?.durable
     }
     #[cfg(not(unix))]
     {
@@ -252,6 +266,400 @@ pub fn copy_executable(src: &Path, dest: &Path) -> Result<(), Error> {
     publish(dest, Content::CopyOf(src), Mode::OfSource)
 }
 
+/// Create a new executable copy at `dest`, refusing any existing entry.
+///
+/// This is for rollback files, whose existing contents must never be run or
+/// replaced. An unpredictable temporary name is opened with
+/// `O_CREAT|O_EXCL|O_NOFOLLOW`, flushed, and renamed to the final name without
+/// replacing an entry there.
+///
+/// # Errors
+///
+/// The source is not regular, the destination exists, or a write, mode change,
+/// rename, or sync fails. When the directory sync after the rename fails,
+/// the error says the copy is in place.
+#[cfg(unix)]
+pub fn copy_executable_new(src: &Path, dest: &Path) -> Result<(), Error> {
+    use std::io::Write;
+    use std::os::fd::OwnedFd;
+
+    let mut source = File::open(src).map_err(|err| named(err, "read", src))?;
+    let source_stat = stat(&source).map_err(|err| named(err, "read", src))?;
+    if source_stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(Error::other(format!(
+            "install executable: {} is not a regular file",
+            src.display()
+        )));
+    }
+    if let Some(parent) = dir_of(dest) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let parent_path = dir_of(dest).unwrap_or_else(|| Path::new("."));
+    let parent = open_dir(parent_path).map_err(|err| named(err, "open", parent_path))?;
+    let final_leaf = leaf_of(dest, "create")?;
+    let (leaf, fd): (CString, OwnedFd) = loop {
+        let mut random = [0_u8; 16];
+        getrandom::fill(&mut random)
+            .map_err(|err| Error::other(format!("get random rollback name: {err}")))?;
+        let leaf = CString::new(format!(".ljos-rollback.{}", hex::encode(random)))
+            .map_err(Error::other)?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "creates a rollback file with O_EXCL and O_NOFOLLOW in the destination directory"
+        )]
+        match rustix::fs::openat(
+            &parent,
+            leaf.as_c_str(),
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::EXCL
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::from_raw_mode(0o600),
+        ) {
+            Ok(fd) => break (leaf, fd),
+            Err(err) if err == rustix::io::Errno::EXIST => continue,
+            Err(err) => {
+                return Err(named(
+                    Error::from_raw_os_error(err.raw_os_error()),
+                    "create a temporary rollback for",
+                    dest,
+                ))
+            }
+        }
+    };
+    let mut fresh = FreshEntry {
+        parent,
+        parent_path: parent_path.to_path_buf(),
+        leaf,
+        file: File::from(fd),
+        committed: false,
+    };
+    std::io::copy(&mut source, &mut fresh.file).map_err(|err| named(err, "copy", src))?;
+    let mode = (source_stat.st_mode as u32) & 0o777;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the fresh rollback descriptor mode before its directory sync"
+    )]
+    rustix::fs::fchmod(&fresh.file, rustix::fs::Mode::from_raw_mode(mode)).map_err(|err| {
+        named(
+            Error::from_raw_os_error(err.raw_os_error()),
+            "mark executable",
+            dest,
+        )
+    })?;
+    fresh
+        .file
+        .flush()
+        .map_err(|err| named(err, "write", dest))?;
+    flush(&fresh.file, dest).map_err(|err| named(err, "flush", dest))?;
+    fresh.commit(&final_leaf, dest)?;
+    fresh.committed = true;
+    flush(&fresh.parent, &fresh.parent_path)
+        .map_err(|err| not_durable(err, dest, &fresh.parent_path))
+}
+
+/// A rename that took effect.
+///
+/// `durable` is the sync of the directory after it. An error there does
+/// not undo the rename: the new name is in place, but a crash may bring
+/// back what was there before.
+#[cfg(unix)]
+#[must_use = "the rename took effect even when `durable` is an error"]
+#[derive(Debug)]
+pub struct Moved {
+    pub durable: Result<(), Error>,
+}
+
+/// Make `dest` a symlink to `target` with one rename, replacing whatever
+/// entry is at `dest` and never following it. A crash leaves the old entry
+/// or the new link.
+///
+/// # Errors
+///
+/// `dest` has no file name, or the link cannot be made or renamed onto
+/// `dest`. Then nothing at `dest` changed. A failed sync after the rename
+/// is [`Moved::durable`].
+#[cfg(unix)]
+pub fn publish_link(dest: &Path, target: &Path) -> Result<Moved, Error> {
+    let leaf = leaf_of(dest, "install executable: link")?;
+    if let Some(parent) = dir_of(dest) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let stage = Stage::new(dest)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "makes the new link inside the stage directory this process made"
+    )]
+    rustix::fs::symlinkat(target, stage.dir(), EXE).map_err(|err| {
+        named(
+            Error::from_raw_os_error(err.raw_os_error()),
+            "link",
+            &stage.file(),
+        )
+    })?;
+    stage.rename_onto(&leaf, dest)
+}
+
+#[cfg(not(unix))]
+pub fn copy_executable_new(src: &Path, dest: &Path) -> Result<(), Error> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+        .and_then(|mut to| {
+            let mut from = File::open(src)?;
+            std::io::copy(&mut from, &mut to).map(|_| ())
+        })
+}
+
+#[cfg(unix)]
+struct FreshEntry {
+    parent: File,
+    parent_path: PathBuf,
+    leaf: CString,
+    file: File,
+    committed: bool,
+}
+
+#[cfg(unix)]
+impl FreshEntry {
+    fn commit(&self, final_leaf: &CStr, path: &Path) -> Result<(), Error> {
+        rename_noreplace(&self.parent, &self.leaf, final_leaf)
+            .map_err(|err| named(Error::from_raw_os_error(err.raw_os_error()), "create", path))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FreshEntry {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = rustix::fs::unlinkat(
+                &self.parent,
+                self.leaf.as_c_str(),
+                rustix::fs::AtFlags::empty(),
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn rename_noreplace(parent: &File, old: &CStr, new: &CStr) -> rustix::io::Result<()> {
+    #[cfg(any(
+        target_os = "android",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "tvos",
+        target_os = "visionos",
+        target_os = "watchos"
+    ))]
+    {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "publishes a flushed rollback without replacing its final name"
+        )]
+        match rustix::fs::renameat_with(
+            parent,
+            old,
+            parent,
+            new,
+            rustix::fs::RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(rustix::io::Errno::NOSYS | rustix::io::Errno::INVAL) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fallback publishes a flushed rollback without replacing its final name"
+    )]
+    rustix::fs::linkat(parent, old, parent, new, rustix::fs::AtFlags::empty())?;
+    rustix::fs::unlinkat(parent, old, rustix::fs::AtFlags::empty())
+}
+
+/// One regular file read through a descriptor relative to [`HeldDirectory`].
+#[cfg(unix)]
+pub(crate) struct DirectoryEntry {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) mode: u32,
+}
+
+/// A destination directory opened once and held by descriptor.
+///
+/// A symlink at the directory itself is followed. That directory is one the
+/// user configured. Hook installation then binds each read, replacement,
+/// removal, and directory sync to the descriptor, and does not follow a
+/// symlink at a name inside it.
+///
+/// Opening takes an exclusive `flock` on the directory, held until the
+/// value is dropped. Every ljos path that edits a hook opens the hooks
+/// directory this way, so two of them take turns: each reads the hooks
+/// after the other's writes and its own writes lose nothing. A program
+/// that does not take the lock is not ordered with ljos.
+#[cfg(unix)]
+pub(crate) struct HeldDirectory {
+    file: File,
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl HeldDirectory {
+    pub(crate) fn open(path: &Path) -> Result<Self, Error> {
+        let file = open_dir(path).map_err(|err| named(err, "open", path))?;
+        loop {
+            match rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive) {
+                Ok(()) => break,
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(err) => {
+                    return Err(named(
+                        Error::from_raw_os_error(err.raw_os_error()),
+                        "lock",
+                        path,
+                    ))
+                }
+            }
+        }
+        Ok(Self {
+            file,
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub(crate) fn read(&self, name: &str) -> Result<Option<DirectoryEntry>, Error> {
+        use std::io::Read;
+        use std::os::unix::ffi::OsStrExt;
+        let name = CString::new(name).map_err(Error::other)?;
+        let mut file = match open_at(
+            &self.file,
+            &name,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        ) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) if err.raw_os_error() == Some(libc::ELOOP) => {
+                let link = self.path.join(name.to_string_lossy().as_ref());
+                let target =
+                    rustix::fs::readlinkat(&self.file, &name, Vec::new()).map_err(|read| {
+                        named(
+                            Error::from_raw_os_error(read.raw_os_error()),
+                            "read link",
+                            &link,
+                        )
+                    })?;
+                let target = Path::new(std::ffi::OsStr::from_bytes(target.to_bytes()));
+                return Err(Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "install executable: {} is a symbolic link to {}; replace the link with a regular file",
+                        link.display(),
+                        target.display()
+                    ),
+                ));
+            }
+            Err(err) => {
+                return Err(named(
+                    err,
+                    "open",
+                    &self.path.join(name.to_string_lossy().as_ref()),
+                ))
+            }
+        };
+        let st = stat(&file).map_err(|err| named(err, "read", &self.path))?;
+        if st.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "install executable: {} is not a regular file",
+                    self.path.join(name.to_string_lossy().as_ref()).display()
+                ),
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(Some(DirectoryEntry {
+            bytes,
+            mode: st.st_mode & 0o777,
+        }))
+    }
+
+    pub(crate) fn publish(&self, name: &str, body: &[u8], mode: u32) -> Result<(), Error> {
+        let path = self.path.join(name);
+        let stage = Stage::in_dir(&self.file, &self.path)?;
+        stage.fill(Fill::Bytes(body))?;
+        #[cfg(test)]
+        before_entry_mutation(&path);
+        stage.settle(&path, mode & 0o777)?.durable
+    }
+
+    pub(crate) fn remove(&self, name: &str) -> Result<(), Error> {
+        let name = CString::new(name).map_err(Error::other)?;
+        #[cfg(test)]
+        before_entry_mutation(&self.path.join(name.to_string_lossy().as_ref()));
+        rustix::fs::unlinkat(&self.file, name.as_c_str(), rustix::fs::AtFlags::empty())
+            .map_err(|err| Error::from_raw_os_error(err.raw_os_error()))?;
+        flush(&self.file, &self.path).map_err(|err| named(err, "flush", &self.path))
+    }
+
+    /// `true` when `name` is a symlink. A missing name is `false`.
+    pub(crate) fn is_symlink(&self, name: &str) -> Result<bool, Error> {
+        let name_c = CString::new(name).map_err(Error::other)?;
+        match stat_at(&self.file, &name_c) {
+            Ok(st) => Ok(st.st_mode & libc::S_IFMT == libc::S_IFLNK),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(named(err, "read", &self.path.join(name))),
+        }
+    }
+
+    /// The text of `name`, following a symlink at that name.
+    ///
+    /// An entry that is missing, not a regular file, or not UTF-8 is empty.
+    /// Uninstall uses that to leave a linked hook whose target has no ljos
+    /// block.
+    pub(crate) fn followed_text(&self, name: &str) -> Result<String, Error> {
+        use std::io::Read;
+        let name_c = CString::new(name).map_err(Error::other)?;
+        let path = self.path.join(name);
+        let mut file = match open_at(&self.file, &name_c, libc::O_RDONLY | libc::O_NONBLOCK) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+            Err(err) => return Err(named(err, "open", &path)),
+        };
+        let st = stat(&file).map_err(|err| named(err, "read", &path))?;
+        if st.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Ok(String::new());
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|err| named(err, "read", &path))?;
+        Ok(String::from_utf8(bytes).unwrap_or_default())
+    }
+}
+
+#[cfg(all(test, unix))]
+type EntryHook = Box<dyn FnMut(&Path)>;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static BEFORE_ENTRY_MUTATION: std::cell::RefCell<Option<EntryHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn before_entry_mutation(path: &Path) {
+    BEFORE_ENTRY_MUTATION.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(path);
+        }
+    });
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn set_entry_hook(hook: Option<EntryHook>) {
+    BEFORE_ENTRY_MUTATION.with(|slot| *slot.borrow_mut() = hook);
+}
+
 /// Set the permission bits of the file or directory at `path` to `mode`,
 /// masked to `0o7777`, without following a symlink at `path`.
 ///
@@ -287,29 +695,6 @@ pub fn change_mode(path: impl AsRef<Path>, mode: u32) -> Result<(), Error> {
             libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
         ) {
             Ok(file) => fchmod_checked(&file, mode, path),
-            // A directory or file without a read bit for its owner cannot be
-            // opened to fchmod. fchmodat on the held parent follows no link.
-            Err(err) if err.raw_os_error() == Some(libc::EACCES) => {
-                refuse_exec(&st, mode, path)?;
-                // SAFETY: parent is an open directory and leaf is
-                // NUL-terminated.
-                #[expect(
-                    clippy::disallowed_methods,
-                    reason = "the mode change of a name in a held directory, not following a link; refuse_exec checked the mode"
-                )]
-                let rc = unsafe {
-                    libc::fchmodat(
-                        parent.as_raw_fd(),
-                        leaf.as_ptr(),
-                        (mode & 0o7777) as libc::mode_t,
-                        libc::AT_SYMLINK_NOFOLLOW,
-                    )
-                };
-                if rc != 0 {
-                    return Err(moded(Error::last_os_error(), "change the mode of", path));
-                }
-                Ok(())
-            }
             Err(err) => Err(moded(err, "open", path)),
         }
     }
@@ -342,26 +727,29 @@ pub fn change_mode_of(file: &std::fs::File, mode: u32) -> Result<(), Error> {
 #[cfg(all(test, unix))]
 pub(crate) fn fixture_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
-    let file = File::open(path).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
     #[expect(
         clippy::disallowed_methods,
         reason = "a test fixture's mode, which may carry setuid with an execute bit"
     )]
-    file.set_permissions(std::fs::Permissions::from_mode(mode))
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
         .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
 }
 
 #[cfg(unix)]
 fn fchmod_checked(file: &File, mode: u32, path: &Path) -> Result<(), Error> {
-    use std::os::unix::fs::PermissionsExt;
     let st = stat(file).map_err(|err| moded(err, "read", path))?;
     refuse_exec(&st, mode, path)?;
     #[expect(
         clippy::disallowed_methods,
         reason = "the descriptor mode change change_mode and change_mode_of make after refuse_exec"
     )]
-    file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))
-        .map_err(|err| moded(err, "change the mode of", path))
+    rustix::fs::fchmod(file, rustix::fs::Mode::from_raw_mode(mode & 0o7777)).map_err(|err| {
+        moded(
+            Error::from_raw_os_error(err.raw_os_error()),
+            "change the mode of",
+            path,
+        )
+    })
 }
 
 /// Refuse a `mode` that gives `st`, if it is not a directory, an execute
@@ -402,17 +790,24 @@ fn leaf_of(path: &Path, what: &str) -> Result<CString, Error> {
         })
 }
 
+/// Open `path` as a directory and follow a symlink at `path`.
+///
+/// The path is a directory the user configured. The descriptor is the
+/// directory itself, so later names are opened relative to it.
 #[cfg(unix)]
 fn open_dir(path: &Path) -> Result<File, Error> {
-    use std::os::unix::fs::OpenOptionsExt;
     #[expect(
         clippy::disallowed_methods,
-        reason = "opens a directory read-only to hold it by descriptor"
+        reason = "opens a directory the user configured and follows a symlink at it"
     )]
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
-        .open(path)
+    let opened = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|err| Error::from_raw_os_error(err.raw_os_error()))?;
+    Ok(opened)
 }
 
 #[cfg(unix)]
@@ -441,7 +836,7 @@ enum Fill<'a> {
 struct Stage {
     parent: File,
     parent_path: PathBuf,
-    dir: File,
+    dir: Option<File>,
     name: CString,
     path: PathBuf,
 }
@@ -449,15 +844,22 @@ struct Stage {
 #[cfg(unix)]
 impl Stage {
     fn new(path: &Path) -> Result<Self, Error> {
-        use std::hash::{BuildHasher, Hasher};
-        let parent_path = dir_of(path).unwrap_or_else(|| Path::new(".")).to_path_buf();
-        let parent = open_dir(&parent_path).map_err(|err| named(err, "open", &parent_path))?;
+        let parent_path = dir_of(path).unwrap_or_else(|| Path::new("."));
+        let parent = open_dir(parent_path).map_err(|err| named(err, "open", parent_path))?;
+        Self::in_dir(&parent, parent_path)
+    }
+
+    fn in_dir(parent: &File, parent_path: &Path) -> Result<Self, Error> {
+        let parent = parent
+            .try_clone()
+            .map_err(|err| named(err, "duplicate", parent_path))?;
+        let parent_path = parent_path.to_path_buf();
         let mut last = None;
         for _ in 0..16 {
-            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-            hasher.write_u64(NEXT.fetch_add(1, Ordering::Relaxed));
-            hasher.write_u32(std::process::id());
-            let name = format!(".ljos-exe.{:016x}", hasher.finish());
+            let mut random = [0_u8; 16];
+            getrandom::fill(&mut random)
+                .map_err(|err| Error::other(format!("get random stage name: {err}")))?;
+            let name = format!(".ljos-stage.{}", hex::encode(random));
             let name = CString::new(name).map_err(Error::other)?;
             // SAFETY: parent is an open directory and name is NUL-terminated.
             // mkdirat creates the name or fails and follows no symlink there.
@@ -470,13 +872,22 @@ impl Stage {
                 return Err(named(err, "create a temporary directory in", &parent_path));
             }
             let path = parent_path.join(name.to_string_lossy().as_ref());
+            // Own cleanup immediately after creation. Every later error drops
+            // this guard and removes the directory through `parent`.
+            let mut stage = Self {
+                parent,
+                parent_path,
+                dir: None,
+                name,
+                path,
+            };
             let dir = open_at(
-                &parent,
-                &name,
+                &stage.parent,
+                &stage.name,
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
             )
-            .map_err(|err| named(err, "open", &path))?;
-            let held = stat(&dir).map_err(|err| named(err, "read", &path))?;
+            .map_err(|err| named(err, "open", &stage.path))?;
+            let held = stat(&dir).map_err(|err| named(err, "read", &stage.path))?;
             // SAFETY: geteuid has no preconditions.
             let me = unsafe { libc::geteuid() };
             if held.st_mode & libc::S_IFMT != libc::S_IFDIR
@@ -485,25 +896,10 @@ impl Stage {
             {
                 return Err(Error::other(format!(
                     "install executable: {} was replaced before it was opened",
-                    path.display()
+                    stage.path.display()
                 )));
             }
-            {
-                use std::os::unix::fs::PermissionsExt;
-                #[expect(
-                    clippy::disallowed_methods,
-                    reason = "marks the held stage directory private"
-                )]
-                dir.set_permissions(std::fs::Permissions::from_mode(0o700))
-                    .map_err(|err| named(err, "mark private", &path))?;
-            }
-            let stage = Self {
-                parent,
-                parent_path,
-                dir,
-                name,
-                path,
-            };
+            stage.dir = Some(dir);
             #[cfg(test)]
             at_step(Step::Staged, &stage.path);
             return Ok(stage);
@@ -516,13 +912,17 @@ impl Stage {
         self.path.join("exe")
     }
 
+    fn dir(&self) -> &File {
+        self.dir.as_ref().expect("stage directory opened")
+    }
+
     /// Create the staged file in a forked child and write `fill` to it.
     ///
     /// The child makes only async-signal-safe calls: this process may have
     /// other threads, and one of them may hold a lock the child would wait
     /// on forever. It exits with 0 or the errno of the call that failed.
     fn fill(&self, fill: Fill) -> Result<(), Error> {
-        let stage = self.dir.as_raw_fd();
+        let stage = self.dir().as_raw_fd();
         // SAFETY: the child runs `write_staged` and `_exit` only, both of
         // which make async-signal-safe calls on memory fork copied.
         let pid = unsafe { libc::fork() };
@@ -562,12 +962,9 @@ impl Stage {
         }
     }
 
-    /// Mark the staged file `mode`, flush it, rename it onto `path` and
-    /// check that the name now holds that file, both under a lock on the
-    /// parent directory, then flush the directory so the new name survives
-    /// a crash.
-    fn settle(self, path: &Path, mode: u32) -> Result<(), Error> {
-        use std::os::unix::fs::PermissionsExt;
+    /// Mark the staged file `mode`, flush it, and [`Stage::rename_onto`]
+    /// `path`.
+    fn settle(self, path: &Path, mode: u32) -> Result<Moved, Error> {
         let leaf = path
             .file_name()
             .and_then(|name| CString::new(name.as_encoded_bytes()).ok())
@@ -581,7 +978,7 @@ impl Stage {
         at_step(Step::Written, &self.path);
         let tmp = self.file();
         let file = open_at(
-            &self.dir,
+            self.dir(),
             EXE,
             libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
         )
@@ -597,51 +994,38 @@ impl Stage {
             clippy::disallowed_methods,
             reason = "the mode of the staged file, through its descriptor, before the rename"
         )]
-        file.set_permissions(std::fs::Permissions::from_mode(mode))
-            .map_err(|err| named(err, "mark executable", &tmp))?;
+        rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(mode)).map_err(|err| {
+            named(
+                Error::from_raw_os_error(err.raw_os_error()),
+                "mark executable",
+                &tmp,
+            )
+        })?;
         flush(&file, &tmp).map_err(|err| named(err, "flush", &tmp))?;
-        let lock = DirLock::exclusive(&self.parent)
-            .map_err(|err| named(err, "lock", &self.parent_path))?;
+        drop(file);
         #[cfg(test)]
         at_step(Step::Moving, &self.path);
-        // SAFETY: both descriptors are open directories and both names are
-        // NUL-terminated. renameat follows neither name.
+        self.rename_onto(&leaf, path)
+    }
+
+    /// Rename the staged entry onto `leaf`, the name of `path`, then flush
+    /// the directory so the new name survives a crash.
+    fn rename_onto(&self, leaf: &CStr, path: &Path) -> Result<Moved, Error> {
         #[expect(
             clippy::disallowed_methods,
-            reason = "renames the staged file from the held stage directory onto the destination name"
+            reason = "renames the staged entry from the held stage directory onto the destination name"
         )]
-        if unsafe {
-            libc::renameat(
-                self.dir.as_raw_fd(),
-                EXE.as_ptr(),
-                self.parent.as_raw_fd(),
-                leaf.as_ptr(),
+        rustix::fs::renameat(self.dir(), EXE, &self.parent, leaf).map_err(|err| {
+            named(
+                Error::from_raw_os_error(err.raw_os_error()),
+                "rename onto",
+                path,
             )
-        } != 0
-        {
-            return Err(named(Error::last_os_error(), "rename onto", path));
-        }
-        #[cfg(test)]
-        at_step(Step::Renamed, &self.path);
-        // `file` stays open until this check, so its inode number cannot be
-        // given to something else put at the name. Every publish into this
-        // directory holds `lock` from its rename to this check, so no later
-        // publish of ours can have replaced the file: anything else at the
-        // name, a hard link to a file of ours included, was put there by
-        // someone else.
-        match stat_at(&self.parent, &leaf) {
-            Ok(now) if same_file(&now, &staged) => {}
-            _ => {
-                return Err(Error::other(format!(
-                    "install executable: {} was replaced after the rename",
-                    path.display()
-                )))
-            }
-        }
-        drop(lock);
-        drop(file);
-        let _ = flush(&self.parent, &self.parent_path);
-        Ok(())
+        })?;
+        Ok(Moved {
+            durable: flush(&self.parent, &self.parent_path)
+                .map_err(|err| not_durable(err, path, &self.parent_path)),
+        })
     }
 }
 
@@ -653,18 +1037,27 @@ impl Drop for Stage {
     fn drop(&mut self) {
         // SAFETY: dir is an open directory and EXE is NUL-terminated. No other
         // user can make a name in a 0700 directory this process owns.
-        unsafe { libc::unlinkat(self.dir.as_raw_fd(), EXE.as_ptr(), 0) };
-        if let (Ok(held), Ok(named)) = (stat(&self.dir), stat_at(&self.parent, &self.name)) {
+        if let Some(dir) = &self.dir {
+            let _ = rustix::fs::unlinkat(dir, EXE, rustix::fs::AtFlags::empty());
+        } else {
+            // Opening the directory was the first fallible operation after
+            // mkdirat. Removal by name cannot follow a replacement symlink.
+            let _ = rustix::fs::unlinkat(
+                &self.parent,
+                self.name.as_c_str(),
+                rustix::fs::AtFlags::REMOVEDIR,
+            );
+        }
+        if let (Some(dir), Ok(named)) = (&self.dir, stat_at(&self.parent, &self.name)) {
+            let Ok(held) = stat(dir) else {
+                return;
+            };
             if same_file(&held, &named) {
-                // SAFETY: parent is an open directory and name is
-                // NUL-terminated. AT_REMOVEDIR removes only an empty directory.
-                unsafe {
-                    libc::unlinkat(
-                        self.parent.as_raw_fd(),
-                        self.name.as_ptr(),
-                        libc::AT_REMOVEDIR,
-                    )
-                };
+                let _ = rustix::fs::unlinkat(
+                    &self.parent,
+                    self.name.as_c_str(),
+                    rustix::fs::AtFlags::REMOVEDIR,
+                );
             }
         }
     }
@@ -755,22 +1148,19 @@ fn errno() -> libc::c_int {
 
 #[cfg(unix)]
 fn open_at(dir: &File, name: &CStr, flags: libc::c_int) -> Result<File, Error> {
-    // SAFETY: dir is an open directory and name is NUL-terminated.
     #[expect(
         clippy::disallowed_methods,
-        reason = "opens a name read-only under a held directory descriptor; both callers pass O_NOFOLLOW"
+        reason = "opens a name relative to a held directory descriptor"
     )]
-    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags | libc::O_CLOEXEC) };
-    if fd < 0 {
-        return Err(Error::last_os_error());
-    }
-    // SAFETY: fd was just opened and nothing else owns it.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "owns a descriptor this function opened, never stdout or stderr"
-    )]
-    let file = unsafe { File::from_raw_fd(fd) };
-    Ok(file)
+    let opened = rustix::fs::openat(
+        dir,
+        name,
+        rustix::fs::OFlags::from_bits_retain((flags | libc::O_CLOEXEC) as u32),
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|err| Error::from_raw_os_error(err.raw_os_error()))?;
+    Ok(opened)
 }
 
 #[cfg(unix)]
@@ -805,57 +1195,6 @@ fn stat_at(dir: &File, name: &CStr) -> Result<libc::stat, Error> {
     Ok(st)
 }
 
-/// How many times [`DirLock::exclusive`] tries the lock, [`LOCK_PAUSE`]
-/// apart, before it gives up.
-#[cfg(unix)]
-const LOCK_TRIES: u32 = 200;
-
-#[cfg(unix)]
-const LOCK_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
-
-/// An exclusive `flock` on a directory descriptor, released on drop.
-///
-/// Another user who can open the directory can hold the lock too. A
-/// publish there waits [`LOCK_TRIES`] times [`LOCK_PAUSE`] for them and
-/// then fails.
-#[cfg(unix)]
-struct DirLock<'a>(&'a File);
-
-#[cfg(unix)]
-impl<'a> DirLock<'a> {
-    fn exclusive(dir: &'a File) -> Result<Self, Error> {
-        for _ in 0..LOCK_TRIES {
-            // SAFETY: dir is an open descriptor.
-            if unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                return Ok(Self(dir));
-            }
-            let err = Error::last_os_error();
-            match err.kind() {
-                std::io::ErrorKind::Interrupted => {}
-                std::io::ErrorKind::WouldBlock => std::thread::sleep(LOCK_PAUSE),
-                _ => return Err(err),
-            }
-        }
-        Err(Error::new(
-            std::io::ErrorKind::WouldBlock,
-            format!(
-                "another process held the lock for {} ms",
-                LOCK_PAUSE.as_millis() * u128::from(LOCK_TRIES)
-            ),
-        ))
-    }
-}
-
-#[cfg(unix)]
-impl Drop for DirLock<'_> {
-    /// A forked writer of another publish may still hold a copy of the
-    /// descriptor, so the lock is released here rather than at close.
-    fn drop(&mut self) {
-        // SAFETY: the descriptor is open for the life of the borrow.
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
-    }
-}
-
 #[cfg(unix)]
 fn same_file(a: &libc::stat, b: &libc::stat) -> bool {
     a.st_dev == b.st_dev && a.st_ino == b.st_ino
@@ -872,8 +1211,6 @@ enum Step {
     Written,
     /// The staged file is checked and flushed; the rename is next.
     Moving,
-    /// The rename is done; the name is checked next.
-    Renamed,
 }
 
 #[cfg(all(test, unix))]
@@ -902,23 +1239,68 @@ fn named(err: Error, what: &str, path: &Path) -> Error {
     )
 }
 
+/// The payload of an [`Error`] from a directory sync after a rename took
+/// effect. [`renamed`] finds it.
+#[derive(Debug)]
+struct NotDurable(String);
+
+impl std::fmt::Display for NotDurable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotDurable {}
+
+/// `err` from syncing `dir` after a rename onto `path` took effect.
+#[cfg(unix)]
+fn not_durable(err: Error, path: &Path, dir: &Path) -> Error {
+    Error::new(
+        err.kind(),
+        NotDurable(format!(
+            "install executable: {} is in place, but syncing {} failed, so a crash may bring back what was there: {err}",
+            path.display(),
+            dir.display()
+        )),
+    )
+}
+
+/// `true` when `err` came after the rename took effect: the new name is in
+/// place and only its directory sync failed.
+pub(crate) fn renamed(err: &Error) -> bool {
+    err.get_ref().is_some_and(|inner| inner.is::<NotDurable>())
+}
+
 #[cfg(test)]
 thread_local! {
     static FLUSHED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
     /// When set, a flush of a staged file fails with EIO.
     static FAIL_STAGED_FLUSH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A flush of one of these directories fails with EIO.
+    static FAIL_FLUSH_OF: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// `sync_all` on `file`, a file or a directory, opened at `path`. `settle`
-/// returns the staged file's error before the rename. It drops the
-/// directory's error after the rename, which a flush cannot undo.
+/// Make a flush of each of `dirs` on this thread fail with EIO, until the
+/// next call.
+#[cfg(test)]
+pub(crate) fn fail_flush_of(dirs: Vec<PathBuf>) {
+    FAIL_FLUSH_OF.with(|fail| *fail.borrow_mut() = dirs);
+}
+
+/// `fsync` on `file`, a file or directory opened at `path`. A directory
+/// sync after a rename is reported in [`Moved::durable`], since it cannot
+/// undo the rename.
 #[cfg(unix)]
 fn flush(file: &File, path: &Path) -> Result<(), Error> {
     #[cfg(test)]
     if FAIL_STAGED_FLUSH.get() && path.file_name() == Some(std::ffi::OsStr::new("exe")) {
         return Err(Error::from_raw_os_error(libc::EIO));
     }
-    file.sync_all()?;
+    #[cfg(test)]
+    if FAIL_FLUSH_OF.with(|fail| fail.borrow().iter().any(|dir| dir == path)) {
+        return Err(Error::from_raw_os_error(libc::EIO));
+    }
+    rustix::fs::fsync(file).map_err(|err| Error::from_raw_os_error(err.raw_os_error()))?;
     #[cfg(test)]
     FLUSHED.with(|done| done.borrow_mut().push(path.to_path_buf()));
     #[cfg(not(test))]
@@ -1082,7 +1464,7 @@ mod tests {
             assert_eq!(done.len(), 2, "{step} flushed {done:?}");
             let stage = done[0].parent().unwrap();
             let name = stage.file_name().unwrap().to_string_lossy();
-            assert!(name.starts_with(".ljos-exe."), "{step} flushed {done:?}");
+            assert!(name.starts_with(".ljos-stage."), "{step} flushed {done:?}");
             assert_eq!(stage.parent(), Some(dir.path()), "{step}");
             assert!(!stage.exists(), "{step} left {}", stage.display());
             assert_eq!(done[1], dir.path(), "{step} flushed {done:?}");
@@ -1113,10 +1495,39 @@ mod tests {
             let stages: Vec<_> = std::fs::read_dir(dir.path())
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name())
-                .filter(|name| name.to_string_lossy().starts_with(".ljos-exe."))
+                .filter(|name| name.to_string_lossy().starts_with(".ljos-stage."))
                 .collect();
             assert!(stages.is_empty(), "{step}: left {stages:?}");
         }
+    }
+
+    /// A destination-directory sync error is returned after the rename,
+    /// and says the file is in place.
+    #[test]
+    fn a_failed_directory_flush_fails_the_publish_without_a_stage() {
+        struct Unset;
+        impl Drop for Unset {
+            fn drop(&mut self) {
+                fail_flush_of(Vec::new());
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        let _unset = Unset;
+        fail_flush_of(vec![dir.path().to_path_buf()]);
+        let err = install_executable(&dest, OURS).unwrap_err();
+        assert!(
+            err.to_string().contains("is in place, but syncing"),
+            "{err}"
+        );
+        assert!(renamed(&err), "{err}");
+        assert_eq!(std::fs::read(&dest).unwrap(), OURS);
+        let stages: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".ljos-stage."))
+            .collect();
+        assert!(stages.is_empty(), "left {stages:?}");
     }
 
     /// Another user can leave symlinks at temporary names in a directory
@@ -1148,7 +1559,7 @@ mod tests {
         let shared = dir.path().join("shared");
         std::fs::create_dir(&shared).unwrap();
         let pid = std::process::id();
-        for n in 0..NEXT.load(Ordering::Relaxed) + 4096 {
+        for n in 0..4096 {
             #[expect(
                 clippy::disallowed_methods,
                 reason = "links a path that is not a git hook"
@@ -1357,162 +1768,6 @@ mod tests {
         }
     }
 
-    /// A symlink put at the destination after the rename is reported, not
-    /// taken for the published file.
-    #[test]
-    fn a_destination_replaced_after_the_rename_is_reported() {
-        for step in ["install", "copy"] {
-            let (dir, _, _, src) = arena(0o644, "victim");
-            let dest = dir.path().join("stub");
-            let evil = dir.path().join("evil");
-            let swap = dest.clone();
-            AT_STEP.with(|hook| {
-                *hook.borrow_mut() = Some(Box::new(move |at, _: &Path| {
-                    if at == Step::Renamed {
-                        std::fs::remove_file(&swap).unwrap();
-                        #[expect(
-                            clippy::disallowed_methods,
-                            reason = "links a path that is not a git hook"
-                        )]
-                        std::os::unix::fs::symlink(&evil, &swap).unwrap();
-                    }
-                }));
-            });
-            let got = publish(step, &src, &dest);
-            AT_STEP.with(|hook| *hook.borrow_mut() = None);
-            let err = got.expect_err(step).to_string();
-            assert!(
-                err.contains("was replaced after the rename"),
-                "{step}: {err}"
-            );
-        }
-    }
-
-    /// A hard link to another file of this user, put at the destination
-    /// after the rename, is reported. A check that took any regular file of
-    /// the same owner returned Ok with the linked `PWNED` body in place.
-    #[test]
-    fn a_hard_link_put_at_the_destination_after_the_rename_is_reported() {
-        for step in ["install", "copy"] {
-            let (dir, _, _, src) = arena(0o644, "victim");
-            let dest = dir.path().join("stub");
-            let evil = dir.path().join("evil-exec");
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "writes a file that is not a git hook"
-            )]
-            std::fs::write(&evil, "#!/bin/sh\necho PWNED\n").unwrap();
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(&evil, std::fs::Permissions::from_mode(0o777)).unwrap();
-            let (link, swap) = (dir.path().join("link"), dest.clone());
-            AT_STEP.with(|hook| {
-                *hook.borrow_mut() = Some(Box::new(move |at, _: &Path| {
-                    if at == Step::Renamed {
-                        #[expect(
-                            clippy::disallowed_methods,
-                            reason = "links a path that is not a git hook"
-                        )]
-                        std::fs::hard_link(&evil, &link).unwrap();
-                        #[expect(
-                            clippy::disallowed_methods,
-                            reason = "renames a path that is not a git hook"
-                        )]
-                        std::fs::rename(&link, &swap).unwrap();
-                    }
-                }));
-            });
-            let got = publish(step, &src, &dest);
-            AT_STEP.with(|hook| *hook.borrow_mut() = None);
-            let err = got.expect_err(step).to_string();
-            assert!(
-                err.contains("was replaced after the rename"),
-                "{step}: {err}"
-            );
-            assert_eq!(
-                std::fs::read(&dest).unwrap(),
-                b"#!/bin/sh\necho PWNED\n",
-                "{step}: the link is what the check saw"
-            );
-        }
-    }
-
-    /// A second publish of the destination, started between the first
-    /// one's rename and its check, waits for that check and then
-    /// publishes. Without the lock its rename would land in that gap and
-    /// the first publish would report the destination replaced.
-    #[test]
-    fn a_second_publish_waits_for_the_first_ones_check() {
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("stub");
-        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let second = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let waited = std::rc::Rc::new(std::cell::Cell::new(false));
-        let (hook_done, hook_second, hook_waited) = (
-            Arc::clone(&done),
-            std::rc::Rc::clone(&second),
-            std::rc::Rc::clone(&waited),
-        );
-        let target = dest.clone();
-        AT_STEP.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move |at, _: &Path| {
-                if at != Step::Renamed || hook_second.borrow().is_some() {
-                    return;
-                }
-                let (target, done) = (target.clone(), Arc::clone(&hook_done));
-                *hook_second.borrow_mut() = Some(thread::spawn(move || {
-                    let got = install_executable(&target, b"#!/bin/sh\necho second\n");
-                    done.store(true, Ordering::SeqCst);
-                    got
-                }));
-                thread::sleep(std::time::Duration::from_millis(300));
-                hook_waited.set(!hook_done.load(Ordering::SeqCst));
-            }));
-        });
-        let first = install_executable(&dest, OURS);
-        AT_STEP.with(|hook| *hook.borrow_mut() = None);
-        first.unwrap();
-        let second = second.borrow_mut().take().expect("second publish started");
-        second.join().unwrap().unwrap();
-        assert!(
-            waited.get(),
-            "the second publish finished inside the first one's check"
-        );
-        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho second\n");
-    }
-
-    /// Another descriptor holds the directory's lock and never lets go.
-    /// A publish there gives up and names the directory instead of
-    /// waiting forever.
-    #[test]
-    fn a_publish_gives_up_on_a_lock_that_is_never_released() {
-        let dir = tempfile::tempdir().unwrap();
-        let holder = File::open(dir.path()).unwrap();
-        // SAFETY: holder is an open descriptor.
-        assert_eq!(unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX) }, 0);
-        let dest = dir.path().join("stub");
-        let (tx, rx) = std::sync::mpsc::channel();
-        let target = dest.clone();
-        thread::spawn(move || {
-            let _ = tx.send(install_executable(&target, OURS));
-        });
-        let bound = LOCK_PAUSE * LOCK_TRIES + std::time::Duration::from_secs(20);
-        let got = rx
-            .recv_timeout(bound)
-            .unwrap_or_else(|_| panic!("the publish still waits for the lock after {bound:?}"));
-        let err = got.expect_err("published while another descriptor held the lock");
-        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock, "{err}");
-        let msg = err.to_string();
-        assert!(
-            msg.contains(&format!("lock {}", dir.path().display())),
-            "{msg}"
-        );
-        assert!(!dest.exists());
-        drop(holder);
-    }
-
     /// A failed publish removes the staged file through the held directory
     /// and leaves a name someone else put at the stage's name, and what it
     /// links to.
@@ -1537,7 +1792,7 @@ mod tests {
             let planted = std::fs::read_dir(dir.path())
                 .unwrap()
                 .map(|entry| entry.unwrap().path())
-                .find(|path| path.to_string_lossy().contains(".ljos-exe."))
+                .find(|path| path.to_string_lossy().contains(".ljos-stage."))
                 .unwrap_or_else(|| panic!("{step}: the planted stage name was removed"));
             assert_eq!(std::fs::read_link(&planted).unwrap(), attack, "{step}");
             assert!(
@@ -1552,7 +1807,7 @@ mod tests {
             let stages: Vec<_> = std::fs::read_dir(dir.path())
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name())
-                .filter(|name| name.to_string_lossy().starts_with(".ljos-exe."))
+                .filter(|name| name.to_string_lossy().starts_with(".ljos-stage."))
                 .collect();
             assert!(stages.is_empty(), "{step}: left {stages:?}");
         }
@@ -1699,7 +1954,7 @@ mod tests {
 
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
-        for mode in [0o1777, 0o000, 0o755] {
+        for mode in [0o755, 0o1777, 0o000] {
             change_mode(&sub, mode).unwrap();
             assert_eq!(mode_of(&sub), mode);
         }
@@ -1790,14 +2045,35 @@ mod tests {
         let meta: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         let root = Path::new(meta["workspace_root"].as_str().unwrap());
         let workspace = read(&root.join("Cargo.toml"));
-        let level = &workspace["workspace"]["lints"]["clippy"]["disallowed_methods"];
-        let level = level
-            .as_str()
-            .or_else(|| level.get("level").and_then(toml::Value::as_str));
-        assert!(
-            matches!(level, Some("deny" | "forbid")),
-            "[workspace.lints.clippy] disallowed_methods is {level:?}"
-        );
+        let clippy = read(&root.join("clippy.toml"));
+        let denied: std::collections::BTreeSet<_> = clippy["disallowed-methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap())
+            .collect();
+        for path in [
+            "std::fs::hard_link",
+            "std::os::unix::fs::symlink",
+            "rustix::fs::symlink",
+            "rustix::fs::symlinkat",
+            "rustix::fs::rename",
+            "rustix::fs::renameat_with",
+            "rustix::fs::link",
+            "rustix::fs::linkat",
+        ] {
+            assert!(denied.contains(path), "{path} is not denied in clippy.toml");
+        }
+        for lint in ["disallowed_methods", "disallowed_types"] {
+            let level = &workspace["workspace"]["lints"]["clippy"][lint];
+            let level = level
+                .as_str()
+                .or_else(|| level.get("level").and_then(toml::Value::as_str));
+            assert!(
+                matches!(level, Some("deny" | "forbid")),
+                "[workspace.lints.clippy] {lint} is {level:?}"
+            );
+        }
         let members = meta["workspace_members"].as_array().unwrap();
         let packages = meta["packages"].as_array().unwrap();
         assert_eq!(members.len(), packages.len());
