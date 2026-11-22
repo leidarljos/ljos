@@ -77853,6 +77853,43 @@ lesson, due yesterday, seat ada
         }
     }
 
+    /// A passwd home and `HOME` that are one private directory outside the
+    /// temp roots, so `~`, `cd ~` and the key directory agree whatever
+    /// `HOME` the suite runs under, and the real passwd home is not touched.
+    struct HoldPersonHome {
+        _env: HoldEnv,
+        _own: crate::proc_tree::HoldOwnHome,
+        _dir: tempfile::TempDir,
+    }
+
+    impl HoldPersonHome {
+        fn new() -> Self {
+            let dir = tempfile::Builder::new()
+                .prefix("ljos-person-home-")
+                .tempdir_in(crate::test_seat_root::seat_root(
+                    crate::bookkeep::path_is_temp,
+                ))
+                .unwrap();
+            let home = dir.path().join("u");
+            std::fs::create_dir_all(home.join(".config/ljos")).unwrap();
+            let own = crate::proc_tree::HoldOwnHome::set(&home);
+            let env = HoldEnv::set(&[
+                ("HOME", home.to_str().unwrap()),
+                ("XDG_CONFIG_HOME", home.join(".config").to_str().unwrap()),
+                ("XDG_DATA_HOME", home.join(".local/share").to_str().unwrap()),
+                (
+                    "XDG_STATE_HOME",
+                    home.join(".local/state").to_str().unwrap(),
+                ),
+            ]);
+            Self {
+                _env: env,
+                _own: own,
+                _dir: dir,
+            }
+        }
+    }
+
     /// A runner that could rewrite the person key could choose the
     /// passphrase, and one that could clear the failure count could guess
     /// without a lockout. A write to either, or into their directory, runs
@@ -77974,6 +78011,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn a_tree_above_the_person_key_runs_with_its_warning() {
         let _g = env_guard();
+        let _person_home = HoldPersonHome::new();
         let data = tempfile::tempdir().unwrap();
         let _env = HoldEnv::set(&[
             ("XDG_DATA_HOME", data.path().to_str().unwrap()),
@@ -78495,6 +78533,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn every_route_to_the_person_key_directory_names_its_rule() {
         let _g = env_guard();
+        let _person_home = HoldPersonHome::new();
         let dir = person_key::key_dir().expect("a passwd home");
         std::fs::create_dir_all(&dir).unwrap();
         let config = dir.parent().unwrap().to_path_buf();
