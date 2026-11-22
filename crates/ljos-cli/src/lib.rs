@@ -50259,8 +50259,13 @@ fn paths_for_commit(dir: &Path, paths: &[&str]) -> Option<(PathBuf, Vec<String>)
     Some((root, rels))
 }
 
+/// The top of the worktree that holds `dir`. The pending list and the
+/// batch record are replaced through temporaries there, so the stale ones
+/// are swept once per process.
 fn worktree_root(dir: &Path) -> Option<PathBuf> {
-    tracker_lock_path(dir).and_then(|lock| lock.parent().map(Path::to_path_buf))
+    let root = tracker_lock_path(dir).and_then(|lock| lock.parent().map(Path::to_path_buf))?;
+    tracker_tmp::sweep_stale_once(&root);
+    Some(root)
 }
 
 fn worktree_prefix(dir: &Path) -> String {
@@ -61002,6 +61007,50 @@ mod tests {
         assert!(said.contains("committed"), "{said}");
         assert!(!old.exists(), "the stale temporary is still there");
         assert!(young.exists(), "a young temporary was swept");
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// The pending list and the batch record live at the checkout root, so
+    /// a tracker write sweeps their stale temporaries there too, in both
+    /// the old doubled-dot name and the current one.
+    #[test]
+    fn a_tracker_write_sweeps_stale_temporaries_at_the_checkout_root() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let issues = seeded_tracker(&root);
+        let gone = tracker_tmp::tests::dead_pid();
+        let stale = [
+            root.join(format!(".ljos-commit.pending.tmp.{gone}-1-0")),
+            root.join(format!("..ljos-commit.batch.tmp.{gone}-1-1")),
+        ];
+        for path in &stale {
+            std::fs::write(path, "half a list").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(
+                    std::time::SystemTime::now()
+                        - tracker_tmp::STALE_AFTER
+                        - std::time::Duration::from_secs(60),
+                )
+                .unwrap();
+        }
+        std::fs::write(
+            &issues,
+            "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        assert!(said.contains("committed"), "{said}");
+        for path in &stale {
+            assert!(!path.exists(), "{} is still there", path.display());
+        }
         for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
             std::env::remove_var(var);
         }

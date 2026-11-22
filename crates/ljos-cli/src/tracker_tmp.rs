@@ -32,6 +32,9 @@ pub(crate) struct TempFile {
 
 impl TempFile {
     /// A fresh temporary beside `target`, named so [`is_temp_name`] knows it.
+    /// A dotfile target keeps its one leading dot: the temporary of
+    /// `.ljos-commit.pending` is `.ljos-commit.pending.tmp.SUFFIX`, which
+    /// the `info/exclude` line `/.ljos-commit.*.tmp.*` matches.
     fn beside(target: &Path) -> std::io::Result<(Self, std::fs::File)> {
         let parent = target
             .parent()
@@ -41,6 +44,8 @@ impl TempFile {
         let base = target
             .file_name()
             .and_then(|s| s.to_str())
+            .map(|s| s.trim_start_matches('.'))
+            .filter(|s| !s.is_empty())
             .unwrap_or("output");
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -217,6 +222,23 @@ pub(crate) mod tests {
         replace_file(&path, "new\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
         assert!(temps(dir.path()).is_empty());
+    }
+
+    /// The temporary of a dotfile keeps one leading dot, so the pending
+    /// list's matches `/.ljos-commit.*.tmp.*` in `info/exclude`.
+    #[test]
+    fn a_dotfile_temporary_has_one_leading_dot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".ljos-commit.pending");
+        let mut seen = String::new();
+        replace_file_with(&path, "a\n", |tmp| {
+            seen = tmp.file_name().unwrap().to_string_lossy().into_owned();
+            Ok(())
+        })
+        .unwrap();
+        assert!(seen.starts_with(".ljos-commit.pending.tmp."), "{seen}");
+        assert!(is_temp_name(&seen), "{seen}");
+        assert_eq!(temp_writer_pid(&seen), Some(std::process::id()));
     }
 
     #[test]
