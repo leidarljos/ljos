@@ -1517,7 +1517,7 @@ mod tests {
         let phc = read(&kept).unwrap().unwrap();
         let saved = std::env::var_os("CURSOR_AGENT");
         // SAFETY: under env_guard, and restored below.
-        unsafe { std::env::set_var("CURSOR_AGENT", "1") };
+        unsafe { crate::test_env_guards::set_var_unchecked("CURSOR_AGENT", "1") };
         let mut said = Vec::new();
         for at_terminal in [true, false] {
             crate::PERSON_AT_TERMINAL.with(|p| p.set(at_terminal));
@@ -1529,8 +1529,8 @@ mod tests {
         crate::PERSON_AT_TERMINAL.with(|p| p.set(false));
         unsafe {
             match saved {
-                Some(value) => std::env::set_var("CURSOR_AGENT", value),
-                None => std::env::remove_var("CURSOR_AGENT"),
+                Some(value) => crate::test_env_guards::set_var_unchecked("CURSOR_AGENT", value),
+                None => crate::test_env_guards::remove_var_unchecked("CURSOR_AGENT"),
             }
         }
         for why in &said {
@@ -2181,15 +2181,15 @@ mod tests {
             .collect();
         // SAFETY: under env_guard, and restored below.
         unsafe {
-            std::env::set_var("HOME", tmp.path());
-            std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("cfg"));
+            crate::test_env_guards::set_var_unchecked("HOME", tmp.path());
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", tmp.path().join("cfg"));
         }
         let got = key_path();
         unsafe {
             for (k, v) in saved {
                 match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
+                    Some(v) => crate::test_env_guards::set_var_unchecked(k, v),
+                    None => crate::test_env_guards::remove_var_unchecked(k),
                 }
             }
         }

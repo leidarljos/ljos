@@ -1594,11 +1594,10 @@ note from b
         .unwrap();
         std::fs::set_permissions(&git_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _env = crate::test_env_lock();
-        let path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
-        std::env::set_var("LC_ALL", "fr_FR.UTF-8");
-        std::env::set_var("LANG", "fr_FR.UTF-8");
-        std::env::set_var("LANGUAGE", "fr");
+        let _path = crate::prepend_path(&bin);
+        crate::test_env_guards::set_var("LC_ALL", "fr_FR.UTF-8");
+        crate::test_env_guards::set_var("LANG", "fr_FR.UTF-8");
+        crate::test_env_guards::set_var("LANGUAGE", "fr");
         let out = git(dir.path(), &["push", "origin", "HEAD"]);
         let said = output_text(&out);
         assert!(
@@ -1746,7 +1745,7 @@ body b
     fn prepare_writes_the_attributes_and_the_driver_once() {
         let _lock = crate::test_env_lock();
         let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
-        unsafe { std::env::remove_var("LJOS_ATOMS_DRIVER") };
+        unsafe { crate::test_env_guards::remove_var_unchecked("LJOS_ATOMS_DRIVER") };
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let run = |args: &[&str]| {
@@ -1815,8 +1814,10 @@ body b
         assert_eq!(String::from_utf8_lossy(&count.stdout).trim(), "1");
         unsafe {
             match previous {
-                Some(value) => std::env::set_var("LJOS_ATOMS_DRIVER", value),
-                None => std::env::remove_var("LJOS_ATOMS_DRIVER"),
+                Some(value) => {
+                    crate::test_env_guards::set_var_unchecked("LJOS_ATOMS_DRIVER", value)
+                }
+                None => crate::test_env_guards::remove_var_unchecked("LJOS_ATOMS_DRIVER"),
             }
         }
     }
@@ -1946,18 +1947,18 @@ body b
         let old_git_dir = std::env::var_os("GIT_DIR");
         let old_git_work_tree = std::env::var_os("GIT_WORK_TREE");
         unsafe {
-            std::env::set_var("GIT_DIR", &bare);
-            std::env::set_var("GIT_WORK_TREE", &home);
+            crate::test_env_guards::set_var_unchecked("GIT_DIR", &bare);
+            crate::test_env_guards::set_var_unchecked("GIT_WORK_TREE", &home);
         }
         prepare_tracker(&tracker, true, false).unwrap();
         unsafe {
             match old_git_dir {
-                Some(value) => std::env::set_var("GIT_DIR", value),
-                None => std::env::remove_var("GIT_DIR"),
+                Some(value) => crate::test_env_guards::set_var_unchecked("GIT_DIR", value),
+                None => crate::test_env_guards::remove_var_unchecked("GIT_DIR"),
             }
             match old_git_work_tree {
-                Some(value) => std::env::set_var("GIT_WORK_TREE", value),
-                None => std::env::remove_var("GIT_WORK_TREE"),
+                Some(value) => crate::test_env_guards::set_var_unchecked("GIT_WORK_TREE", value),
+                None => crate::test_env_guards::remove_var_unchecked("GIT_WORK_TREE"),
             }
         }
 
@@ -2029,7 +2030,7 @@ body b
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let driver = format!("{} %A %P", script.display());
         let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
-        unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
+        unsafe { crate::test_env_guards::set_var_unchecked("LJOS_ATOMS_DRIVER", &driver) };
         let run = |cwd: &Path, args: &[&str]| {
             let out = crate::git_cmd()
                 .arg("-C")
@@ -2123,8 +2124,10 @@ body b
         let results: Vec<_> = joins.into_iter().map(|j| j.join().unwrap()).collect();
         unsafe {
             match previous {
-                Some(value) => std::env::set_var("LJOS_ATOMS_DRIVER", value),
-                None => std::env::remove_var("LJOS_ATOMS_DRIVER"),
+                Some(value) => {
+                    crate::test_env_guards::set_var_unchecked("LJOS_ATOMS_DRIVER", value)
+                }
+                None => crate::test_env_guards::remove_var_unchecked("LJOS_ATOMS_DRIVER"),
             }
         }
         for (i, result) in results.iter().enumerate() {
@@ -2202,7 +2205,7 @@ body b
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let driver = format!("{} %A %P", script.display());
         let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
-        unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
+        unsafe { crate::test_env_guards::set_var_unchecked("LJOS_ATOMS_DRIVER", &driver) };
         let run = |cwd: &Path, args: &[&str]| {
             let out = crate::git_cmd()
                 .arg("-C")
@@ -2275,8 +2278,10 @@ body b
         let pushed = push_checkout(&b);
         unsafe {
             match previous {
-                Some(value) => std::env::set_var("LJOS_ATOMS_DRIVER", value),
-                None => std::env::remove_var("LJOS_ATOMS_DRIVER"),
+                Some(value) => {
+                    crate::test_env_guards::set_var_unchecked("LJOS_ATOMS_DRIVER", value)
+                }
+                None => crate::test_env_guards::remove_var_unchecked("LJOS_ATOMS_DRIVER"),
             }
         }
         assert!(pushed.is_ok(), "{pushed:?}");
@@ -2321,9 +2326,9 @@ body b
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe {
-            std::env::set_var("HOME", dir.path());
-            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
-            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
+            crate::test_env_guards::set_var_unchecked("HOME", dir.path());
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", dir.path().join("config"));
+            crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", dir.path().join("state"));
         }
         let key = crate::sync::identity_path();
         std::fs::create_dir_all(key.parent().unwrap()).unwrap();
@@ -2341,9 +2346,9 @@ body b
         let public = String::from_utf8_lossy(&public.stdout).trim().to_string();
         let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
         unsafe {
-            std::env::set_var("PACKSET_URL", &url);
-            std::env::set_var("PACKSET_WORKSPACE", "seat");
-            std::env::set_var("PACKSET_TIMEOUT_MS", "5000");
+            crate::test_env_guards::set_var_unchecked("PACKSET_URL", &url);
+            crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "seat");
+            crate::test_env_guards::set_var_unchecked("PACKSET_TIMEOUT_MS", "5000");
         }
         *store.lock().unwrap() = vec![serde_json::json!({
             "id": "a1", "text": "kept in the pack", "kind": "lesson",
@@ -2470,14 +2475,17 @@ body b
         assert!(public.status.success());
         let public = String::from_utf8_lossy(&public.stdout).trim().to_string();
         unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
-            std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
-            std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
-            std::env::set_var("PACKSET_AUTH", "off");
-            std::env::set_var("PACKSET_HOME", &pack_home);
-            std::env::set_var("PACKSET_WORKSPACE", "merge-relative");
-            std::env::remove_var("LJOS_WRITE_SCOPE");
+            crate::test_env_guards::set_var_unchecked("HOME", &home);
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", home.join(".config"));
+            crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", home.join(".local/state"));
+            crate::test_env_guards::set_var_unchecked(
+                "PACKSET_URL",
+                format!("http://127.0.0.1:{port}"),
+            );
+            crate::test_env_guards::set_var_unchecked("PACKSET_AUTH", "off");
+            crate::test_env_guards::set_var_unchecked("PACKSET_HOME", &pack_home);
+            crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "merge-relative");
+            crate::test_env_guards::remove_var_unchecked("LJOS_WRITE_SCOPE");
         }
         let client = crate::pack().unwrap();
         crate::admit::post_kept(
@@ -2506,7 +2514,7 @@ body b
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
         let driver = format!("{} %A %P", wrapper.display());
         let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
-        unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
+        unsafe { crate::test_env_guards::set_var_unchecked("LJOS_ATOMS_DRIVER", &driver) };
         let origin = dir.path().join("origin.git");
         let a = dir.path().join("a");
         let b = dir.path().join("b");
@@ -2591,8 +2599,10 @@ body b
             .unwrap();
         unsafe {
             match previous {
-                Some(value) => std::env::set_var("LJOS_ATOMS_DRIVER", value),
-                None => std::env::remove_var("LJOS_ATOMS_DRIVER"),
+                Some(value) => {
+                    crate::test_env_guards::set_var_unchecked("LJOS_ATOMS_DRIVER", value)
+                }
+                None => crate::test_env_guards::remove_var_unchecked("LJOS_ATOMS_DRIVER"),
             }
         }
         drop(daemon);

@@ -1825,14 +1825,14 @@ mod tests {
         let lock = super::super::test_env_lock();
         let dir = tempfile::TempDir::new().unwrap();
         unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
-            std::env::set_var("HOME", dir.path());
-            std::env::set_var("LJOS_GUARD", "on");
-            std::env::set_var("LJOS_HOLD", "rohit");
-            std::env::set_var("LJOS_SEAT", "claude");
-            std::env::set_var("PACKSET_URL", "off");
-            std::env::set_var("PACKSET_WORKSPACE", "seat-a");
-            std::env::set_var("LJOS_USER_RULES_SYNC", "off");
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", dir.path().join("config"));
+            crate::test_env_guards::set_var_unchecked("HOME", dir.path());
+            crate::test_env_guards::set_var_unchecked("LJOS_GUARD", "on");
+            crate::test_env_guards::set_var_unchecked("LJOS_HOLD", "rohit");
+            crate::test_env_guards::set_var_unchecked("LJOS_SEAT", "claude");
+            crate::test_env_guards::set_var_unchecked("PACKSET_URL", "off");
+            crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "seat-a");
+            crate::test_env_guards::set_var_unchecked("LJOS_USER_RULES_SYNC", "off");
         }
         super::super::PERSON_AT_TERMINAL.with(|p| p.set(true));
         (lock, dir)
@@ -1894,8 +1894,8 @@ mod tests {
         assert_eq!(written.author, "rohit");
         assert!(written.due_at.is_none());
         unsafe {
-            std::env::set_var("LJOS_SEAT", "codex");
-            std::env::set_var("PACKSET_WORKSPACE", "seat-b");
+            crate::test_env_guards::set_var_unchecked("LJOS_SEAT", "codex");
+            crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "seat-b");
         }
         let path = rules_path().unwrap();
         assert!(path.starts_with(dir.path().join("config")));
@@ -1940,7 +1940,7 @@ mod tests {
         assert!(agy_out.contains("injectSteps"), "{agy_out}");
         assert!(agy_out.contains("never post or reply to Alan"), "{agy_out}");
         unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("other"));
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", dir.path().join("other"));
         }
         assert!(preface().is_empty(), "a second config home has no rules");
     }
@@ -2353,7 +2353,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("token"), format!("{TOKEN}\n")).unwrap();
         // SAFETY: the caller holds the process env lock for the whole test.
-        unsafe { std::env::set_var("PACKSET_TOKEN", TOKEN) };
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_TOKEN", TOKEN) };
         let mut started = ljos_test_boot::Packsetd::build();
         started.home_at(home);
         started.pack_at(&dir);
@@ -2374,8 +2374,8 @@ mod tests {
         let daemon = packsetd(dir.path());
         let url = daemon.url().to_string();
         unsafe {
-            std::env::set_var("PACKSET_URL", &url);
-            std::env::set_var("PACKSET_WORKSPACE", "seat");
+            crate::test_env_guards::set_var_unchecked("PACKSET_URL", &url);
+            crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "seat");
         }
         let client = crate::PacksetClient::new(url.as_str());
         let stored = client
@@ -2447,8 +2447,8 @@ mod tests {
         let daemon = packsetd(dir.path());
         let url = daemon.url().to_string();
         unsafe {
-            std::env::set_var("PACKSET_URL", &url);
-            std::env::set_var("PACKSET_WORKSPACE", "seat");
+            crate::test_env_guards::set_var_unchecked("PACKSET_URL", &url);
+            crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "seat");
         }
         let client = crate::PacksetClient::new(url.as_str());
         let stored = client
@@ -2495,8 +2495,10 @@ mod tests {
         let (_lock, dir) = isolated();
         let daemon = packsetd(dir.path());
         let url = daemon.url().to_string();
-        let workspace = |name: &str| unsafe { std::env::set_var("PACKSET_WORKSPACE", name) };
-        unsafe { std::env::set_var("PACKSET_URL", &url) };
+        let workspace = |name: &str| unsafe {
+            crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", name)
+        };
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_URL", &url) };
         workspace("seat");
         let id = "lessonid0000000000000000000003";
         let client = crate::PacksetClient::new(url.as_str());
@@ -2687,12 +2689,12 @@ mod tests {
         // no terminal, which is what a hook and a pipe have.
         super::super::PERSON_AT_TERMINAL.with(|p| p.set(false));
         let saved = std::env::var_os("CLAUDECODE");
-        unsafe { std::env::set_var("CLAUDECODE", "1") };
+        unsafe { crate::test_env_guards::set_var_unchecked("CLAUDECODE", "1") };
         let kept = keep_held(&row.id);
         unsafe {
             match saved {
-                Some(value) => std::env::set_var("CLAUDECODE", value),
-                None => std::env::remove_var("CLAUDECODE"),
+                Some(value) => crate::test_env_guards::set_var_unchecked("CLAUDECODE", value),
+                None => crate::test_env_guards::remove_var_unchecked("CLAUDECODE"),
             }
         }
         let kept = kept.unwrap();
@@ -2850,7 +2852,7 @@ mod tests {
     impl EnvVar {
         fn set(name: &'static str, value: &str) -> Self {
             let before = std::env::var_os(name);
-            unsafe { std::env::set_var(name, value) };
+            unsafe { crate::test_env_guards::set_var_unchecked(name, value) };
             Self(name, before)
         }
     }
@@ -2858,8 +2860,8 @@ mod tests {
     impl Drop for EnvVar {
         fn drop(&mut self) {
             match self.1.take() {
-                Some(value) => unsafe { std::env::set_var(self.0, value) },
-                None => unsafe { std::env::remove_var(self.0) },
+                Some(value) => unsafe { crate::test_env_guards::set_var_unchecked(self.0, value) },
+                None => unsafe { crate::test_env_guards::remove_var_unchecked(self.0) },
             }
         }
     }
@@ -2956,14 +2958,17 @@ mod tests {
             prepare_clone(&laptop);
             prepare_clone(&shared);
             unsafe {
-                std::env::set_var("LJOS_USER_RULES_SYNC", "off");
-                std::env::set_var("LJOS_HOLD", "rohit");
-                std::env::set_var("LJOS_GUARD", "on");
-                std::env::set_var("PACKSET_URL", "off");
-                std::env::set_var("HOME", root.path());
-                std::env::remove_var("LJOS_USER_RULES_TRACKER");
-                std::env::remove_var("LJOS_TRACKER_GIT");
-                std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
+                crate::test_env_guards::set_var_unchecked("LJOS_USER_RULES_SYNC", "off");
+                crate::test_env_guards::set_var_unchecked("LJOS_HOLD", "rohit");
+                crate::test_env_guards::set_var_unchecked("LJOS_GUARD", "on");
+                crate::test_env_guards::set_var_unchecked("PACKSET_URL", "off");
+                crate::test_env_guards::set_var_unchecked("HOME", root.path());
+                crate::test_env_guards::remove_var_unchecked("LJOS_USER_RULES_TRACKER");
+                crate::test_env_guards::remove_var_unchecked("LJOS_TRACKER_GIT");
+                crate::test_env_guards::set_var_unchecked(
+                    "XDG_STATE_HOME",
+                    root.path().join("state"),
+                );
             }
             Self {
                 _lock: lock,
@@ -2976,7 +2981,7 @@ mod tests {
         }
 
         fn home(&self, cfg: &std::path::Path) {
-            unsafe { std::env::set_var("XDG_CONFIG_HOME", cfg) };
+            unsafe { crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", cfg) };
         }
     }
 
@@ -3313,9 +3318,9 @@ mod tests {
         .unwrap();
         unsafe {
             // Unset is off under `cargo test`, so this test asks for a sync.
-            std::env::set_var("LJOS_USER_RULES_SYNC", "on");
-            std::env::set_var("LJOS_USER_RULES_TRACKER", &repo);
-            std::env::set_var("LJOS_USER_RULES_SYNC_MS", "400");
+            crate::test_env_guards::set_var_unchecked("LJOS_USER_RULES_SYNC", "on");
+            crate::test_env_guards::set_var_unchecked("LJOS_USER_RULES_TRACKER", &repo);
+            crate::test_env_guards::set_var_unchecked("LJOS_USER_RULES_SYNC_MS", "400");
         }
         let started = std::time::Instant::now();
         let line = super::super::session_start_for(Some("seat-two"));

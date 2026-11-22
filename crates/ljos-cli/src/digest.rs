@@ -1580,23 +1580,23 @@ mod tests {
         );
     }
 
-    fn isolate(root: &std::path::Path, home: &std::path::Path, path: &str) {
+    fn isolate(root: &std::path::Path, home: &std::path::Path, path: &str) -> crate::PathGuard {
         // A spent hook budget left on this thread turns the deed read into
         // an immediate timeout, and the row never appears.
         crate::disarm_wall();
         crate::tool_bound::disarm();
         unsafe {
-            std::env::set_var("HOME", home);
-            std::env::set_var("XDG_STATE_HOME", home.join("state"));
-            std::env::set_var("XDG_DATA_HOME", home.join("data"));
-            std::env::set_var("XDG_CONFIG_HOME", home.join("config"));
-            std::env::set_var("VISSUE_ROOT", root);
-            std::env::remove_var("ISSUE_ROOT");
-            std::env::remove_var("VISSUE_PREFIX");
-            std::env::set_var("PATH", path);
-            std::env::remove_var("LJOS_TRACKER_GIT");
-            std::env::remove_var("LJOS_SEAT");
+            crate::test_env_guards::set_var_unchecked("HOME", home);
+            crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", home.join("state"));
+            crate::test_env_guards::set_var_unchecked("XDG_DATA_HOME", home.join("data"));
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", home.join("config"));
+            crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root);
+            crate::test_env_guards::remove_var_unchecked("ISSUE_ROOT");
+            crate::test_env_guards::remove_var_unchecked("VISSUE_PREFIX");
+            crate::test_env_guards::remove_var_unchecked("LJOS_TRACKER_GIT");
+            crate::test_env_guards::remove_var_unchecked("LJOS_SEAT");
         }
+        crate::set_path(path)
     }
 
     fn tracker(dir: &std::path::Path) -> std::path::PathBuf {
@@ -1736,8 +1736,8 @@ mod tests {
             "source": {"seat": "bob", "at": "2026-10-28T18:00:00Z"}
         }));
         let path = format!("{}:/usr/bin:/bin", bin.display());
-        isolate(&root, &home, &path);
-        unsafe { std::env::set_var("PACKSET_URL", &url) };
+        let _path = isolate(&root, &home, &path);
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_URL", &url) };
 
         let text = digest(None, false).unwrap();
         let first = text
@@ -1828,7 +1828,7 @@ mod tests {
     impl ZoneGuard {
         fn set(tz: &str) -> Self {
             let prev = std::env::var_os("TZ");
-            unsafe { std::env::set_var("TZ", tz) };
+            unsafe { crate::test_env_guards::set_var_unchecked("TZ", tz) };
             std::thread::sleep(std::time::Duration::from_millis(1100));
             Self { prev }
         }
@@ -1838,8 +1838,8 @@ mod tests {
         fn drop(&mut self) {
             unsafe {
                 match self.prev.take() {
-                    Some(value) => std::env::set_var("TZ", value),
-                    None => std::env::remove_var("TZ"),
+                    Some(value) => crate::test_env_guards::set_var_unchecked("TZ", value),
+                    None => crate::test_env_guards::remove_var_unchecked("TZ"),
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -1964,8 +1964,8 @@ mod tests {
             "source": {"seat": "bob", "at": "2026-10-28T18:00:00Z"}
         }));
         let path = format!("{}:/usr/bin:/bin", bin.display());
-        isolate(&root, &home, &path);
-        unsafe { std::env::set_var("PACKSET_URL", &url) };
+        let _path = isolate(&root, &home, &path);
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_URL", &url) };
 
         let text = digest(None, false).unwrap();
         let seats: Vec<&str> = text
@@ -2004,8 +2004,8 @@ mod tests {
             &["commit", "-q", "-m", "chore(issues): probe-b filed by bob"],
             "2020-01-01T00:00:00Z",
         );
-        isolate(&root, &home, "/usr/bin:/bin");
-        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let _path = isolate(&root, &home, "/usr/bin:/bin");
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_URL", "off") };
         let first = digest(Some("last"), false).unwrap();
         assert!(first.contains("no earlier digest"), "{first}");
         assert!(first.contains("filed probe-b"), "{first}");
@@ -2023,9 +2023,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("XDG_DATA_HOME", home.join("data"));
-            std::env::set_var("LJOS_SEAT", "erin");
+            crate::test_env_guards::set_var_unchecked("HOME", &home);
+            crate::test_env_guards::set_var_unchecked("XDG_DATA_HOME", home.join("data"));
+            crate::test_env_guards::set_var_unchecked("LJOS_SEAT", "erin");
         }
         note_guard("refusal", "erin", "rm -rf /tmp/probe");
         note_policyd_line("allow\trewrite\tgit status");
@@ -2133,8 +2133,8 @@ mod tests {
             }));
         }
         let path = format!("{}:/usr/bin:/bin", bin.display());
-        isolate(&root, &home, &path);
-        unsafe { std::env::set_var("PACKSET_URL", &url) };
+        let _path = isolate(&root, &home, &path);
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_URL", &url) };
         let text = digest(None, false).unwrap();
         assert!(text.contains("filed bench-0042"), "{text}");
         assert!(
@@ -2164,8 +2164,8 @@ mod tests {
             &["commit", "-q", "-m", "chore(issues): probe-b filed by bob"],
             "2020-01-01T00:00:00Z",
         );
-        isolate(&root, &home, "/usr/bin:/bin");
-        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let _path = isolate(&root, &home, "/usr/bin:/bin");
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_URL", "off") };
         (root, home)
     }
 
@@ -2320,8 +2320,8 @@ mod tests {
                 date,
             );
         }
-        isolate(&root, &home, "/usr/bin:/bin");
-        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let _path = isolate(&root, &home, "/usr/bin:/bin");
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_URL", "off") };
         let text = digest(None, false).unwrap();
         let bounty = seat_block(&text, "bounty-driftwatch");
         assert!(bounty.contains("filed side-b"), "{text}");
@@ -2370,10 +2370,10 @@ mod tests {
             &["commit", "-q", "-m", "chore(issues): probe-b filed by bob"],
             "2020-01-01T00:00:00Z",
         );
-        isolate(&root, &home, "/usr/bin:/bin");
+        let _path = isolate(&root, &home, "/usr/bin:/bin");
         unsafe {
-            std::env::set_var("PACKSET_URL", "off");
-            std::env::set_var("LJOS_SEAT", "erin");
+            crate::test_env_guards::set_var_unchecked("PACKSET_URL", "off");
+            crate::test_env_guards::set_var_unchecked("LJOS_SEAT", "erin");
         }
         note_guard(
             "refusal",
@@ -2725,12 +2725,12 @@ mod tests {
             "{bounded:?}"
         );
 
-        isolate(&root, &home, "/usr/bin:/bin");
-        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let _path = isolate(&root, &home, "/usr/bin:/bin");
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_URL", "off") };
         let trace = dir.path().join("git.trace");
-        unsafe { std::env::set_var("GIT_TRACE", &trace) };
+        unsafe { crate::test_env_guards::set_var_unchecked("GIT_TRACE", &trace) };
         let text = digest(Some("2026-06-01"), false).unwrap();
-        unsafe { std::env::remove_var("GIT_TRACE") };
+        unsafe { crate::test_env_guards::remove_var_unchecked("GIT_TRACE") };
         for (id, _, seat) in &old_in_window {
             let line = format!("filed {id}");
             assert!(
@@ -2775,8 +2775,8 @@ mod tests {
             &["commit", "-q", "-m", "chore(issues): old-out noted by ada"],
             "2020-01-01T00:00:00Z",
         );
-        isolate(&root, &home, "/usr/bin:/bin");
-        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let _path = isolate(&root, &home, "/usr/bin:/bin");
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_URL", "off") };
         let first = digest(Some("last"), false).unwrap();
         assert!(first.contains("filed old-out"), "{first}");
         let state: serde_json::Value = serde_json::from_str(
@@ -2794,9 +2794,9 @@ mod tests {
             "2020-02-01T00:00:00Z",
         );
         let trace = dir.path().join("git.trace");
-        unsafe { std::env::set_var("GIT_TRACE", &trace) };
+        unsafe { crate::test_env_guards::set_var_unchecked("GIT_TRACE", &trace) };
         let second = digest(Some("last"), false).unwrap();
-        unsafe { std::env::remove_var("GIT_TRACE") };
+        unsafe { crate::test_env_guards::remove_var_unchecked("GIT_TRACE") };
         assert!(second.contains("filed late-old"), "{second}");
         assert!(!second.contains("filed old-out"), "{second}");
         let traced = std::fs::read_to_string(&trace).unwrap();

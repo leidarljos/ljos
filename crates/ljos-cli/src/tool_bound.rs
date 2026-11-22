@@ -220,13 +220,13 @@ mod tests {
     fn the_tool_budget_is_thirty_seconds_unless_configured() {
         let _g = crate::tests::env_guard();
         unsafe {
-            std::env::remove_var("LJOS_MCP_TIMEOUT");
-            std::env::remove_var("LJOS_MCP_TIMEOUT_MS");
+            crate::test_env_guards::remove_var_unchecked("LJOS_MCP_TIMEOUT");
+            crate::test_env_guards::remove_var_unchecked("LJOS_MCP_TIMEOUT_MS");
         }
         assert_eq!(budget(), Duration::from_secs(30));
-        unsafe { std::env::set_var("LJOS_MCP_TIMEOUT", "12") };
+        unsafe { crate::test_env_guards::set_var_unchecked("LJOS_MCP_TIMEOUT", "12") };
         assert_eq!(budget(), Duration::from_secs(12));
-        unsafe { std::env::set_var("LJOS_MCP_TIMEOUT_MS", "250") };
+        unsafe { crate::test_env_guards::set_var_unchecked("LJOS_MCP_TIMEOUT_MS", "250") };
         assert_eq!(budget(), Duration::from_millis(250));
     }
 
@@ -246,12 +246,12 @@ mod tests {
             }
         });
         unsafe {
-            std::env::set_var("HOME", home.path());
-            std::env::set_var("PACKSET_URL", format!("http://{addr}"));
-            std::env::remove_var("PACKSET_TOKEN");
-            std::env::remove_var("PACKSET_TOKEN_FILE");
-            std::env::remove_var("PACKSET_TIMEOUT_MS");
-            std::env::remove_var("LJOS_IN_HOOK");
+            crate::test_env_guards::set_var_unchecked("HOME", home.path());
+            crate::test_env_guards::set_var_unchecked("PACKSET_URL", format!("http://{addr}"));
+            crate::test_env_guards::remove_var_unchecked("PACKSET_TOKEN");
+            crate::test_env_guards::remove_var_unchecked("PACKSET_TOKEN_FILE");
+            crate::test_env_guards::remove_var_unchecked("PACKSET_TIMEOUT_MS");
+            crate::test_env_guards::remove_var_unchecked("LJOS_IN_HOOK");
         }
         let _bound = arm(Duration::from_millis(400));
         let started = Instant::now();

@@ -1473,7 +1473,7 @@ mod tests {
         let _g = crate::tests::env_guard();
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var_os("XDG_STATE_HOME");
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.path());
         let all = sample();
         assert!(keep("a1", &all).unwrap().starts_with("kept a1aaaaaa"));
         let r = reviews();
@@ -1486,8 +1486,8 @@ mod tests {
         });
         assert!(resolve("a1", &twin).is_err());
         match old {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
+            Some(v) => crate::test_env_guards::set_var("XDG_STATE_HOME", v),
+            None => crate::test_env_guards::remove_var("XDG_STATE_HOME"),
         }
     }
 
@@ -1497,7 +1497,7 @@ mod tests {
         // the same atom id, so this one keeps its own directory.
         let _env = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.path());
         let mut all = sample();
         let mut dup = all[1].clone();
         dup.id = "e5eeeeeeeeeeeeee".into();
@@ -1588,7 +1588,7 @@ mod tests {
     fn a_torn_review_line_keeps_the_verdicts_after_it() {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.path());
         let path = reviews_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let row = |id: &str| format!(r#"{{"id":"{id}","verdict":"keep","at":"t","by":"s"}}"#);
@@ -1608,7 +1608,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.path());
         const THREADS: usize = 32;
         const EACH: usize = 4;
         let mut handles = Vec::with_capacity(THREADS);
@@ -1649,7 +1649,7 @@ mod tests {
         use std::os::unix::io::AsRawFd;
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.path());
         let path = reviews_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let held = std::fs::OpenOptions::new()
@@ -1677,15 +1677,15 @@ mod tests {
     fn a_drop_records_the_verdict_before_the_pack_change() {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.path());
         let old = std::env::var_os("PACKSET_URL");
-        std::env::set_var("PACKSET_URL", "off");
+        crate::test_env_guards::set_var("PACKSET_URL", "off");
         let all = sample();
         assert!(drop_memory("a1", &all).is_err());
         assert_eq!(reviews()["a1aaaaaaaaaaaaaa"].verdict, "drop");
         match old {
-            Some(v) => std::env::set_var("PACKSET_URL", v),
-            None => std::env::remove_var("PACKSET_URL"),
+            Some(v) => crate::test_env_guards::set_var("PACKSET_URL", v),
+            None => crate::test_env_guards::remove_var("PACKSET_URL"),
         }
     }
 
@@ -1723,7 +1723,7 @@ mod tests {
     fn a_recall_bumps_the_count_the_list_shows() {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.path());
         let atoms = vec![atom(
             "a1aaaaaaaaaaaaaa",
             "pin the fuse",
@@ -1754,6 +1754,6 @@ mod tests {
             said.contains("earlier 4x (recall and lookup were one count)"),
             "{said}"
         );
-        std::env::remove_var("XDG_STATE_HOME");
+        crate::test_env_guards::remove_var("XDG_STATE_HOME");
     }
 }

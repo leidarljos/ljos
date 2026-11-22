@@ -6690,30 +6690,9 @@ mod tests {
         with_path_dir(dir, body)
     }
 
-    /// Run `body` with `dir` first on PATH. The caller holds [`crate::test_env_lock`].
+    /// Run `body` with `dir` first on PATH.
     fn with_path_dir<T>(dir: &Path, body: impl FnOnce() -> T) -> T {
-        struct PathGuard(Option<std::ffi::OsString>);
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                // SAFETY: the caller holds the process env lock.
-                unsafe {
-                    if let Some(value) = &self.0 {
-                        std::env::set_var("PATH", value);
-                    } else {
-                        std::env::remove_var("PATH");
-                    }
-                }
-            }
-        }
-        let before = std::env::var_os("PATH");
-        let mut entries = vec![dir.to_path_buf()];
-        if let Some(old) = &before {
-            entries.extend(std::env::split_paths(old));
-        }
-        let joined = std::env::join_paths(entries).unwrap();
-        // SAFETY: the caller holds the process env lock.
-        unsafe { std::env::set_var("PATH", &joined) };
-        let _guard = PathGuard(before);
+        let _path = crate::prepend_path(dir);
         body()
     }
 
@@ -7018,12 +6997,12 @@ mod tests {
         let _g = crate::test_env_lock();
         let before = std::env::var_os("LJOS_TRACKER_GIT");
         let config_before = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        crate::test_env_guards::set_var("LJOS_TRACKER_GIT", "commit");
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
         std::fs::write(config.join("ljos/age.key"), "not a key\n").unwrap();
-        std::env::set_var("XDG_CONFIG_HOME", &config);
+        crate::test_env_guards::set_var("XDG_CONFIG_HOME", &config);
         let remote = dir.path().join("remote.git");
         let root = dir.path().join("local");
         let other = dir.path().join("other");
@@ -7075,12 +7054,12 @@ mod tests {
         let said = sync_one(&root, true, false, false).unwrap();
         let local = git(&root, &["log", "--format=%s"]);
         match before {
-            Some(value) => std::env::set_var("LJOS_TRACKER_GIT", value),
-            None => std::env::remove_var("LJOS_TRACKER_GIT"),
+            Some(value) => crate::test_env_guards::set_var("LJOS_TRACKER_GIT", value),
+            None => crate::test_env_guards::remove_var("LJOS_TRACKER_GIT"),
         }
         match config_before {
-            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
+            Some(value) => crate::test_env_guards::set_var("XDG_CONFIG_HOME", value),
+            None => crate::test_env_guards::remove_var("XDG_CONFIG_HOME"),
         }
         assert!(
             said.contains("not fetched (LJOS_TRACKER_GIT=commit)"),
@@ -7102,7 +7081,7 @@ mod tests {
     fn an_off_tracker_is_left_alone_in_passing() {
         let _g = crate::test_env_lock();
         let before = std::env::var_os("LJOS_TRACKER_GIT");
-        std::env::set_var("LJOS_TRACKER_GIT", "off");
+        crate::test_env_guards::set_var("LJOS_TRACKER_GIT", "off");
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let init = crate::git_cmd()
@@ -7121,8 +7100,8 @@ mod tests {
         .unwrap();
         let said = sync_one(root, true, true, false).unwrap();
         match before {
-            Some(value) => std::env::set_var("LJOS_TRACKER_GIT", value),
-            None => std::env::remove_var("LJOS_TRACKER_GIT"),
+            Some(value) => crate::test_env_guards::set_var("LJOS_TRACKER_GIT", value),
+            None => crate::test_env_guards::remove_var("LJOS_TRACKER_GIT"),
         }
         assert_eq!(quiet, "");
         assert!(said.contains("sync: off (LJOS_TRACKER_GIT)"), "{said}");
@@ -7258,28 +7237,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&fake_age, std::fs::Permissions::from_mode(0o755)).unwrap();
-        struct PathGuard(Option<std::ffi::OsString>);
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                // SAFETY: this test holds the process env lock.
-                unsafe {
-                    if let Some(value) = &self.0 {
-                        std::env::set_var("PATH", value);
-                    } else {
-                        std::env::remove_var("PATH");
-                    }
-                }
-            }
-        }
-        let before = std::env::var_os("PATH");
-        let mut entries = vec![dir.path().to_path_buf()];
-        if let Some(old) = &before {
-            entries.extend(std::env::split_paths(old));
-        }
-        let joined = std::env::join_paths(entries).unwrap();
-        // SAFETY: this test holds the process env lock.
-        unsafe { std::env::set_var("PATH", &joined) };
-        let _guard = PathGuard(before);
+        let _path = crate::prepend_path(dir.path());
         let scope: Scope = toml::from_str(
             "name = \"example-host\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
         )
@@ -7536,8 +7494,8 @@ mod tests {
 
     fn hold_env(dir: &Path) -> crate::EnvLock {
         let lock = crate::test_env_lock();
-        std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
-        std::env::set_var("XDG_STATE_HOME", dir.join("state"));
+        crate::test_env_guards::set_var("XDG_CONFIG_HOME", dir.join("config"));
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.join("state"));
         std::fs::create_dir_all(dir.join("config/ljos")).unwrap();
         std::fs::create_dir_all(dir.join("state")).unwrap();
         lock
@@ -7827,7 +7785,7 @@ mod tests {
             format!("repos = [\"{listed}\"]\n"),
         )
         .unwrap();
-        std::env::set_var("XDG_CONFIG_HOME", &config);
+        crate::test_env_guards::set_var("XDG_CONFIG_HOME", &config);
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let head = git(&source, &["rev-parse", "HEAD"]).unwrap();
         let said = adopt("otherhost", false, false).unwrap();
@@ -7962,9 +7920,8 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let old_path = std::env::var("PATH").unwrap_or_default();
         // Only the fakes. A real age later on PATH would hide rage.
-        std::env::set_var("PATH", &bin);
+        let path = crate::set_path(&bin);
         let log = dir.path().join("peer.jsonl.age");
         std::fs::write(&log, b"sealed").unwrap();
         let id = dir.path().join("age.key");
@@ -7972,7 +7929,7 @@ mod tests {
         let opened = open(&log, &id);
         std::fs::remove_file(bin.join("age")).unwrap();
         let via_rage = open(&log, &id);
-        std::env::set_var("PATH", &old_path);
+        drop(path);
         assert!(matches!(opened, Ok(None)), "age: {opened:?}");
         assert!(matches!(via_rage, Ok(None)), "rage: {via_rage:?}");
     }
@@ -7994,12 +7951,11 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let old_path = std::env::var("PATH").unwrap_or_default();
         let old_language = std::env::var("LANGUAGE").ok();
         let old_lc_messages = std::env::var("LC_MESSAGES").ok();
-        std::env::set_var("LANGUAGE", "fr");
-        std::env::set_var("LC_MESSAGES", "fr");
-        std::env::set_var("PATH", &bin);
+        crate::test_env_guards::set_var("LANGUAGE", "fr");
+        crate::test_env_guards::set_var("LC_MESSAGES", "fr");
+        let path = crate::set_path(&bin);
         let log = dir.path().join("peer.jsonl.age");
         std::fs::write(&log, b"sealed").unwrap();
         let id = dir.path().join("age.key");
@@ -8007,14 +7963,14 @@ mod tests {
         let opened = open(&log, &id);
         std::fs::remove_file(bin.join("age")).unwrap();
         let via_rage = open(&log, &id);
-        std::env::set_var("PATH", &old_path);
+        drop(path);
         match old_language {
-            Some(value) => std::env::set_var("LANGUAGE", value),
-            None => std::env::remove_var("LANGUAGE"),
+            Some(value) => crate::test_env_guards::set_var("LANGUAGE", value),
+            None => crate::test_env_guards::remove_var("LANGUAGE"),
         }
         match old_lc_messages {
-            Some(value) => std::env::set_var("LC_MESSAGES", value),
-            None => std::env::remove_var("LC_MESSAGES"),
+            Some(value) => crate::test_env_guards::set_var("LC_MESSAGES", value),
+            None => crate::test_env_guards::remove_var("LC_MESSAGES"),
         }
         assert!(
             matches!(opened, Ok(None)),
@@ -8043,8 +7999,8 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&age, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::env::set_var("PATH", &bin);
-        std::env::set_var("PACKSET_URL", "off");
+        let _path = crate::set_path(&bin);
+        crate::test_env_guards::set_var("PACKSET_URL", "off");
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
         std::fs::write(
@@ -8052,7 +8008,7 @@ mod tests {
             "# public key: age1ownedkey\nAGE-SECRET-KEY-1TEST\n",
         )
         .unwrap();
-        std::env::set_var("XDG_CONFIG_HOME", &config);
+        crate::test_env_guards::set_var("XDG_CONFIG_HOME", &config);
         let root = dir.path().join("repo");
         std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
         std::fs::write(root.join(".ljos/atoms/peerbox.jsonl.age"), b"sealed").unwrap();
@@ -8092,12 +8048,12 @@ mod tests {
             std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
                 .unwrap();
         }
-        std::env::set_var("PATH", &bin);
-        std::env::set_var("PACKSET_URL", "off");
+        let _path = crate::set_path(&bin);
+        crate::test_env_guards::set_var("PACKSET_URL", "off");
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
         std::fs::write(config.join("ljos/age.key"), "AGE-SECRET-KEY-1TEST\n").unwrap();
-        std::env::set_var("XDG_CONFIG_HOME", &config);
+        crate::test_env_guards::set_var("XDG_CONFIG_HOME", &config);
         let root = dir.path().join("repo");
         std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
         std::fs::write(root.join(".ljos/atoms/peerbox.jsonl.age"), b"sealed").unwrap();
@@ -8128,8 +8084,8 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(bin.join("age"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::env::set_var("PATH", &bin);
-        std::env::set_var("PACKSET_URL", "off");
+        let _path = crate::set_path(&bin);
+        crate::test_env_guards::set_var("PACKSET_URL", "off");
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
         let secret = format!("AGE-SECRET-KEY-1{}\n", "Q".repeat(58));
@@ -8143,7 +8099,7 @@ mod tests {
             format!("# public key: age1cloud\n{secret}"),
         )
         .unwrap();
-        std::env::set_var("XDG_CONFIG_HOME", &config);
+        crate::test_env_guards::set_var("XDG_CONFIG_HOME", &config);
         let root = dir.path().join("repo");
         std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
         let cloud_log = root.join(".ljos/atoms/peerbox+cloud.jsonl.age");
@@ -8190,8 +8146,8 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(bin.join("age"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::env::set_var("PATH", &bin);
-        std::env::set_var("PACKSET_URL", "off");
+        let _path = crate::set_path(&bin);
+        crate::test_env_guards::set_var("PACKSET_URL", "off");
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
         let secret = format!("AGE-SECRET-KEY-1{}\n", "Q".repeat(58));
@@ -8200,7 +8156,7 @@ mod tests {
             format!("# public key: age1cloud\n{secret}"),
         )
         .unwrap();
-        std::env::set_var("XDG_CONFIG_HOME", &config);
+        crate::test_env_guards::set_var("XDG_CONFIG_HOME", &config);
         let scope: Scope = toml::from_str(
             "name = \"example-host\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
         )
@@ -8252,13 +8208,12 @@ mod tests {
             std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
                 .unwrap();
         }
-        let old_path = std::env::var("PATH").unwrap_or_default();
         let old_pack = std::env::var("PACKSET_URL").ok();
         let old_xdg = std::env::var("XDG_CONFIG_HOME").ok();
         let old_host = std::env::var("LJOS_TEST_HOSTNAME").ok();
-        std::env::set_var("PATH", &bin);
-        std::env::set_var("PACKSET_URL", "off");
-        std::env::set_var("LJOS_TEST_HOSTNAME", "thisbox");
+        let path = crate::set_path(&bin);
+        crate::test_env_guards::set_var("PACKSET_URL", "off");
+        crate::test_env_guards::set_var("LJOS_TEST_HOSTNAME", "thisbox");
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
         std::fs::write(
@@ -8266,7 +8221,7 @@ mod tests {
             format!("AGE-SECRET-KEY-1{}\n", "Q".repeat(58)),
         )
         .unwrap();
-        std::env::set_var("XDG_CONFIG_HOME", &config);
+        crate::test_env_guards::set_var("XDG_CONFIG_HOME", &config);
         let root = dir.path().join("repo");
         std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
         std::fs::write(root.join(".ljos/atoms/peerbox.jsonl.age"), b"sealed").unwrap();
@@ -8274,18 +8229,18 @@ mod tests {
         let scope: Scope =
             toml::from_str("name = \"surf\"\nrecipients = [\"age1someoneelse\"]\n").unwrap();
         let result = import(&root, &scope);
-        std::env::set_var("PATH", old_path);
+        drop(path);
         match old_pack {
-            Some(value) => std::env::set_var("PACKSET_URL", value),
-            None => std::env::remove_var("PACKSET_URL"),
+            Some(value) => crate::test_env_guards::set_var("PACKSET_URL", value),
+            None => crate::test_env_guards::remove_var("PACKSET_URL"),
         }
         match old_xdg {
-            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
+            Some(value) => crate::test_env_guards::set_var("XDG_CONFIG_HOME", value),
+            None => crate::test_env_guards::remove_var("XDG_CONFIG_HOME"),
         }
         match old_host {
-            Some(value) => std::env::set_var("LJOS_TEST_HOSTNAME", value),
-            None => std::env::remove_var("LJOS_TEST_HOSTNAME"),
+            Some(value) => crate::test_env_guards::set_var("LJOS_TEST_HOSTNAME", value),
+            None => crate::test_env_guards::remove_var("LJOS_TEST_HOSTNAME"),
         }
         let msg = result.expect("foreign logs stay skips");
         assert!(
@@ -8419,8 +8374,8 @@ mod tests {
         }
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_CONFIG_HOME", dir.path());
-        std::env::set_var("HOME", dir.path().join("home"));
+        crate::test_env_guards::set_var("XDG_CONFIG_HOME", dir.path());
+        crate::test_env_guards::set_var("HOME", dir.path().join("home"));
         let cloud = cloud_identity_path();
         assert!(
             cloud.starts_with(dir.path()),
@@ -8500,7 +8455,7 @@ mod tests {
         }
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_CONFIG_HOME", dir.path());
         let own = identity_path();
         std::fs::create_dir_all(own.parent().unwrap()).unwrap();
         let made = Command::new("age-keygen")
@@ -8567,10 +8522,10 @@ mod tests {
     /// Point this process at `dir` as a VM that holds `cloud.age` and no
     /// machine key. Returns the cloud identity's public key.
     fn vm_with_only_the_cloud_identity(dir: &Path) -> String {
-        std::env::set_var("HOME", dir.join("home"));
-        std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
-        std::env::set_var("XDG_STATE_HOME", dir.join("state"));
-        std::env::set_var("PACKSET_TIMEOUT_MS", "5000");
+        crate::test_env_guards::set_var("HOME", dir.join("home"));
+        crate::test_env_guards::set_var("XDG_CONFIG_HOME", dir.join("config"));
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.join("state"));
+        crate::test_env_guards::set_var("PACKSET_TIMEOUT_MS", "5000");
         let cloud = cloud_identity_path();
         std::fs::create_dir_all(cloud.parent().unwrap()).unwrap();
         let made = Command::new("age-keygen")
@@ -8631,7 +8586,7 @@ mod tests {
         )
         .unwrap();
         let posted = std::sync::Arc::default();
-        std::env::set_var("PACKSET_URL", serve_pack(std::sync::Arc::clone(&posted)));
+        crate::test_env_guards::set_var("PACKSET_URL", serve_pack(std::sync::Arc::clone(&posted)));
         let said = import(&root, &scope).unwrap();
         assert!(
             said.contains("gonehost's example-host log is not sealed to this machine"),
@@ -8704,7 +8659,7 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-q", "-m", "seed"]);
         let posted = std::sync::Arc::default();
-        std::env::set_var("PACKSET_URL", serve_pack(std::sync::Arc::clone(&posted)));
+        crate::test_env_guards::set_var("PACKSET_URL", serve_pack(std::sync::Arc::clone(&posted)));
 
         let said = adopt_in_repo(&root, &scope, "gonehost", opts(true, false)).unwrap();
         assert!(
@@ -8759,8 +8714,8 @@ mod tests {
             "[user]\n\temail = seat@example.invalid\n\tname = seat\n[commit]\n\tgpgsign = false\n",
         )
         .unwrap();
-        std::env::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
-        std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+        crate::test_env_guards::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
+        crate::test_env_guards::set_var("GIT_CONFIG_NOSYSTEM", "1");
         let box_public = age_keygen(&dir.path().join("box.key"));
         let public = vm_with_only_the_cloud_identity(&dir.path().join("a"));
         let secret = std::fs::read_to_string(cloud_identity_path()).unwrap();
@@ -8813,17 +8768,17 @@ mod tests {
         };
         let tracker_a = clone("tracker-a");
         let tracker_b = clone("tracker-b");
-        std::env::set_var("LJOS_TEST_HOSTNAME", "cursor");
-        std::env::set_var("LJOS_TRACKER_GIT", "push");
-        std::env::remove_var("VISSUE_ROOT");
+        crate::test_env_guards::set_var("LJOS_TEST_HOSTNAME", "cursor");
+        crate::test_env_guards::set_var("LJOS_TRACKER_GIT", "push");
+        crate::test_env_guards::remove_var("VISSUE_ROOT");
 
-        std::env::set_var(SYNC_HOST_KEY, "cursor-seat-a");
-        std::env::set_var("ISSUE_ROOT", &tracker_a);
+        crate::test_env_guards::set_var(SYNC_HOST_KEY, "cursor-seat-a");
+        crate::test_env_guards::set_var("ISSUE_ROOT", &tracker_a);
         let learned = std::sync::Arc::new(std::sync::Mutex::new(vec![
             atom("a1", "learned on vm a", &["scope:cloud"]),
             atom("a2", "box only", &["scope:example-host"]),
         ]));
-        std::env::set_var("PACKSET_URL", serve_pack(learned));
+        crate::test_env_guards::set_var("PACKSET_URL", serve_pack(learned));
         let exported = sync_repo_in_passing(false, true).unwrap();
         let shared = git(&remote, &["ls-tree", "-r", "--name-only", "main"]);
         assert!(
@@ -8832,15 +8787,15 @@ mod tests {
         );
 
         let b = dir.path().join("b");
-        std::env::set_var("HOME", b.join("home"));
-        std::env::set_var("XDG_CONFIG_HOME", b.join("config"));
-        std::env::set_var("XDG_STATE_HOME", b.join("state"));
+        crate::test_env_guards::set_var("HOME", b.join("home"));
+        crate::test_env_guards::set_var("XDG_CONFIG_HOME", b.join("config"));
+        crate::test_env_guards::set_var("XDG_STATE_HOME", b.join("state"));
         std::fs::create_dir_all(cloud_identity_path().parent().unwrap()).unwrap();
         std::fs::write(cloud_identity_path(), &secret).unwrap();
-        std::env::set_var(SYNC_HOST_KEY, "cursor-seat-b");
-        std::env::set_var("ISSUE_ROOT", &tracker_b);
+        crate::test_env_guards::set_var(SYNC_HOST_KEY, "cursor-seat-b");
+        crate::test_env_guards::set_var("ISSUE_ROOT", &tracker_b);
         let posted = std::sync::Arc::default();
-        std::env::set_var("PACKSET_URL", serve_pack(std::sync::Arc::clone(&posted)));
+        crate::test_env_guards::set_var("PACKSET_URL", serve_pack(std::sync::Arc::clone(&posted)));
         let said = sync_repo_in_passing(true, false).unwrap();
         assert!(
             said.contains("cursor-seat-a: 1 cloud atoms taken"),
@@ -8848,9 +8803,9 @@ mod tests {
         );
         assert_eq!(posted_texts(&posted), vec!["learned on vm a"]);
 
-        std::env::remove_var(SYNC_HOST_KEY);
+        crate::test_env_guards::remove_var(SYNC_HOST_KEY);
         assert_eq!(host(), "cursor", "without the seat both VMs are one host");
-        std::env::remove_var("LJOS_TEST_HOSTNAME");
+        crate::test_env_guards::remove_var("LJOS_TEST_HOSTNAME");
         std::fs::create_dir_all(b.join("home/.config/ljos")).unwrap();
         std::fs::write(
             b.join("home/.config/ljos/env"),
@@ -8920,9 +8875,9 @@ mod tests {
         ]);
         assert!(mode.starts_with("120000"), "{mode}");
         let posted = std::sync::Arc::default();
-        std::env::set_var("PACKSET_URL", serve_pack(std::sync::Arc::clone(&posted)));
-        std::env::set_var("PACKSET_WORKSPACE", "seat");
-        std::env::set_var("PACKSET_TIMEOUT_MS", "5000");
+        crate::test_env_guards::set_var("PACKSET_URL", serve_pack(std::sync::Arc::clone(&posted)));
+        crate::test_env_guards::set_var("PACKSET_WORKSPACE", "seat");
+        crate::test_env_guards::set_var("PACKSET_TIMEOUT_MS", "5000");
 
         let err = adopt_in_repo(&root, &scope, "gonehost", opts(true, false)).unwrap_err();
         assert!(err.to_string().contains("not a regular file"), "{err}");
@@ -9014,7 +8969,7 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-q", "-m", "seed"]);
         let posted = std::sync::Arc::default();
-        std::env::set_var("PACKSET_URL", serve_pack(std::sync::Arc::clone(&posted)));
+        crate::test_env_guards::set_var("PACKSET_URL", serve_pack(std::sync::Arc::clone(&posted)));
 
         let said = adopt_in_repo(&root, &scope, "gonehost", opts(true, false)).unwrap();
         assert!(
@@ -9343,7 +9298,7 @@ mod tests {
         for linked in [".ljos", ".ljos/user-rules", "sync/user-rules"] {
             let dir = tempfile::tempdir().unwrap();
             let _env = begin(dir.path());
-            std::env::remove_var("LJOS_TRACKER_GIT");
+            crate::test_env_guards::remove_var("LJOS_TRACKER_GIT");
             let machine = make_key();
             let root = tracker(dir.path());
             let local = dir.path().join("config/ljos/user-rules.json");
@@ -9397,14 +9352,14 @@ mod tests {
 
     fn begin(dir: &Path) -> crate::EnvLock {
         let lock = hold_env(dir);
-        std::env::set_var("HOME", dir);
+        crate::test_env_guards::set_var("HOME", dir);
         lock
     }
 
     fn point_pack(url: &str) {
-        std::env::set_var("PACKSET_URL", url);
-        std::env::set_var("PACKSET_WORKSPACE", "seat");
-        std::env::set_var("PACKSET_TIMEOUT_MS", "5000");
+        crate::test_env_guards::set_var("PACKSET_URL", url);
+        crate::test_env_guards::set_var("PACKSET_WORKSPACE", "seat");
+        crate::test_env_guards::set_var("PACKSET_TIMEOUT_MS", "5000");
     }
 
     fn make_key() -> String {
@@ -9672,7 +9627,7 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let _env = begin(dir.path());
-        std::env::set_var("LJOS_TEST_HOSTNAME", "bad host");
+        crate::test_env_guards::set_var("LJOS_TEST_HOSTNAME", "bad host");
         let fix = fixture(dir.path(), Some(OLD_COMMIT));
         let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
         point_pack(&url);
@@ -11255,9 +11210,9 @@ mod tests {
         std::fs::create_dir_all(home.join(".config/ljos")).unwrap();
         // SAFETY: this test holds the process env lock.
         unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
-            std::env::set_var(WRITE_SCOPE_KEY, CLOUD_SCOPE);
+            crate::test_env_guards::set_var_unchecked("HOME", &home);
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", home.join(".config"));
+            crate::test_env_guards::set_var_unchecked(WRITE_SCOPE_KEY, CLOUD_SCOPE);
         }
         assert_eq!(
             scope_for_lesson(Some("example-host".into())).as_deref(),
@@ -11276,7 +11231,7 @@ mod tests {
             assert!(tagged, "vm write missed scope:cloud: {atom}");
         }
         // SAFETY: this test holds the process env lock.
-        unsafe { std::env::remove_var(WRITE_SCOPE_KEY) };
+        unsafe { crate::test_env_guards::remove_var_unchecked(WRITE_SCOPE_KEY) };
         assert_eq!(
             scope_for_lesson(Some("example-host".into())).as_deref(),
             Some("example-host")
@@ -11362,7 +11317,7 @@ mod tests {
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
         // SAFETY: this test holds the process env lock.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config) };
+        unsafe { crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", &config) };
         let scope: Scope = toml::from_str(
             "name = \"example-host\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
         )
@@ -11448,7 +11403,7 @@ mod tests {
         std::fs::create_dir_all(config.join("ljos")).unwrap();
         std::fs::write(config.join("ljos/sync.toml"), "default_scope = \"cloud\"\n").unwrap();
         // SAFETY: this test holds the process env lock.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config) };
+        unsafe { crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", &config) };
         let scope: Scope = toml::from_str(
             "name = \"example-host\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
         )
@@ -11491,7 +11446,7 @@ mod tests {
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
         // SAFETY: this test holds the process env lock.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config) };
+        unsafe { crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", &config) };
         let scope: Scope = toml::from_str(
             "name = \"example-host\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
         )
@@ -11521,7 +11476,7 @@ mod tests {
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
         // SAFETY: this test holds the process env lock.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config) };
+        unsafe { crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", &config) };
         let root = dir.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str]| {
@@ -11581,7 +11536,7 @@ mod tests {
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
         // SAFETY: this test holds the process env lock.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config) };
+        unsafe { crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", &config) };
         let scope: Scope = toml::from_str(
             "name = \"example-host\"\nrecipients = []\n[scopes]\ncloud = [\"age1cloud\"]\n",
         )
@@ -11742,14 +11697,17 @@ mod tests {
         let port = _daemon.port();
         // SAFETY: this test holds the process env lock.
         unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("XDG_CONFIG_HOME", &config);
-            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
-            std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
-            std::env::set_var("PACKSET_AUTH", "off");
-            std::env::set_var("PACKSET_HOME", &pack_home);
-            std::env::set_var("PACKSET_WORKSPACE", "retire-scope");
-            std::env::remove_var(WRITE_SCOPE_KEY);
+            crate::test_env_guards::set_var_unchecked("HOME", &home);
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", &config);
+            crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", dir.path().join("state"));
+            crate::test_env_guards::set_var_unchecked(
+                "PACKSET_URL",
+                format!("http://127.0.0.1:{port}"),
+            );
+            crate::test_env_guards::set_var_unchecked("PACKSET_AUTH", "off");
+            crate::test_env_guards::set_var_unchecked("PACKSET_HOME", &pack_home);
+            crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "retire-scope");
+            crate::test_env_guards::remove_var_unchecked(WRITE_SCOPE_KEY);
         }
         let key = identity_path();
         let made = Command::new("age-keygen")
@@ -11825,7 +11783,7 @@ mod tests {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+        crate::test_env_guards::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
         let public = age_keygen(&identity_path());
         std::fs::create_dir_all(root.join(".ljos")).unwrap();
         std::fs::write(
@@ -11894,14 +11852,17 @@ mod tests {
         let (port, _daemon) = spawn_pack(&pack_home);
         // SAFETY: this test holds the process env lock.
         unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("XDG_CONFIG_HOME", &config);
-            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
-            std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
-            std::env::set_var("PACKSET_AUTH", "off");
-            std::env::set_var("PACKSET_HOME", &pack_home);
-            std::env::set_var("PACKSET_WORKSPACE", "move-scope");
-            std::env::remove_var(WRITE_SCOPE_KEY);
+            crate::test_env_guards::set_var_unchecked("HOME", &home);
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", &config);
+            crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", dir.path().join("state"));
+            crate::test_env_guards::set_var_unchecked(
+                "PACKSET_URL",
+                format!("http://127.0.0.1:{port}"),
+            );
+            crate::test_env_guards::set_var_unchecked("PACKSET_AUTH", "off");
+            crate::test_env_guards::set_var_unchecked("PACKSET_HOME", &pack_home);
+            crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "move-scope");
+            crate::test_env_guards::remove_var_unchecked(WRITE_SCOPE_KEY);
         }
         let public = age_keygen(&identity_path());
         let client = crate::pack().unwrap();
@@ -12006,14 +11967,17 @@ mod tests {
         let (port, _daemon) = spawn_pack(&pack_home);
         // SAFETY: this test holds the process env lock.
         unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("XDG_CONFIG_HOME", &config);
-            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
-            std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
-            std::env::set_var("PACKSET_AUTH", "off");
-            std::env::set_var("PACKSET_HOME", &pack_home);
-            std::env::set_var("PACKSET_WORKSPACE", "import-cloud");
-            std::env::remove_var(WRITE_SCOPE_KEY);
+            crate::test_env_guards::set_var_unchecked("HOME", &home);
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", &config);
+            crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", dir.path().join("state"));
+            crate::test_env_guards::set_var_unchecked(
+                "PACKSET_URL",
+                format!("http://127.0.0.1:{port}"),
+            );
+            crate::test_env_guards::set_var_unchecked("PACKSET_AUTH", "off");
+            crate::test_env_guards::set_var_unchecked("PACKSET_HOME", &pack_home);
+            crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "import-cloud");
+            crate::test_env_guards::remove_var_unchecked(WRITE_SCOPE_KEY);
         }
         let public = age_keygen(&identity_path());
         let root = dir.path().join("tracker");
@@ -12074,14 +12038,17 @@ mod tests {
         let (port, _daemon) = spawn_pack(&pack_home);
         // SAFETY: this test holds the process env lock.
         unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("XDG_CONFIG_HOME", &config);
-            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
-            std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
-            std::env::set_var("PACKSET_AUTH", "off");
-            std::env::set_var("PACKSET_HOME", &pack_home);
-            std::env::set_var("PACKSET_WORKSPACE", "vm-cloud-key");
-            std::env::remove_var(WRITE_SCOPE_KEY);
+            crate::test_env_guards::set_var_unchecked("HOME", &home);
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", &config);
+            crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", dir.path().join("state"));
+            crate::test_env_guards::set_var_unchecked(
+                "PACKSET_URL",
+                format!("http://127.0.0.1:{port}"),
+            );
+            crate::test_env_guards::set_var_unchecked("PACKSET_AUTH", "off");
+            crate::test_env_guards::set_var_unchecked("PACKSET_HOME", &pack_home);
+            crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "vm-cloud-key");
+            crate::test_env_guards::remove_var_unchecked(WRITE_SCOPE_KEY);
         }
         assert!(!identity_path().exists(), "the machine key was invented");
         let cloud_public = age_keygen(&cloud_identity_path());
@@ -12148,14 +12115,17 @@ mod tests {
         let (port, _daemon) = spawn_pack(&pack_home);
         // SAFETY: this test holds the process env lock.
         unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("XDG_CONFIG_HOME", &config);
-            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
-            std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
-            std::env::set_var("PACKSET_AUTH", "off");
-            std::env::set_var("PACKSET_HOME", &pack_home);
-            std::env::set_var("PACKSET_WORKSPACE", "merge-cloud");
-            std::env::remove_var(WRITE_SCOPE_KEY);
+            crate::test_env_guards::set_var_unchecked("HOME", &home);
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", &config);
+            crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", dir.path().join("state"));
+            crate::test_env_guards::set_var_unchecked(
+                "PACKSET_URL",
+                format!("http://127.0.0.1:{port}"),
+            );
+            crate::test_env_guards::set_var_unchecked("PACKSET_AUTH", "off");
+            crate::test_env_guards::set_var_unchecked("PACKSET_HOME", &pack_home);
+            crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "merge-cloud");
+            crate::test_env_guards::remove_var_unchecked(WRITE_SCOPE_KEY);
         }
         let root = dir.path().join("tracker");
         std::fs::create_dir_all(root.join(".ljos")).unwrap();
@@ -12275,14 +12245,20 @@ mod tests {
             let (port, daemon) = spawn_pack(&pack_home);
             // SAFETY: this test holds the process env lock.
             unsafe {
-                std::env::set_var("HOME", &home);
-                std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
-                std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
-                std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
-                std::env::set_var("PACKSET_AUTH", "off");
-                std::env::set_var("PACKSET_HOME", &pack_home);
-                std::env::set_var("PACKSET_WORKSPACE", "shared");
-                std::env::remove_var(WRITE_SCOPE_KEY);
+                crate::test_env_guards::set_var_unchecked("HOME", &home);
+                crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", home.join(".config"));
+                crate::test_env_guards::set_var_unchecked(
+                    "XDG_STATE_HOME",
+                    home.join(".local/state"),
+                );
+                crate::test_env_guards::set_var_unchecked(
+                    "PACKSET_URL",
+                    format!("http://127.0.0.1:{port}"),
+                );
+                crate::test_env_guards::set_var_unchecked("PACKSET_AUTH", "off");
+                crate::test_env_guards::set_var_unchecked("PACKSET_HOME", &pack_home);
+                crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "shared");
+                crate::test_env_guards::remove_var_unchecked(WRITE_SCOPE_KEY);
             }
             let machine = age_keygen(&identity_path());
             let cloud = age_keygen(&cloud_identity_path());
@@ -12766,7 +12742,7 @@ mod tests {
         // SAFETY: the fixture holds the process env lock. The first clone's
         // headed mark stays in the old state directory.
         unsafe {
-            std::env::set_var("XDG_STATE_HOME", &fresh);
+            crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", &fresh);
         }
         for root in [&fix.root, &other] {
             let said = import(root, &fix.scope()).unwrap();
@@ -13197,9 +13173,9 @@ mod tests {
         std::os::unix::fs::symlink(fix.dir.join("home"), &home).unwrap();
         // SAFETY: the fixture holds the process env lock.
         unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::remove_var("XDG_CONFIG_HOME");
-            std::env::remove_var("XDG_STATE_HOME");
+            crate::test_env_guards::set_var_unchecked("HOME", &home);
+            crate::test_env_guards::remove_var_unchecked("XDG_CONFIG_HOME");
+            crate::test_env_guards::remove_var_unchecked("XDG_STATE_HOME");
         }
         for root in [fix.root.clone(), parent.join("reader"), worktree] {
             let said = import(&root, &scope).unwrap();

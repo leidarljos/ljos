@@ -284,6 +284,10 @@ static PINNED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 /// the seat's env file already names a root, or when vissue's own choice
 /// is the tracker. `ljos-mcp` pins before it loads that file, and a root
 /// named there is the one it means.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the pinned tracker must reach vissue child processes"
+)]
 pub fn pin_root() {
     if ["ISSUE_ROOT", "VISSUE_ROOT"]
         .iter()
@@ -428,6 +432,10 @@ fn issue_file(path: &Path) -> bool {
 
 /// Drop a pin that sits in a product checkout, so vissue does not write
 /// there because this process named it.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a product checkout must not inherit a root pinned by ljos"
+)]
 fn drop_pin_inside_product() {
     let pinned = PINNED
         .lock()
@@ -558,6 +566,10 @@ pub fn aim_tracker() -> Result<(), String> {
 /// # Errors
 ///
 /// As [`aim_tracker`].
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the selected tracker must reach vissue child processes"
+)]
 pub fn aim_tracker_from(here: &Path) -> Result<(), String> {
     drop_pin_inside_product();
     let (root, guessed) = root_vissue_would_use(here);
@@ -782,11 +794,11 @@ mod tests {
         committed_tracker(&root, "", "Work");
         assert!(!is_tracker(&root), "no Software/ and no VISSUE_PREFIX");
         let before = std::env::var_os("VISSUE_PREFIX");
-        std::env::set_var("VISSUE_PREFIX", "Work");
+        crate::test_env_guards::set_var("VISSUE_PREFIX", "Work");
         let taken = is_tracker(&root);
         match before {
-            Some(v) => std::env::set_var("VISSUE_PREFIX", v),
-            None => std::env::remove_var("VISSUE_PREFIX"),
+            Some(v) => crate::test_env_guards::set_var("VISSUE_PREFIX", v),
+            None => crate::test_env_guards::remove_var("VISSUE_PREFIX"),
         }
         assert!(taken);
     }
@@ -836,15 +848,15 @@ mod tests {
             std::env::var_os("ISSUE_ROOT"),
             std::env::var_os("VISSUE_CONFIG"),
         );
-        std::env::set_var("XDG_DATA_HOME", product.join("data"));
-        std::env::remove_var("VISSUE_ROOT");
-        std::env::remove_var("ISSUE_ROOT");
-        std::env::remove_var("VISSUE_CONFIG");
+        crate::test_env_guards::set_var("XDG_DATA_HOME", product.join("data"));
+        crate::test_env_guards::remove_var("VISSUE_ROOT");
+        crate::test_env_guards::remove_var("ISSUE_ROOT");
+        crate::test_env_guards::remove_var("VISSUE_CONFIG");
         let err = aim_tracker_from(&product).unwrap_err();
         let named = std::env::var("VISSUE_ROOT").ok();
         let restore = |key: &str, value: Option<std::ffi::OsString>| match value {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
+            Some(value) => crate::test_env_guards::set_var(key, value),
+            None => crate::test_env_guards::remove_var(key),
         };
         restore("XDG_DATA_HOME", saved.0);
         restore("VISSUE_ROOT", saved.1);
@@ -886,22 +898,22 @@ mod tests {
             std::env::var_os("ISSUE_ROOT"),
             std::env::var_os("VISSUE_CONFIG"),
         );
-        std::env::remove_var("VISSUE_ROOT");
-        std::env::remove_var("ISSUE_ROOT");
-        std::env::set_var("VISSUE_CONFIG", &cfg);
+        crate::test_env_guards::remove_var("VISSUE_ROOT");
+        crate::test_env_guards::remove_var("ISSUE_ROOT");
+        crate::test_env_guards::set_var("VISSUE_CONFIG", &cfg);
         let aimed = aim_tracker_from(&product);
         let set = std::env::var("VISSUE_ROOT").ok();
         match saved.0 {
-            Some(value) => std::env::set_var("VISSUE_ROOT", value),
-            None => std::env::remove_var("VISSUE_ROOT"),
+            Some(value) => crate::test_env_guards::set_var("VISSUE_ROOT", value),
+            None => crate::test_env_guards::remove_var("VISSUE_ROOT"),
         }
         match saved.1 {
-            Some(value) => std::env::set_var("ISSUE_ROOT", value),
-            None => std::env::remove_var("ISSUE_ROOT"),
+            Some(value) => crate::test_env_guards::set_var("ISSUE_ROOT", value),
+            None => crate::test_env_guards::remove_var("ISSUE_ROOT"),
         }
         match saved.2 {
-            Some(value) => std::env::set_var("VISSUE_CONFIG", value),
-            None => std::env::remove_var("VISSUE_CONFIG"),
+            Some(value) => crate::test_env_guards::set_var("VISSUE_CONFIG", value),
+            None => crate::test_env_guards::remove_var("VISSUE_CONFIG"),
         }
         assert!(aimed.is_ok(), "{aimed:?}");
         assert_eq!(set.as_deref(), Some(tracker.to_str().unwrap()));
@@ -923,8 +935,8 @@ mod tests {
     fn restore_tracker_env(saved: [(&'static str, Option<std::ffi::OsString>); 5]) {
         for (key, value) in saved {
             match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
+                Some(value) => crate::test_env_guards::set_var(key, value),
+                None => crate::test_env_guards::remove_var(key),
             }
         }
     }
@@ -937,7 +949,7 @@ mod tests {
             "VISSUE_PREFIX",
             "LJOS_TRACKER_REMOTE",
         ] {
-            std::env::remove_var(key);
+            crate::test_env_guards::remove_var(key);
         }
     }
 
@@ -952,7 +964,7 @@ mod tests {
         std::fs::write(root.join("README"), "tracker\n").unwrap();
         let saved = saved_tracker_env();
         clear_tracker_env();
-        std::env::set_var("VISSUE_ROOT", &root);
+        crate::test_env_guards::set_var("VISSUE_ROOT", &root);
         let found = product_checkout(&root);
         restore_tracker_env(saved);
         assert_eq!(found, None);
@@ -970,12 +982,12 @@ mod tests {
         let saved_data = std::env::var_os("XDG_DATA_HOME");
         let saved = saved_tracker_env();
         clear_tracker_env();
-        std::env::set_var("XDG_DATA_HOME", &data);
+        crate::test_env_guards::set_var("XDG_DATA_HOME", &data);
         let found = product_checkout(&root);
         restore_tracker_env(saved);
         match saved_data {
-            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-            None => std::env::remove_var("XDG_DATA_HOME"),
+            Some(value) => crate::test_env_guards::set_var("XDG_DATA_HOME", value),
+            None => crate::test_env_guards::remove_var("XDG_DATA_HOME"),
         }
         assert_eq!(found, None);
     }
@@ -1041,17 +1053,17 @@ mod tests {
             std::env::var_os("ISSUE_ROOT"),
             std::env::var_os("VISSUE_CONFIG"),
         );
-        std::env::set_var("HOME", dir.path());
-        std::env::set_var("XDG_CONFIG_HOME", dir.path().join(".config"));
-        std::env::remove_var("VISSUE_ROOT");
-        std::env::remove_var("ISSUE_ROOT");
-        std::env::remove_var("VISSUE_CONFIG");
+        crate::test_env_guards::set_var("HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_CONFIG_HOME", dir.path().join(".config"));
+        crate::test_env_guards::remove_var("VISSUE_ROOT");
+        crate::test_env_guards::remove_var("ISSUE_ROOT");
+        crate::test_env_guards::remove_var("VISSUE_CONFIG");
         let missing = missing_tracker_line();
-        std::env::set_var("VISSUE_ROOT", dir.path());
+        crate::test_env_guards::set_var("VISSUE_ROOT", dir.path());
         let named = missing_tracker_line();
         let restore = |key: &str, value: Option<std::ffi::OsString>| match value {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
+            Some(value) => crate::test_env_guards::set_var(key, value),
+            None => crate::test_env_guards::remove_var(key),
         };
         restore("HOME", saved.0);
         restore("XDG_CONFIG_HOME", saved.1);

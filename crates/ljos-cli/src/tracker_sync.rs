@@ -284,10 +284,10 @@ mod tests {
 
     fn isolate(root: &Path) {
         unsafe {
-            std::env::set_var("VISSUE_ROOT", root);
-            std::env::remove_var("ISSUE_ROOT");
-            std::env::remove_var("LJOS_TRACKER_GIT");
-            std::env::set_var("PACKSET_URL", "off");
+            crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root);
+            crate::test_env_guards::remove_var_unchecked("ISSUE_ROOT");
+            crate::test_env_guards::remove_var_unchecked("LJOS_TRACKER_GIT");
+            crate::test_env_guards::set_var_unchecked("PACKSET_URL", "off");
         }
     }
 
@@ -326,12 +326,12 @@ mod tests {
             "{both}"
         );
 
-        unsafe { std::env::set_var("LJOS_TRACKER_GIT", "off") };
+        unsafe { crate::test_env_guards::set_var_unchecked("LJOS_TRACKER_GIT", "off") };
         let off = super::tracker_sync_line().unwrap();
         assert!(off.contains("1 unpushed"), "{off}");
         assert!(!off.contains("uncommitted"), "{off}");
 
-        unsafe { std::env::remove_var("LJOS_TRACKER_GIT") };
+        unsafe { crate::test_env_guards::remove_var_unchecked("LJOS_TRACKER_GIT") };
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "edits"]);
         git(&root, &["push", "-q"]);
@@ -371,7 +371,7 @@ warn\ttickets\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted iss
         let _ = origin;
 
         git(&root, &["commit", "-q", "--allow-empty", "-m", "held"]);
-        unsafe { std::env::set_var("LJOS_TRACKER_GIT", "commit") };
+        unsafe { crate::test_env_guards::set_var_unchecked("LJOS_TRACKER_GIT", "commit") };
         assert!(super::push_leftover().is_empty());
         let still = crate::git_cmd()
             .arg("-C")

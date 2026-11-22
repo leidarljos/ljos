@@ -408,6 +408,10 @@ fn same_env(a: &Job, b: &Job) -> bool {
 
 /// Set the variables of [`PER_CALL`] and the payload's session as the
 /// call that left `job` had them.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the queue worker must restore the queued call environment"
+)]
 fn wear_call(job: &Job) {
     crate::with_env_mutation(|| {
         for key in PER_CALL {

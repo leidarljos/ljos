@@ -6,16 +6,16 @@ fn review_env() -> (EnvLock, tempfile::TempDir) {
     let lock = test_env_lock();
     let dir = tempfile::TempDir::new().unwrap();
     unsafe {
-        std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
-        std::env::set_var("HOME", dir.path());
-        std::env::set_var("LJOS_GUARD", "on");
-        std::env::set_var("LJOS_HOLD", "rohit");
-        std::env::set_var("LJOS_SEAT", "claude");
-        std::env::set_var("PACKSET_URL", "off");
-        std::env::set_var("PACKSET_WORKSPACE", "seat-a");
-        std::env::set_var("LJOS_USER_RULES_SYNC", "off");
+        crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", dir.path().join("config"));
+        crate::test_env_guards::set_var_unchecked("HOME", dir.path());
+        crate::test_env_guards::set_var_unchecked("LJOS_GUARD", "on");
+        crate::test_env_guards::set_var_unchecked("LJOS_HOLD", "rohit");
+        crate::test_env_guards::set_var_unchecked("LJOS_SEAT", "claude");
+        crate::test_env_guards::set_var_unchecked("PACKSET_URL", "off");
+        crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "seat-a");
+        crate::test_env_guards::set_var_unchecked("LJOS_USER_RULES_SYNC", "off");
         for key in ["LJOS_MCP_CONFIG", "CLAUDE_CONFIG_DIR", "CODEX_HOME"] {
-            std::env::remove_var(key);
+            crate::test_env_guards::remove_var_unchecked(key);
         }
     }
     PERSON_AT_TERMINAL.with(|p| p.set(true));

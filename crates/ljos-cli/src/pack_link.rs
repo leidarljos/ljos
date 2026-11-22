@@ -2422,7 +2422,7 @@ mod tests {
     fn a_search_reads_the_port_owner_once_for_each_url() {
         let _g = crate::tests::env_guard();
         // SAFETY: under the lock every environment-reading test takes.
-        unsafe { std::env::remove_var("LJOS_IN_HOOK") };
+        unsafe { crate::test_env_guards::remove_var_unchecked("LJOS_IN_HOOK") };
         let (url, other) = ("http://127.0.0.1:9", "http://127.0.0.1:10");
         let start = reads();
         foreign(url);
@@ -2735,12 +2735,12 @@ mod tests {
     fn quiet_pack() -> tempfile::TempDir {
         let home = tempfile::tempdir().unwrap();
         unsafe {
-            std::env::remove_var("PACKSET_TOKEN");
-            std::env::remove_var("PACKSET_TOKEN_FILE");
-            std::env::remove_var("PACKSET_TIMEOUT_MS");
-            std::env::remove_var("PACKSET_WORKSPACE");
-            std::env::remove_var("LJOS_IN_HOOK");
-            std::env::set_var("PACKSET_HOME", home.path());
+            crate::test_env_guards::remove_var_unchecked("PACKSET_TOKEN");
+            crate::test_env_guards::remove_var_unchecked("PACKSET_TOKEN_FILE");
+            crate::test_env_guards::remove_var_unchecked("PACKSET_TIMEOUT_MS");
+            crate::test_env_guards::remove_var_unchecked("PACKSET_WORKSPACE");
+            crate::test_env_guards::remove_var_unchecked("LJOS_IN_HOOK");
+            crate::test_env_guards::set_var_unchecked("PACKSET_HOME", home.path());
         }
         home
     }
@@ -2838,8 +2838,8 @@ mod tests {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         unsafe {
-            std::env::set_var("PACKSET_TIMEOUT_MS", "45000");
-            std::env::set_var("LJOS_MCP_TIMEOUT", "60");
+            crate::test_env_guards::set_var_unchecked("PACKSET_TIMEOUT_MS", "45000");
+            crate::test_env_guards::set_var_unchecked("LJOS_MCP_TIMEOUT", "60");
         }
         let _bound = crate::tool_bound::arm(std::time::Duration::from_secs(60));
         let (client, seen) = serve(|_, _| (200, r#"{"hits":[]}"#.into(), None));
@@ -3027,7 +3027,7 @@ mod tests {
     fn a_search_asks_a_busy_writer_again_and_then_reads() {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
-        unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "seat") };
         let _retry = super::BusyRetry::enter();
         let (client, seen) = busy_then_hit(3);
         let started = std::time::Instant::now();
@@ -3056,7 +3056,7 @@ mod tests {
     fn a_search_that_stays_busy_stops_inside_the_budget() {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
-        unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "seat") };
         let _retry = super::BusyRetry::enter();
         let (client, seen) = serve(|_, req| {
             if req.lines().next().unwrap_or("").contains("GET /v1/search") {
@@ -3127,7 +3127,7 @@ mod tests {
     fn a_search_waits_out_retry_after() {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
-        unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "seat") };
         let _retry = super::BusyRetry::enter();
         let (client, seen) = serve(|n, req| {
             let search = req.lines().next().unwrap_or("").contains("GET /v1/search");
@@ -3166,7 +3166,7 @@ mod tests {
     fn a_search_waits_out_retry_ms() {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
-        unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "seat") };
         let _retry = super::BusyRetry::enter();
         let (client, seen) = serve(|n, req| {
             let search = req.lines().next().unwrap_or("").contains("GET /v1/search");
@@ -3263,14 +3263,19 @@ mod tests {
             fn drop(&mut self) {
                 unsafe {
                     match &self.0 {
-                        Some(value) => std::env::set_var("LJOS_SEARCH_BUSY_WAIT", value),
-                        None => std::env::remove_var("LJOS_SEARCH_BUSY_WAIT"),
+                        Some(value) => crate::test_env_guards::set_var_unchecked(
+                            "LJOS_SEARCH_BUSY_WAIT",
+                            value,
+                        ),
+                        None => {
+                            crate::test_env_guards::remove_var_unchecked("LJOS_SEARCH_BUSY_WAIT")
+                        }
                     }
                 }
             }
         }
         let _restore = Restore(std::env::var_os("LJOS_SEARCH_BUSY_WAIT"));
-        unsafe { std::env::set_var("LJOS_SEARCH_BUSY_WAIT", "0") };
+        unsafe { crate::test_env_guards::set_var_unchecked("LJOS_SEARCH_BUSY_WAIT", "0") };
         let _retry = super::BusyRetry::enter();
         let (client, seen) = serve(|_, req| {
             if req.lines().next().unwrap_or("").contains("GET /v1/search") {

@@ -123,6 +123,10 @@ fn remember_skip(dir: &Path) {
 /// configuration names, when it is not inside a product checkout, is
 /// named on the environment so the command still writes there. Staying
 /// in `here` is what lets a later stat wait.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "parking the process must preserve its tracker for child commands"
+)]
 fn park(here: &Path, move_process_cwd: bool) {
     if !move_process_cwd {
         return;

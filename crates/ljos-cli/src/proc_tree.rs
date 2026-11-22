@@ -2721,7 +2721,7 @@ mod tests {
         let _guard = crate::test_env_lock();
         let home = tempfile::tempdir().unwrap();
         // SAFETY: `test_env_lock` puts HOME back when it drops.
-        unsafe { std::env::set_var("HOME", home.path()) };
+        unsafe { crate::test_env_guards::set_var_unchecked("HOME", home.path()) };
         let opener = Proc {
             pid: 1,
             start: 1,
@@ -2768,9 +2768,9 @@ mod tests {
         // SAFETY: this test holds `test_env_lock`, which puts the variables
         // back when it drops. Nothing else on this thread reads them.
         unsafe {
-            std::env::set_var("HOME", home.path());
-            std::env::set_var("TMPDIR", &tmpdir);
-            std::env::remove_var("XDG_RUNTIME_DIR");
+            crate::test_env_guards::set_var_unchecked("HOME", home.path());
+            crate::test_env_guards::set_var_unchecked("TMPDIR", &tmpdir);
+            crate::test_env_guards::remove_var_unchecked("XDG_RUNTIME_DIR");
         }
         let opener = Proc {
             pid: 1,
@@ -2792,8 +2792,8 @@ mod tests {
             "the hook did not keep a copy outside XDG_RUNTIME_DIR"
         );
         unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", reader.path());
-            std::env::set_var("HOME", writer.path().join("other-home"));
+            crate::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", reader.path());
+            crate::test_env_guards::set_var_unchecked("HOME", writer.path().join("other-home"));
         }
         assert!(
             !reader.path().join("ljos/tool-calls").exists(),
@@ -2812,8 +2812,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let run = tempfile::tempdir().unwrap();
         unsafe {
-            std::env::set_var("HOME", home.path());
-            std::env::set_var("XDG_RUNTIME_DIR", run.path());
+            crate::test_env_guards::set_var_unchecked("HOME", home.path());
+            crate::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", run.path());
         }
         // A broken sentinel means a record should exist; with no records, the
         // error names every location that was checked.

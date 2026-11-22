@@ -36,11 +36,11 @@ impl Drop for Guard {
         let keep: Vec<_> = self.saved.iter().map(|(k, _)| k.clone()).collect();
         for (k, _) in std::env::vars_os() {
             if !keep.iter().any(|have| have == &k) {
-                std::env::remove_var(&k);
+                ljos_cli::test_env_guards::remove_var(&k);
             }
         }
         for (k, v) in &self.saved {
-            std::env::set_var(k, v);
+            ljos_cli::test_env_guards::set_var(k, v);
         }
     }
 }
@@ -94,10 +94,10 @@ fn git(dir: &Path, args: &[&str]) -> String {
 fn isolate_git(root: &Path) {
     let cfg = root.join("gitconfig");
     fs::write(&cfg, b"").unwrap();
-    std::env::set_var("GIT_CONFIG_GLOBAL", &cfg);
-    std::env::set_var("GIT_CONFIG_SYSTEM", &cfg);
-    std::env::set_var("GIT_TERMINAL_PROMPT", "0");
-    std::env::set_var("PATH", "/usr/bin:/bin");
+    ljos_cli::test_env_guards::set_var("GIT_CONFIG_GLOBAL", &cfg);
+    ljos_cli::test_env_guards::set_var("GIT_CONFIG_SYSTEM", &cfg);
+    ljos_cli::test_env_guards::set_var("GIT_TERMINAL_PROMPT", "0");
+    ljos_cli::test_env_guards::set_var("PATH", "/usr/bin:/bin");
 }
 
 fn executable(path: &Path, body: &str) {
@@ -136,17 +136,17 @@ fn seat_env(root: &Path) -> (PathBuf, PathBuf) {
     }
     fs::write(rel.join("SHA256SUMS"), sums).unwrap();
     isolate_git(root);
-    std::env::set_var("HOME", &home);
+    ljos_cli::test_env_guards::set_var("HOME", &home);
     // Not under `/.config/ljos/`, so a write to the push allowlist is the
     // cloud guard's warning and not the seat-path refusal.
-    std::env::set_var("XDG_CONFIG_HOME", &xdg);
-    std::env::set_var("LJOS_RELEASE_DIR", &rel);
-    std::env::remove_var("LJOS_BIN_DIR");
-    std::env::remove_var("LJOS_TRACKER_REMOTE");
-    std::env::remove_var("LJOS_TRACKER_GIT");
-    std::env::remove_var("LJOS_TRACKER_DIR");
-    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
-    std::env::set_var("LJOS_GUARD", "on");
+    ljos_cli::test_env_guards::set_var("XDG_CONFIG_HOME", &xdg);
+    ljos_cli::test_env_guards::set_var("LJOS_RELEASE_DIR", &rel);
+    ljos_cli::test_env_guards::remove_var("LJOS_BIN_DIR");
+    ljos_cli::test_env_guards::remove_var("LJOS_TRACKER_REMOTE");
+    ljos_cli::test_env_guards::remove_var("LJOS_TRACKER_GIT");
+    ljos_cli::test_env_guards::remove_var("LJOS_TRACKER_DIR");
+    ljos_cli::test_env_guards::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    ljos_cli::test_env_guards::set_var("LJOS_GUARD", "on");
     for key in [
         "CURSOR_AGENT",
         "CLAUDECODE",
@@ -165,7 +165,7 @@ fn seat_env(root: &Path) -> (PathBuf, PathBuf) {
         "all_proxy",
         "ALL_PROXY",
     ] {
-        std::env::remove_var(key);
+        ljos_cli::test_env_guards::remove_var(key);
     }
     (home, xdg)
 }
@@ -194,7 +194,7 @@ fn clear_ids() {
         "LJOS_SEAT_KEY",
         "VISSUE_AGENT",
     ] {
-        std::env::remove_var(key);
+        ljos_cli::test_env_guards::remove_var(key);
     }
 }
 
@@ -307,12 +307,12 @@ fn cloud_up_sets_no_hooks_path() {
     let root = tempfile::tempdir().unwrap();
     let (home, xdg) = seat_env(root.path());
     clear_ids();
-    std::env::set_var("LJOS_SEAT", "probe");
+    ljos_cli::test_env_guards::set_var("LJOS_SEAT", "probe");
     // The global level is the home's own `.gitconfig`, as on a fresh machine.
-    std::env::remove_var("GIT_CONFIG_GLOBAL");
+    ljos_cli::test_env_guards::remove_var("GIT_CONFIG_GLOBAL");
     let system = root.path().join("system-gitconfig");
     fs::write(&system, b"").unwrap();
-    std::env::set_var("GIT_CONFIG_SYSTEM", &system);
+    ljos_cli::test_env_guards::set_var("GIT_CONFIG_SYSTEM", &system);
     let (_origin, repo) = bare_repo(root.path(), "seat");
     std::env::set_current_dir(&repo).unwrap();
     let said = ljos_cli::cloud::up(false).unwrap();
@@ -386,7 +386,7 @@ fn cloud_up_takes_back_the_hooks_an_earlier_cloud_up_set() {
     let root = tempfile::tempdir().unwrap();
     let (_home, xdg) = seat_env(root.path());
     clear_ids();
-    std::env::set_var("LJOS_SEAT", "probe");
+    ljos_cli::test_env_guards::set_var("LJOS_SEAT", "probe");
     let global = root.path().join("gitconfig");
     let (_origin, repo) = bare_repo(root.path(), "seat");
     let ours = xdg.join("ljos/hooks");
@@ -538,7 +538,7 @@ fn shell_guard_warns_when_a_line_changes_the_hooks() {
     let root = tempfile::tempdir().unwrap();
     let (home, xdg) = seat_env(root.path());
     clear_ids();
-    std::env::set_var("LJOS_SEAT", "probe");
+    ljos_cli::test_env_guards::set_var("LJOS_SEAT", "probe");
     ljos_cli::cloud::up(false).unwrap();
     let (_origin, repo) = bare_repo(root.path(), "seat");
     let retired = xdg.join("ljos/hooks/pre-push");
@@ -636,7 +636,7 @@ fn the_hook_allows_a_hooks_change_and_prints_the_warning() {
     let root = tempfile::tempdir().unwrap();
     let (_home, _xdg) = seat_env(root.path());
     clear_ids();
-    std::env::set_var("LJOS_SEAT", "probe");
+    ljos_cli::test_env_guards::set_var("LJOS_SEAT", "probe");
     ljos_cli::cloud::up(false).unwrap();
     let (_origin, repo) = bare_repo(root.path(), "seat");
     let payload = serde_json::json!({
@@ -762,7 +762,7 @@ fn a_write_to_the_git_hooks_directory_runs_named_like_a_runner_hook() {
     }
 
     let data = root.path().join("data");
-    std::env::set_var("XDG_DATA_HOME", &data);
+    ljos_cli::test_env_guards::set_var("XDG_DATA_HOME", &data);
     named("touch $XDG_DATA_HOME/ljos/git-hooks/pre-push");
     named("mkdir -p ${XDG_DATA_HOME}/ljos/git-hooks/x");
     named(&format!(
@@ -772,14 +772,14 @@ fn a_write_to_the_git_hooks_directory_runs_named_like_a_runner_hook() {
     allow("touch $XDG_DATA_HOME/ljos/other");
     allow("touch ~/.local/share/ljos/other");
     named("touch ~/.local/share/ljos/git-hooks/pre-push");
-    std::env::remove_var("XDG_DATA_HOME");
+    ljos_cli::test_env_guards::remove_var("XDG_DATA_HOME");
 
     let custom = root.path().join("custom-hooks");
-    std::env::set_var("LJOS_GIT_HOOKS", &custom);
+    ljos_cli::test_env_guards::set_var("LJOS_GIT_HOOKS", &custom);
     named("touch $LJOS_GIT_HOOKS/pre-push");
     named(&format!("mkdir -p {}", custom.join("x").display()));
     allow("touch /tmp/other-hooks/pre-push");
-    std::env::remove_var("LJOS_GIT_HOOKS");
+    ljos_cli::test_env_guards::remove_var("LJOS_GIT_HOOKS");
 
     let cfg = root.path().join("gitconfig");
     fs::write(&cfg, "[core]\n\thooksPath = /tmp/not-the-ljos-hooks\n").unwrap();
@@ -796,7 +796,7 @@ fn a_write_to_the_git_hooks_directory_runs_named_like_a_runner_hook() {
     allow("touch /tmp/not-the-ljos-hooks/pre-push");
     fs::write(&cfg, "").unwrap();
 
-    std::env::set_var("LJOS_SEAT", "probe");
+    ljos_cli::test_env_guards::set_var("LJOS_SEAT", "probe");
     ljos_cli::cloud::up(false).unwrap();
     for line in [
         "printf x > ~/.gitconfig",

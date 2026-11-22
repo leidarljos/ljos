@@ -1822,11 +1822,11 @@ mod tests {
         write_lane(&from, "lane-b", &["shared kiln", "beta kiln"]);
         // SAFETY: test_env_lock restores the process environment.
         unsafe {
-            std::env::set_var("VISSUE_ROOT", dir.path());
-            std::env::set_var("LJOS_SEAT", "box");
-            std::env::set_var("LJOS_TRACKER_GIT", "off");
-            std::env::set_var("PACKSET_URL", "off");
-            std::env::set_var("LJOS_SEARCH_WAIT", "30");
+            crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", dir.path());
+            crate::test_env_guards::set_var_unchecked("LJOS_SEAT", "box");
+            crate::test_env_guards::set_var_unchecked("LJOS_TRACKER_GIT", "off");
+            crate::test_env_guards::set_var_unchecked("PACKSET_URL", "off");
+            crate::test_env_guards::set_var_unchecked("LJOS_SEARCH_WAIT", "30");
         }
         let store = SeatStore::open("box").unwrap();
         let first = pull(&store, &from).unwrap();
@@ -1857,8 +1857,8 @@ mod tests {
             }
         });
         unsafe {
-            std::env::set_var("PACKSET_URL", format!("http://{addr}"));
-            std::env::set_var("PACKSET_AUTH", "off");
+            crate::test_env_guards::set_var_unchecked("PACKSET_URL", format!("http://{addr}"));
+            crate::test_env_guards::set_var_unchecked("PACKSET_AUTH", "off");
         }
         reset_mesh_locks();
         crate::memory_port::reset_work_counts();

@@ -126,8 +126,8 @@ fn several_ids_are_accepted_once_and_the_rerun_matches() {
     seat.plant("cccc3333dddd4444", ALSO, None);
     seat.plant("eeee5555ffff6666", HARD, Some("ada"));
 
-    std::env::set_var("XDG_STATE_HOME", seat.root.path().join("home/.state"));
-    std::env::set_var("LJOS_SEAT", "ada");
+    ljos_cli::test_env_guards::set_var("XDG_STATE_HOME", seat.root.path().join("home/.state"));
+    ljos_cli::test_env_guards::set_var("LJOS_SEAT", "ada");
     let filed = ljos_cli::admit::file_open("File the kiln note before dusk.", "lesson");
     assert!(filed.is_ok(), "{filed:?}");
 

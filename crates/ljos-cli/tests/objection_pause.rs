@@ -54,24 +54,24 @@ impl Tracker {
         let git_cfg = dir.path().join("gitconfig");
         std::fs::write(&git_cfg, "").unwrap();
         unsafe {
-            std::env::set_var("PATH", path);
-            std::env::set_var("HOME", &home);
-            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
-            std::env::set_var("XDG_RUNTIME_DIR", home.join("run"));
-            std::env::set_var("VISSUE_ROOT", &root);
-            std::env::set_var("VISSUE_NO_ROUTE", "1");
-            std::env::set_var("VISSUE_AGENT", "saddle@test");
-            std::env::set_var("LJOS_SEAT", "saddle");
-            std::env::set_var("LJOS_TRACKER_GIT", "off");
-            std::env::set_var("PACKSET_URL", "off");
-            std::env::set_var("GIT_CONFIG_GLOBAL", &git_cfg);
-            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+            ljos_cli::test_env_guards::set_var_unchecked("PATH", path);
+            ljos_cli::test_env_guards::set_var_unchecked("HOME", &home);
+            ljos_cli::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", home.join(".config"));
+            ljos_cli::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", home.join("run"));
+            ljos_cli::test_env_guards::set_var_unchecked("VISSUE_ROOT", &root);
+            ljos_cli::test_env_guards::set_var_unchecked("VISSUE_NO_ROUTE", "1");
+            ljos_cli::test_env_guards::set_var_unchecked("VISSUE_AGENT", "saddle@test");
+            ljos_cli::test_env_guards::set_var_unchecked("LJOS_SEAT", "saddle");
+            ljos_cli::test_env_guards::set_var_unchecked("LJOS_TRACKER_GIT", "off");
+            ljos_cli::test_env_guards::set_var_unchecked("PACKSET_URL", "off");
+            ljos_cli::test_env_guards::set_var_unchecked("GIT_CONFIG_GLOBAL", &git_cfg);
+            ljos_cli::test_env_guards::set_var_unchecked("GIT_CONFIG_NOSYSTEM", "1");
             if let Some(text) = config {
                 let path = dir.path().join("ljos.toml");
                 std::fs::write(&path, text).unwrap();
-                std::env::set_var("LJOS_CONFIG", &path);
+                ljos_cli::test_env_guards::set_var_unchecked("LJOS_CONFIG", &path);
             } else {
-                std::env::remove_var("LJOS_CONFIG");
+                ljos_cli::test_env_guards::remove_var_unchecked("LJOS_CONFIG");
             }
         }
         let _ = Command::new("git")
@@ -109,8 +109,8 @@ impl Drop for Tracker {
         for (key, value) in &self._saved {
             unsafe {
                 match value {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
+                    Some(v) => ljos_cli::test_env_guards::set_var_unchecked(key, v),
+                    None => ljos_cli::test_env_guards::remove_var_unchecked(key),
                 }
             }
         }

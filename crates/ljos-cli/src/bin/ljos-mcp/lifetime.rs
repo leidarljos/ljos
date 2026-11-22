@@ -629,11 +629,11 @@ mod tests {
     #[test]
     fn the_drain_outlasts_a_raised_pack_timeout() {
         let previous = std::env::var("PACKSET_TIMEOUT_MS").ok();
-        std::env::set_var("PACKSET_TIMEOUT_MS", "45000");
+        ljos_cli::test_env_guards::set_var("PACKSET_TIMEOUT_MS", "45000");
         let window = settle_window();
         match previous {
-            Some(value) => std::env::set_var("PACKSET_TIMEOUT_MS", value),
-            None => std::env::remove_var("PACKSET_TIMEOUT_MS"),
+            Some(value) => ljos_cli::test_env_guards::set_var("PACKSET_TIMEOUT_MS", value),
+            None => ljos_cli::test_env_guards::remove_var("PACKSET_TIMEOUT_MS"),
         }
         assert!(
             window >= Duration::from_secs(50),

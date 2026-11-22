@@ -19,7 +19,7 @@ const SCRUB: &[&str] = &[
 
 fn scrub() {
     for key in SCRUB {
-        std::env::remove_var(key);
+        ljos_cli::test_env_guards::remove_var(key);
     }
 }
 

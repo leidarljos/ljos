@@ -36,7 +36,7 @@ fn gate_child() {
     ljos_cli::person_key::keep_in_for_this_process(PathBuf::from(dir));
     if let Ok(mark) = std::env::var(CHILD_MARK) {
         // SAFETY: this child runs one test on one thread.
-        unsafe { std::env::set_var(mark, "1") };
+        unsafe { ljos_cli::test_env_guards::set_var_unchecked(mark, "1") };
     }
     let code = match ljos_cli::git_hooks::run_named("pre-push") {
         Ok(()) => {

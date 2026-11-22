@@ -2035,18 +2035,18 @@ mod tests {
         assert!(session_cast_refusal("demo-ind1", "sess-bob-0001", "bob", &own, &family).is_none());
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("VISSUE_ROOT", dir.path());
-        std::env::set_var("LJOS_HARNESS_SESSION", "sess-live-0001");
-        std::env::set_var("LJOS_PROCESS_NONCE", "nonce-live-0001");
+        crate::test_env_guards::set_var("VISSUE_ROOT", dir.path());
+        crate::test_env_guards::set_var("LJOS_HARNESS_SESSION", "sess-live-0001");
+        crate::test_env_guards::set_var("LJOS_PROCESS_NONCE", "nonce-live-0001");
         let first = claim_session_ballot("probe-seat-1", "saddle").unwrap();
         let second = claim_session_ballot("probe-seat-1", "other");
         assert!(second.is_ok(), "{second:?}");
         let again = claim_session_ballot("probe-seat-1", "saddle").unwrap_err();
         assert!(again.to_string().contains("already cast"), "{again:#}");
         first.keep();
-        std::env::remove_var("VISSUE_ROOT");
-        std::env::remove_var("LJOS_HARNESS_SESSION");
-        std::env::remove_var("LJOS_PROCESS_NONCE");
+        crate::test_env_guards::remove_var("VISSUE_ROOT");
+        crate::test_env_guards::remove_var("LJOS_HARNESS_SESSION");
+        crate::test_env_guards::remove_var("LJOS_PROCESS_NONCE");
     }
 
     #[test]

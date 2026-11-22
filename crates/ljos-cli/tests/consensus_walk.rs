@@ -29,8 +29,8 @@ fn a_consensus_reading_does_not_pick_the_whole_history() {
         .map(|key| (key, std::env::var_os(key)))
         .collect();
     unsafe {
-        std::env::set_var("PATH", &path);
-        std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
+        ljos_cli::test_env_guards::set_var_unchecked("PATH", &path);
+        ljos_cli::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", dir.path().join("run"));
     }
     let _ = ljos_cli::push_cite_reading(
         "proj-fast",
@@ -41,8 +41,8 @@ fn a_consensus_reading_does_not_pick_the_whole_history() {
     let _ = ljos_cli::protected_push_reading("proj-fast", None);
     for (key, value) in saved {
         match value {
-            Some(value) => unsafe { std::env::set_var(key, value) },
-            None => unsafe { std::env::remove_var(key) },
+            Some(value) => unsafe { ljos_cli::test_env_guards::set_var_unchecked(key, value) },
+            None => unsafe { ljos_cli::test_env_guards::remove_var_unchecked(key) },
         }
     }
     let text = std::fs::read_to_string(&log).unwrap_or_default();

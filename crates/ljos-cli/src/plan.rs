@@ -521,11 +521,11 @@ mod tests {
         let run = dir.path().join("run");
         std::fs::create_dir_all(&run).unwrap();
         unsafe {
-            std::env::set_var("VISSUE_ROOT", &root);
-            std::env::set_var("LJOS_SEAT", "ada");
-            std::env::set_var("XDG_RUNTIME_DIR", &run);
-            std::env::remove_var("LJOS_TRACKER_GIT");
-            std::env::remove_var("ISSUE_ROOT");
+            crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", &root);
+            crate::test_env_guards::set_var_unchecked("LJOS_SEAT", "ada");
+            crate::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", &run);
+            crate::test_env_guards::remove_var_unchecked("LJOS_TRACKER_GIT");
+            crate::test_env_guards::remove_var_unchecked("ISSUE_ROOT");
         }
         let items = [
             "measure the files".to_string(),

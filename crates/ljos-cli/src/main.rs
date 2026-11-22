@@ -4447,6 +4447,10 @@ fn seat_kind(cmd: &Cmd) -> ljos_cli::seat_resolve::Kind {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the hook flag must reach every child started by the hook"
+)]
 fn run_hook(hook: HookArgs) -> Result<()> {
     let HookArgs {
         limit,

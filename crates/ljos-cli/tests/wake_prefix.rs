@@ -21,11 +21,11 @@ impl Drop for Guard {
         let keep: Vec<_> = self.saved.iter().map(|(k, _)| k.clone()).collect();
         for (k, _) in std::env::vars_os() {
             if !keep.iter().any(|have| have == &k) {
-                std::env::remove_var(&k);
+                ljos_cli::test_env_guards::remove_var(&k);
             }
         }
         for (k, v) in &self.saved {
-            std::env::set_var(k, v);
+            ljos_cli::test_env_guards::set_var(k, v);
         }
     }
 }
@@ -34,8 +34,8 @@ impl Drop for Guard {
 fn a_prefix_wake_matches_longer_run_seats() {
     let _g = Guard::new();
     let dir = tempfile::tempdir().unwrap();
-    std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
-    std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
+    ljos_cli::test_env_guards::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+    ljos_cli::test_env_guards::set_var("XDG_STATE_HOME", dir.path().join("state"));
 
     let set = ljos_cli::wake::set_webhook("ljosbot-review-", "http://127.0.0.1:9/hook", None, None)
         .expect("set prefix");

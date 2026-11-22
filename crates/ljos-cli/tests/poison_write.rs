@@ -686,7 +686,7 @@ fn with_held_issue(node: &str, body: impl FnOnce()) {
     let prev = std::env::var_os("XDG_RUNTIME_DIR");
     // SAFETY: restored before this function returns. The other tests in
     // this file spawn children with their own environment.
-    unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+    unsafe { ljos_cli::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", dir.path()) };
     let ljos = dir.path().join("ljos");
     std::fs::create_dir_all(&ljos).unwrap();
     let holder = ljos_cli::holder_name();
@@ -697,8 +697,10 @@ fn with_held_issue(node: &str, body: impl FnOnce()) {
     .unwrap();
     body();
     match prev {
-        Some(prev) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", prev) },
-        None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        Some(prev) => unsafe {
+            ljos_cli::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", prev)
+        },
+        None => unsafe { ljos_cli::test_env_guards::remove_var_unchecked("XDG_RUNTIME_DIR") },
     }
 }
 

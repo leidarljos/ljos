@@ -1,0 +1,4 @@
+disallowed-methods = [
+    { path = "std::env::set_var", reason = "use the test env guards" },
+    { path = "std::env::remove_var", reason = "use the test env guards" },
+]

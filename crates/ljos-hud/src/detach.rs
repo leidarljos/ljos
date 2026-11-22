@@ -128,13 +128,16 @@ mod tests {
         let _listener = UnixListener::bind(&path).unwrap();
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var(crate::summon::SOCKET_ENV, path.to_str().unwrap());
+            crate::test_env_guards::set_var_unchecked(
+                crate::summon::SOCKET_ENV,
+                path.to_str().unwrap(),
+            );
         }
         let code = start_detached(&base()).unwrap();
         assert_eq!(code, 0);
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::remove_var(crate::summon::SOCKET_ENV);
+            crate::test_env_guards::remove_var_unchecked(crate::summon::SOCKET_ENV);
         }
         drop(_listener);
     }

@@ -118,9 +118,9 @@ impl SeatEnv {
             .collect();
         unsafe {
             for (key, value) in pairs {
-                std::env::set_var(key, value);
+                ljos_cli::test_env_guards::set_var_unchecked(key, value);
             }
-            std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+            ljos_cli::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", runtime.path());
         }
         Self {
             saved,
@@ -134,8 +134,8 @@ impl Drop for SeatEnv {
         for (key, value) in &self.saved {
             unsafe {
                 match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
+                    Some(value) => ljos_cli::test_env_guards::set_var_unchecked(key, value),
+                    None => ljos_cli::test_env_guards::remove_var_unchecked(key),
                 }
             }
         }

@@ -280,6 +280,10 @@ pub fn schedule_finish(input: &str, session: Option<&str>) {
 /// # Errors
 ///
 /// The job file cannot be read.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the detached finish is no longer a hook process"
+)]
 pub fn run_finish_job(path: &std::path::Path) -> anyhow::Result<()> {
     // This process is not the runner's hook. A pack read may take its
     // own timeout. The wall budget stays off.
