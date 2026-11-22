@@ -49466,15 +49466,20 @@ pub struct TrackerAct {
 }
 
 /// The subject `persist_tracker` writes, or `None` when it names no seat.
+///
+/// The seat follows the first ` by `. A batch commit's ` with N held` is
+/// dropped: it comes before ` by SEAT`, or after the seat in older
+/// history.
 #[must_use]
 pub fn parse_tracker_commit(message: &str) -> Option<TrackerAct> {
-    let rest = message.trim().strip_prefix("chore(issues): ")?;
-    let (body, seat) = rest.rsplit_once(" by ")?;
-    let seat = seat.trim();
+    let subject = message.trim().lines().next()?;
+    let rest = subject.strip_prefix("chore(issues): ")?;
+    let (body, seat) = rest.split_once(" by ")?;
+    let seat = without_held_count(seat.trim());
     if seat.is_empty() || seat.contains(char::is_whitespace) {
         return None;
     }
-    let (issue, verb) = body.split_once(' ')?;
+    let (issue, verb) = without_held_count(body).split_once(' ')?;
     let verb = verb.trim();
     if issue.is_empty() || verb.is_empty() {
         return None;
@@ -49484,6 +49489,16 @@ pub fn parse_tracker_commit(message: &str) -> Option<TrackerAct> {
         verb: verb.to_string(),
         seat: seat.to_string(),
     })
+}
+
+/// `text` without a trailing ` with N held`.
+fn without_held_count(text: &str) -> &str {
+    text.rsplit_once(" with ")
+        .filter(|(_, tail)| {
+            tail.strip_suffix(" held")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .map_or(text, |(head, _)| head)
 }
 
 /// The words of a logbook line a reader matches on. A `Note:` line gives
@@ -51666,7 +51681,9 @@ fn write_tracker_batch(root: &Path, batch: &TrackerBatch) -> std::io::Result<()>
 }
 
 /// `message` with the writes in `held` named in the body. With no write
-/// of its own (`alone`), the subject counts the held writes.
+/// of its own (`alone`), the subject counts the held writes; with one, the
+/// count goes before ` by SEAT`, so the subject still ends with the seat
+/// [`parse_tracker_commit`] reads.
 fn batch_message(message: &str, alone: bool, held: &[String], seat: &str) -> String {
     if held.is_empty() {
         return message.to_string();
@@ -51675,7 +51692,10 @@ fn batch_message(message: &str, alone: bool, held: &[String], seat: &str) -> Str
     let subject = if alone {
         format!("chore(issues): {} held writes by {seat}", held.len())
     } else {
-        format!("{subject} with {} held", held.len())
+        match subject.strip_suffix(&format!(" by {seat}")) {
+            Some(head) => format!("{head} with {} held by {seat}", held.len()),
+            None => subject.to_string(),
+        }
     };
     let mut out = format!("{subject}\n\n");
     if !body.is_empty() {
@@ -61479,7 +61499,7 @@ mod tests {
         assert_eq!(commit_count(root), seeded + 2);
         let body = git_text(root, &["log", "-1", "--format=%B"]);
         assert!(
-            body.starts_with("chore(issues): probe-a1b2 claimed by saddle with 20 held\n\n"),
+            body.starts_with("chore(issues): probe-a1b2 claimed with 20 held by saddle\n\n"),
             "{body}"
         );
         assert_eq!(
@@ -61561,7 +61581,55 @@ mod tests {
         let subject = git_text(root, &["log", "-1", "--format=%s"]);
         assert_eq!(
             subject.trim(),
-            "chore(issues): probe-a1b2 noted by saddle with 1 held"
+            "chore(issues): probe-a1b2 noted with 1 held by saddle"
+        );
+        for var in [
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_SEAT",
+            "LJOS_TRACKER_BATCH_SECS",
+        ] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// A claim that carries held notes still names its seat, one spelled
+    /// with a space included, so `ljos log --seat` and the usage table
+    /// count it.
+    #[test]
+    fn a_claim_that_carries_held_notes_still_parses() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let issues = seeded_tracker(root);
+        std::env::set_var("VISSUE_ROOT", root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "Dock Hand");
+        std::env::set_var("LJOS_TRACKER_BATCH_SECS", "600");
+        let layout = vissue_core::Layout::new(root, "Software");
+        vissue_core::ops::note(&layout, "probe-a1b2", "one").unwrap();
+        assert!(persist_tracker("probe-a1b2", "noted").contains("committed"));
+        vissue_core::ops::note(&layout, "probe-a1b2", "two").unwrap();
+        let said = persist_tracker("probe-a1b2", "noted");
+        assert!(said.contains("held"), "{said}");
+        let text = std::fs::read_to_string(&issues).unwrap();
+        std::fs::write(&issues, text.replacen("TODO", "STARTED", 1)).unwrap();
+        let said = persist_tracker("probe-a1b2", "claimed");
+        assert!(said.contains("committed"), "{said}");
+        let subject = git_text(root, &["log", "-1", "--format=%s"]);
+        let log = super::tracker_log(Some("dock-hand")).unwrap();
+        assert!(log.lines().any(|l| l.ends_with(subject.trim())), "{log}");
+        let usage = super::tracker_usage("2000-01-01").unwrap();
+        let row = usage
+            .lines()
+            .find(|l| l.starts_with("dock-hand "))
+            .unwrap_or_default();
+        assert!(row.contains("claimed 1"), "{usage}");
+        assert_eq!(
+            subject.trim(),
+            "chore(issues): probe-a1b2 claimed with 1 held by dock-hand"
         );
         for var in [
             "VISSUE_ROOT",
@@ -63212,6 +63280,17 @@ mod tests {
         assert_eq!(act.verb, "ballot cast");
         assert_eq!(act.seat, "saddle");
         assert!(super::parse_tracker_commit("chore(issues): probe-a1b2 claimed").is_none());
+        for subject in [
+            "chore(issues): probe-a1b2 claimed with 2 held by saddle",
+            "chore(issues): probe-a1b2 claimed by saddle with 2 held",
+        ] {
+            let act = super::parse_tracker_commit(subject).unwrap();
+            assert_eq!(
+                (act.issue.as_str(), act.verb.as_str(), act.seat.as_str()),
+                ("probe-a1b2", "claimed", "saddle"),
+                "{subject}"
+            );
+        }
         let (verb, seat) =
             super::parse_logbook_act("- Noted by saddle [2026-10-16 Fri 10:35]").unwrap();
         assert_eq!((verb.as_str(), seat.as_str()), ("Noted", "saddle"));
