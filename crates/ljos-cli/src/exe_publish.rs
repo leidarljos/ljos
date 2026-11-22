@@ -1344,6 +1344,116 @@ fn put(dir: &Path, tmp: &Path) {
     }
 
     #[test]
+    fn the_site_scan_names_a_hook_opened_through_an_alias_from_outside() {
+        let aliased = r#"
+use std::fs::OpenOptions as Oo;
+use std::fs::File as F;
+fn put(dir: &Path) {
+    let a = Oo::new().write(true).create(true).open(dir.join("pre-push")).unwrap();
+    let b = F::options().append(true).open(dir.join("pre-commit")).unwrap();
+    let c = Oo::new().write(true).open(dir.join("notes.txt")).unwrap();
+}
+"#;
+        assert_eq!(hook_lines(aliased), vec![5, 6]);
+    }
+
+    #[test]
+    fn the_site_scan_names_a_hook_put_by_a_writing_program() {
+        let run = r#"
+use std::process::Command;
+fn put(dir: &Path, tmp: &Path) {
+    Command::new("cp").arg(tmp).arg(dir.join("pre-push")).status().unwrap();
+    Command::new("/bin/mv").arg("--").arg(tmp).arg(dir.join("pre-commit")).status().unwrap();
+    Command::new("install")
+        .args(["-m", "755"])
+        .args([tmp, &dir.join("post-commit")])
+        .status()
+        .unwrap();
+    let mut ln = Command::new("ln");
+    ln.arg("-sf");
+    ln.arg(tmp).arg(dir.join("pre-push"));
+    ln.status().unwrap();
+    Command::new("cp").arg("-t").arg(dir).arg(tmp).status().unwrap();
+    Command::new("cp").arg(tmp).arg(dir.join("notes.txt")).status().unwrap();
+    Command::new("git").arg("hook").arg("run").arg("pre-push").status().unwrap();
+}
+"#;
+        assert_eq!(hook_lines(run), vec![4, 5, 6, 13, 15]);
+    }
+
+    #[test]
+    fn the_site_scan_names_a_hook_written_by_a_macro_from_outside() {
+        let wrapped = r#"
+macro_rules! put {
+    ($path:expr) => {
+        std::fs::write($path, "x").unwrap()
+    };
+}
+macro_rules! outer {
+    ($path:expr) => {
+        put!($path)
+    };
+}
+fn install(dir: &Path) {
+    put!(dir.join("pre-push"));
+    outer!(dir.join("post-commit"));
+    put!(dir.join("notes.txt"));
+    println!("{}", dir.join("pre-push").display());
+}
+"#;
+        assert_eq!(hook_lines(wrapped), vec![13, 14]);
+    }
+
+    #[test]
+    fn the_site_scan_names_a_hook_renamed_by_a_macro_from_outside() {
+        let wrapped = r#"
+macro_rules! mv {
+    ($from:expr, $to:expr) => {
+        std::fs::rename($from, $to).unwrap()
+    };
+}
+fn install(dir: &Path) {
+    mv!(dir.join("pre-push.tmp"), dir.join("pre-push"));
+    mv!(dir.join("a.tmp"), dir.join("notes.txt"));
+}
+"#;
+        assert_eq!(hook_lines(wrapped), vec![8]);
+    }
+
+    #[test]
+    fn the_site_scan_names_a_hook_put_by_libc() {
+        let raw = r#"
+fn put(tmp: &CStr) {
+    let hook = CString::new("hooks/pre-push").unwrap();
+    unsafe { libc::symlink(tmp.as_ptr(), hook.as_ptr()) };
+    unsafe { libc::rename(tmp.as_ptr(), hook.as_ptr()) };
+    unsafe { libc::link(tmp.as_ptr(), hook.as_ptr()) };
+    let fd = unsafe { libc::openat(-100, hook.as_ptr(), libc::O_WRONLY | libc::O_CREAT, 0o755) };
+    let fd = unsafe { libc::openat(-100, hook.as_ptr(), libc::O_RDONLY) };
+    let note = CString::new("notes.txt").unwrap();
+    unsafe { libc::symlink(tmp.as_ptr(), note.as_ptr()) };
+}
+"#;
+        assert_eq!(hook_lines(raw), vec![4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn the_site_scan_names_a_hook_put_through_a_function_value() {
+        let held = r#"
+use std::fs::rename;
+fn put(dir: &Path, tmp: &Path) {
+    let f = std::fs::rename;
+    f(tmp, dir.join("pre-push")).unwrap();
+    let g = rename;
+    g(tmp, dir.join("pre-commit")).unwrap();
+    apply(std::fs::write, dir.join("post-commit"));
+    f(tmp, dir.join("notes.txt")).unwrap();
+}
+"#;
+        assert_eq!(hook_lines(held), vec![5, 7, 8]);
+    }
+
+    #[test]
     fn the_site_scan_follows_a_hook_name_through_lets() {
         let chain = r#"
 fn chain(dir: &Path) {
@@ -1663,7 +1773,25 @@ fn put(dir: &Path) {
         ("fs::symlink_dir(", 1),
         ("File::create(", 0),
         ("File::create_new(", 0),
+        ("libc::open(", 0),
+        ("libc::openat(", 1),
+        ("libc::creat(", 0),
+        ("libc::rename(", 1),
+        ("libc::renameat(", 3),
+        ("libc::renameat2(", 3),
+        ("libc::link(", 1),
+        ("libc::linkat(", 3),
+        ("libc::symlink(", 1),
+        ("libc::symlinkat(", 2),
     ];
+
+    /// Flags that make a `libc::open` or `libc::openat` in `RAW_WRITES` a
+    /// write. Without one in the call it is taken for a read: the crate
+    /// opens many files by `openat` with a `flags` argument for reading.
+    const WRITE_FLAGS: &[&str] = &["O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND"];
+
+    /// Programs that write the paths a `Command` gives them.
+    const WRITING_PROGRAMS: &[&str] = &["cp", "mv", "install", "ln"];
 
     /// The `fs::` calls of `RAW_WRITES` by their bare name, as a `use`
     /// brings them in.
@@ -1691,6 +1819,50 @@ fn put(dir: &Path) {
                     .map(|&(name, n)| (format!("{name}("), n, true)),
             )
             .collect();
+        for (path, alias) in use_aliases(code) {
+            let last = path.rsplit("::").next().unwrap_or("");
+            if path.contains("fs::") {
+                if let Some(&(_, n)) = BARE_WRITES.iter().find(|(name, _)| *name == last) {
+                    out.push((format!("{alias}("), n, true));
+                }
+            }
+            for &(api, n) in RAW_WRITES {
+                let (module, call) = api.split_once("::").unwrap_or((api, ""));
+                if module == last {
+                    out.push((format!("{alias}::{call}"), n, false));
+                }
+            }
+        }
+        for at in word_uses(code, "let") {
+            let Some(end) = statement_end(code, at) else {
+                continue;
+            };
+            let Some((name, value)) = code[at + "let".len()..end].split_once('=') else {
+                continue;
+            };
+            let name = name.trim().trim_start_matches("mut ").trim();
+            let value = squeeze(value);
+            if name.is_empty() || !name.chars().all(is_ident) {
+                continue;
+            }
+            let held = out.iter().find(|(api, _, bare)| {
+                let api = api.trim_end_matches('(');
+                value == api
+                    || (!bare
+                        && value
+                            .strip_suffix(api)
+                            .is_some_and(|rest| rest.is_empty() || rest.ends_with("::")))
+            });
+            if let Some(&(_, n, _)) = held {
+                out.push((format!("{name}("), n, true));
+            }
+        }
+        out
+    }
+
+    /// `(path, alias)` for every `use path as alias;` item in `code`.
+    fn use_aliases(code: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
         for at in word_uses(code, "use") {
             let Some(end) = statement_end(code, at) else {
                 continue;
@@ -1725,19 +1897,63 @@ fn put(dir: &Path) {
                 if alias == "_" || !alias.chars().all(is_ident) {
                     continue;
                 }
-                let path = format!("{prefix}{}", words[..pos].concat());
-                let last = path.rsplit("::").next().unwrap_or("");
-                if path.contains("fs::") {
-                    if let Some(&(_, n)) = BARE_WRITES.iter().find(|(name, _)| *name == last) {
-                        out.push((format!("{alias}("), n, true));
-                    }
-                }
-                for &(api, n) in RAW_WRITES {
-                    let (module, call) = api.split_once("::").unwrap_or((api, ""));
-                    if module == last {
-                        out.push((format!("{alias}::{call}"), n, false));
-                    }
-                }
+                out.push((
+                    format!("{prefix}{}", words[..pos].concat()),
+                    alias.to_string(),
+                ));
+            }
+        }
+        out
+    }
+
+    /// Names that build `OpenOptions` in `code`, with any `use .. as ..`
+    /// alias of `OpenOptions` or `File`.
+    fn openers(code: &str) -> Vec<String> {
+        let mut out = vec!["OpenOptions".to_string(), "File::options(".to_string()];
+        for (path, alias) in use_aliases(code) {
+            match path.rsplit("::").next() {
+                Some("OpenOptions") => out.push(alias),
+                Some("File") => out.push(format!("{alias}::options(")),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// `Command::new(` and the same through any `use .. as ..` alias of
+    /// `Command`.
+    fn commands(code: &str) -> Vec<String> {
+        let mut out = vec!["Command::new(".to_string()];
+        for (path, alias) in use_aliases(code) {
+            if path.rsplit("::").next() == Some("Command") {
+                out.push(format!("{alias}::new("));
+            }
+        }
+        out
+    }
+
+    /// `name` and body span of every `macro_rules!` in `code`.
+    fn macro_defs(code: &str) -> Vec<(String, (usize, usize))> {
+        let b = code.as_bytes();
+        let mut out = Vec::new();
+        for at in word_uses(code, "macro_rules") {
+            let rest = code[at + "macro_rules".len()..].trim_start();
+            let Some(rest) = rest.strip_prefix('!') else {
+                continue;
+            };
+            let rest = rest.trim_start();
+            let name: String = rest.chars().take_while(|&c| is_ident(c)).collect();
+            let open = code.len() - rest.len() + name.len();
+            let Some(open) = (open..b.len()).find(|&j| !b[j].is_ascii_whitespace()) else {
+                continue;
+            };
+            let close = match b[open] {
+                b'{' => close_of(code, open),
+                b'(' | b'[' => Some(split_args(code, open, false).1),
+                _ => None,
+            };
+            if let (false, Some(close)) = (name.is_empty(), close) {
+                out.push((name, (open, close + 1)));
             }
         }
         out
@@ -1752,6 +1968,12 @@ fn put(dir: &Path) {
         lines: Vec<usize>,
         /// `write_apis` of `code`.
         writes: Vec<(String, usize, bool)>,
+        /// `openers` of `code`.
+        openers: Vec<String>,
+        /// `commands` of `code`.
+        commands: Vec<String>,
+        /// Spans of the `use` statements in `code`.
+        uses: Vec<(usize, usize)>,
     }
 
     struct Func {
@@ -1812,6 +2034,12 @@ fn put(dir: &Path) {
                     .chain(text.match_indices('\n').map(|(at, _)| at + 1))
                     .collect();
                 let writes = write_apis(&code);
+                let openers = openers(&code);
+                let commands = commands(&code);
+                let uses = word_uses(&code, "use")
+                    .into_iter()
+                    .filter_map(|at| Some((at, statement_end(&code, at)?)))
+                    .collect();
                 Source {
                     path,
                     text,
@@ -1819,9 +2047,30 @@ fn put(dir: &Path) {
                     literals,
                     lines,
                     writes,
+                    openers,
+                    commands,
+                    uses,
                 }
             })
             .collect();
+        let mut macros: Vec<String> = Vec::new();
+        loop {
+            let more: Vec<String> = srcs
+                .iter()
+                .flat_map(|src| {
+                    macro_defs(&src.code)
+                        .into_iter()
+                        .filter(|(name, span)| {
+                            !macros.contains(name) && !raw_sites(src, *span, &macros).is_empty()
+                        })
+                        .map(|(name, _)| name)
+                })
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            macros.extend(more);
+        }
         let mut quals: Vec<String> = ["crate", "self", "super", "Self"]
             .map(String::from)
             .to_vec();
@@ -1858,8 +2107,10 @@ fn put(dir: &Path) {
             .iter()
             .map(|f| calls_in(&srcs[f.src], f, &quals))
             .collect();
-        let sites: Vec<Vec<((usize, usize), usize)>> =
-            funcs.iter().map(|f| raw_sites(&srcs[f.src], f)).collect();
+        let sites: Vec<Vec<((usize, usize), usize)>> = funcs
+            .iter()
+            .map(|f| raw_sites(&srcs[f.src], f.body, &macros))
+            .collect();
         // Parameter, whether a method, the defining file, and the raw write
         // the parameter reaches.
         type Writer = (usize, bool, usize, usize, usize);
@@ -2015,6 +2266,7 @@ fn put(dir: &Path) {
             ".to_owned()",
             ".as_ref()",
             ".into()",
+            ".as_ptr()",
             ".unwrap()",
             "?",
         ]
@@ -2057,9 +2309,15 @@ fn put(dir: &Path) {
         {
             let callee = code[s..open].trim_end();
             let args = split_args(code, open, false).0;
-            if [".join", ".with_file_name", "Path::new", "PathBuf::from"]
-                .iter()
-                .any(|name| callee.ends_with(name))
+            if [
+                ".join",
+                ".with_file_name",
+                "Path::new",
+                "PathBuf::from",
+                "CString::new",
+            ]
+            .iter()
+            .any(|name| callee.ends_with(name))
                 && args.len() == 1
             {
                 return leaf(scan, f, args[0].0, args[0].1, depth);
@@ -2476,26 +2734,43 @@ fn put(dir: &Path) {
         out
     }
 
-    /// Spans of the paths `f` opens for writing with a raw call, and the
-    /// line of each call.
-    fn raw_sites(src: &Source, f: &Func) -> Vec<((usize, usize), usize)> {
+    /// Spans of the paths the code in `span` opens for writing with a raw
+    /// call, and the line of each call: a write call, `OpenOptions`, a
+    /// writing program run by `Command`, a use of one of `macros`, or a
+    /// write function passed on as a value.
+    fn raw_sites(
+        src: &Source,
+        span: (usize, usize),
+        macros: &[String],
+    ) -> Vec<((usize, usize), usize)> {
         let code = &src.code;
-        let body = &code[f.body.0..f.body.1];
+        let body = &code[span.0..span.1];
         let mut out = Vec::new();
-        let mut take = |open: usize, n: usize| {
-            if let Some(&span) = split_args(code, open, false).0.get(n) {
-                out.push((span, line_of(src, open)));
+        let mut take = |open: usize, n: Option<usize>| {
+            let args = split_args(code, open, false).0;
+            let line = line_of(src, open);
+            match n {
+                Some(n) => out.extend(args.get(n).map(|&arg| (arg, line))),
+                None => out.extend(args.into_iter().map(|arg| (arg, line))),
             }
         };
         for (api, n, bare) in &src.writes {
             for (at, _) in body.match_indices(api.as_str()) {
                 let before = &body[..at];
                 let lead = before.chars().next_back();
-                if !bare
-                    || (!lead.is_some_and(|c| is_ident(c) || matches!(c, '.' | ':'))
-                        && !ends_with_word(before.trim_end(), "fn"))
+                let open = span.0 + at + api.len() - 1;
+                let read_only = (api.ends_with("::open(") || api.ends_with("::openat(")) && {
+                    let close = split_args(code, open, false).1;
+                    !WRITE_FLAGS
+                        .iter()
+                        .any(|flag| has_word(&code[open..close], flag))
+                };
+                if !read_only
+                    && (!bare
+                        || (!lead.is_some_and(|c| is_ident(c) || matches!(c, '.' | ':'))
+                            && !ends_with_word(before.trim_end(), "fn")))
                 {
-                    take(f.body.0 + at + api.len() - 1, *n);
+                    take(open, Some(*n));
                 }
             }
         }
@@ -2508,10 +2783,141 @@ fn put(dir: &Path) {
         ]
         .iter()
         .any(|flag| body.contains(flag));
-        if writable && (body.contains("OpenOptions") || body.contains("File::options(")) {
-            for (at, _) in body.match_indices(".open(") {
-                take(f.body.0 + at + 5, 0);
+        let opens = src.openers.iter().enumerate().any(|(n, name)| {
+            if n < 2 {
+                body.contains(name.as_str())
+            } else {
+                has_word(body, name)
             }
+        });
+        if writable && opens {
+            for (at, _) in body.match_indices(".open(") {
+                take(span.0 + at + 5, Some(0));
+            }
+        }
+        for name in macros {
+            for at in word_uses(body, name) {
+                let after = span.0 + at + name.len();
+                let Some(rest) = code[after..].strip_prefix('!') else {
+                    continue;
+                };
+                let open = after + 1 + rest.len() - rest.trim_start().len();
+                if matches!(code.as_bytes().get(open), Some(b'(' | b'[' | b'{')) {
+                    take(open, None);
+                }
+            }
+        }
+        for new in &src.commands {
+            for (at, _) in body.match_indices(new.as_str()) {
+                let open = span.0 + at + new.len() - 1;
+                let (args, close) = split_args(code, open, false);
+                let program = args.first().and_then(|&(s, e)| literal(src, s, e));
+                if !program
+                    .is_some_and(|p| WRITING_PROGRAMS.contains(&p.rsplit('/').next().unwrap_or(p)))
+                {
+                    continue;
+                }
+                let line = line_of(src, open);
+                let mut args: Vec<_> = command_args(code, close + 1)
+                    .into_iter()
+                    .map(|arg| (arg, line))
+                    .collect();
+                let lhs = code[..span.0 + at].trim_end().strip_suffix('=');
+                let var: String = lhs
+                    .map(|lhs| lhs.trim_end())
+                    .map(|lhs| &lhs[lhs.trim_end_matches(is_ident).len()..])
+                    .unwrap_or_default()
+                    .to_string();
+                if !var.is_empty() {
+                    for use_at in word_uses(&code[close..span.1], &var) {
+                        let from = close + use_at + var.len();
+                        let line = line_of(src, from);
+                        args.extend(command_args(code, from).into_iter().map(|arg| (arg, line)));
+                    }
+                }
+                let targeted = args.iter().any(|&((s, e), _)| {
+                    literal(src, s, e)
+                        .is_some_and(|a| a.starts_with("-t") || a.starts_with("--target-directory"))
+                });
+                if targeted {
+                    out.extend(args);
+                } else {
+                    out.extend(args.pop());
+                }
+            }
+        }
+        for (api, _, bare) in &src.writes {
+            let name = api.trim_end_matches('(');
+            if *bare {
+                continue;
+            }
+            for (at, _) in body.match_indices(name) {
+                let s = span.0 + at;
+                let e = s + name.len();
+                let mut ps = s;
+                while let Some(rest) = code[..ps].strip_suffix("::") {
+                    ps = rest.trim_end_matches(is_ident).len();
+                }
+                let before = code[..ps].trim_end();
+                let next = code[e..].trim_start().chars().next();
+                let bound = before.ends_with('=')
+                    && word_uses(before, "let")
+                        .last()
+                        .is_some_and(|&l| !code[l..ps].contains(';'));
+                if code[..s].ends_with(is_ident)
+                    || next.is_some_and(|c| c == '(' || c == ':' || is_ident(c))
+                    || src.uses.iter().any(|&(us, ue)| us <= s && e <= ue)
+                    || bound
+                {
+                    continue;
+                }
+                out.push(((ps, e), line_of(src, s)));
+            }
+        }
+        out
+    }
+
+    /// The path arguments of a `Command` chain that starts at `from`: each
+    /// `.arg(x)`, and each element of `.args([..])` or `.args(x)` itself.
+    fn command_args(code: &str, from: usize) -> Vec<(usize, usize)> {
+        let b = code.as_bytes();
+        let mut out = Vec::new();
+        let mut at = from;
+        loop {
+            let rest = &code[at..];
+            let next = at + rest.len() - rest.trim_start().len();
+            match b.get(next) {
+                Some(b'?') => {
+                    at = next + 1;
+                    continue;
+                }
+                Some(b'.') => {}
+                _ => break,
+            }
+            let name: String = code[next + 1..]
+                .chars()
+                .take_while(|&c| is_ident(c))
+                .collect();
+            let rest = &code[next + 1 + name.len()..];
+            let open = next + 1 + name.len() + rest.len() - rest.trim_start().len();
+            if name.is_empty() || b.get(open) != Some(&b'(') {
+                break;
+            }
+            let (args, close) = split_args(code, open, false);
+            match (name.as_str(), args.first()) {
+                ("arg", Some(&arg)) => out.push(arg),
+                ("args", Some(&(s, e))) => {
+                    let list = code[s..e].trim_start_matches(['&', ' ']);
+                    let list = list.strip_prefix("vec!").unwrap_or(list).trim_start();
+                    if list.starts_with('[') {
+                        out.extend(split_args(code, e - list.len(), false).0);
+                    } else {
+                        out.push((s, e));
+                    }
+                }
+                _ => {}
+            }
+            at = close + 1;
         }
         out
     }
