@@ -12,7 +12,8 @@ mod scratch;
 
 pub use packsetd::{reap_listener, Builder, Packsetd};
 pub use scratch::{
-    checkout, checkout_seats, fresh_dir, git, git_at, git_ceiling, home_seats, GIT_CEILING,
+    checkout, checkout_seats, fresh_dir, git, git_at, git_ceiling, home_seats, no_login_git_config,
+    GIT_CEILING,
 };
 
 use std::ffi::c_char;
@@ -198,6 +199,13 @@ mod tests {
             unsafe { std::env::set_var(key, value) };
             Self(key, old)
         }
+
+        fn remove(key: &'static str) -> Self {
+            let old = std::env::var_os(key);
+            // SAFETY: the caller holds ENV.
+            unsafe { std::env::remove_var(key) };
+            Self(key, old)
+        }
     }
 
     impl Drop for PutEnv {
@@ -227,6 +235,67 @@ mod tests {
             std::env::split_paths(&crate::git_ceiling()).any(|root| root.starts_with(&temp));
         assert!(!moved, "a ceiling followed HOME to {}", temp.display());
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// A `~/.gitconfig` that signs every commit with a program that is not
+    /// there fails a plain `git commit`, and not one from [`crate::git`].
+    #[test]
+    fn a_hostile_home_gitconfig_does_not_reach_the_scratch_git() {
+        let _env = ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile_dir("hostile-gitconfig");
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".config/git")).unwrap();
+        let hostile = "[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = /nonexistent/ljos-gpg\n";
+        std::fs::write(home.join(".gitconfig"), hostile).unwrap();
+        std::fs::write(home.join(".config/git/config"), hostile).unwrap();
+        let _home = PutEnv::set("HOME", &home);
+        let _xdg = PutEnv::set("XDG_CONFIG_HOME", home.join(".config"));
+        let _global = PutEnv::remove("GIT_CONFIG_GLOBAL");
+        let _system = PutEnv::remove("GIT_CONFIG_SYSTEM");
+        let _nosystem = PutEnv::remove("GIT_CONFIG_NOSYSTEM");
+        let repo = root.join("repo");
+        let commit = |mut git: std::process::Command| {
+            git.arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t.invalid"])
+                .args(["commit", "-q", "--allow-empty", "-m", "seed"])
+                .output()
+                .unwrap()
+        };
+        let init = crate::git()
+            .args(["init", "-q"])
+            .arg(&repo)
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "{init:?}");
+        let mut plain = std::process::Command::new("git");
+        plain.env(crate::GIT_CEILING, crate::git_ceiling());
+        let refused = commit(plain);
+        assert!(
+            !refused.status.success(),
+            "the hostile config did not apply: {refused:?}"
+        );
+        for (what, git) in [("git", crate::git()), ("git_at", crate::git_at("git"))] {
+            let out = commit(git);
+            assert!(out.status.success(), "{what}: {out:?}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A global or system config the process names is the one git reads.
+    #[test]
+    fn a_git_config_the_process_names_is_kept() {
+        let _env = ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _global = PutEnv::set("GIT_CONFIG_GLOBAL", "/tmp/named-global");
+        let _system = PutEnv::set("GIT_CONFIG_SYSTEM", "/tmp/named-system");
+        let cmd = crate::git();
+        let set: Vec<_> = cmd.get_envs().map(|(k, _)| k.to_owned()).collect();
+        assert!(!set.iter().any(|k| k == "GIT_CONFIG_GLOBAL"), "{set:?}");
+        assert!(!set.iter().any(|k| k == "GIT_CONFIG_NOSYSTEM"), "{set:?}");
     }
 
     fn tempfile_dir(prefix: &str) -> std::path::PathBuf {

@@ -66,20 +66,39 @@ pub fn git_ceiling() -> OsString {
     std::env::join_paths(roots).expect("a scratch root contains the path separator")
 }
 
-/// `git` from `PATH` with [`git_ceiling`] set.
+/// `git` from `PATH` with [`git_ceiling`] set and the login's git config
+/// left out, as [`git_at`] does.
 #[must_use]
 pub fn git() -> Command {
     git_at("git")
 }
 
-/// `program` as git, with [`git_ceiling`] set. `env_clear` drops the
-/// ceiling, so a caller that clears the environment sets
-/// [`GIT_CEILING`] to [`git_ceiling`] again after it.
+/// `program` as git, with [`git_ceiling`] set and [`no_login_git_config`]
+/// applied. `env_clear` drops both, so a caller that clears the
+/// environment sets [`GIT_CEILING`] to [`git_ceiling`] again after it.
 #[must_use]
 pub fn git_at(program: impl AsRef<OsStr>) -> Command {
     let mut cmd = Command::new(program);
     cmd.env(GIT_CEILING, git_ceiling());
+    no_login_git_config(&mut cmd);
     cmd
+}
+
+/// Keep a `HOME` or system git config out of `cmd`, so a
+/// `commit.gpgsign` or hook in `~/.gitconfig` or `/etc/gitconfig` does
+/// not reach a scratch commit. `GIT_CONFIG_GLOBAL` becomes `/dev/null`
+/// and `GIT_CONFIG_NOSYSTEM` becomes `1`, unless this process names a
+/// global or system config of its own: a test that set one under its
+/// lock meant git to read it. A later `env` on `cmd` overrides either.
+pub fn no_login_git_config(cmd: &mut Command) {
+    if std::env::var_os("GIT_CONFIG_GLOBAL").is_none() {
+        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    }
+    if std::env::var_os("GIT_CONFIG_SYSTEM").is_none()
+        && std::env::var_os("GIT_CONFIG_NOSYSTEM").is_none()
+    {
+        cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    }
 }
 
 /// A new directory under `root`, mode `0o755`, named

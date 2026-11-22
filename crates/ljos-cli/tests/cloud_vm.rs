@@ -43,8 +43,9 @@ impl Drop for Guard {
 }
 
 fn sh_at(dir: &Path, script: &str) -> std::process::Output {
-    Command::new("sh")
-        .current_dir(dir)
+    let mut sh = Command::new("sh");
+    ljos_test_boot::no_login_git_config(&mut sh);
+    sh.current_dir(dir)
         .arg("-c")
         .arg(script)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -984,6 +985,10 @@ fn ljos_seat(home: &Path) -> String {
     if let Some(cfg) = std::env::var_os("GIT_CONFIG_SYSTEM") {
         cmd.env("GIT_CONFIG_SYSTEM", cfg);
     }
+    if let Some(off) = std::env::var_os("GIT_CONFIG_NOSYSTEM") {
+        cmd.env("GIT_CONFIG_NOSYSTEM", off);
+    }
+    ljos_test_boot::no_login_git_config(&mut cmd);
     if let Ok(seat) = std::env::var("LJOS_SEAT") {
         cmd.env("LJOS_SEAT", seat);
     }

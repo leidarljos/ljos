@@ -86,7 +86,9 @@ impl Tracker {
     }
 
     fn vissue(&self, args: &[&str]) -> String {
-        let out = Command::new("vissue").args(args).output().unwrap();
+        let mut vissue = Command::new("vissue");
+        ljos_test_boot::no_login_git_config(&mut vissue);
+        let out = vissue.args(args).output().unwrap();
         assert!(
             out.status.success(),
             "vissue {args:?}\n{}",
@@ -96,10 +98,9 @@ impl Tracker {
     }
 
     fn show(&self, id: &str) -> serde_json::Value {
-        let out = Command::new("vissue")
-            .args(["show", id, "--json"])
-            .output()
-            .unwrap();
+        let mut vissue = Command::new("vissue");
+        ljos_test_boot::no_login_git_config(&mut vissue);
+        let out = vissue.args(["show", id, "--json"]).output().unwrap();
         serde_json::from_slice(&out.stdout).expect("show json")
     }
 }

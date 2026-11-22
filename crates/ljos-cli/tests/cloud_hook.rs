@@ -46,8 +46,9 @@ impl Drop for Guard {
 }
 
 fn sh_at(dir: &Path, script: &str) -> std::process::Output {
-    Command::new("sh")
-        .current_dir(dir)
+    let mut sh = Command::new("sh");
+    ljos_test_boot::no_login_git_config(&mut sh);
+    sh.current_dir(dir)
         .arg("-c")
         .arg(script)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -243,8 +244,16 @@ fn has_ref(origin: &Path, name: &str) -> bool {
 
 /// Every `core.hooksPath` git reads in `dir`, one `origin<TAB>value` line
 /// each. `scope` is `--system`, `--global` or `--local`, or `None` for all.
+/// A config this process does not name is the one git finds itself, so a
+/// home's own `.gitconfig` counts.
 fn hooks_paths(dir: &Path, scope: Option<&str>) -> String {
-    let out = ljos_test_boot::git()
+    let mut git = ljos_test_boot::git();
+    for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"] {
+        if std::env::var_os(key).is_none() {
+            git.env_remove(key);
+        }
+    }
+    let out = git
         .arg("-C")
         .arg(dir)
         .arg("config")
