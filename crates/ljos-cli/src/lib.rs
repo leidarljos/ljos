@@ -14619,10 +14619,10 @@ pub const HOOK_DEADLINE_MS: u64 = 8000;
 pub const HOOK_WALL_BUDGET_MS: u64 = 2_000;
 
 thread_local! {
-    /// When this call must be done. Set by [`arm_wall_budget`] or
-    /// [`arm_hook_wall_budget`]. A pack read and a child process stop
-    /// here instead of at their own timeout.
-    static WALL_DEADLINE: std::cell::Cell<Option<std::time::Instant>> =
+    /// When this call must be done, and the name of the budget that set
+    /// it. Set by [`arm_wall_budget`] or [`arm_hook_wall_budget`]. A pack
+    /// read and a child process stop here instead of at their own timeout.
+    static WALL_DEADLINE: std::cell::Cell<Option<(std::time::Instant, &'static str)>> =
         const { std::cell::Cell::new(None) };
     /// The pack timeout for this thread, in milliseconds. A recall thread
     /// and the verdict do not share one environment variable, so one
@@ -14632,7 +14632,7 @@ thread_local! {
 
 /// Clears the wall budget when dropped, so a later call on this thread
 /// is not still inside a budget that already ended.
-pub struct WallGuard(Option<std::time::Instant>);
+pub struct WallGuard(Option<(std::time::Instant, &'static str)>);
 
 impl Drop for WallGuard {
     fn drop(&mut self) {
@@ -14646,13 +14646,22 @@ impl Drop for WallGuard {
 /// the call. Dropping it clears the bound.
 #[must_use]
 pub fn arm_wall_budget() -> WallGuard {
-    arm_wall_budget_for(std::time::Duration::from_millis(HOOK_WALL_BUDGET_MS))
+    arm_wall_budget_for(
+        std::time::Duration::from_millis(HOOK_WALL_BUDGET_MS),
+        "guard check wall budget",
+    )
 }
 
-fn arm_wall_budget_for(total: std::time::Duration) -> WallGuard {
-    let wanted = std::time::Instant::now() + total;
+/// Bound this call to `total` from now. `name` is the budget a line names
+/// when this bound cuts a wait short. An earlier bound already armed on
+/// the thread keeps its deadline and its name.
+fn arm_wall_budget_for(total: std::time::Duration, name: &'static str) -> WallGuard {
+    let wanted = (std::time::Instant::now() + total, name);
     let previous = WALL_DEADLINE.with(|cell| {
-        let deadline = cell.get().map_or(wanted, |held| held.min(wanted));
+        let deadline = cell.get().map_or(
+            wanted,
+            |held| if held.0 <= wanted.0 { held } else { wanted },
+        );
         cell.replace(Some(deadline))
     });
     WallGuard(previous)
@@ -14665,7 +14674,7 @@ fn arm_wall_budget_for(total: std::time::Duration) -> WallGuard {
 pub fn arm_hook_wall_budget() -> WallGuard {
     let left = std::time::Duration::from_millis(HOOK_WALL_BUDGET_MS)
         .saturating_sub(hookd::started().elapsed());
-    arm_wall_budget_for(left)
+    arm_wall_budget_for(left, "hook wall budget")
 }
 
 /// Drop a wall budget a previous test left on this thread.
@@ -14682,7 +14691,7 @@ fn disarm_wall() {
 pub(crate) fn wall_left() -> Option<std::time::Duration> {
     let thread = WALL_DEADLINE.with(|cell| {
         cell.get()
-            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+            .map(|(deadline, _)| deadline.saturating_duration_since(std::time::Instant::now()))
     });
     let tool = tool_bound::remaining();
     match (thread, tool) {
@@ -14694,7 +14703,9 @@ pub(crate) fn wall_left() -> Option<std::time::Duration> {
 }
 
 fn wall_deadline() -> Option<std::time::Instant> {
-    let thread = WALL_DEADLINE.with(std::cell::Cell::get);
+    let thread = WALL_DEADLINE
+        .with(std::cell::Cell::get)
+        .map(|(deadline, _)| deadline);
     let tool = tool_bound::deadline_instant();
     match (thread, tool) {
         (Some(thread), Some(tool)) => Some(thread.min(tool)),
@@ -14734,7 +14745,7 @@ impl SittingPreclaimBudget {
 pub fn begin_sitting_preclaim() -> SittingPreclaimBudget {
     let total = sitting_claim_wait();
     SittingPreclaimBudget {
-        wall: Some(arm_wall_budget_for(total)),
+        wall: Some(arm_wall_budget_for(total, "sitting wall budget")),
         total,
     }
 }
@@ -41236,7 +41247,7 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
     // already uses for its claim ([`sitting_claim_wait`]): the first third
     // of the documented `timeout -k 5 30`. Every claimdag call from here,
     // and the claim lock, stops at it. `LJOS_SITTING_CLAIM_WAIT` raises it.
-    let _wall = arm_wall_budget_for(sitting_claim_wait());
+    let _wall = arm_wall_budget_for(sitting_claim_wait(), "claim wall budget");
     let listed = match run_captured("claimdag", &args) {
         Ok(said) => said.stdout,
         Err(err) if claim_budget_spent(&err) => {
@@ -46496,7 +46507,10 @@ pub fn sitting_stream_started(
         note_claim_pending(issue, assignee, &why);
         format!("claim-pending: {why}\n")
     } else {
-        let bound = arm_wall_budget_for(std::time::Duration::from_secs(2));
+        let bound = arm_wall_budget_for(
+            std::time::Duration::from_secs(2),
+            "sitting claim wall budget",
+        );
         let claimed = claim(issue, assignee);
         let timed_out = claimed
             .as_ref()
@@ -46799,7 +46813,10 @@ pub fn retry_pending_claim(issue: &str) -> String {
     if assignee.is_empty() {
         return String::new();
     }
-    let bound = arm_wall_budget_for(std::time::Duration::from_secs(2));
+    let bound = arm_wall_budget_for(
+        std::time::Duration::from_secs(2),
+        "pending claim wall budget",
+    );
     let claimed = claim(issue, assignee);
     drop(bound);
     match claimed {
@@ -46828,16 +46845,21 @@ fn sitting_budget_left(step: &str, total: std::time::Duration) -> Result<()> {
 
 /// How long a sitting may wait for a tracker lock, and the limit that sets
 /// it. With no wall budget armed, the claim budget `total` stands in.
+/// An armed wall budget keeps the name it was given.
 fn sitting_lock_limit(total: std::time::Duration) -> (std::time::Duration, &'static str) {
     let claim = WALL_DEADLINE.with(|cell| {
-        cell.get()
-            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+        cell.get().map(|(deadline, name)| {
+            (
+                deadline.saturating_duration_since(std::time::Instant::now()),
+                name,
+            )
+        })
     });
     let wall = match (claim, tool_bound::remaining()) {
-        (Some(claim), Some(tool)) if tool < claim => (tool, "the tool budget"),
-        (None, Some(tool)) => (tool, "the tool budget"),
-        (Some(claim), _) => (claim, "the claim budget"),
-        (None, None) => (total, "the claim budget"),
+        (Some((left, _)), Some(tool)) if tool < left => (tool, "tool budget"),
+        (None, Some(tool)) => (tool, "tool budget"),
+        (Some((left, name)), _) => (left, name),
+        (None, None) => (total, "claim budget"),
     };
     let lock = tracker_lock_wait();
     if lock < wall.0 {
@@ -46847,10 +46869,21 @@ fn sitting_lock_limit(total: std::time::Duration) -> (std::time::Duration, &'sta
     }
 }
 
+/// Words for `limit` after "until" in a sitting lock line. The lock-wait
+/// variable is already a name. A budget name takes an article.
+fn sitting_limit_words(limit: &str) -> String {
+    if limit == "LJOS_TRACKER_LOCK_WAIT" {
+        limit.to_string()
+    } else {
+        format!("the {limit}")
+    }
+}
+
 fn wait_for_sitting_lock(path: &Path, what: &str, total: std::time::Duration) -> Result<()> {
     let (left, limit) = sitting_lock_limit(total);
     let started = std::time::Instant::now();
     let Some(held) = CommitLock::acquire_by(path, started + left) else {
+        let limit = sitting_limit_words(limit);
         bail!(
             "sitting: another tracker writer held the {what} at {} for {}s, until {limit} ran out; nothing was claimed",
             path.display(),
@@ -48325,7 +48358,7 @@ pub fn finish(
     let ended = {
         // The claim graph gets three seconds. Past that the tracker is
         // handed back locally, and a later call reconciles the graph.
-        let bound = arm_wall_budget_for(std::time::Duration::from_secs(3));
+        let bound = arm_wall_budget_for(std::time::Duration::from_secs(3), "finish wall budget");
         let ended = if closing {
             complete_with_grant(
                 issue,
@@ -49005,17 +49038,66 @@ pub fn tracker_verb_wait() -> std::time::Duration {
     tracker_lock_wait().min(std::time::Duration::from_secs(4))
 }
 
-/// The line a tracker write prints when another writer kept the commit
-/// lock of `dir` past [`tracker_lock_wait`].
+/// The wait a tracker write gives another writer's commit lock.
+#[derive(Clone, Copy, Debug)]
+pub struct LockWait {
+    /// How long the write waits.
+    pub wait: std::time::Duration,
+    /// The budget that made `wait` shorter than [`tracker_lock_wait`].
+    pub cut_by: Option<&'static str>,
+}
+
+/// [`tracker_lock_wait`], cut to what is left of an armed wall budget or
+/// tool budget, whichever ends first. A wall budget is named by whatever
+/// armed it.
 #[must_use]
-pub fn tracker_lock_busy(dir: &Path) -> String {
+pub fn tracker_lock_budget() -> LockWait {
+    let mut out = LockWait {
+        wait: tracker_lock_wait(),
+        cut_by: None,
+    };
+    let thread = WALL_DEADLINE.with(std::cell::Cell::get);
+    let now = std::time::Instant::now();
+    for (left, name) in [
+        (
+            thread.map(|(deadline, _)| deadline.saturating_duration_since(now)),
+            thread.map_or("wall budget", |(_, name)| name),
+        ),
+        (tool_bound::remaining(), "tool budget"),
+    ] {
+        if let Some(left) = left.filter(|left| *left < out.wait) {
+            out = LockWait {
+                wait: left,
+                cut_by: Some(name),
+            };
+        }
+    }
+    out
+}
+
+/// The line a tracker write prints when another writer kept the commit
+/// lock of `dir` through the whole of `waited`.
+#[must_use]
+pub fn tracker_lock_busy(dir: &Path, waited: LockWait) -> String {
     let lock = tracker_lock_path(dir).map_or_else(
         || dir.display().to_string(),
         |path| path.display().to_string(),
     );
+    let wait = waited.wait;
+    let tenths = wait.subsec_millis() / 100;
+    let secs = if tenths == 0 {
+        format!("{}s", wait.as_secs())
+    } else {
+        format!("{}.{tenths}s", wait.as_secs())
+    };
+    let cut = waited.cut_by.map_or_else(String::new, |budget| {
+        format!(
+            ", all that was left of the {budget}, short of the {}s LJOS_TRACKER_LOCK_WAIT",
+            tracker_lock_wait().as_secs()
+        )
+    });
     format!(
-        "tracker git: another writer held {lock} for {}s, so this write is on disk and not committed; the commit is deferred to the next write or push\n",
-        tracker_lock_wait().as_secs()
+        "tracker git: another writer held {lock} for {secs}{cut}, so this write is on disk and not committed; the commit is deferred to the next write or push\n"
     )
 }
 
@@ -50557,12 +50639,11 @@ fn persist_tracker_writes(
     // that another seat's commit is about to make stale. A git process
     // outside ljos that holds the index is waited out a few times before
     // the line says so.
-    let lock_wait =
-        wall_left().map_or_else(tracker_lock_wait, |left| left.min(tracker_lock_wait()));
-    let Some(held) = tracker_commit_lock_by(dir, std::time::Instant::now() + lock_wait) else {
+    let lock_wait = tracker_lock_budget();
+    let Some(held) = tracker_commit_lock_by(dir, std::time::Instant::now() + lock_wait.wait) else {
         let refs: Vec<&str> = specs.iter().map(String::as_str).collect();
         note_deferred_paths(dir, &refs);
-        return tracker_lock_busy(dir);
+        return tracker_lock_busy(dir, lock_wait);
     };
     let mut live: Vec<&str> = Vec::new();
     let mut ignored_note = String::new();
@@ -58853,11 +58934,43 @@ mod tests {
             waited < std::time::Duration::from_secs(5),
             "waited past the deadline: {waited:?}"
         );
-        let busy = tracker_lock_busy(repo);
+        let busy = tracker_lock_busy(
+            repo,
+            LockWait {
+                wait: std::time::Duration::from_millis(300),
+                cut_by: None,
+            },
+        );
         assert!(busy.contains(TRACKER_LOCK), "{busy}");
+        assert!(busy.contains(" for 0.3s,"), "{busy}");
         assert!(busy.contains("not committed"), "{busy}");
         drop(held);
         assert!(tracker_commit_lock_by(repo, std::time::Instant::now()).is_some());
+    }
+
+    /// A wait under a tenth of a second past the whole second prints as the
+    /// whole second, not as a zero tenth.
+    #[test]
+    fn a_lock_wait_prints_whole_seconds_when_its_tenths_are_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        for (millis, shown) in [
+            (1, " for 0s,"),
+            (99, " for 0s,"),
+            (2_000, " for 2s,"),
+            (2_001, " for 2s,"),
+            (2_099, " for 2s,"),
+            (2_100, " for 2.1s,"),
+            (2_999, " for 2.9s,"),
+        ] {
+            let busy = tracker_lock_busy(
+                dir.path(),
+                LockWait {
+                    wait: std::time::Duration::from_millis(millis),
+                    cut_by: None,
+                },
+            );
+            assert!(busy.contains(shown), "{millis} ms: {busy}");
+        }
     }
 
     /// Another writer keeps the commit lock for three seconds, about as long
@@ -58896,6 +59009,267 @@ mod tests {
             String::from_utf8_lossy(&shown.stdout).contains("STARTED"),
             "{said}"
         );
+    }
+
+    /// `LJOS_TRACKER_LOCK_WAIT` asks for a minute, but the call's wall
+    /// budget ends in three seconds. The write gives up at the budget, and
+    /// the line names the wait it made and the budget that cut it short,
+    /// not the minute it never waited.
+    #[test]
+    fn a_lock_wait_cut_short_by_the_wall_budget_names_the_real_wait() {
+        let _env = env_guard();
+        disarm_wall();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let held = tracker_commit_lock(dir.path());
+        assert!(held.0.is_some(), "the other writer took the lock");
+        let body = "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+        std::fs::write(&issues, body).unwrap();
+        let started = std::time::Instant::now();
+        let said = {
+            let _wall =
+                arm_wall_budget_for(std::time::Duration::from_secs(3), "finish wall budget");
+            persist_tracker_file(&issues, "probe-a1b2", "claimed")
+        };
+        let took = started.elapsed();
+        drop(held);
+        for var in ["LJOS_TRACKER_LOCK_WAIT", "LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "waited {took:?}: {said}"
+        );
+        assert!(said.contains("another writer held"), "{said}");
+        assert!(!said.contains(" for 60s"), "{said}");
+        let waited: f64 = said
+            .split(" for ")
+            .nth(1)
+            .and_then(|rest| rest.split('s').next())
+            .and_then(|secs| secs.parse().ok())
+            .unwrap_or_else(|| panic!("no wait in {said}"));
+        assert!(
+            waited > 1.0 && waited <= 3.0,
+            "named a {waited}s wait: {said}"
+        );
+        assert!(
+            waited <= took.as_secs_f64() + 0.05,
+            "named {waited}s but waited {took:?}: {said}"
+        );
+        assert!(said.contains("of the finish wall budget"), "{said}");
+        assert!(
+            said.contains("short of the 60s LJOS_TRACKER_LOCK_WAIT"),
+            "{said}"
+        );
+    }
+
+    /// Nested wall budgets keep the name of the one that ends first, and a
+    /// dropped inner budget gives the outer one its name back.
+    #[test]
+    fn the_wall_budget_that_ends_first_names_the_lock_wait() {
+        let _env = env_guard();
+        disarm_wall();
+        tool_bound::disarm();
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        {
+            let _hook = arm_hook_wall_budget();
+            assert_eq!(tracker_lock_budget().cut_by, Some("hook wall budget"));
+            let _later =
+                arm_wall_budget_for(std::time::Duration::from_secs(30), "claim wall budget");
+            assert_eq!(tracker_lock_budget().cut_by, Some("hook wall budget"));
+        }
+        {
+            let _outer =
+                arm_wall_budget_for(std::time::Duration::from_secs(30), "finish wall budget");
+            {
+                let _inner = arm_wall_budget_for(
+                    std::time::Duration::from_secs(5),
+                    "pending claim wall budget",
+                );
+                let inner = tracker_lock_budget();
+                assert_eq!(inner.cut_by, Some("pending claim wall budget"));
+                assert!(inner.wait <= std::time::Duration::from_secs(5));
+            }
+            assert_eq!(tracker_lock_budget().cut_by, Some("finish wall budget"));
+        }
+        assert_eq!(tracker_lock_budget().cut_by, None);
+        std::env::remove_var("LJOS_TRACKER_LOCK_WAIT");
+    }
+
+    /// A tracker write inside an MCP tool call, with no wall budget, stops
+    /// at the tool budget and names it.
+    #[test]
+    fn a_lock_wait_cut_short_by_the_tool_budget_names_the_tool_budget() {
+        let _env = env_guard();
+        disarm_wall();
+        tool_bound::disarm();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let held = tracker_commit_lock(dir.path());
+        assert!(held.0.is_some(), "the other writer took the lock");
+        let body = "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+        std::fs::write(&issues, body).unwrap();
+        let started = std::time::Instant::now();
+        let said = {
+            let _tool = tool_bound::arm(std::time::Duration::from_secs(1));
+            persist_tracker_file(&issues, "probe-a1b2", "claimed")
+        };
+        let took = started.elapsed();
+        drop(held);
+        for var in ["LJOS_TRACKER_LOCK_WAIT", "LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+        assert!(took < std::time::Duration::from_secs(10), "waited {took:?}");
+        assert!(said.contains("another writer held"), "{said}");
+        assert!(said.contains("of the tool budget"), "{said}");
+        assert!(!said.contains("wall budget"), "{said}");
+        assert!(
+            said.contains("short of the 60s LJOS_TRACKER_LOCK_WAIT"),
+            "{said}"
+        );
+    }
+
+    /// A tool budget that ends before the wall budget cuts the lock wait
+    /// and is the one the line names.
+    #[test]
+    fn a_tool_budget_shorter_than_the_wall_budget_names_the_tool_budget() {
+        let _env = env_guard();
+        disarm_wall();
+        tool_bound::disarm();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let held = tracker_commit_lock(dir.path());
+        assert!(held.0.is_some(), "the other writer took the lock");
+        let body = "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+        std::fs::write(&issues, body).unwrap();
+        let said = {
+            let _wall =
+                arm_wall_budget_for(std::time::Duration::from_secs(30), "finish wall budget");
+            let _tool = tool_bound::arm(std::time::Duration::from_secs(1));
+            persist_tracker_file(&issues, "probe-a1b2", "claimed")
+        };
+        drop(held);
+        for var in ["LJOS_TRACKER_LOCK_WAIT", "LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+        assert!(said.contains("another writer held"), "{said}");
+        assert!(said.contains("of the tool budget"), "{said}");
+        assert!(!said.contains("finish wall budget"), "{said}");
+        let waited: f64 = said
+            .split(" for ")
+            .nth(1)
+            .and_then(|rest| rest.split('s').next())
+            .and_then(|secs| secs.parse().ok())
+            .unwrap_or_else(|| panic!("no wait in {said}"));
+        assert!(waited <= 1.0, "named a {waited}s wait: {said}");
+    }
+
+    /// A wall budget that ends before the tool budget is the one named.
+    #[test]
+    fn a_wall_budget_shorter_than_the_tool_budget_names_the_wall_budget() {
+        let _env = env_guard();
+        disarm_wall();
+        tool_bound::disarm();
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        let waited = {
+            let _tool = tool_bound::arm(std::time::Duration::from_secs(30));
+            let _wall = arm_wall_budget_for(std::time::Duration::from_secs(2), "claim wall budget");
+            tracker_lock_budget()
+        };
+        std::env::remove_var("LJOS_TRACKER_LOCK_WAIT");
+        assert_eq!(waited.cut_by, Some("claim wall budget"));
+        assert!(
+            waited.wait <= std::time::Duration::from_secs(2),
+            "{waited:?}"
+        );
+    }
+
+    /// A sitting arms its own claim budget, not a hook's. A tracker write
+    /// that budget cuts short names the sitting budget.
+    #[test]
+    fn a_lock_wait_cut_short_by_a_sitting_budget_names_the_sitting() {
+        let _env = env_guard();
+        disarm_wall();
+        tool_bound::disarm();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        std::env::set_var("LJOS_SITTING_CLAIM_WAIT", "1");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let held = tracker_commit_lock(dir.path());
+        assert!(held.0.is_some(), "the other writer took the lock");
+        let body = "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+        std::fs::write(&issues, body).unwrap();
+        let sitting = begin_sitting_preclaim();
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        sitting.finish();
+        drop(held);
+        for var in [
+            "LJOS_TRACKER_LOCK_WAIT",
+            "LJOS_SITTING_CLAIM_WAIT",
+            "LJOS_TRACKER_GIT",
+            "LJOS_SEAT",
+        ] {
+            std::env::remove_var(var);
+        }
+        assert!(said.contains("another writer held"), "{said}");
+        assert!(said.contains("of the sitting wall budget"), "{said}");
+        assert!(!said.contains("hook"), "{said}");
+    }
+
+    /// A sitting lock wait names the armed wall budget. A shorter tool
+    /// budget or `LJOS_TRACKER_LOCK_WAIT` is named instead, and neither
+    /// arm names the claim budget that only stands in when nothing is armed.
+    #[test]
+    fn a_sitting_lock_limit_names_the_budget_that_ends_the_wait() {
+        let _env = env_guard();
+        disarm_wall();
+        tool_bound::disarm();
+        let total = std::time::Duration::from_secs(30);
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        let (wait, name) = {
+            let _wall =
+                arm_wall_budget_for(std::time::Duration::from_secs(10), "sitting wall budget");
+            sitting_lock_limit(total)
+        };
+        assert_eq!(name, "sitting wall budget");
+        assert!(wait <= std::time::Duration::from_secs(10), "{wait:?}");
+        assert_eq!(sitting_limit_words(name), "the sitting wall budget");
+        let (wait, name) = {
+            let _wall =
+                arm_wall_budget_for(std::time::Duration::from_secs(10), "sitting wall budget");
+            let _tool = tool_bound::arm(std::time::Duration::from_secs(2));
+            sitting_lock_limit(total)
+        };
+        assert_eq!(name, "tool budget");
+        assert!(wait <= std::time::Duration::from_secs(2), "{wait:?}");
+        assert_eq!(sitting_limit_words(name), "the tool budget");
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "1");
+        let (wait, name) = {
+            let _wall =
+                arm_wall_budget_for(std::time::Duration::from_secs(10), "sitting wall budget");
+            sitting_lock_limit(total)
+        };
+        assert_eq!(name, "LJOS_TRACKER_LOCK_WAIT");
+        assert_eq!(wait, std::time::Duration::from_secs(1));
+        assert_eq!(sitting_limit_words(name), "LJOS_TRACKER_LOCK_WAIT");
+        disarm_wall();
+        tool_bound::disarm();
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        let (wait, name) = sitting_lock_limit(total);
+        assert_eq!((wait, name), (total, "claim budget"));
+        assert_eq!(sitting_limit_words(name), "the claim budget");
+        std::env::remove_var("LJOS_TRACKER_LOCK_WAIT");
     }
 
     /// A bare `GIT_DIR` plus `GIT_WORK_TREE` checkout still commits and
