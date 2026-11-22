@@ -236,7 +236,7 @@ fn a_note_returns_when_claimdag_never_answers() {
         dir.path(),
         "vissue",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = show ]; then echo '{{\"id\":\"demo-n\",\"logbook\":[]}}'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
             noted.display()
         ),
     );
@@ -259,7 +259,11 @@ fn a_note_returns_when_claimdag_never_answers() {
 #[test]
 fn a_note_returns_when_the_tracker_does_not_answer() {
     let dir = tempfile::tempdir().unwrap();
-    script(dir.path(), "vissue", "#!/bin/sh\nexec sleep 60\n");
+    script(
+        dir.path(),
+        "vissue",
+        "#!/bin/sh\nif [ \"$1\" = show ]; then echo '{\"id\":\"demo-n\",\"logbook\":[]}' ; exit 0; fi\nexec sleep 60\n",
+    );
     let home = home_of(dir.path());
     let path = format!(
         "{}:{}",
@@ -294,18 +298,15 @@ fn a_note_returns_when_the_tracker_does_not_answer() {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect();
-    assert_eq!(lines, ["tracker did not answer after 2 retries"], "{said}");
+    assert_eq!(out.status.code(), Some(ljos_cli::NOTE_WRITE_UNCERTAIN_EXIT));
+    assert_eq!(
+        lines,
+        ["the note on demo-n may or may not have been written; run `ljos show demo-n` to check"],
+        "{said}"
+    );
 }
 
-struct NoteRetryCase {
-    name: &'static str,
-    old_note: Option<&'static str>,
-    first: &'static str,
-    want_calls: usize,
-    want_hello: usize,
-}
-
-fn note_retry(case: &NoteRetryCase, real: &Path) -> Result<(), String> {
+fn timed_note(mode: &str, timeout: u64, real: &Path) -> (std::process::Output, String, usize) {
     let dir = tempfile::tempdir().unwrap();
     let tracker = dir.path().join("tracker");
     let layout = vissue_core::Layout::new(&tracker, "Software");
@@ -321,9 +322,9 @@ fn note_retry(case: &NoteRetryCase, real: &Path) -> Result<(), String> {
     )
     .unwrap();
     let issue = issue.trim();
-    if let Some(old_note) = case.old_note {
+    if mode == "old" {
         let seeded = Command::new(real)
-            .args(["note", issue, "--", old_note])
+            .args(["note", issue, "--", "hello"])
             .env("VISSUE_ROOT", &tracker)
             .env("VISSUE_NO_ROUTE", "1")
             .env("VISSUE_AGENT", "ada")
@@ -340,12 +341,10 @@ fn note_retry(case: &NoteRetryCase, real: &Path) -> Result<(), String> {
         dir.path(),
         "vissue",
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = note ]; then\n  printf '%s\\n' \"$*\" >> '{}'\n  n=$(wc -l < '{}')\n  case \"{}:$n\" in\n    before:1|third:1|third:2) sleep 2; exit 0 ;;\n  esac\n  '{}' \"$@\"\n  code=$?\n  case \"{}:$n\" in tie:1|third:3) sleep 2 ;; esac\n  exit \"$code\"\nfi\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nif [ \"$1\" = note ]; then\n  printf '%s\\n' \"$*\" >> '{}'\n  if [ '{}' = landed ]; then '{}' \"$@\"; fi\n  sleep 60\n  exit 0\nfi\nexec '{}' \"$@\"\n",
             noted.display(),
-            noted.display(),
-            case.first,
+            mode,
             real.display(),
-            case.first,
             real.display()
         ),
     );
@@ -369,14 +368,13 @@ fn note_retry(case: &NoteRetryCase, real: &Path) -> Result<(), String> {
         .env("LJOS_SEAT", "ada")
         .env("LJOS_HOOKD", "off")
         .env("LJOS_TRACKER_GIT", "off")
-        .env("LJOS_TRACKER_LOCK_WAIT", "1")
+        .env("LJOS_TRACKER_LOCK_WAIT", "4")
+        .env("LJOS_CALL_TIMEOUT", timeout.to_string())
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    let took = started.elapsed();
-    let said = text_of(&out);
+    let _took = started.elapsed();
     let wrote = std::fs::read_to_string(&noted).unwrap_or_default();
-    let notes: Vec<&str> = wrote.lines().collect();
     let doc =
         vissue_core::IssueDoc::parse_file("demo", &layout.project_issues_path("demo")).unwrap();
     let card = doc
@@ -387,57 +385,50 @@ fn note_retry(case: &NoteRetryCase, real: &Path) -> Result<(), String> {
     let hello = card
         .logbook
         .iter()
-        .filter(|entry| entry.note.as_deref() == Some("hello"))
+        .filter_map(|entry| entry.note.as_deref())
+        .filter(|note| *note == "hello")
         .count();
-    if !out.status.success()
-        || took >= Duration::from_secs(8)
-        || notes.len() != case.want_calls
-        || hello != case.want_hello
-    {
-        return Err(format!(
-            "{}: calls={} want={} hello={} want={} took={took:?}\n{wrote}{said}",
-            case.name,
-            notes.len(),
-            case.want_calls,
-            hello,
-            case.want_hello
-        ));
-    }
-    Ok(())
+    (out, wrote, hello)
 }
 
 #[test]
-fn note_retries_only_accept_a_new_matching_logbook_entry() {
+fn a_timed_out_note_is_checked_once_and_never_sent_again() {
     if tools::halt(tools::Tool::Vissue) {
         return;
     }
     let real = sibling::require("vissue").unwrap_or_else(|line| panic!("{line}"));
-    let cases = [
-        NoteRetryCase {
-            name: "old identical note and no first write",
-            old_note: Some("hello"),
-            first: "before",
-            want_calls: 2,
-            want_hello: 2,
-        },
-        NoteRetryCase {
-            name: "same-minute old note",
-            old_note: Some("older note"),
-            first: "tie",
-            want_calls: 1,
-            want_hello: 1,
-        },
-        NoteRetryCase {
-            name: "third attempt writes before timing out",
-            old_note: None,
-            first: "third",
-            want_calls: 3,
-            want_hello: 1,
-        },
-    ];
-    let failures: Vec<String> = cases
-        .iter()
-        .filter_map(|case| note_retry(case, &real).err())
-        .collect();
-    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    for timeout in 1..=4 {
+        let (landed, calls, hello) = timed_note("landed", timeout, &real);
+        let said = text_of(&landed);
+        assert!(landed.status.success(), "timeout {timeout}: {said}");
+        assert!(
+            said.contains("the note is in the logbook"),
+            "timeout {timeout}: {said}"
+        );
+        assert!(!said.contains("run it again"), "timeout {timeout}: {said}");
+        assert_eq!(calls.lines().count(), 1, "timeout {timeout}: {calls}");
+        assert_eq!(hello, 1, "timeout {timeout}");
+    }
+
+    let (uncertain, calls, hello) = timed_note("missing", 1, &real);
+    let said = text_of(&uncertain);
+    assert_eq!(
+        uncertain.status.code(),
+        Some(ljos_cli::NOTE_WRITE_UNCERTAIN_EXIT),
+        "{said}"
+    );
+    assert!(said.contains("may or may not have been written"), "{said}");
+    assert!(said.contains("`ljos show "), "{said}");
+    assert_eq!(calls.lines().count(), 1, "{calls}");
+    assert_eq!(hello, 0);
+
+    let (uncertain, calls, hello) = timed_note("old", 1, &real);
+    let said = text_of(&uncertain);
+    assert_eq!(
+        uncertain.status.code(),
+        Some(ljos_cli::NOTE_WRITE_UNCERTAIN_EXIT),
+        "{said}"
+    );
+    assert_eq!(calls.lines().count(), 1, "{calls}");
+    assert_eq!(hello, 1, "the old matching note remains");
 }

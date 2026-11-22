@@ -320,5 +320,10 @@ fn standing_in_a_tracker_still_means_that_tracker() {
     std::fs::create_dir_all(other.join("Software")).unwrap();
     std::fs::write(other.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
     seat.note(&other);
-    assert_eq!(seat.roots(), ["unset"], "the directory it stands in lost");
+    let roots = seat.roots();
+    assert!(!roots.is_empty(), "no tracker call ran");
+    assert!(
+        roots.iter().all(|root| root == "unset"),
+        "the directory it stands in lost: {roots:?}"
+    );
 }

@@ -30,7 +30,7 @@ impl Hab {
             dir.path(),
             "vissue",
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"vissue $*\" >> '{}'\nexit 0\n",
+                "#!/bin/sh\nprintf '%s\\n' \"vissue $*\" >> '{}'\nif [ \"$1\" = show ]; then printf '{{\"id\":\"%s\",\"logbook\":[]}}\\n' \"$2\"; fi\nexit 0\n",
                 log.display()
             ),
         );

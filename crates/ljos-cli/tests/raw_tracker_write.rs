@@ -253,7 +253,10 @@ fn the_vissue_children_ljos_runs_are_not_refused() {
     let stub = bin.join("vissue");
     std::fs::write(
         &stub,
-        format!("#!/bin/sh\necho \"vissue $*\" >> '{}'\n", log.display()),
+        format!(
+            "#!/bin/sh\necho \"vissue $*\" >> '{}'\nif [ \"$1\" = show ]; then printf '{{\"id\":\"%s\",\"logbook\":[]}}\\n' \"$2\"; fi\n",
+            log.display()
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
