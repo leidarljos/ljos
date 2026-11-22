@@ -682,22 +682,136 @@ fn quoted_hook_command(base: &str) -> String {
     format!("{program} hook")
 }
 
-/// Ownership is read from the field the runner executes, never from
-/// free text beside it.
-fn ours(v: &Value, runner: &str) -> bool {
-    ["command", "to"]
-        .iter()
-        .filter_map(|field| v.get(field).and_then(Value::as_str))
-        .any(|t| {
-            t.contains(&format!("--runner {runner}"))
-                || t.contains(&format!("ljos-guard-{runner}.sh"))
-        })
+/// The seat's hook for `runner`, and the command onboard writes for it now.
+#[derive(Clone, Copy)]
+struct Owner<'a> {
+    runner: &'a str,
+    wanted: &'a str,
 }
 
-fn owned_entry(v: &Value, runner: &str) -> bool {
+/// Ownership is read from the field the runner executes, never from
+/// free text beside it. A `command` is ours only when the whole of it is
+/// one simple command in an owned form: `PROGRAM hook --runner RUNNER`
+/// with `ljos` as the program's file name, or this runner's guard script
+/// alone. Anything else, such as a list, a pipe, a redirection, an
+/// expansion or an extra word, is someone else's entry. Amp's `to` is a
+/// raw path, so it is ours when it is an absolute path to the guard script.
+fn ours(v: &Value, owner: Owner) -> bool {
+    let script = format!("ljos-guard-{}.sh", owner.runner);
+    let field = |name: &str| v.get(name).and_then(Value::as_str);
+    field("command").is_some_and(|c| {
+        simple_command(c).is_some_and(|words| {
+            runs_hook_for(&words, owner.runner) || runs_script(&words, &script)
+        }) || is_unquoted(c, owner.wanted)
+    }) || field("to").is_some_and(|to| is_script_path(to, &script))
+}
+
+fn file_name(path: &str) -> Option<&str> {
+    Path::new(path).file_name().and_then(|name| name.to_str())
+}
+
+/// The words of `command` when the shell would read it as one simple
+/// command whose words expand to themselves. `None` for a control or
+/// redirection operator, a newline, a comment, a parameter, command or
+/// arithmetic expansion, a glob, a tilde, a brace, or an unterminated
+/// quote.
+fn simple_command(command: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            '\'' => {
+                started = true;
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        q => word.push(q),
+                    }
+                }
+            }
+            '"' => {
+                started = true;
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '$' | '`' => return None,
+                        '\\' => match chars.next()? {
+                            e @ ('"' | '\\') => word.push(e),
+                            '$' | '`' | '\n' => return None,
+                            e => {
+                                word.push('\\');
+                                word.push(e);
+                            }
+                        },
+                        q => word.push(q),
+                    }
+                }
+            }
+            '\\' => match chars.next()? {
+                '\n' => return None,
+                e => {
+                    word.push(e);
+                    started = true;
+                }
+            },
+            '#' if !started => return None,
+            ';' | '&' | '|' | '<' | '>' | '(' | ')' | '$' | '`' | '\n' | '\r' | '*' | '?' | '['
+            | ']' | '{' | '}' | '~' | '!' => return None,
+            c => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    Some(words)
+}
+
+fn runs_hook_for(words: &[String], runner: &str) -> bool {
+    matches!(
+        words,
+        [program, verb, flag, value]
+            if file_name(program) == Some("ljos")
+                && verb == "hook"
+                && flag == "--runner"
+                && value == runner
+    )
+}
+
+fn runs_script(words: &[String], script: &str) -> bool {
+    matches!(words, [program] if file_name(program) == Some(script))
+}
+
+/// An older onboard wrote the program's path without quotes, so a path
+/// with spaces or shell characters reads as other words. That entry is
+/// ours only when it is the exact text of the command onboard writes now
+/// with its program unquoted.
+fn is_unquoted(command: &str, wanted: &str) -> bool {
+    let words = crate::shell_words(wanted);
+    words
+        .first()
+        .is_some_and(|program| crate::tools::sh_word(program) != *program)
+        && command.trim() == words.join(" ")
+}
+
+fn is_script_path(to: &str, script: &str) -> bool {
+    to.starts_with('/') && file_name(to) == Some(script)
+}
+
+fn owned_entry(v: &Value, owner: Owner) -> bool {
     v.get("hooks").and_then(Value::as_array).map_or_else(
-        || ours(v, runner),
-        |hooks| hooks.iter().any(|h| ours(h, runner)),
+        || ours(v, owner),
+        |hooks| hooks.iter().any(|h| ours(h, owner)),
     )
 }
 
@@ -713,20 +827,20 @@ fn repair_field(found: &mut Value, item: &Value, field: &str) -> Option<bool> {
     }
 }
 
-fn repair_owned_hook(found: &mut Value, item: &Value, runner: &str) -> Option<bool> {
+fn repair_owned_hook(found: &mut Value, item: &Value, owner: Owner) -> Option<bool> {
     if let Some(changed) = repair_field(found, item, "command") {
         return Some(changed);
     }
     let wanted = item["hooks"]
         .as_array()?
         .iter()
-        .find(|hook| ours(hook, runner))?;
+        .find(|hook| ours(hook, owner))?;
     let mut seen = false;
     let mut changed = false;
     for owned in found["hooks"]
         .as_array_mut()?
         .iter_mut()
-        .filter(|hook| ours(hook, runner))
+        .filter(|hook| ours(hook, owner))
     {
         if let Some(repaired) = repair_field(owned, wanted, "command") {
             seen = true;
@@ -743,11 +857,17 @@ fn ensure_in(obj: &mut Map<String, Value>, key: &str, item: Value, runner: &str)
     let Some(list) = list.as_array_mut() else {
         return false;
     };
+    let wanted = item
+        .get("command")
+        .or_else(|| item.pointer("/hooks/0/command"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let owner = Owner { runner, wanted };
     let mut seen = false;
     let mut changed = false;
-    for found in list.iter_mut().filter(|g| owned_entry(g, runner)) {
+    for found in list.iter_mut().filter(|g| owned_entry(g, owner)) {
         seen = true;
-        if let Some(repaired) = repair_owned_hook(found, &item, runner) {
+        if let Some(repaired) = repair_owned_hook(found, &item, owner) {
             changed |= repaired;
         } else if *found != item {
             *found = item.clone();
@@ -921,7 +1041,11 @@ fn spec(runner: &str, root: &mut Value, command: &str) -> Result<bool, String> {
             let want = json!({ "tool": "Bash", "action": "delegate", "to": command });
             let mut seen = false;
             let mut changed = false;
-            for found in list.iter_mut().filter(|rule| ours(rule, runner)) {
+            let owner = Owner {
+                runner,
+                wanted: command,
+            };
+            for found in list.iter_mut().filter(|rule| ours(rule, owner)) {
                 seen = true;
                 changed |= repair_field(found, &want, "to").unwrap_or(false);
             }
@@ -1837,7 +1961,11 @@ mod tests {
             let mut added = 0;
             for event in events.values_mut() {
                 for group in event.as_array_mut().unwrap() {
-                    if owned_entry(group, runner) {
+                    let owner = Owner {
+                        runner,
+                        wanted: &old,
+                    };
+                    if owned_entry(group, owner) {
                         group["hooks"]
                             .as_array_mut()
                             .unwrap()
@@ -1910,7 +2038,7 @@ mod tests {
 
     #[test]
     fn reonboard_repairs_every_owned_hook_in_a_group() {
-        let command = "'/safe path/ljos-guard-auggie.sh'";
+        let command = "'/opt/ljos$(echo)/ljos-guard-auggie.sh'";
         let mut root = json!({
             "hooks": {
                 "PreToolUse": [{
@@ -1965,11 +2093,12 @@ mod tests {
 
     #[test]
     fn reonboard_repairs_every_owned_group_and_entry() {
-        let stale = |runner: &str| format!("/opt/ljos$(echo)/ljos-guard-{runner}.sh");
-        let command = "'/safe path/ljos-guard-auggie.sh'";
+        let stale = "/opt/ljos$(echo)/ljos-guard-auggie.sh";
+        let command = crate::tools::sh_word(stale);
+        let command = command.as_str();
         let group = json!({
             "matcher": "launch-process",
-            "hooks": [{"type": "command", "command": stale("auggie"), "timeout": 20_000}]
+            "hooks": [{"type": "command", "command": stale, "timeout": 20_000}]
         });
         let foreign = json!({
             "matcher": "launch-process",
@@ -1988,8 +2117,11 @@ mod tests {
         assert!(!spec("auggie", &mut root, command).unwrap());
         assert_eq!(root, before);
 
-        let command = "/safe/ljos hook --runner windsurf";
-        let entry = json!({"command": stale("windsurf"), "show_output": false});
+        let program = "/opt/ljos$(echo)/bin/ljos";
+        let command = format!("{} hook --runner windsurf", crate::tools::sh_word(program));
+        let command = command.as_str();
+        let entry =
+            json!({"command": format!("{program} hook --runner windsurf"), "show_output": false});
         let foreign = json!({"command": "/usr/bin/true", "show_output": true});
         let mut root = json!({
             "hooks": { "pre_run_command": [entry.clone(), foreign.clone(), entry] }
@@ -2061,6 +2193,160 @@ mod tests {
             assert!(!spec(runner, &mut root, command).unwrap(), "{runner}");
             assert_eq!(root, before, "{runner}");
         }
+    }
+
+    #[test]
+    fn a_near_runner_name_or_script_name_is_foreign() {
+        let hooked = |runner: &str, matcher: &str, command: &str| {
+            let foreign = group(Some(matcher), command, 20, runner);
+            (
+                json!({ "hooks": { "PreToolUse": [foreign.clone()] } }),
+                "/hooks/PreToolUse/0",
+                foreign,
+                "/hooks/PreToolUse/1/hooks/0/command",
+            )
+        };
+        let delegated = |to: &str| {
+            let foreign = json!({ "tool": "Bash", "action": "delegate", "to": to });
+            (
+                json!({ "amp.permissions": [foreign.clone()] }),
+                "/amp.permissions/1",
+                foreign,
+                "/amp.permissions/0/to",
+            )
+        };
+        let qwen = "/safe/ljos hook --runner qwen";
+        let auggie = "'/safe path/ljos-guard-auggie.sh'";
+        let amp = "/safe path/ljos-guard-amp.sh";
+        let qwen_shell = "^run_shell_command$";
+        for (runner, (mut root, foreign_at, foreign, ours_at), command) in [
+            (
+                "qwen",
+                hooked("qwen", qwen_shell, "/opt/ljos hook --runner qwen-extra"),
+                qwen,
+            ),
+            (
+                "qwen",
+                hooked("qwen", qwen_shell, "/usr/bin/env echo --runner qwen"),
+                qwen,
+            ),
+            (
+                "qwen",
+                hooked("qwen", qwen_shell, "/opt/ljos status --runner qwen"),
+                qwen,
+            ),
+            (
+                "auggie",
+                hooked("auggie", "launch-process", "/old/not-ljos-guard-auggie.sh"),
+                auggie,
+            ),
+            (
+                "auggie",
+                hooked(
+                    "auggie",
+                    "launch-process",
+                    "printf /tmp/ljos-guard-auggie.sh",
+                ),
+                auggie,
+            ),
+            ("amp", delegated("/old/not-ljos-guard-amp.sh.bak"), amp),
+            ("amp", delegated("printf /tmp/ljos-guard-amp.sh"), amp),
+        ] {
+            assert!(spec(runner, &mut root, command).unwrap(), "{runner}");
+            assert_eq!(root.pointer(foreign_at), Some(&foreign), "{runner}: {root}");
+            assert_eq!(
+                root.pointer(ours_at),
+                Some(&json!(command)),
+                "{runner}: {root}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_compound_or_extended_hook_command_is_foreign() {
+        let command = "'/safe path/ljos' hook --runner qwen";
+        for foreign in [
+            "/opt/ljos hook --runner qwen && printf foreign",
+            "/opt/ljos hook --runner qwen || printf foreign",
+            "/opt/ljos hook --runner qwen; printf foreign",
+            "/opt/ljos hook --runner qwen | tee /tmp/log",
+            "/opt/ljos hook --runner qwen &",
+            "/opt/ljos hook --runner qwen > /tmp/log",
+            "/opt/ljos hook --runner qwen 2>/dev/null",
+            "/opt/ljos hook --runner qwen < /dev/null",
+            "/opt/ljos hook --runner qwen\nprintf foreign",
+            "/opt/ljos hook --runner qwen # mine",
+            "/opt/ljos hook --runner qwen --limit 5",
+            "/opt/ljos hook --limit 5 --runner qwen",
+            "/opt/ljos hook --runner=qwen",
+            "LJOS_SEAT=ada /opt/ljos hook --runner qwen",
+            "$(printf /opt)/ljos hook --runner qwen",
+            "`printf /opt`/ljos hook --runner qwen",
+            "\"$HOME/ljos\" hook --runner qwen",
+            "/a;b/ljos hook --runner qwen",
+            "~/bin/ljos hook --runner qwen",
+            "/opt/*/ljos hook --runner qwen",
+            "(/opt/ljos hook --runner qwen)",
+            "'/opt/ljos hook --runner qwen",
+        ] {
+            let mut root = json!({ "hooks": { "PreToolUse": [
+                group(Some("^run_shell_command$"), foreign, 20, "qwen")
+            ] } });
+            assert!(spec("qwen", &mut root, command).unwrap(), "{foreign}");
+            assert_eq!(
+                root.pointer("/hooks/PreToolUse/0/hooks/0/command"),
+                Some(&json!(foreign)),
+                "{root}"
+            );
+            assert_eq!(
+                root.pointer("/hooks/PreToolUse/1/hooks/0/command"),
+                Some(&json!(command)),
+                "{root}"
+            );
+        }
+        for owned in [
+            "/old/ljos hook --runner qwen",
+            "'/old path/ljos' hook --runner qwen",
+            "\"/old path/ljos\" hook --runner 'qwen'",
+            "/old\\ path/ljos hook --runner qwen",
+        ] {
+            let mut root = json!({ "hooks": { "PreToolUse": [
+                group(Some("^run_shell_command$"), owned, 20, "qwen")
+            ] } });
+            assert!(spec("qwen", &mut root, command).unwrap(), "{owned}");
+            let list = root.pointer("/hooks/PreToolUse").unwrap();
+            assert_eq!(list.as_array().unwrap().len(), 1, "{owned}: {root}");
+            assert_eq!(list.pointer("/0/hooks/0/command"), Some(&json!(command)));
+        }
+        let script = "'/safe path/ljos-guard-auggie.sh'";
+        for foreign in [
+            "/old/ljos-guard-auggie.sh && printf foreign",
+            "/old/ljos-guard-auggie.sh --extra",
+            "/old/ljos-guard-auggie.sh > /tmp/log",
+        ] {
+            let mut root = json!({ "hooks": { "PreToolUse": [
+                group(Some("launch-process"), foreign, 20_000, "auggie")
+            ] } });
+            assert!(spec("auggie", &mut root, script).unwrap(), "{foreign}");
+            assert_eq!(
+                root.pointer("/hooks/PreToolUse/0/hooks/0/command"),
+                Some(&json!(foreign)),
+                "{root}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_older_unquoted_hook_path_is_still_owned() {
+        let old = "/opt/My Tools/ljos hook --runner qwen";
+        let command = "'/opt/My Tools/ljos' hook --runner qwen";
+        let mut root = json!({ "hooks": { "PreToolUse": [
+            group(Some("^run_shell_command$"), old, 20, "qwen")
+        ] } });
+        assert!(spec("qwen", &mut root, command).unwrap(), "{root}");
+        let list = root.pointer("/hooks/PreToolUse").unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 1, "{root}");
+        assert_eq!(list.pointer("/0/hooks/0/command"), Some(&json!(command)));
     }
 
     #[test]
