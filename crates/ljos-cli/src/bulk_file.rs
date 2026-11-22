@@ -235,22 +235,28 @@ fn is_lock(path: &Path) -> bool {
 /// Files by path, with their bytes.
 type Files = BTreeMap<PathBuf, Vec<u8>>;
 
-/// Every regular file under `dir` but the lock files, with its bytes.
+/// The files of the project directory `dir` that a create writes, with
+/// their bytes: `issues.org` and each regular file in `issues/` but the
+/// lock files. Nothing else there is read.
 fn snapshot(dir: &Path) -> Result<Files> {
     let mut out = BTreeMap::new();
-    if !dir.exists() {
+    let board = dir.join("issues.org");
+    if std::fs::symlink_metadata(&board).is_ok_and(|meta| meta.is_file()) {
+        out.insert(
+            board.clone(),
+            std::fs::read(&board).with_context(|| format!("reading {}", board.display()))?,
+        );
+    }
+    let ledger = dir.join("issues");
+    if !ledger.is_dir() {
         return Ok(out);
     }
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(at) = stack.pop() {
-        for entry in std::fs::read_dir(&at).with_context(|| format!("reading {}", at.display()))? {
-            let entry = entry?;
-            let kind = entry.file_type()?;
-            if kind.is_dir() {
-                stack.push(entry.path());
-            } else if kind.is_file() && !is_lock(&entry.path()) {
-                out.insert(entry.path(), std::fs::read(entry.path())?);
-            }
+    for entry in
+        std::fs::read_dir(&ledger).with_context(|| format!("reading {}", ledger.display()))?
+    {
+        let entry = entry?;
+        if entry.file_type()?.is_file() && !is_lock(&entry.path()) {
+            out.insert(entry.path(), std::fs::read(entry.path())?);
         }
     }
     Ok(out)
@@ -819,6 +825,21 @@ mod tests {
         assert_eq!(roll_back(boards).unwrap(), None);
         assert_eq!(read(), "before\n");
         assert!(dir.join("issues.org.lock").is_file());
+    }
+
+    #[test]
+    fn a_snapshot_reads_only_the_files_a_create_writes() {
+        let (_root, _layout, board) = demo(true);
+        std::fs::write(board.dir.join("notes.txt"), "not the board\n").unwrap();
+        std::fs::create_dir_all(board.dir.join("issues/deeper")).unwrap();
+        std::fs::write(board.dir.join("issues/deeper/x.org"), "deeper\n").unwrap();
+        let mut names: Vec<String> = snapshot(&board.dir)
+            .unwrap()
+            .keys()
+            .map(|path| path.strip_prefix(&board.dir).unwrap().display().to_string())
+            .collect();
+        names.retain(|name| !name.starts_with("issues/demo-"));
+        assert_eq!(names, ["issues/.ledger"]);
     }
 
     /// A tracker with project `demo` holding one issue, and the batch's
