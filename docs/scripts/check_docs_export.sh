@@ -61,7 +61,7 @@ trap cleanup EXIT
 
 git -C "$ROOT" worktree add --detach "$wt" HEAD >/dev/null
 git -C "$ROOT" worktree add --detach "$base_wt" "$compare_base" >/dev/null
-PYTHONPATH=docs/scripts python3 -m unittest docs/scripts/test_check_export_sync.py
+PYTHONPATH=docs/scripts python3 -m unittest docs/scripts/test_check_export_sync.py docs/scripts/test_gen_samples.py
 cd "$wt"
 
 export PYTHONDONTWRITEBYTECODE=1

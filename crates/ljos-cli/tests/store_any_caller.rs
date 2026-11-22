@@ -4,6 +4,11 @@
 //! --lesson`, a choice a prompt states and a proposal an older ljos left
 //! open are found by `ljos search` right after.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::path::Path;

@@ -627,7 +627,7 @@ fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64, cache: Option<&P
     let price = match j.price_in() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("jev: {e}");
+            say!("jev: {e}");
             return miss("error", 0);
         }
     };

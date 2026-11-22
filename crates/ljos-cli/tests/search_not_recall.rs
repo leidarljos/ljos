@@ -1,6 +1,11 @@
 //! A search is a lookup. It does not raise the recall count. A prompt
 //! that is handed the lesson does.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 
 use std::io::Write;

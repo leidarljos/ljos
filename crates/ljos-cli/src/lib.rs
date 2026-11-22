@@ -9,11 +9,74 @@ ljos_test_boot::harness!();
 
 use std::path::{Path, PathBuf};
 
+use crate::output_wrap::Width;
 use anyhow::{bail, Context, Result};
 use packset_client::Hit;
 use serde_json::Value;
 
 pub use pack_link::PacksetClient;
+
+/// `eprintln!` for a person: the line wraps to the terminal stderr is on,
+/// and stays byte for byte when stderr is a pipe or a file.
+#[macro_export]
+macro_rules! say {
+    () => {
+        $crate::say_text("\n")
+    };
+    ($($arg:tt)*) => {
+        $crate::say_text(&format!("{}\n", format_args!($($arg)*)))
+    };
+}
+
+/// `eprint!` for a person, wrapped as [`say!`] wraps.
+#[macro_export]
+macro_rules! say_raw {
+    ($($arg:tt)*) => {
+        $crate::say_text(&format!($($arg)*))
+    };
+}
+
+/// `println!` for prose a person reads: the text wraps to the terminal
+/// stdout is on, and stays byte for byte on a pipe or a file.
+#[macro_export]
+macro_rules! tell {
+    () => {
+        $crate::tell_text("\n")
+    };
+    ($($arg:tt)*) => {
+        $crate::tell_text(&format!("{}\n", format_args!($($arg)*)))
+    };
+}
+
+/// `print!` for prose a person reads, wrapped as [`tell!`] wraps.
+#[macro_export]
+macro_rules! tell_raw {
+    ($($arg:tt)*) => {
+        $crate::tell_text(&format!($($arg)*))
+    };
+}
+
+/// `println!` for text that is laid out already or that a program reads:
+/// JSON, hook answers, ids, and pages built with a [`Width`].
+#[macro_export]
+macro_rules! emit {
+    () => {
+        $crate::emit_text("\n")
+    };
+    ($($arg:tt)*) => {
+        $crate::emit_text(&format!("{}\n", format_args!($($arg)*)))
+    };
+}
+
+/// `print!` for text that is laid out already or that a program reads.
+#[macro_export]
+macro_rules! emit_raw {
+    ($($arg:tt)*) => {
+        $crate::emit_text(&format!($($arg)*))
+    };
+}
+
+pub use output::{emit_text, say_text, tell_text};
 
 pub mod admit;
 pub mod ask_pack;
@@ -60,6 +123,8 @@ pub mod mesh_lane;
 pub mod note_queue;
 pub mod note_retire;
 pub mod offboard;
+pub mod output;
+pub mod output_wrap;
 pub mod pack_copy;
 pub mod pack_link;
 pub mod panel_cloud;
@@ -1546,7 +1611,7 @@ fn server_entry_in(dry: bool) -> Result<Value> {
     // `--harness json` prints this value alone on stdout so it parses.
     // The reason for an absolute path goes to stderr.
     if let Some(note) = &plan.note {
-        eprintln!("{note}");
+        say!("{note}");
     }
     Ok(serde_json::json!({
         "mcpServers": {
@@ -4708,7 +4773,7 @@ fn warn_seat_disagreement() {
     if ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    eprint!("{line}");
+    say_raw!("{line}");
 }
 
 /// Who is sitting, with nothing set. The seat: `LJOS_SEAT` or the
@@ -5342,7 +5407,7 @@ fn notice_shared_harness(family: &str) {
     if ONCE.swap(true, Ordering::Relaxed) {
         return;
     }
-    eprintln!(
+    say!(
         "ljos: this session has no id and it shares the seat {family}, so run `export LJOS_SEAT=NAME`."
     );
 }
@@ -12558,16 +12623,15 @@ struct JudgeWorkerJob {
 
 /// Run one prompt judgment in a detached worker started by `ljos hook`.
 pub fn run_jev_judge_worker() -> anyhow::Result<()> {
-    use std::io::{Read, Write};
+    use std::io::Read;
     let mut raw = String::new();
     std::io::stdin().read_to_string(&mut raw)?;
     let job: JudgeWorkerJob = serde_json::from_str(&raw)?;
     let texts: Vec<&str> = job.candidates.iter().map(String::as_str).collect();
     let judged = jev::judge_with(&job.cfg, &job.cue, &texts, &job.claims, &job.dirs);
     if let Ok(line) = serde_json::to_string(&judged) {
-        let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "{line}");
-        let _ = out.flush();
+        emit!("{line}");
+        let _ = output::flush_stdout();
     }
     Ok(())
 }
@@ -12757,10 +12821,10 @@ pub fn recall_note(issue: &str, memories: &str) -> String {
     if body.is_empty() {
         return String::new();
     }
-    let head = scan::wrap(&format!("On {issue}"), scan::COLS);
-    let more = scan::wrap(
+    let head = scan::wrap_for(&format!("On {issue}"), HOOK_WIDTH);
+    let more = scan::wrap_for(
         &format!("`ljos recall {issue}` shows the working set."),
-        scan::COLS,
+        HOOK_WIDTH,
     );
     format!("{head}\n{more}\n{body}")
 }
@@ -15103,7 +15167,7 @@ pub fn hook_timed<T>(stage: &str, f: impl FnOnce() -> T) -> T {
     }
     let started = std::time::Instant::now();
     let out = f();
-    eprintln!(
+    say!(
         "hook-timing {stage} {:.0} ms",
         started.elapsed().as_secs_f64() * 1000.0
     );
@@ -15316,20 +15380,21 @@ pub fn search_rank_line(ranking: &Ranking, hits: &[Hit]) -> String {
 /// that is starting, busy or not running is the one line of [`degraded`].
 pub fn say_search_rank(ranking: &Ranking, hits: &[Hit]) {
     if !say_degraded_ranking(ranking) {
-        let rank = search_rank_for_person(&search_rank_line(ranking, hits));
-        if !rank.is_empty() {
-            eprint!("{rank}");
-        }
+        say_rank(&search_rank_line(ranking, hits));
     }
 }
 
 /// [`say_search_rank`] for a recall, which does not know its rows here.
 pub fn say_ranking(ranking: &Ranking) {
     if !say_degraded_ranking(ranking) {
-        let rank = search_rank_for_person(&ranking_line(ranking));
-        if !rank.is_empty() {
-            eprint!("{rank}");
-        }
+        say_rank(&ranking_line(ranking));
+    }
+}
+
+fn say_rank(line: &str) {
+    let rank = search_rank_for_person(line);
+    if !rank.is_empty() {
+        say_raw!("{rank}");
     }
 }
 
@@ -17050,7 +17115,7 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
         bail!("search: the reranked search took longer than {ms} ms")
     };
     if std::env::var_os("LJOS_HOOK_TIMING").is_some() {
-        eprintln!("hook-timing rerank {read} claims walked");
+        say!("hook-timing rerank {read} claims walked");
     }
     found
 }
@@ -17342,7 +17407,7 @@ fn warn_search_refused(base: &str, code: u16) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .push((base, line.clone()));
-    eprintln!("{line}");
+    say!("{line}");
 }
 
 /// What doctor reports when an authenticated search is still refused.
@@ -17517,7 +17582,7 @@ fn say_search_miss() {
         return;
     }
     *said = Some(line.to_string());
-    eprintln!("{}", scan::wrap(line, scan::COLS));
+    say!("{}", scan::wrap_for(line, Width::stderr()));
 }
 
 /// Whether the writer at `client` takes `rank=relevance` in this
@@ -18366,7 +18431,7 @@ fn due_nudge(call: &HookCall) -> (String, Option<String>) {
         return (String::new(), None);
     }
     (
-        scan::wrap(
+        scan::wrap_for(
             &format!(
                 "{due} claim{} came due for review this week ({} due in all). Review is not the task: \
                  when the work reaches a pause, `ljos due` shows the soonest {SITTING_DUE}; grade one only \
@@ -18375,7 +18440,7 @@ fn due_nudge(call: &HookCall) -> (String, Option<String>) {
                 if due == 1 { "" } else { "s" },
                 all.len()
             ),
-            scan::COLS,
+            HOOK_WIDTH,
         ),
         Some(key),
     )
@@ -18719,6 +18784,10 @@ fn skip_json_literal(b: &[u8], i: &mut usize) -> bool {
 /// Print the allow for an editor harness `beforeReadFile` and return 0.
 /// `None` when the bytes are not that call, or the trace marker is on
 /// so the full payload can be recorded.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "writes the hook answer bytes and sets GATE_ANSWERED under the stdout lock"
+)]
 pub fn answer_cursor_read_bytes(bytes: &[u8]) -> Option<i32> {
     if hook_trace_marker() || !cursor_read_allow_bytes(bytes) {
         return None;
@@ -18780,6 +18849,10 @@ pub fn emit_cursor_side_answer(input: &str, event: Option<&str>) -> Option<i32> 
 /// Write a side answer already computed and return
 /// its status, so a caller that had to look at the answer first does not
 /// compute it twice.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "writes the hook answer bytes and sets GATE_ANSWERED under the stdout lock"
+)]
 pub fn emit_side_answer(input: &str, event: Option<&str>, output: &str, code: i32) -> i32 {
     let mut out = std::io::stdout().lock();
     GATE_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -18831,6 +18904,10 @@ pub fn hook_failure_output(input: &str, event: Option<&str>, error: &str) -> Opt
 /// Write the gate's failure answer, an allow with a note, and exit 0.
 /// Returns when this process is not answering a gate or has already
 /// answered.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "writes the hook answer bytes and sets GATE_ANSWERED under the stdout lock"
+)]
 pub fn answer_failed_gate(error: &str) {
     let Some((input, event)) = GATE_CALL.get() else {
         return;
@@ -18849,12 +18926,16 @@ pub fn answer_failed_gate(error: &str) {
     GATE_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = std::io::Write::write_all(&mut out, text.as_bytes());
     let _ = std::io::Write::flush(&mut out);
-    eprintln!("ljos hook: {}; the call is allowed", hook_fault_line(error));
+    say!("ljos hook: {}; the call is allowed", hook_fault_line(error));
     std::process::exit(0);
 }
 
 /// Write a gate's answer and mark it given, so a failure after it, or the
 /// deadline, writes nothing more.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "writes the hook answer bytes and sets GATE_ANSWERED under the stdout lock"
+)]
 pub fn answer_gate(output: &str) {
     let mut out = std::io::stdout().lock();
     GATE_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -21358,7 +21439,7 @@ pub fn prompt_writer_line() -> Option<String> {
 /// a down writer is one line.
 pub fn say_fault(line: &str) {
     if !FAULT_SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        eprintln!("{line}");
+        say!("{line}");
     }
 }
 
@@ -24826,7 +24907,7 @@ pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) 
             Ok(body) => Ok(body),
             Err(err) if existing_atom_id(&err).is_some() => {
                 let id = existing_atom_id(&err).unwrap_or_default();
-                eprintln!("remember: already stored as {id}, so run `ljos search`.");
+                say!("remember: already stored as {id}, so run `ljos search`.");
                 Ok(serde_json::json!({
                     "id": id,
                     "kind": "lesson",
@@ -25037,7 +25118,7 @@ pub fn flush_queued_lessons() {
                 if let Some(line) = pack_down_message(&err) {
                     say_fault(&line);
                 } else {
-                    eprintln!(
+                    say!(
                         "memory: {waiting} note(s) still queued (the lesson is safe and will be sent automatically; the pack did not answer: {err:#})"
                     );
                 }
@@ -25069,13 +25150,13 @@ pub fn flush_queued_lessons() {
         rest.waiting_on = None;
         let lines = note_queue::drained_lines(&rest);
         if !lines.is_empty() {
-            eprint!("{lines}");
+            say_raw!("{lines}");
         }
         return;
     }
     let lines = note_queue::drained_lines(&done);
     if !lines.is_empty() {
-        eprint!("{lines}");
+        say_raw!("{lines}");
     }
 }
 
@@ -26703,7 +26784,8 @@ pub struct WorkflowStatus {
 
 /// The status from the parent's children and the latest round's ballots.
 /// Open children come first, in the order design, implement, review, panel;
-/// a closed latest round is read by [`panel_verdict`].
+/// a closed latest round is read by [`panel_verdict`]. `width` is the width
+/// the `next:` line is printed at.
 #[must_use]
 pub fn workflow_status_of(
     parent: &str,
@@ -26711,6 +26793,7 @@ pub fn workflow_status_of(
     children: &[WorkflowChild],
     latest_ballots: &[Forecast],
     cfg: &WorkflowConfig,
+    width: Width,
 ) -> WorkflowStatus {
     let rounds: Vec<&WorkflowChild> = children
         .iter()
@@ -26731,9 +26814,13 @@ pub fn workflow_status_of(
     let first_open = |stage: Stage| open.iter().find(|c| c.stage == stage);
     let sit = |c: &WorkflowChild| {
         let lead = format!("`ljos sitting {}` (", c.id);
-        // `next: ` is printed in front of this citation. The title stays
-        // inside the parentheses on that line.
-        let room = scan::COLS.saturating_sub(6 + lead.chars().count() + 1);
+        // `next: ` is printed in front of this citation. At the fixed width
+        // the title stays inside the parentheses on that line. At a
+        // terminal width the line wraps and the title is whole.
+        let room = match width.terminal() {
+            Some(_) => usize::MAX,
+            None => scan::COLS.saturating_sub(6 + lead.chars().count() + 1),
+        };
         format!("{lead}{})", scan::fit_title(&c.title, room))
     };
     let mut passed = false;
@@ -26800,16 +26887,19 @@ pub fn workflow_status_of(
     }
 }
 
-/// The status as the sitting and `ljos workflow` print it.
+/// The status as the sitting and `ljos workflow` print it, at `width`.
 #[must_use]
-pub fn format_workflow_status(s: &WorkflowStatus) -> String {
-    let mut out = format!(
-        "{} on {}, round {}, stage {}\nnext: {}\n",
-        s.name, s.parent, s.round, s.stage, s.next
+pub fn format_workflow_status(s: &WorkflowStatus, width: Width) -> String {
+    let mut out = scan::wrap_on_terminal(
+        &format!(
+            "{} on {}, round {}, stage {}\nnext: {}\n",
+            s.name, s.parent, s.round, s.stage, s.next
+        ),
+        width,
     );
     for c in &s.open {
         let lead = format!("  open {} ({}, {}) ", c.id, c.stage.word(), c.state);
-        out.push_str(&scan::line_with_title(&lead, &c.title, scan::COLS));
+        out.push_str(&scan::line_with_title_for(&lead, &c.title, width));
         out.push('\n');
     }
     out
@@ -26841,12 +26931,13 @@ pub fn workflow_on(issue: &str) -> Option<String> {
         .and_then(|v| workflow_name_from_issue(&v))
 }
 
-/// The status of a workflow parent; none when it carries no workflow.
+/// The status of a workflow parent, for text printed at `width`; none when
+/// it carries no workflow.
 ///
 /// # Errors
 ///
 /// The tracker not answering.
-pub fn workflow_status(parent: &str) -> Result<Option<WorkflowStatus>> {
+pub fn workflow_status(parent: &str, width: Width) -> Result<Option<WorkflowStatus>> {
     let v = tracker_show_json(parent)?;
     let Some(name) = workflow_name_from_issue(&v) else {
         return Ok(None);
@@ -26863,7 +26954,7 @@ pub fn workflow_status(parent: &str) -> Result<Option<WorkflowStatus>> {
         Some(id) => forecasts_from_json(&raw_ballot_json(id)?)?,
         None => Vec::new(),
     };
-    let status = workflow_status_of(parent, &name, &children, &ballots, &cfg);
+    let status = workflow_status_of(parent, &name, &children, &ballots, &cfg, width);
     if let Some(id) = latest {
         if let Some(why) = panel_gate::settle_refusal(&id) {
             session_authored_notice(&why);
@@ -26880,7 +26971,7 @@ pub(crate) fn session_authored_notice(why: &str) {
     if !seen.insert(why.to_string()) {
         return;
     }
-    eprintln!("ljos: session-authored: {why}");
+    say!("ljos: session-authored: {why}");
 }
 
 /// Why a close is refused on a workflow parent, or none
@@ -26925,7 +27016,7 @@ pub(crate) fn workflow_child(
 ///
 /// An unknown workflow, a parent under another workflow, or the tracker
 /// refusing a write.
-pub fn workflow_start(parent: &str, name: &str) -> Result<String> {
+pub fn workflow_start(parent: &str, name: &str, width: Width) -> Result<String> {
     let name = parse_workflow_name(name)?;
     let v = tracker_show_json(parent)?;
     let mut out = String::new();
@@ -26971,8 +27062,8 @@ pub fn workflow_start(parent: &str, name: &str) -> Result<String> {
         out.push_str(&persist_tracker(&id, "filed a design child"));
     }
     out.push_str(&persist_tracker(parent, "started a workflow"));
-    if let Some(s) = workflow_status(parent)? {
-        out.push_str(&format_workflow_status(&s));
+    if let Some(s) = workflow_status(parent, width)? {
+        out.push_str(&format_workflow_status(&s, width));
     }
     Ok(out)
 }
@@ -27062,8 +27153,8 @@ fn note_objections_below(issue: &str, state: &converge::PanelState) -> Result<()
 /// The parent carries no workflow, a child is still open, the panel has
 /// not all voted, the design is missing, the panel already passed, or the
 /// tracker refusing a write.
-pub fn workflow_round(parent: &str) -> Result<String> {
-    let Some(status) = workflow_status(parent)? else {
+pub fn workflow_round(parent: &str, width: Width) -> Result<String> {
+    let Some(status) = workflow_status(parent, width)? else {
         return Err(policy_label::labelled(
             "workflow-warning",
             format!("workflow: {parent} carries no workflow; `ljos workflow {parent} --start feature` starts one"),
@@ -27131,8 +27222,8 @@ pub fn workflow_round(parent: &str) -> Result<String> {
                 "the next round opens when the {n} blocking {} closed\n",
                 if n == 1 { "fix is" } else { "fixes are" }
             ));
-            if let Some(s) = workflow_status(parent)? {
-                out.push_str(&format_workflow_status(&s));
+            if let Some(s) = workflow_status(parent, width)? {
+                out.push_str(&format_workflow_status(&s, width));
             }
             Ok(out)
         }
@@ -27169,8 +27260,8 @@ pub fn workflow_round(parent: &str) -> Result<String> {
             run_captured("vissue", &["append", &id, &body])?;
             let mut out = format!("filed panel round {n}: {id}\n");
             out.push_str(&persist_tracker(&id, "filed a panel round"));
-            if let Some(s) = workflow_status(parent)? {
-                out.push_str(&format_workflow_status(&s));
+            if let Some(s) = workflow_status(parent, width)? {
+                out.push_str(&format_workflow_status(&s, width));
             }
             Ok(out)
         }
@@ -27179,7 +27270,7 @@ pub fn workflow_round(parent: &str) -> Result<String> {
 
 /// The `== workflow` block of a sitting: the status of the issue's own
 /// workflow, or of its parent's when the issue is a step of one. Empty when
-/// neither carries a workflow.
+/// neither carries a workflow. Laid out at [`SITTING_WIDTH`].
 #[must_use]
 pub fn workflow_sitting_block(issue: &str) -> String {
     let Ok(v) = tracker_show_json(issue) else {
@@ -27200,8 +27291,11 @@ pub fn workflow_sitting_block(issue: &str) -> String {
             format!("{issue} is the {} step of {p}\n", stage.word()),
         )
     };
-    match workflow_status(&parent) {
-        Ok(Some(s)) => format!("== workflow\n{role}{}", format_workflow_status(&s)),
+    match workflow_status(&parent, SITTING_WIDTH) {
+        Ok(Some(s)) => format!(
+            "== workflow\n{role}{}",
+            format_workflow_status(&s, SITTING_WIDTH)
+        ),
         Ok(None) => String::new(),
         Err(e) => format!("== workflow\n{role}the workflow status could not be read: {e:#}\n"),
     }
@@ -27377,7 +27471,8 @@ fn activated_for_ticket(persona: &Persona, title: &str, own: &[Value]) -> Vec<Hi
 /// and domains, the memories that persona activates for this ticket, what
 /// the seat knows on those domains (preferences first), and the issue's
 /// working set. One text, so a panel member reads the same seat the rest
-/// do and still reads it its own way.
+/// do and still reads it its own way. It is laid out at [`Width::FIXED`]:
+/// the same text is written to the panel's files and handed to subagents.
 ///
 /// # Errors
 ///
@@ -27499,7 +27594,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
         }
     }
     out.push_str("\nThe work (tracker recall may include unverified logbook notes):\n");
-    out.push_str(&tracker_recall(issue)?.stdout);
+    out.push_str(&tracker_recall(issue, Width::FIXED)?.stdout);
     out.push_str(&format!(
         "\nWalk the island as yourself before the ballot: `ljos island` on the work with `--as {name}`. \
          The number on a row is spread along your links, not a rank of what is true. \
@@ -34981,6 +35076,10 @@ pub(crate) fn open_state_dir(path: &Path) -> std::io::Result<(std::fs::File, std
 /// `O_NONBLOCK` is cleared once that check passes, so a later read of a
 /// real log waits for its bytes. A symlink fails the open (`ELOOP`) and is
 /// reported as one.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "owns a descriptor this function opened, never stdout or stderr"
+)]
 pub(crate) fn open_regular_at(
     dir: &std::fs::File,
     name: &std::ffi::CStr,
@@ -35483,14 +35582,14 @@ pub fn log_bypass(kind: &str, how: &str, command: &str, rule: &Rule) {
     line.push('\n');
     let _ = path.parent().map(std::fs::create_dir_all);
     if let Err(err) = append_locked_row(&path, line.as_bytes(), Durability::BestEffort) {
-        eprintln!("{}", bypass_skip_note(&path, &err));
+        say!("{}", bypass_skip_note(&path, &err));
     }
 }
 
 /// A guard that cannot judge allows the call, warns once, and logs a fault.
 fn allow_unjudged(why: &str, command: &str) {
     let note = format!("ljos: the guard could not judge ({why}); the call is allowed");
-    eprintln!("{note}");
+    say!("{note}");
     set_guard_note(note.clone());
     log_bypass(
         "fault",
@@ -37485,6 +37584,12 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     }
 }
 
+/// Words used as doctor row labels.
+#[must_use]
+pub fn is_doctor_word(word: &str) -> bool {
+    matches!(word, "ok" | "info" | "warn" | "fail" | "no" | "warming")
+}
+
 /// `1 unpushed` and `12 unpushed` count. `0 unpushed` does not.
 fn names_unpushed(state: &str) -> bool {
     state.split(';').any(|part| {
@@ -39347,6 +39452,15 @@ pub const SITTING_DUE: usize = 8;
 /// How many dated events a sitting's timeline prints. Protocol: last twelve.
 pub const SITTING_TIMELINE: usize = 12;
 
+/// The width of text a hook hands to the runner. It goes into the
+/// runner's JSON and is never printed to a terminal.
+pub(crate) const HOOK_WIDTH: Width = Width::FIXED;
+
+/// The width a sitting is laid out at. [`compact_sitting_block`] parses its
+/// pieces line by line and the same pieces are its `--json` text, so a
+/// sitting does not follow the terminal.
+const SITTING_WIDTH: Width = Width::FIXED;
+
 /// The review clock as a sitting prints it: the due cards that name this
 /// issue, then the count of those. When none do, the line is
 /// `nothing relevant is due`.
@@ -39443,9 +39557,9 @@ fn sitting_review_sweep() -> String {
 /// due atoms, then the summary. Those rows are the ones `graded` takes.
 /// With `all`, every due atom is listed to read, and none is put up for
 /// grading: a list of a thousand is a census, not a review.
-pub fn due_report(all: bool) -> Result<String> {
+pub fn due_report(all: bool, width: Width) -> Result<String> {
     let (shown, matched, summary, sweep) = due_rows(all)?;
-    Ok(format_due_page(&shown, matched, &summary, &sweep))
+    Ok(format_due_page(&shown, matched, &summary, &sweep, width))
 }
 
 /// The due list as JSON. The ids are the full ones `ljos graded` takes.
@@ -39517,28 +39631,34 @@ fn due_rows(all: bool) -> Result<(Vec<Value>, usize, String, String)> {
     ))
 }
 
-fn format_due_page(shown: &[Value], matched: usize, summary: &str, sweep: &str) -> String {
-    let mut out = scan::count_line("due", shown.len(), matched, "soonest first");
+fn format_due_page(
+    shown: &[Value],
+    matched: usize,
+    summary: &str,
+    sweep: &str,
+    width: Width,
+) -> String {
+    let mut out = scan::count_line("due", shown.len(), matched, "soonest first", width);
     out.push('\n');
     if shown.len() < matched {
-        out.push_str(&scan::wrap(
+        out.push_str(&scan::wrap_for(
             "the rest stay due and that list grades none, so run `ljos due --all`.",
-            scan::COLS,
+            width,
         ));
         out.push('\n');
     }
     if !summary.is_empty() {
-        out.push_str(&scan::wrap(summary, scan::COLS));
+        out.push_str(&scan::wrap_for(summary, width));
         out.push('\n');
     }
     if !sweep.trim().is_empty() {
-        out.push_str(&scan::wrap(sweep.trim(), scan::COLS));
+        out.push_str(&scan::wrap_for(sweep.trim(), width));
         out.push('\n');
     }
     if !shown.is_empty() {
-        out.push_str(&scan::wrap(
+        out.push_str(&scan::wrap_for(
             "grade one with `ljos graded ID`, or retire it with `ljos forget ID`.",
-            scan::COLS,
+            width,
         ));
         out.push('\n');
     }
@@ -39550,13 +39670,13 @@ fn format_due_page(shown: &[Value], matched: usize, summary: &str, sweep: &str) 
     let now = now_utc();
     for (atom, label) in shown.iter().zip(labels) {
         out.push('\n');
-        out.push_str(&due_block(atom, &label, &now));
+        out.push_str(&due_block(atom, &label, &now, width));
         out.push('\n');
     }
     out
 }
 
-fn due_block(atom: &Value, label: &str, now: &str) -> String {
+fn due_block(atom: &Value, label: &str, now: &str, width: Width) -> String {
     let kind = atom["kind"].as_str().unwrap_or("claim");
     let when = match atom["due_at"].as_str().filter(|due| !due.is_empty()) {
         None => "not reviewed yet".to_string(),
@@ -39589,7 +39709,13 @@ fn due_block(atom: &Value, label: &str, now: &str) -> String {
     } else {
         format!("id {label}")
     };
-    scan::claim_block(&head, atom["text"].as_str().unwrap_or("").trim(), &foot, 0)
+    scan::claim_block(
+        &head,
+        atom["text"].as_str().unwrap_or("").trim(),
+        &foot,
+        0,
+        width,
+    )
 }
 
 /// The newer claims the pack holds on what `claim` says: the review
@@ -40014,7 +40140,7 @@ fn format_due_cards(atoms: &[Value]) -> String {
     let now = now_utc();
     let mut out = String::new();
     for (atom, label) in atoms.iter().zip(labels) {
-        out.push_str(&due_block(atom, &label, &now));
+        out.push_str(&due_block(atom, &label, &now, SITTING_WIDTH));
         out.push('\n');
     }
     out
@@ -40382,18 +40508,26 @@ pub fn format_consolidation(body: &Value) -> String {
 
 /// One block per hub, highest first. The score is how many memories point
 /// here, weighed by how linked those are.
-pub fn format_hubs(body: &Value) -> String {
+pub fn format_hubs(body: &Value, width: Width) -> String {
     let hubs: Vec<&Value> = body["hubs"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|hub| reviewable(*hub))
         .collect();
-    let mut out = scan::count_line("hubs", hubs.len(), hubs.len(), "highest first");
+    let mut out = scan::count_line("hubs", hubs.len(), hubs.len(), "highest first", width);
     out.push('\n');
-    out.push_str("The score is how many memories point here, weighed by how linked those are.\n");
+    out.push_str(&scan::wrap_for(
+        "The score is how many memories point here, weighed by how linked those are.",
+        width,
+    ));
+    out.push('\n');
     if hubs.is_empty() {
-        out.push_str("no memory is pointed at, so run `ljos remember \"TEXT\"`.\n");
+        out.push_str(&scan::wrap_for(
+            "no memory is pointed at, so run `ljos remember \"TEXT\"`.",
+            width,
+        ));
+        out.push('\n');
         return out;
     }
     let labels = scan::unique_prefixes(hubs.iter().map(|hub| hub["id"].as_str().unwrap_or("")));
@@ -40429,6 +40563,7 @@ pub fn format_hubs(body: &Value) -> String {
             hub["text"].as_str().unwrap_or("").trim(),
             &foot,
             0,
+            width,
         ));
         out.push('\n');
     }
@@ -40510,13 +40645,13 @@ pub fn island_reading(body: &Value) -> String {
 }
 
 /// One block per activated memory, strongest first.
-pub fn format_island(body: &Value) -> String {
+pub fn format_island(body: &Value, width: Width) -> String {
     let mut out = String::new();
     for line in island_reading(body).lines() {
         if line.is_empty() {
             continue;
         }
-        out.push_str(&scan::wrap(line, scan::COLS));
+        out.push_str(&scan::wrap_for(line, width));
         out.push('\n');
     }
     let now = now_utc();
@@ -40527,13 +40662,10 @@ pub fn format_island(body: &Value) -> String {
         } else {
             " The encoder is down, so this was matched by words only."
         };
-        out.push_str(&scan::wrap(
-            &format!(
+        out.push_str(&scan::wrap_for(&format!(
                 "weak island: {seeds} seed{} two scorers agreed on.{words} Read it as the pack's best-connected cluster, not as what the cue is about. It will not fire.",
                 if seeds == 1 { "" } else { "s" }
-            ),
-            scan::COLS,
-        ));
+            ), width));
         out.push('\n');
     }
     let atoms: Vec<&Value> = body["island"]
@@ -40551,6 +40683,7 @@ pub fn format_island(body: &Value) -> String {
             atoms.len(),
             atoms.len(),
             "strongest first",
+            width,
         ));
         out.push('\n');
     }
@@ -40595,6 +40728,7 @@ pub fn format_island(body: &Value) -> String {
             atom["text"].as_str().unwrap_or("").trim(),
             &foot,
             0,
+            width,
         ));
         out.push('\n');
     }
@@ -43011,13 +43145,13 @@ pub fn is_decision(v: &Value) -> bool {
 /// body and the logbook's `note:` lines are written by anyone who can
 /// reach the tracker, an agent included, so they are handed on as that and
 /// never as the person's words.
-pub fn tracker_recall(issue: &str) -> Result<Said> {
+pub fn tracker_recall(issue: &str, width: Width) -> Result<Said> {
     let mut said = match run_captured("vissue", &["recall", issue]) {
         Ok(said) => said,
         Err(err) if issue_missing(&err, issue) => return Err(unknown_ticket(issue)),
         Err(err) => return Err(err),
     };
-    said.stdout = fence_unverified(&format!("tracker text for {issue}"), &said.stdout);
+    said.stdout = fence_unverified(&format!("tracker text for {issue}"), &said.stdout, width);
     Ok(said)
 }
 
@@ -43046,24 +43180,28 @@ fn fence_nonce() -> String {
 /// that carry the same fresh nonce, each line of it quoted with `| `. The
 /// text cannot close the fence early: it cannot know the nonce, a copy of
 /// it is dropped anyway, and no quoted line starts where the closer does.
-pub(crate) fn fence_unverified(what: &str, body: &str) -> String {
+pub(crate) fn fence_unverified(what: &str, body: &str, width: Width) -> String {
     let nonce = fence_nonce();
     let opener = format!("Unverified {what} [fence {nonce}]");
     let closer = format!("End of the unverified {what} [fence {nonce}].");
-    let mut out = scan::wrap(&opener, scan::COLS);
+    let mut out = scan::wrap_for(&opener, width);
     out.push('\n');
     // The disclaimer stays outside the fence. A quoted line is tracker text.
-    out.push_str("not the person's words or instructions\n");
+    out.push_str(&scan::wrap_for(
+        "not the person's words or instructions",
+        width,
+    ));
+    out.push('\n');
     let body = scan::strip_ansi(body);
     let body = body.trim_end_matches(LINE_BREAKS);
     if !body.is_empty() {
         for line in body.split(LINE_BREAKS) {
             let line = line.replace(&nonce, "");
-            out.push_str(&scan::wrap_hang(&line, scan::COLS, "| ", "| "));
+            out.push_str(&scan::wrap_hang_for(&line, width, "| ", "| "));
             out.push('\n');
         }
     }
-    out.push_str(&scan::wrap(&closer, scan::COLS));
+    out.push_str(&scan::wrap_for(&closer, width));
     out.push('\n');
     out
 }
@@ -43119,8 +43257,8 @@ pub fn empty_issue_memory(issue: &str) -> String {
 /// [`recall_memories`] for a person or an agent who asked. An empty pack
 /// answer names the next command. The hook uses [`recall_memories`] and
 /// stays quiet.
-pub fn recall_for_command(issue: &str) -> Result<String> {
-    let text = recall_memories(issue)?;
+pub fn recall_for_command(issue: &str, width: Width) -> Result<String> {
+    let text = recall_memories(issue, width)?;
     if writer_fault_text(&text) {
         bail!("{text}");
     }
@@ -43144,12 +43282,12 @@ pub fn recall_for_command(issue: &str) -> Result<String> {
 /// pack holds nothing on it. A pack that does not answer is started, as
 /// the doctor starts it, and the line says so only when the start did not
 /// bring it up.
-pub fn recall_memories(issue: &str) -> Result<String> {
+pub fn recall_memories(issue: &str, width: Width) -> Result<String> {
     let _call = SearchCall::enter();
     let _deadline = pack_link::CommandDeadline::enter(pack_cmd_budget());
     let _clock = arm_cmd_pack();
     let _listing = ListingMemo::enter();
-    recall_memories_with(issue, true)
+    recall_memories_with(issue, true, width)
 }
 
 /// [`recall_memories`] for prompt injection: note memories are left out so
@@ -43159,7 +43297,7 @@ pub(crate) fn recall_memories_for_prompt(issue: &str) -> String {
     let _call = SearchCall::enter();
     let _deadline = pack_link::CommandDeadline::enter(pack_cmd_budget());
     let _clock = arm_cmd_pack();
-    match recall_memories_with(issue, false) {
+    match recall_memories_with(issue, false, HOOK_WIDTH) {
         Ok(text) => {
             if read_encoder_status().as_ref().is_some_and(encoder_lexical) {
                 format!("{LEXICAL_ONLY_LINE}{text}")
@@ -43284,7 +43422,7 @@ fn listed_word_hits(
     hits
 }
 
-fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
+fn recall_memories_with(issue: &str, include_notes: bool, width: Width) -> Result<String> {
     let _call = SearchCall::enter();
     let issue = issue.trim();
     if let Some(listing) = sitting_listing() {
@@ -43316,6 +43454,7 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
                 &now,
                 include_notes,
                 false,
+                width,
             ));
         }
         let own = tagged_with_issue(listing.atoms.as_ref(), issue);
@@ -43340,6 +43479,7 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
             &now,
             include_notes,
             listing.searched,
+            width,
         ));
     }
     // A dead encoder stays lexical until the writer is replaced and the
@@ -43469,6 +43609,7 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
         &now_utc(),
         include_notes,
         false,
+        width,
     );
     if starting_fallback {
         text.insert_str(0, &format!("{}\n", degraded::STARTING_LINE));
@@ -43576,6 +43717,7 @@ fn recall_lines(
     now: &str,
     include_notes: bool,
     pack_order: bool,
+    width: Width,
 ) -> String {
     let key = |h: &Hit| h.id.clone().unwrap_or_else(|| h.text.clone());
     let (own_facts, own_notes): (Vec<&Hit>, Vec<&Hit>) = own
@@ -43639,6 +43781,7 @@ fn recall_lines(
         facts_kept.len(),
         own_facts.len(),
         "best match first, on this issue",
+        width,
     ));
     out.push('\n');
     // Related hits are not this issue's lessons. With none of its own,
@@ -43648,7 +43791,7 @@ fn recall_lines(
     }
     for h in &facts_kept {
         note_shown(h);
-        out.push_str(&memory_block(h, now, label_of(h)));
+        out.push_str(&memory_block(h, now, label_of(h), width));
         out.push('\n');
     }
     if !related_facts.is_empty() {
@@ -43657,11 +43800,12 @@ fn recall_lines(
             related_facts.len(),
             related_matched.saturating_sub(related_notes.len()),
             "fused order, not filed on this issue",
+            width,
         ));
         out.push('\n');
         for h in &related_facts {
             note_shown(h);
-            out.push_str(&memory_block(h, now, label_of(h)));
+            out.push_str(&memory_block(h, now, label_of(h), width));
             out.push('\n');
         }
     }
@@ -43673,16 +43817,17 @@ fn recall_lines(
             notes_kept.len() + related_notes.len(),
             own_notes.len() + related_notes.len(),
             "unverified logbook notes, not facts",
+            width,
         ));
         out.push('\n');
         for h in &notes_kept {
             note_shown(h);
-            out.push_str(&memory_block(h, now, label_of(h)));
+            out.push_str(&memory_block(h, now, label_of(h), width));
             out.push('\n');
         }
         for h in &related_notes {
             note_shown(h);
-            out.push_str(&memory_block(h, now, label_of(h)));
+            out.push_str(&memory_block(h, now, label_of(h), width));
             out.push('\n');
         }
     }
@@ -43698,9 +43843,9 @@ fn recall_lines(
             .max(own_notes.len())
             .max(related_matched)
             .max(1);
-        out.push_str(&scan::wrap(
+        out.push_str(&scan::wrap_for(
             &format!("more on {issue} remain, so run `ljos search {issue} -n {ask}`."),
-            scan::COLS,
+            width,
         ));
         out.push('\n');
     }
@@ -43717,7 +43862,10 @@ fn injected_block(rows: &[&Hit], now: &str, failure: bool, matched: usize) -> St
     } else {
         scan::remembered_head(shown, matched)
     };
-    let blocks: Vec<String> = rows.iter().map(|hit| memory_block(hit, now, "")).collect();
+    let blocks: Vec<String> = rows
+        .iter()
+        .map(|hit| memory_block(hit, now, "", HOOK_WIDTH))
+        .collect();
     if blocks.is_empty() {
         head
     } else {
@@ -43728,7 +43876,7 @@ fn injected_block(rows: &[&Hit], now: &str, failure: bool, matched: usize) -> St
 /// One recalled claim: the label on its own line, the text under it.
 /// `id_label` is the prefix a person uses with `ljos forget`. Empty leaves
 /// the id off, which is what the prompt hook injects.
-fn memory_block(h: &Hit, now: &str, id_label: &str) -> String {
+fn memory_block(h: &Hit, now: &str, id_label: &str, width: Width) -> String {
     let from = other_seat(&h.entities, &seat_name());
     let age = age_of(h.ts.as_deref(), now);
     let mut head = kind_label(h);
@@ -43751,7 +43899,7 @@ fn memory_block(h: &Hit, now: &str, id_label: &str) -> String {
     } else {
         format!("id {id_label}")
     };
-    scan::claim_block(&head, h.text.trim(), &foot, 2)
+    scan::claim_block(&head, h.text.trim(), &foot, 2, width)
 }
 
 /// The one line a recall shows when the store stayed down after it was
@@ -44111,7 +44259,7 @@ fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>, usize)>
 ///
 /// The tracker not answering. A deed store or pack that does not answer
 /// leaves its rows out; the tracker's rows are the spine.
-pub fn timeline(issue: &str, limit: usize) -> Result<String> {
+pub fn timeline(issue: &str, limit: usize, width: Width) -> Result<String> {
     let (title, events, matched) = timeline_of(issue, limit)?;
     let nonce = fence_nonce();
     let events: Vec<Event> = events
@@ -44124,6 +44272,7 @@ pub fn timeline(issue: &str, limit: usize) -> Result<String> {
         &title,
         matched,
         &now_local(),
+        width,
     ))
 }
 
@@ -44180,21 +44329,23 @@ fn format_timeline(
     title: &str,
     matched: usize,
     now: &str,
+    width: Width,
 ) -> String {
     let today = days_of_stamp(Some(now)).unwrap_or(0);
-    let mut out = scan::line_with_title(&format!("timeline of {issue}: "), title, scan::COLS);
+    let mut out = scan::line_with_title_for(&format!("timeline of {issue}: "), title, width);
     out.push('\n');
     out.push_str(&scan::count_line(
         "events",
         events.len(),
         matched,
         "oldest first",
+        width,
     ));
     out.push('\n');
     if events.len() < matched {
-        out.push_str(&scan::wrap(
+        out.push_str(&scan::wrap_for(
             &format!("older events remain, so run `ljos timeline {issue} -n {matched}`."),
-            scan::COLS,
+            width,
         ));
         out.push('\n');
     }
@@ -44220,9 +44371,9 @@ fn format_timeline(
         head.push_str(", ");
         head.push_str(event.source);
         out.push('\n');
-        out.push_str(&scan::wrap(&head, scan::COLS));
+        out.push_str(&scan::wrap_for(&head, width));
         out.push('\n');
-        out.push_str(&wrap_timeline_row(&event.text));
+        out.push_str(&wrap_timeline_row(&event.text, width));
         out.push('\n');
     }
     out
@@ -44230,13 +44381,13 @@ fn format_timeline(
 
 /// One timeline row. A note's fence markers stay whole, so a wrap is
 /// `| [end HASH]` and not `|` plus the rest of the hash.
-fn wrap_timeline_row(text: &str) -> String {
-    wrap_fenced_note(text).unwrap_or_else(|| scan::wrap_hang(text, scan::COLS, "  ", "  | "))
+fn wrap_timeline_row(text: &str, width: Width) -> String {
+    wrap_fenced_note(text, width).unwrap_or_else(|| scan::wrap_hang_for(text, width, "  ", "  | "))
 }
 
 /// `note: [unverified HASH] text [end HASH]`, wrapped so both markers stay
 /// one token. `None` when `text` is not that row.
-fn wrap_fenced_note(text: &str) -> Option<String> {
+fn wrap_fenced_note(text: &str, width: Width) -> Option<String> {
     let rest = text.strip_prefix("note: ")?;
     if !rest.starts_with("[unverified ") {
         return None;
@@ -44256,7 +44407,7 @@ fn wrap_fenced_note(text: &str) -> Option<String> {
         &["note:", opener],
         body,
         closer,
-        scan::COLS,
+        width,
         "  ",
         "  | ",
     ))
@@ -44264,29 +44415,36 @@ fn wrap_fenced_note(text: &str) -> Option<String> {
 
 /// Wrap `head`, the words of `body`, and `tail` under a hanging prefix.
 /// `tail` is one token, so a fence closer is not split.
+/// Columns are characters at [`scan::COLS`] at [`Width::FIXED`], else
+/// display columns at the terminal width.
 fn hang_atomic(
     head: &[&str],
     body: &str,
     tail: &str,
-    cols: usize,
+    width: Width,
     first: &str,
     cont: &str,
 ) -> String {
+    let cols = width.terminal().unwrap_or(scan::COLS);
+    let measure = |text: &str| match width.terminal() {
+        Some(_) => output_wrap::prose_display_width(text),
+        None => text.chars().count(),
+    };
     let mut words: Vec<&str> = head.to_vec();
     if !body.is_empty() {
         words.extend(body.split_whitespace());
     }
     words.push(tail);
-    let first_room = cols.saturating_sub(first.chars().count()).max(1);
-    let cont_room = cols.saturating_sub(cont.chars().count()).max(1);
+    let first_room = cols.saturating_sub(measure(first)).max(1);
+    let cont_room = cols.saturating_sub(measure(cont)).max(1);
     let mut lines = Vec::new();
     let mut current = String::new();
     let mut room = first_room;
     for word in words {
         let next = if current.is_empty() {
-            word.chars().count()
+            measure(word)
         } else {
-            current.chars().count() + 1 + word.chars().count()
+            measure(&current) + 1 + measure(word)
         };
         if current.is_empty() || next <= room {
             if !current.is_empty() {
@@ -44778,7 +44936,7 @@ impl SectionCursor {
 fn sitting_heading(name: &str, title: &str) -> String {
     format!(
         "{}\n",
-        scan::line_with_title(&format!("== {name}: "), title, scan::COLS)
+        scan::line_with_title_for(&format!("== {name}: "), title, SITTING_WIDTH)
     )
 }
 
@@ -45011,9 +45169,9 @@ fn parent_chain_contains(start: &str, needle: &str) -> Result<bool> {
 /// # Errors
 ///
 /// The tracker cannot be read, or `issue` is not in it.
-pub fn show_issue(issue: &str, all: bool) -> Result<String> {
+pub fn show_issue(issue: &str, all: bool, width: Width) -> Result<String> {
     let card = show_card(issue)?;
-    Ok(format_show(&card, all))
+    Ok(format_show(&card, all, width))
 }
 
 /// One ticket as JSON: id, project, state, priority, title, claim, parent,
@@ -45086,7 +45244,7 @@ fn flat_title_or_none(raw: &str) -> String {
     }
 }
 
-fn format_show(card: &Value, all: bool) -> String {
+fn format_show(card: &Value, all: bool, width: Width) -> String {
     let id = card["id"].as_str().unwrap_or("");
     let state = card["state"].as_str().unwrap_or("");
     let title = flat_title_or_none(card["title"].as_str().unwrap_or(""));
@@ -45096,12 +45254,12 @@ fn format_show(card: &Value, all: bool) -> String {
         head.push_str(&format!("  [#{priority}]"));
     }
     let one = format!("{head}  {title}");
-    let mut out = if one.chars().count() <= scan::COLS {
+    let mut out = if scan::fits_for(&one, width) {
         one
     } else {
-        let mut wrapped = scan::wrap(&head, scan::COLS);
+        let mut wrapped = scan::wrap_for(&head, width);
         wrapped.push('\n');
-        wrapped.push_str(&scan::wrap_hang(&title, scan::COLS, "  ", "  "));
+        wrapped.push_str(&scan::wrap_hang_for(&title, width, "  ", "  "));
         wrapped
     };
     out.push('\n');
@@ -45113,7 +45271,7 @@ fn format_show(card: &Value, all: bool) -> String {
         } else {
             format!("claimed {age} by {seat}")
         };
-        out.push_str(&scan::wrap_hang(&line, scan::COLS, "  ", "  "));
+        out.push_str(&scan::wrap_hang_for(&line, width, "  ", "  "));
         out.push('\n');
     }
     let parent = parent_row(card);
@@ -45132,7 +45290,7 @@ fn format_show(card: &Value, all: bool) -> String {
         } else {
             format!("{pid}  {pstate}  {ptitle}")
         };
-        out.push_str(&scan::wrap_hang(&line, scan::COLS, "parent: ", "  "));
+        out.push_str(&scan::wrap_hang_for(&line, width, "parent: ", "  "));
         out.push('\n');
     }
     let children = children_rows(id);
@@ -45145,7 +45303,7 @@ fn format_show(card: &Value, all: bool) -> String {
             let cstate = child["state"].as_str().unwrap_or("?");
             let ctitle = flat_title_or_none(child["title"].as_str().unwrap_or(""));
             let line = format!("{cid}  {cstate}  {ctitle}");
-            out.push_str(&scan::wrap_hang(&line, scan::COLS, "  ", "  "));
+            out.push_str(&scan::wrap_hang_for(&line, width, "  ", "  "));
             out.push('\n');
         }
     }
@@ -45172,20 +45330,20 @@ fn format_show(card: &Value, all: bool) -> String {
             } else {
                 format!("{bid}  {bstate}  {kind}  {btitle}")
             };
-            out.push_str(&scan::wrap_hang(&line, scan::COLS, "  ", "  "));
+            out.push_str(&scan::wrap_hang_for(&line, width, "  ", "  "));
             out.push('\n');
         }
     }
-    append_show_prose(&mut out, card, all);
+    append_show_prose(&mut out, card, all, width);
     out
 }
 
 /// The body, then the notes. A blank line separates them from the header.
-fn append_show_prose(out: &mut String, card: &Value, all: bool) {
+fn append_show_prose(out: &mut String, card: &Value, all: bool, width: Width) {
     let body = show_body(card);
     if !body.is_empty() {
         out.push('\n');
-        out.push_str(&scan::wrap(&body, scan::COLS));
+        out.push_str(&scan::wrap_for(&body, width));
         out.push('\n');
     }
     let notes = show_notes(card, all);
@@ -45203,11 +45361,11 @@ fn append_show_prose(out: &mut String, card: &Value, all: bool) {
         }
         let head = note_head(&note);
         if !head.is_empty() {
-            out.push_str(&scan::wrap(&head, scan::COLS));
+            out.push_str(&scan::wrap_for(&head, width));
             out.push('\n');
         }
         if !note.text.is_empty() {
-            out.push_str(&scan::wrap_hang(&note.text, scan::COLS, "  ", "  "));
+            out.push_str(&scan::wrap_hang_for(&note.text, width, "  ", "  "));
             out.push('\n');
         }
     }
@@ -45215,7 +45373,7 @@ fn append_show_prose(out: &mut String, card: &Value, all: bool) {
         let id = card["id"].as_str().unwrap_or("");
         let word = if earlier == 1 { "note" } else { "notes" };
         let line = format!("{earlier} earlier {word}; run `ljos show {id} --all`");
-        out.push_str(&scan::wrap(&line, scan::COLS));
+        out.push_str(&scan::wrap_for(&line, width));
         out.push('\n');
     }
 }
@@ -45441,6 +45599,7 @@ pub fn ready_view(
     json: bool,
     limit: Option<usize>,
     all: bool,
+    width: Width,
 ) -> Result<String> {
     let layout = vissue_core::Layout::resolve(None, None)?;
     layout.require_tracker()?;
@@ -45466,10 +45625,8 @@ pub fn ready_view(
         });
         return Ok(format!("{}\n", serde_json::to_string_pretty(&doc)?));
     }
-    Ok(scan::ready_page(
-        &ready_lines(&rows, &recs, claim_age::now_here()),
-        page,
-    ))
+    let raw = ready_lines(&rows, &recs, claim_age::now_here());
+    Ok(scan::ready_page(&raw, page, width))
 }
 
 /// This seat's claims, then free tickets, then another seat's claims.
@@ -46932,7 +47089,7 @@ pub fn sitting_stream_started(
     // The same list `ljos recall` prints: issue memories, then related
     // hits, with the same caps. The island's own ranking is a different
     // list and a sitting used to show fewer than recall.
-    match recall_memories_with(issue, true) {
+    match recall_memories_with(issue, true, SITTING_WIDTH) {
         Ok(text) => piece.push_str(&text),
         Err(e) if is_pack_busy(&e) => {
             degraded::say(degraded::State::Busy);
@@ -46988,6 +47145,7 @@ pub fn sitting_stream_started(
         Ok(said) => piece.push_str(&fence_unverified(
             &format!("tracker text for {issue}"),
             &said.stdout,
+            SITTING_WIDTH,
         )),
         Err(e) if call_deadline::stalled(&e.to_string()) => note_stalled(),
         Err(e) => piece.push_str(&format!("recall: {e:#}\n")),
@@ -47004,13 +47162,13 @@ pub fn sitting_stream_started(
 
     let mut piece = String::new();
     sections.heading(&mut piece, "timeline");
-    match timeline(issue, SITTING_TIMELINE) {
+    match timeline(issue, SITTING_TIMELINE, SITTING_WIDTH) {
         Ok(text) => piece.push_str(&text),
         Err(e) => piece.push_str(&format!("timeline: {e:#}\n")),
     }
     note_stalled();
     emit_piece(&mut out, &mut emit, &piece);
-    let next = plan::next_item_line(issue);
+    let next = plan::next_item_line(issue, SITTING_WIDTH);
     if !next.is_empty() {
         emit_piece(&mut out, &mut emit, &next);
     }
@@ -48139,7 +48297,7 @@ pub fn reopen(issue: &str) -> Result<String> {
     }
     let note = undo::reopen_note(&caller, state);
     if let Err(e) = run_captured("vissue", &["note", issue, &note]) {
-        eprintln!("ljos reopen: the note on {issue} was not written: {e:#}");
+        say!("ljos reopen: the note on {issue} was not written: {e:#}");
     }
     let mut out = format!("{issue} reopened as {prior}\n");
     out.push_str("the close stays on the logbook, with the reopen under it\n");
@@ -48466,7 +48624,8 @@ fn open_child_rows(issue: &str) -> Result<Vec<(String, String)>> {
 }
 
 /// Why a close is refused while a child is open, or `None` when every
-/// child is closed or the tracker did not list them.
+/// child is closed or the tracker did not list them. The refusal is a
+/// one-line `label` record, so each title is cut at [`Width::FIXED`].
 fn open_child_close_refusal(issue: &str) -> Option<String> {
     let open = open_child_rows(issue).ok()?;
     if open.is_empty() {
@@ -48474,7 +48633,7 @@ fn open_child_close_refusal(issue: &str) -> Option<String> {
     }
     let listed = open
         .iter()
-        .map(|(id, title)| scan::line_with_title(&format!("{id} "), title, scan::COLS))
+        .map(|(id, title)| scan::line_with_title_for(&format!("{id} "), title, Width::FIXED))
         .collect::<Vec<_>>()
         .join("; ");
     let tickets = if open.len() == 1 { "ticket" } else { "tickets" };
@@ -48521,8 +48680,9 @@ pub fn finish(
     gen: Option<u64>,
     close: bool,
     verbose: bool,
+    width: Width,
 ) -> Result<String> {
-    if let Some(mut ticked) = plan::tick_checklist(issue)? {
+    if let Some(mut ticked) = plan::tick_checklist(issue, width)? {
         if let Some(text) = lesson.map(str::trim).filter(|text| !text.is_empty()) {
             for claim in lesson_claims(text) {
                 ticked.push_str(&finish_lesson(issue, &claim));
@@ -48560,7 +48720,8 @@ pub fn finish(
     // never on the say of the seat that sat on it; refused before anything
     // is written.
     if close {
-        match workflow_status(issue) {
+        // The refusals are one-line `label` records.
+        match workflow_status(issue, Width::FIXED) {
             Ok(Some(s)) => {
                 if let Some(why) = workflow_close_refusal(&s) {
                     return Err(policy_label::labelled("workflow-warning", why));
@@ -48947,6 +49108,10 @@ impl CommitLock {
     /// made, created mode 0600 and not through a symlink. A lock that cannot
     /// be opened is no lock, as above.
     #[must_use]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "owns a descriptor this function opened, never stdout or stderr"
+    )]
     pub(crate) fn acquire_private(path: &std::path::Path) -> Self {
         use std::os::unix::io::{AsRawFd, FromRawFd};
         let Ok((dir, name)) = open_state_dir(path) else {
@@ -48978,6 +49143,10 @@ impl CommitLock {
     /// [`Self::acquire_private`], given up at `deadline`. `None` when another
     /// holder still has it then. A lock that cannot be opened is no lock.
     #[must_use]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "owns a descriptor this function opened, never stdout or stderr"
+    )]
     pub(crate) fn acquire_private_by(
         path: &std::path::Path,
         mut deadline: std::time::Instant,
@@ -51379,9 +51548,9 @@ pub fn search_reading(n: usize, seat_ahead: bool) -> &'static str {
 /// [`search_reading`]. Without it the page is one line on place. An empty
 /// answer is [`scan::nothing_matched_line`]. The id on each row is the
 /// prefix [`search_hit_id`] prints. The ranker score is not printed.
-/// `--json` uses the same prefix.
-pub fn format_hits(hits: &[Hit], explain: bool) -> String {
-    format_search(hits, hits.len(), false, explain, "", true)
+/// `--json` uses the same prefix. The page is laid out at `width`.
+pub fn format_hits(hits: &[Hit], explain: bool, width: Width) -> String {
+    format_search(hits, hits.len(), false, explain, "", true, width)
 }
 
 /// [`format_hits`] with the count before the limit cut. `capped` means the
@@ -51395,12 +51564,23 @@ pub fn format_search(
     explain: bool,
     query: &str,
     seat_ahead: bool,
+    width: Width,
 ) -> String {
-    format_search_stored(hits, matched, capped, explain, query, seat_ahead, &[])
+    format_search_stored(
+        hits,
+        matched,
+        capped,
+        explain,
+        query,
+        seat_ahead,
+        &[],
+        width,
+    )
 }
 
 /// [`format_search`] with the ids the prefix must be unique among.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn format_search_stored(
     hits: &[Hit],
     matched: usize,
@@ -51409,6 +51589,7 @@ pub fn format_search_stored(
     query: &str,
     seat_ahead: bool,
     store: &[String],
+    width: Width,
 ) -> String {
     format_search_stored_with_flags(
         hits,
@@ -51419,6 +51600,7 @@ pub fn format_search_stored(
         seat_ahead,
         store,
         &[],
+        width,
     )
 }
 
@@ -51434,6 +51616,7 @@ pub fn format_search_stored_with_flags(
     seat_ahead: bool,
     store: &[String],
     extra_flags: &[String],
+    width: Width,
 ) -> String {
     let now = now_utc();
     let mine = seat_name();
@@ -51485,6 +51668,7 @@ pub fn format_search_stored_with_flags(
             reading,
             seat_ahead,
             store: &refs,
+            width,
         },
         extra_flags,
     )
@@ -52737,7 +52921,7 @@ fn policy_reading_known(
         .min(policy_recall_wait().saturating_sub(started.elapsed()))
         .saturating_sub(std::time::Duration::from_millis(40));
     let context = recall.recv_timeout(wait).unwrap_or_else(|_| {
-        eprintln!(
+        say!(
             "ljos policy: the memory recall had not answered after {} ms, so this verdict carries none",
             wait.as_millis()
         );
@@ -53717,7 +53901,7 @@ fn take_labels() -> Vec<String> {
 pub fn take_guard_note() -> Option<String> {
     let mut lines = take_labels();
     for said in &lines {
-        eprintln!("{said}");
+        say!("{said}");
     }
     lines.extend(GUARD_NOTE.with(|slot| slot.borrow_mut().take()));
     (!lines.is_empty()).then(|| lines.join("\n"))
@@ -54197,7 +54381,7 @@ fn tcb_answer_in_with_env(
     let unhealthy = |why: &str| format!("allow\t{}", unhealthy_note(why));
     let faulted = |why: &str| {
         let line = format!("ljos: the guard could not judge ({why}); the call is allowed");
-        eprintln!("{line}");
+        say!("{line}");
         log_bypass(
             "fault",
             why,
@@ -54216,7 +54400,7 @@ fn tcb_answer_in_with_env(
             Err(e) => {
                 let why = format!("cannot resolve command directory: {e:#}");
                 let note = format!("ljos: the guard could not judge ({why}); the call is allowed");
-                eprintln!("{note}");
+                say!("{note}");
                 return format!("allow\t{}", unhealthy_note(&why));
             }
         },
@@ -55028,8 +55212,8 @@ pub fn run_within(
     deadline: std::time::Duration,
 ) -> Result<()> {
     let said = run_captured_within(bin, args, None, deadline)?;
-    print!("{}", said.stdout);
-    eprint!("{}", said.stderr);
+    tell_raw!("{}", said.stdout);
+    say_raw!("{}", said.stderr);
     Ok(())
 }
 
@@ -55128,8 +55312,8 @@ pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Re
             .unwrap_or_else(tool_bound::budget)
             .max(std::time::Duration::from_millis(1));
         let said = run_captured_within(bin, args, identity, left)?;
-        print!("{}", said.stdout);
-        eprint!("{}", said.stderr);
+        tell_raw!("{}", said.stdout);
+        say_raw!("{}", said.stderr);
         return Ok(());
     }
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
@@ -55159,6 +55343,8 @@ pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Re
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    // The child keeps the terminal, so it streams and can prompt on stdin.
+    // Its output is passed through as it writes it, not wrapped here.
     let mut child = cmd
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -57121,12 +57307,12 @@ mod tests {
     fn a_getent_on_path_does_not_make_the_passwd_home_a_sandbox() {
         let _env = env_guard();
         let Some(pw) = crate::proc_tree::own_home() else {
-            eprintln!("skipping: this uid has no passwd home");
+            crate::say!("skipping: this uid has no passwd home");
             return;
         };
         let pw = std::fs::canonicalize(&pw).unwrap_or(pw);
         if pw.components().count() < 3 || crate::bookkeep::path_is_temp(Some(&pw)) {
-            eprintln!(
+            crate::say!(
                 "skipping: passwd home {} is a temp root or too short for one",
                 pw.display()
             );
@@ -57735,6 +57921,7 @@ mod tests {
             "2026-10-18T12:00:00.000Z",
             true,
             false,
+            crate::output_wrap::Width::FIXED,
         );
         // Facts lead; the working notes follow under their own heading.
         assert!(
@@ -57770,13 +57957,22 @@ mod tests {
             "now",
             false,
             false,
+            crate::output_wrap::Width::FIXED,
         );
         assert_eq!(
             prompt,
             "\nMemory  shown 1 of 1, best match first, on this issue\n  lesson, from an agent, ticket probe-0lm4\n    tagged lesson\n    id lesson-0\n"
         );
         assert_eq!(
-            super::recall_lines(&[], Vec::new(), "probe-0lm4", "now", true, false),
+            super::recall_lines(
+                &[],
+                Vec::new(),
+                "probe-0lm4",
+                "now",
+                true,
+                false,
+                crate::output_wrap::Width::FIXED
+            ),
             ""
         );
         let alone = super::recall_lines(
@@ -57786,6 +57982,7 @@ mod tests {
             "now",
             true,
             false,
+            crate::output_wrap::Width::FIXED,
         );
         assert_eq!(
             alone,
@@ -57881,7 +58078,7 @@ mod tests {
             ("VISSUE_ROOT", dir.path().to_str().unwrap()),
             ("VISSUE_NO_ROUTE", "1"),
         ]);
-        let text = recall_memories("sample-k2p2").unwrap();
+        let text = recall_memories("sample-k2p2", crate::output_wrap::Width::FIXED).unwrap();
         assert!(text.contains("rotated from 1Password"), "{text}");
         assert!(text.contains("before the old one expires"), "{text}");
         assert!(text.contains("shown 10 of 22"), "{text}");
@@ -57923,7 +58120,7 @@ mod tests {
             ("VISSUE_NO_ROUTE", "1"),
         ]);
         super::search_call::forget_deepest();
-        let _ = recall_memories("sample-k2p2").unwrap();
+        let _ = recall_memories("sample-k2p2", crate::output_wrap::Width::FIXED).unwrap();
         assert!(
             super::search_call::deepest() >= 2,
             "a search in the recall took a deadline of its own"
@@ -57935,7 +58132,7 @@ mod tests {
             "a search in the prompt recall took a deadline of its own"
         );
         super::search_call::forget_deepest();
-        let _ = recall_memories_with("sample-k2p2", true);
+        let _ = recall_memories_with("sample-k2p2", true, crate::output_wrap::Width::FIXED);
         assert!(
             super::search_call::deepest() >= 2,
             "a search in a sitting's recall took a deadline of its own"
@@ -63161,8 +63358,6 @@ mod tests {
         let task = "parse the fixture";
         assert!(!task.contains("acme-12ab"));
         let brief = subagent_brief("general-purpose", "acme-12ab", false);
-        println!("{brief}");
-        println!("{said}");
         assert!(brief.contains("acme-12ab"), "{brief}");
         assert!(
             brief.contains("ljos vote") || brief.contains("ljos note"),
@@ -67594,7 +67789,14 @@ mod tests {
     fn the_status_walks_design_implement_review_panel() {
         let cfg = workflow_config();
         let status = |children: &[WorkflowChild], ballots: &[Forecast]| {
-            workflow_status_of("p-1", "feature", children, ballots, &cfg)
+            workflow_status_of(
+                "p-1",
+                "feature",
+                children,
+                ballots,
+                &cfg,
+                crate::output_wrap::Width::FIXED,
+            )
         };
         let s = status(&[], &[]);
         assert_eq!(s.stage, "design");
@@ -67656,7 +67858,7 @@ mod tests {
         assert!(!s.passed);
         assert!(workflow_close_refusal(&s).is_some());
 
-        let text = format_workflow_status(&s);
+        let text = format_workflow_status(&s, crate::output_wrap::Width::FIXED);
         assert!(
             text.starts_with("feature on p-1, round 2, stage implement\n"),
             "{text}"
@@ -67772,7 +67974,7 @@ mod tests {
         std::env::set_var("CHILDREN", &children);
         std::env::set_var("BALLOTS", &ballots);
 
-        let out = workflow_round("proj-1a2b").unwrap();
+        let out = workflow_round("proj-1a2b", crate::output_wrap::Width::FIXED).unwrap();
         assert!(out.contains("filed panel round"), "{out}");
         assert!(!out.contains("settled-with-notes"), "{out}");
         assert!(!out.contains("closed as"), "{out}");
@@ -67803,7 +68005,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let out = workflow_round("proj-1a2b").unwrap();
+        let out = workflow_round("proj-1a2b", crate::output_wrap::Width::FIXED).unwrap();
         assert!(out.contains("filed fix proj-f001"), "{out}");
         assert!(out.contains("the gate ignores a failure"), "{out}");
         let said = std::fs::read_to_string(&log).unwrap();
@@ -67820,7 +68022,7 @@ mod tests {
 :LOGBOOK:\n- Note: \"finding: tester: blocking: the wait is still unchecked :: the wait is unchecked\" [2026-10-14 Wed 12:05]\n:END:\n";
         std::fs::write(&issues, board("", later)).unwrap();
         std::fs::write(&children, ids(&["anneal-r2", "anneal-r3"])).unwrap();
-        let out = workflow_round("proj-1a2b").unwrap();
+        let out = workflow_round("proj-1a2b", crate::output_wrap::Width::FIXED).unwrap();
         assert!(out.contains("filed fix"), "{out}");
         assert!(out.contains("the wait is unchecked"), "{out}");
         assert!(!out.contains("settled-with-notes"), "{out}");
@@ -67909,6 +68111,7 @@ mod tests {
             None,
             true,
             false,
+            crate::output_wrap::Width::FIXED,
         )
         .unwrap_err()
         .to_string();
@@ -67930,7 +68133,9 @@ mod tests {
         );
 
         std::fs::write(&issues, board("DONE")).unwrap();
-        let s = workflow_status("probe-p001").unwrap().unwrap();
+        let s = workflow_status("probe-p001", crate::output_wrap::Width::FIXED)
+            .unwrap()
+            .unwrap();
         assert!(s.passed, "{s:?}");
         assert_eq!(workflow_close_refusal(&s), None);
         assert_eq!(workflow_sitting_block("probe-x999"), "");
@@ -68019,6 +68224,7 @@ mod tests {
             None,
             true,
             false,
+            crate::output_wrap::Width::FIXED,
         )
         .unwrap_err()
         .to_string();
@@ -72641,6 +72847,7 @@ box-1 is yours.
             "2026-11-08T00:00:00Z",
             true,
             false,
+            crate::output_wrap::Width::FIXED,
         );
         let bullets: Vec<String> = recall.lines().filter_map(sitting_memory_text).collect();
         assert_eq!(bullets.len(), 4, "{recall}");
@@ -72960,12 +73167,12 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 recalled += 1;
                 reciprocal_rank += 1.0 / (rank + 1) as f64;
             }
-            eprintln!("{}\t{:?}\t{ids:?}", ticket.id, rank.map(|rank| rank + 1));
+            say!("{}\t{:?}\t{ids:?}", ticket.id, rank.map(|rank| rank + 1));
         }
         let count = fixture.tickets.len() as f64;
         let recall_at_five = recalled as f64 / count;
         let mean_reciprocal_rank = reciprocal_rank / count;
-        eprintln!(
+        say!(
             "words-only recall@{}={recall_at_five:.3} MRR={mean_reciprocal_rank:.3}",
             super::SITTING_RECALL_CAP
         );
@@ -73205,6 +73412,7 @@ playbook: sit
             now,
             true,
             true,
+            crate::output_wrap::Width::FIXED,
         );
         let mut recalled: Vec<String> = recall
             .lines()
@@ -73601,6 +73809,7 @@ lesson, due yesterday, seat ada
                 now,
                 false,
                 true,
+                crate::output_wrap::Width::FIXED,
             );
             let shown = format!("due:\n{due}\ntimeline:\n{timeline}\nrecall:\n{recall}");
             assert_eq!(due.contains(text), keep, "{title} tag={tag:?}\n{shown}");
@@ -74671,6 +74880,7 @@ lesson, due yesterday, seat ada
             now,
             false,
             true,
+            crate::output_wrap::Width::FIXED,
         );
         assert!(!due.contains(text), "due kept a tombstone:\n{due}");
         assert!(
@@ -74787,7 +74997,8 @@ lesson, due yesterday, seat ada
         }
         let _clear = Clear;
         super::fail_sitting_listing();
-        let recall = super::recall_memories_with(&issue, false).unwrap();
+        let recall =
+            super::recall_memories_with(&issue, false, crate::output_wrap::Width::FIXED).unwrap();
         assert!(
             recall.contains("The kiln damper sticks during anneal."),
             "{recall}"
@@ -76405,7 +76616,7 @@ lesson, due yesterday, seat ada
             {"id": "a", "text": "one", "activation": 1.0, "seed": true, "ts": now_utc()},
             {"id": "b", "text": "two", "activation": 0.25, "seed": false}
         ]});
-        let printed = format_island(&body);
+        let printed = format_island(&body, crate::output_wrap::Width::FIXED);
         assert!(
             printed.contains("Seat island") && printed.contains("Not fired"),
             "{printed}"
@@ -76422,13 +76633,13 @@ lesson, due yesterday, seat ada
             "{printed}"
         );
         assert!(printed.contains("strongest first"), "{printed}");
-        assert!(format_island(&serde_json::json!({})).is_empty());
+        assert!(format_island(&serde_json::json!({}), crate::output_wrap::Width::FIXED).is_empty());
         let persona = serde_json::json!({
             "as": "reviewer",
             "fired": 3,
             "island": [{"id": "a", "text": "one", "activation": 1.0, "seed": true, "ts": now_utc()}]
         });
-        let walked = format_island(&persona);
+        let walked = format_island(&persona, crate::output_wrap::Width::FIXED);
         assert!(walked.contains("Persona reviewer"), "{walked}");
         assert!(walked.contains("Fired: 3"), "{walked}");
         assert!(!walked.contains("Seat island"), "{walked}");
@@ -80403,7 +80614,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn shell_lines_that_left_the_start_directory_still_name_the_hook_write() {
         if !crate::tool_installed("ljos-policyd") {
-            eprintln!("skipped: ljos-policyd is not installed");
+            say!("skipped: ljos-policyd is not installed");
             return;
         }
         let _g = env_guard();
@@ -80527,7 +80738,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn a_cd_the_shell_reads_is_where_policyd_judges_the_line() {
         if !crate::tool_installed("ljos-policyd") {
-            eprintln!("skipped: ljos-policyd is not installed");
+            say!("skipped: ljos-policyd is not installed");
             return;
         }
         let _g = env_guard();
@@ -80562,7 +80773,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn a_cd_through_home_or_cdpath_is_judged_where_it_lands() {
         if !crate::tool_installed("ljos-policyd") {
-            eprintln!("skipped: ljos-policyd is not installed");
+            say!("skipped: ljos-policyd is not installed");
             return;
         }
         let _g = env_guard();
@@ -80614,7 +80825,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn a_backslash_newline_joins_the_line_policyd_reads() {
         if !crate::tool_installed("ljos-policyd") {
-            eprintln!("skipped: ljos-policyd is not installed");
+            say!("skipped: ljos-policyd is not installed");
             return;
         }
         let script = |line: &str| tcb_argvs(line)[0][2].clone();
@@ -80657,7 +80868,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn a_heredoc_body_is_judged_only_where_a_shell_runs_it() {
         if !crate::tool_installed("ljos-policyd") {
-            eprintln!("skipped: ljos-policyd is not installed");
+            say!("skipped: ljos-policyd is not installed");
             return;
         }
         let _g = env_guard();
@@ -80793,7 +81004,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn a_python_heredoc_is_judged_as_python() {
         if !crate::tool_installed("ljos-policyd") {
-            eprintln!("skipped: ljos-policyd is not installed");
+            say!("skipped: ljos-policyd is not installed");
             return;
         }
         let _g = env_guard();
@@ -83836,7 +84047,7 @@ lesson, due yesterday, seat ada
             ("VISSUE_NO_ROUTE", "1"),
             ("PACKSET_URL", "http://127.0.0.1:9"),
         ]);
-        let text = timeline("sample-f3nc", 12).expect("timeline");
+        let text = timeline("sample-f3nc", 12, crate::output_wrap::Width::FIXED).expect("timeline");
         let open = text
             .find("[unverified ")
             .unwrap_or_else(|| panic!("{text}"));
@@ -83880,7 +84091,7 @@ lesson, due yesterday, seat ada
             ("VISSUE_NO_ROUTE", "1"),
             ("PACKSET_URL", "http://127.0.0.1:9"),
         ]);
-        let text = timeline("sample-f3nc", 12).expect("timeline");
+        let text = timeline("sample-f3nc", 12, crate::output_wrap::Width::FIXED).expect("timeline");
         let open = text
             .find("[unverified ")
             .unwrap_or_else(|| panic!("{text}"));
@@ -83906,6 +84117,34 @@ lesson, due yesterday, seat ada
             "a wrap line is the rest of the hash:\n{text}"
         );
         assert!(text.contains("the codec is one file"), "{text}");
+    }
+
+    #[test]
+    fn a_timeline_note_off_tty_keeps_legacy_spacing_and_cjk_breaks() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("Software/sample");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: sample issues\n#+VISSUE: 1\n#+CATEGORY: sample\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#B] Keep note wraps stable\n:PROPERTIES:\n:ID:         sample-f3nc\n:CREATED:    [2026-09-20 Sat]\n:END:\n:LOGBOOK:\n- Note: \"hello  world\" [2026-09-21 Sun 10:00]\n- Note: \"你 好 世 界 你 好 世 界 你 好 世 界 你 好 世 界 你 好\" [2026-09-21 Sun 10:01]\n:END:\n",
+        )
+        .unwrap();
+        let _bins = super::set_path(super::path_without(&["vissue", "deedar"]));
+        let _roots = HoldEnv::set(&[
+            ("ISSUE_ROOT", dir.path().to_str().unwrap()),
+            ("VISSUE_ROOT", dir.path().to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("PACKSET_URL", "http://127.0.0.1:9"),
+        ]);
+        let text = timeline("sample-f3nc", 12, crate::output_wrap::Width::FIXED).expect("timeline");
+        assert!(text.contains("hello world"), "{text}");
+        assert!(!text.contains("hello  world"), "{text}");
+        assert!(
+            text.lines()
+                .all(|line| !line.trim_start().starts_with("| 世")),
+            "{text}"
+        );
     }
 
     fn dangling_hash(line: &str) -> bool {
@@ -85635,7 +85874,7 @@ lesson, due yesterday, seat ada
             ["own-lesson", "person-rule", "inky", "hlebot", "fortranbot"],
             "{ids:?}"
         );
-        let printed = format_hits(&hits, false);
+        let printed = format_hits(&hits, false, crate::output_wrap::Width::FIXED);
         assert!(printed.contains("from inky"), "{printed}");
         assert!(printed.contains("from hlebot"), "{printed}");
         assert!(printed.contains("from fortranbot"), "{printed}");
@@ -88240,7 +88479,7 @@ lesson, due yesterday, seat ada
     fn a_search_prints_its_hits_and_explains_the_score_on_request() {
         let _g = env_guard();
         let hits = [signal_hit("preference", "Use pnpm instead of npm.", 0.9, 2)];
-        let plain = format_hits(&hits, false);
+        let plain = format_hits(&hits, false, crate::output_wrap::Width::FIXED);
         assert_eq!(
             plain,
             "shown 1 of 1.\nThe first row is the closest match. This seat's rows come first.\n\npreference\n  Use pnpm instead of npm.\n  place 1, 2 of 3 checks, id id-24\n"
@@ -88262,7 +88501,7 @@ lesson, due yesterday, seat ada
         assert_eq!(scan::for_reader(&plain, false), plain);
         assert!(!plain.contains('\u{1b}'));
         std::env::remove_var("NO_COLOR");
-        let explained = format_hits(&hits, true);
+        let explained = format_hits(&hits, true, crate::output_wrap::Width::FIXED);
         assert!(explained.contains("0 to 100"), "{explained}");
         assert!(!explained.contains("0.90"), "{explained}");
         assert!(
@@ -88273,8 +88512,14 @@ lesson, due yesterday, seat ada
             !explained.contains("Checks: how many of them named this row"),
             "{explained}"
         );
-        assert_eq!(format_hits(&[], false), "Nothing matched this query.\n");
-        assert_eq!(format_hits(&[], true), "Nothing matched this query.\n");
+        assert_eq!(
+            format_hits(&[], false, crate::output_wrap::Width::FIXED),
+            "Nothing matched this query.\n"
+        );
+        assert_eq!(
+            format_hits(&[], true, crate::output_wrap::Width::FIXED),
+            "Nothing matched this query.\n"
+        );
         let empty_json = search_json_empty(
             &[],
             Some(&Ranking {
@@ -88315,7 +88560,7 @@ lesson, due yesterday, seat ada
         );
         let mut local = signal_hit("lesson", "The door thermocouple reads low.", 1.0, 0);
         local.labels.push("kept-local".into());
-        let line = format_hits(&[local], false);
+        let line = format_hits(&[local], false, crate::output_wrap::Width::FIXED);
         assert!(line.contains("local, not in the pack"), "{line}");
         assert!(line.contains("kept locally"), "{line}");
         assert!(line.contains("The door thermocouple reads low."), "{line}");
@@ -88427,6 +88672,7 @@ lesson, due yesterday, seat ada
                 Some(2),
                 false,
                 false,
+                crate::output_wrap::Width::FIXED,
             )
         });
         match result {
@@ -88465,6 +88711,7 @@ lesson, due yesterday, seat ada
             None,
             false,
             false,
+            crate::output_wrap::Width::FIXED,
         )
         .unwrap_err()
         .to_string();
@@ -88618,6 +88865,7 @@ lesson, due yesterday, seat ada
                 Some(2),
                 false,
                 false,
+                crate::output_wrap::Width::FIXED,
             )
         })
         .unwrap_or_else(|e| panic!("finish failed after the work was done: {e:#}"));
@@ -88752,6 +89000,7 @@ lesson, due yesterday, seat ada
                 Some(2),
                 false,
                 false,
+                crate::output_wrap::Width::FIXED,
             )
         })
         .unwrap_or_else(|e| panic!("finish failed: {e:#}"));
@@ -88895,6 +89144,7 @@ lesson, due yesterday, seat ada
                 Some(2),
                 false,
                 false,
+                crate::output_wrap::Width::FIXED,
             )
         })
         .unwrap_or_else(|e| panic!("finish failed: {e:#}"));
@@ -89049,6 +89299,7 @@ lesson, due yesterday, seat ada
                 Some(2),
                 false,
                 false,
+                crate::output_wrap::Width::FIXED,
             )
         })
         .unwrap_or_else(|e| panic!("finish failed: {e:#}"));
@@ -90246,6 +90497,7 @@ lesson, due yesterday, seat ada
                 Some(2),
                 false,
                 false,
+                crate::output_wrap::Width::FIXED,
             )
             .unwrap_or_else(|e| panic!("box finish: {e:#}"));
             assert!(!box_said.contains("deeds:"), "{box_said}");
@@ -90269,6 +90521,7 @@ lesson, due yesterday, seat ada
                 Some(2),
                 false,
                 false,
+                crate::output_wrap::Width::FIXED,
             )
             .unwrap_or_else(|e| panic!("cloud finish: {e:#}"))
         });
@@ -91294,7 +91547,7 @@ mod claim_chunks_tests {
             "title": title,
             "blocked_by": [],
         });
-        let shown = super::format_show(&card, false);
+        let shown = super::format_show(&card, false, crate::output_wrap::Width::FIXED);
         assert!(
             shown
                 .lines()
@@ -91314,6 +91567,7 @@ mod claim_chunks_tests {
                 "blocked_by": [],
             }),
             false,
+            crate::output_wrap::Width::FIXED,
         );
         assert!(
             blank
@@ -91326,7 +91580,14 @@ mod claim_chunks_tests {
         let json = serde_json::json!({"title": title});
         assert_eq!(json["title"], title);
 
-        let timeline = super::format_timeline(&[], "ljos-633g", title, 0, "2026-11-15");
+        let timeline = super::format_timeline(
+            &[],
+            "ljos-633g",
+            title,
+            0,
+            "2026-11-15",
+            crate::output_wrap::Width::FIXED,
+        );
         let head = timeline.lines().next().unwrap();
         assert!(head.chars().count() <= super::scan::COLS, "{head}");
         assert!(head.starts_with("timeline of ljos-633g: guard:"), "{head}");
@@ -91360,8 +91621,9 @@ mod claim_chunks_tests {
             &[design, open],
             &[],
             &super::workflow_config(),
+            crate::output_wrap::Width::FIXED,
         );
-        let text = super::format_workflow_status(&status);
+        let text = super::format_workflow_status(&status, crate::output_wrap::Width::FIXED);
         let open_line = text
             .lines()
             .find(|line| line.starts_with("  open "))

@@ -15,8 +15,10 @@
 //! tombstones it, so `ljos forget` history still shows it was held.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
+
+use crate::output_wrap::Width;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -531,27 +533,29 @@ pub fn merge(ids: &[String], text: Option<&str>, all: &[Memory]) -> Result<Strin
 /// The memories as a person reads them: a count, newest first, each claim
 /// wrapped to a terminal width. The id prefix names one memory in the list.
 #[must_use]
-pub fn list_page(shown: &[Memory]) -> String {
+pub fn list_page(shown: &[Memory], width: Width) -> String {
     if shown.is_empty() {
         return "no memories to review\n".to_string();
     }
     let labels = crate::scan::unique_prefixes(shown.iter().map(|m| m.id.as_str()));
-    let mut out = crate::scan::count_line("memories", shown.len(), shown.len(), "newest first");
+    let mut out =
+        crate::scan::count_line("memories", shown.len(), shown.len(), "newest first", width);
     out.push('\n');
     for (memory, label) in shown.iter().zip(labels) {
         out.push('\n');
-        out.push_str(&render_memory(memory, &label));
+        out.push_str(&render_memory(memory, &label, width));
     }
     out
 }
 
-/// The memory as the review prints it: id, kind, text, then provenance.
+/// The memory as the review prints it at `width`: id, kind, text, then
+/// provenance.
 #[must_use]
-pub fn describe(m: &Memory) -> String {
-    render_memory(m, m.short_id())
+pub fn describe(m: &Memory, width: Width) -> String {
+    render_memory(m, m.short_id(), width)
 }
 
-fn render_memory(m: &Memory, label: &str) -> String {
+fn render_memory(m: &Memory, label: &str, width: Width) -> String {
     let age = crate::age_of(
         (!m.at.is_empty()).then_some(m.at.as_str()),
         &crate::now_utc(),
@@ -575,57 +579,42 @@ fn render_memory(m: &Memory, label: &str) -> String {
         foot.push_str("  verdict ");
         foot.push_str(verdict);
     }
-    let mut out = crate::scan::wrap(&head, crate::scan::COLS);
+    let mut out = crate::scan::wrap_for(&head, width);
     out.push('\n');
     let text = m.text.trim();
     if !text.is_empty() {
-        out.push_str(&crate::scan::wrap_hang(
-            text,
-            crate::scan::COLS,
-            "    ",
-            "    ",
-        ));
+        out.push_str(&crate::scan::wrap_hang_for(text, width, "    ", "    "));
         out.push('\n');
     }
-    out.push_str(&crate::scan::wrap_hang(
-        &foot,
-        crate::scan::COLS,
-        "    ",
-        "    ",
-    ));
+    out.push_str(&crate::scan::wrap_hang_for(&foot, width, "    ", "    "));
     out.push('\n');
     if let Some(earlier) = earlier {
-        out.push_str(&crate::scan::wrap_hang(
-            &earlier,
-            crate::scan::COLS,
-            "    ",
-            "    ",
-        ));
+        out.push_str(&crate::scan::wrap_hang_for(&earlier, width, "    ", "    "));
         out.push('\n');
     }
     if !m.harness.is_empty() || !m.session.is_empty() {
         let where_from = format!("harness {}  session {}", dash(&m.harness), dash(&m.session));
-        out.push_str(&crate::scan::wrap_hang(
+        out.push_str(&crate::scan::wrap_hang_for(
             &where_from,
-            crate::scan::COLS,
+            width,
             "    ",
             "    ",
         ));
         out.push('\n');
     }
     if let Some(reason) = &m.reason {
-        out.push_str(&crate::scan::wrap_hang(
+        out.push_str(&crate::scan::wrap_hang_for(
             &format!("why: {reason}"),
-            crate::scan::COLS,
+            width,
             "    ",
             "    ",
         ));
         out.push('\n');
     }
     for alias in &m.aliases {
-        out.push_str(&crate::scan::wrap_hang(
+        out.push_str(&crate::scan::wrap_hang_for(
             &format!("also written: {alias}"),
-            crate::scan::COLS,
+            width,
             "    ",
             "    ",
         ));
@@ -1154,8 +1143,8 @@ impl Drop for Raw {
         unsafe {
             libc::tcsetattr(0, libc::TCSANOW, &self.saved);
         }
-        print!("\x1b[?25h\x1b[?1049l");
-        let _ = std::io::stdout().flush();
+        emit_raw!("\x1b[?25h\x1b[?1049l");
+        let _ = crate::output::flush_stdout();
     }
 }
 
@@ -1196,8 +1185,8 @@ fn ask_line(raw: &Raw, prompt: &str) -> String {
         libc::tcsetattr(0, libc::TCSANOW, &raw.saved);
     }
     let (_, h) = term_size();
-    print!("\x1b[{h};1H\x1b[2K\x1b[?25h{prompt}");
-    let _ = std::io::stdout().flush();
+    emit_raw!("\x1b[{h};1H\x1b[2K\x1b[?25h{prompt}");
+    let _ = crate::output::flush_stdout();
     let mut line = String::new();
     let _ = std::io::stdin().read_line(&mut line);
     // SAFETY: raw again, as `Raw::on` set it.
@@ -1219,8 +1208,8 @@ fn draw(view: &View) {
             frame.push_str(&format!("\x1b[{};1H{line}", i + 1));
         }
     }
-    print!("{frame}");
-    let _ = std::io::stdout().flush();
+    emit_raw!("{frame}");
+    let _ = crate::output::flush_stdout();
 }
 
 /// Run the viewer over the live pack until `q`.
@@ -1243,7 +1232,7 @@ pub fn tui(filter: &Filter) -> Result<()> {
     view.since.clone_from(&filter.since);
     view.show_reviewed = filter.reviewed;
     let raw = Raw::on()?;
-    print!("\x1b[?1049h");
+    emit_raw!("\x1b[?1049h");
     loop {
         draw(&view);
         let act = on_key(&mut view, read_key());
@@ -1289,20 +1278,20 @@ pub fn tui(filter: &Filter) -> Result<()> {
 
 /// The question-by-question review over stdin: each unreviewed memory,
 /// newest first, then `k`eep, `e`dit, `m`erge with another id, `d`rop,
-/// `s`kip or `q`uit.
+/// `s`kip or `q`uit. Each memory is laid out at `width`.
 ///
 /// # Errors
 ///
 /// The pack not answering.
-pub fn review_interactive(all: &[Memory]) -> Result<String> {
+pub fn review_interactive(all: &[Memory], width: Width) -> Result<String> {
     let mut out = String::new();
     let stdin = std::io::stdin();
     for m in all.iter().filter(|m| m.verdict.is_none()) {
-        print!(
+        emit_raw!(
             "{}[k]eep [e]dit [m]erge [d]rop [s]kip [q]uit? ",
-            describe(m)
+            describe(m, width)
         );
-        std::io::stdout().flush()?;
+        crate::output::flush_stdout()?;
         let mut answer = String::new();
         if stdin.lock().read_line(&mut answer)? == 0 {
             break;
@@ -1311,15 +1300,15 @@ pub fn review_interactive(all: &[Memory]) -> Result<String> {
             "k" | "keep" => keep(&m.id, all),
             "d" | "drop" => drop_memory(&m.id, all),
             "e" | "edit" => {
-                print!("new text: ");
-                std::io::stdout().flush()?;
+                tell_raw!("new text: ");
+                crate::output::flush_stdout()?;
                 let mut t = String::new();
                 stdin.lock().read_line(&mut t)?;
                 edit(&m.id, &t, all)
             }
             "m" | "merge" => {
-                print!("merge with id: ");
-                std::io::stdout().flush()?;
+                tell_raw!("merge with id: ");
+                crate::output::flush_stdout()?;
                 let mut other = String::new();
                 stdin.lock().read_line(&mut other)?;
                 merge(&[m.id.clone(), other.trim().to_string()], None, all)
@@ -1329,10 +1318,10 @@ pub fn review_interactive(all: &[Memory]) -> Result<String> {
         };
         match said {
             Ok(line) => {
-                print!("{line}");
+                tell_raw!("{line}");
                 out.push_str(&line);
             }
-            Err(e) => println!("{e:#}"),
+            Err(e) => tell!("{e:#}"),
         }
     }
     Ok(out)
@@ -1743,18 +1732,52 @@ mod tests {
         let after = list(&atoms, &BTreeMap::new(), &Filter::default());
         assert_eq!(after[0].recalls, 1);
         assert_eq!(after[0].lookups, 1);
-        let said = describe(&after[0]);
+        let said = describe(&after[0], Width::FIXED);
         assert!(said.contains("recalled 1x"), "{said}");
         assert!(said.contains("looked up 1x"), "{said}");
         std::fs::write(recall_uses_path(), r#"{"a1aaaaaaaaaaaaaa":4}"#).unwrap();
         let mixed = list(&atoms, &BTreeMap::new(), &Filter::default());
         assert_eq!(mixed[0].earlier, 4);
         assert_eq!(mixed[0].recalls, 1);
-        let said = describe(&mixed[0]);
+        let said = describe(&mixed[0], Width::FIXED);
         assert!(
             said.contains("earlier 4x (recall and lookup were one count)"),
             "{said}"
         );
         std::env::remove_var("XDG_STATE_HOME");
+    }
+
+    #[test]
+    fn the_review_lays_a_memory_out_at_the_width_it_is_given() {
+        let text = "The kiln holds a long lesson about the glaze log that the morning firing left behind on the shelf by the door.";
+        let m = Memory {
+            id: "c3cccccccccccccc".into(),
+            text: text.into(),
+            kind: "lesson".into(),
+            origin: "user-declared".into(),
+            basis: String::new(),
+            seat: "ada".into(),
+            harness: String::new(),
+            session: String::new(),
+            host: String::new(),
+            at: String::new(),
+            reason: None,
+            recalls: 0,
+            lookups: 0,
+            earlier: 0,
+            verdict: None,
+            aliases: Vec::new(),
+            ticket: None,
+        };
+        let wide = describe(&m, Width::columns(200));
+        assert!(
+            wide.lines().any(|line| line == format!("    {text}")),
+            "{wide}"
+        );
+        let narrow = describe(&m, Width::columns(40));
+        let body = crate::output_wrap::wrap_hanging_prose(text, 40, "    ", "    ");
+        assert!(narrow.contains(&format!("\n{body}\n")), "{narrow}");
+        let fixed = describe(&m, Width::FIXED);
+        assert!(!fixed.lines().any(|line| line.contains(text)), "{fixed}");
     }
 }

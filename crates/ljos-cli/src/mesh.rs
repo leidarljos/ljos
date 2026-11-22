@@ -137,9 +137,9 @@ impl MeshOut {
             return;
         }
         if self.error {
-            eprintln!("{}", self.text);
+            say!("{}", self.text);
         } else {
-            println!("{}", self.text);
+            tell!("{}", self.text);
         }
     }
 

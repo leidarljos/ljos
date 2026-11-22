@@ -17,7 +17,7 @@ use anyhow::{Context as _, Result};
 /// Any cloud marker counts.
 pub fn open() -> Result<notmuch::Reader> {
     if crate::cloud::any_cloud_marker() {
-        eprintln!(
+        say!(
             "ljos: cloud-seat-mail: a cloud seat has no mailbox of its own; reading the mailbox on this machine"
         );
     }

@@ -1023,6 +1023,10 @@ fn stop_politely(pid: u32) {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_macros,
+    reason = "a skipped test says why on the test harness stderr"
+)]
 mod tests {
     use super::*;
 

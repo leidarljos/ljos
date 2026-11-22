@@ -91,7 +91,7 @@ pub fn run_cli() -> io::Result<Report> {
     let exe = std::env::current_exe()?;
     let report = install(&home, &exe, None)?;
     for line in report.lines() {
-        println!("{line}");
+        ljos_cli::tell!("{line}");
     }
     Ok(report)
 }

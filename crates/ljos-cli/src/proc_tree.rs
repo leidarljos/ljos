@@ -1146,6 +1146,10 @@ impl From<&std::fs::Metadata> for Owner {
 /// the caller holds for `file`. `None` unless every component above
 /// `file` is a directory and the file the walk ends on is a regular
 /// file that is `expect`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "owns a descriptor this function opened, never stdout or stderr"
+)]
 fn pinned_walk(file: &Path, expect: (u64, u64)) -> Option<Vec<Owner>> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
     use std::os::unix::ffi::OsStrExt as _;

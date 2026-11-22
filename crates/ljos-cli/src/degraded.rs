@@ -111,7 +111,7 @@ pub fn say(state: State) -> bool {
     if SAID.with(|said| said.replace(true)) {
         return false;
     }
-    eprintln!("{}", state.line());
+    say!("{}", state.line());
     true
 }
 

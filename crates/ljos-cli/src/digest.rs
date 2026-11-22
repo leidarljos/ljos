@@ -9,6 +9,7 @@ use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::output_wrap::Width;
 use crate::TrackerAct;
 
 /// One thing a seat did.
@@ -128,18 +129,18 @@ const DEED_BUDGET: std::time::Duration = std::time::Duration::from_millis(800);
 ///
 /// `since` is not a day, a time, or `last`. The tracker cannot be read.
 /// The marker cannot be stored.
-pub fn digest(since: Option<&str>, json: bool) -> Result<String> {
-    digest_cli(since, json, !json)
+pub fn digest(since: Option<&str>, json: bool, width: Width) -> Result<String> {
+    digest_cli(since, json, !json, width)
 }
 
 /// The shell. `mark` forces the marker. A plain digest (no JSON) marks
-/// even when `mark` is false.
+/// even when `mark` is false. The text is laid out at `width`.
 ///
 /// # Errors
 ///
 /// As [`digest`].
-pub fn digest_cli(since: Option<&str>, json: bool, mark: bool) -> Result<String> {
-    show(since, json, mark || !json, true)
+pub fn digest_cli(since: Option<&str>, json: bool, mark: bool, width: Width) -> Result<String> {
+    show(since, json, mark || !json, true, width)
 }
 
 /// The MCP tool. It never moves the marker, and a command the guard named
@@ -149,10 +150,16 @@ pub fn digest_cli(since: Option<&str>, json: bool, mark: bool) -> Result<String>
 ///
 /// As [`digest`].
 pub fn digest_for_tool(since: Option<&str>, json: bool) -> Result<String> {
-    show(since, json, false, false)
+    show(since, json, false, false, Width::FIXED)
 }
 
-fn show(since: Option<&str>, json: bool, mark: bool, guard_commands: bool) -> Result<String> {
+fn show(
+    since: Option<&str>,
+    json: bool,
+    mark: bool,
+    guard_commands: bool,
+    width: Width,
+) -> Result<String> {
     let started = unix_now();
     let (window, since_label, prelude) = parse_since(since)?;
     let layout = vissue_core::Layout::resolve(None, None).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -200,6 +207,7 @@ fn show(since: Option<&str>, json: bool, mark: bool, guard_commands: bool) -> Re
             &cutoff,
             &rows,
             &titles,
+            width,
         ))
     }
 }
@@ -1005,19 +1013,20 @@ fn dedup(rows: &mut Vec<Row>) {
     *rows = kept;
 }
 
-/// One digest row. A ticket's title stays on that line. JSON is built
-/// separately and keeps the event text unchanged.
-fn digest_line(event: &Row, titles: &BTreeMap<String, String>) -> String {
+/// One digest row at `width`. At [`Width::FIXED`] a ticket's title stays
+/// on that line. JSON is built separately and keeps the event text
+/// unchanged.
+fn digest_line(event: &Row, titles: &BTreeMap<String, String>, width: Width) -> String {
     let clock = wall(event.at);
     if event.kind == "ticket" {
         let title = titles.get(&event.issue).map(String::as_str).unwrap_or("");
-        return crate::scan::line_with_title(
+        return crate::scan::line_with_title_for(
             &format!("  {clock}  {}  ", event.text),
             title,
-            crate::scan::COLS,
+            width,
         );
     }
-    format!("  {clock}  {}", event.text)
+    crate::scan::wrap_on_terminal(&format!("  {clock}  {}", event.text), width)
 }
 
 fn render_human(
@@ -1026,6 +1035,7 @@ fn render_human(
     cutoff: &str,
     rows: &[Row],
     titles: &BTreeMap<String, String>,
+    width: Width,
 ) -> String {
     let mut out = String::new();
     if let Some(banner) = banner {
@@ -1057,7 +1067,7 @@ fn render_human(
         out.push_str(&seat);
         out.push('\n');
         for event in events {
-            out.push_str(&digest_line(event, titles));
+            out.push_str(&digest_line(event, titles, width));
             out.push('\n');
         }
     }
@@ -1542,7 +1552,7 @@ mod tests {
         );
         let mut titles = BTreeMap::new();
         titles.insert("ljos-633g".into(), title.into());
-        let line = digest_line(&row, &titles);
+        let line = digest_line(&row, &titles, Width::FIXED);
         assert!(line.chars().count() <= crate::scan::COLS, "{line}");
         assert!(line.contains("filed ljos-633g"), "{line}");
         assert!(line.contains("guard:"), "{line}");
@@ -1557,9 +1567,36 @@ mod tests {
                 false,
             ),
             &BTreeMap::new(),
+            Width::FIXED,
         );
         assert!(blank.ends_with(crate::scan::NO_TITLE), "{blank}");
         assert!(blank.chars().count() <= crate::scan::COLS, "{blank}");
+    }
+
+    #[test]
+    fn a_digest_ticket_line_wraps_its_title_to_the_terminal() {
+        let title = "guard: tmux by full path, renamed binary, -L or -S bypasses send-keys checks";
+        let row = Row::new(
+            1_700_000_000,
+            "ada".into(),
+            "ticket",
+            "filed ljos-633g".into(),
+            "ljos-633g",
+            false,
+        );
+        let mut titles = BTreeMap::new();
+        titles.insert("ljos-633g".into(), title.into());
+        let wide = digest_line(&row, &titles, Width::columns(200));
+        assert!(wide.ends_with(title), "{wide}");
+        assert!(!wide.contains('\n'), "{wide}");
+        let narrow = digest_line(&row, &titles, Width::columns(40));
+        let lead = format!("  {}  filed ljos-633g  ", wall(1_700_000_000));
+        let cont = " ".repeat(lead.chars().count());
+        assert_eq!(
+            narrow,
+            crate::output_wrap::wrap_hanging_prose(title, 40, &lead, &cont)
+        );
+        assert!(!narrow.contains("..."), "{narrow}");
     }
 
     use std::os::unix::fs::PermissionsExt;
@@ -1739,7 +1776,7 @@ mod tests {
         isolate(&root, &home, &path);
         unsafe { std::env::set_var("PACKSET_URL", &url) };
 
-        let text = digest(None, false).unwrap();
+        let text = digest(None, false, Width::FIXED).unwrap();
         let first = text
             .lines()
             .find(|line| {
@@ -1790,7 +1827,8 @@ mod tests {
             "{erin}"
         );
 
-        let value: serde_json::Value = serde_json::from_str(&digest(None, true).unwrap()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&digest(None, true, Width::FIXED).unwrap()).unwrap();
         assert!(value["since"].is_null(), "{value}");
         assert!(value["sync"].is_null(), "{value}");
         let kinds: BTreeSet<&str> = value["seats"]
@@ -1812,9 +1850,9 @@ mod tests {
             assert!(kinds.contains(kind), "{kind} missing in {value}");
         }
 
-        let future = digest(Some("2999-01-01"), false).unwrap();
+        let future = digest(Some("2999-01-01"), false, Width::FIXED).unwrap();
         assert!(future.contains("nothing in that window"), "{future}");
-        let past = digest(Some("2000-01-01"), false).unwrap();
+        let past = digest(Some("2000-01-01"), false, Width::FIXED).unwrap();
         assert!(past.contains("filed probe-b"), "{past}");
     }
 
@@ -1967,7 +2005,7 @@ mod tests {
         isolate(&root, &home, &path);
         unsafe { std::env::set_var("PACKSET_URL", &url) };
 
-        let text = digest(None, false).unwrap();
+        let text = digest(None, false, Width::FIXED).unwrap();
         let seats: Vec<&str> = text
             .lines()
             .filter(|line| {
@@ -2006,15 +2044,15 @@ mod tests {
         );
         isolate(&root, &home, "/usr/bin:/bin");
         unsafe { std::env::set_var("PACKSET_URL", "off") };
-        let first = digest(Some("last"), false).unwrap();
+        let first = digest(Some("last"), false, Width::FIXED).unwrap();
         assert!(first.contains("no earlier digest"), "{first}");
         assert!(first.contains("filed probe-b"), "{first}");
         let marker = std::fs::read_to_string(home.join("state/ljos/digest-last")).unwrap();
         assert!(marker.trim().parse::<i64>().is_ok(), "{marker}");
-        let second = digest(Some("last"), false).unwrap();
+        let second = digest(Some("last"), false, Width::FIXED).unwrap();
         assert!(!second.contains("filed probe-b"), "{second}");
         assert!(second.contains("nothing in that window"), "{second}");
-        assert!(digest(Some("noon"), false).is_err());
+        assert!(digest(Some("noon"), false, Width::FIXED).is_err());
     }
 
     #[test]
@@ -2135,7 +2173,7 @@ mod tests {
         let path = format!("{}:/usr/bin:/bin", bin.display());
         isolate(&root, &home, &path);
         unsafe { std::env::set_var("PACKSET_URL", &url) };
-        let text = digest(None, false).unwrap();
+        let text = digest(None, false, Width::FIXED).unwrap();
         assert!(text.contains("filed bench-0042"), "{text}");
         assert!(
             text.contains("ada\n") || text.starts_with("ada\n"),
@@ -2174,8 +2212,8 @@ mod tests {
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let _ = review_filed_tracker(dir.path());
-        let _ = digest(None, true).unwrap();
-        let text = digest(Some("last"), false).unwrap();
+        let _ = digest(None, true, Width::FIXED).unwrap();
+        let text = digest(Some("last"), false, Width::FIXED).unwrap();
         assert!(text.contains("filed probe-b"), "{text}");
     }
 
@@ -2184,7 +2222,7 @@ mod tests {
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, _) = review_filed_tracker(dir.path());
-        let first = digest(Some("last"), false).unwrap();
+        let first = digest(Some("last"), false, Width::FIXED).unwrap();
         assert!(first.contains("filed probe-b"), "{first}");
         let later = chrono::Utc::now() + chrono::Duration::seconds(5);
         let out = crate::git_cmd()
@@ -2199,7 +2237,7 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let second = digest(Some("last"), false).unwrap();
+        let second = digest(Some("last"), false, Width::FIXED).unwrap();
         assert!(!second.contains("filed probe-b"), "{second}");
     }
 
@@ -2221,7 +2259,7 @@ mod tests {
             format!("{}\n", minute + 30),
         )
         .unwrap();
-        let text = digest(Some("last"), false).unwrap();
+        let text = digest(Some("last"), false, Width::FIXED).unwrap();
         assert!(text.contains("closed probe-b"), "{text}");
     }
 
@@ -2322,7 +2360,7 @@ mod tests {
         }
         isolate(&root, &home, "/usr/bin:/bin");
         unsafe { std::env::set_var("PACKSET_URL", "off") };
-        let text = digest(None, false).unwrap();
+        let text = digest(None, false, Width::FIXED).unwrap();
         let bounty = seat_block(&text, "bounty-driftwatch");
         assert!(bounty.contains("filed side-b"), "{text}");
         assert!(!text.contains("\ntracker\n"), "{text}");
@@ -2389,7 +2427,7 @@ mod tests {
         assert!(!stored.contains("xyz"), "{stored}");
         assert!(!stored.contains("ghp_secret123"), "{stored}");
         assert!(!stored.contains("token=abc"), "{stored}");
-        let shown = digest(None, true).unwrap();
+        let shown = digest(None, true, Width::FIXED).unwrap();
         assert!(!shown.contains("xyz"), "{shown}");
         assert!(!shown.contains("ghp_secret123"), "{shown}");
         assert!(shown.contains("curl"), "{shown}");
@@ -2416,7 +2454,7 @@ mod tests {
         let _ = digest_for_tool(None, false).unwrap();
         let _ = digest_for_tool(Some("last"), true).unwrap();
         assert!(!marker.exists(), "the tool wrote {}", marker.display());
-        let text = digest(Some("last"), false).unwrap();
+        let text = digest(Some("last"), false, Width::FIXED).unwrap();
         assert!(text.contains("filed probe-b"), "{text}");
     }
 
@@ -2438,15 +2476,15 @@ mod tests {
             format!("{}\n", minute + 1),
         )
         .unwrap();
-        let first = digest(Some("last"), false).unwrap();
+        let first = digest(Some("last"), false, Width::FIXED).unwrap();
         assert!(first.contains("closed probe-b"), "{first}");
         std::fs::write(
             home.join("state/ljos/digest-last"),
             format!("{}\n", minute + 30),
         )
         .unwrap();
-        let second = digest(Some("last"), false).unwrap();
-        eprintln!("REVIEW2 second:\n{second}");
+        let second = digest(Some("last"), false, Width::FIXED).unwrap();
+        say!("REVIEW2 second:\n{second}");
         assert!(!second.contains("closed probe-b"), "shown twice:\n{second}");
     }
 
@@ -2455,7 +2493,7 @@ mod tests {
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, home) = review_filed_tracker(dir.path());
-        let shown = digest(Some("last"), false).unwrap();
+        let shown = digest(Some("last"), false, Width::FIXED).unwrap();
         assert!(shown.contains("filed probe-b"), "{shown}");
         let marker: i64 = std::fs::read_to_string(home.join("state/ljos/digest-last"))
             .unwrap()
@@ -2496,8 +2534,8 @@ mod tests {
                 String::from_utf8_lossy(&out.stderr)
             );
         }
-        let next = digest(Some("last"), false).unwrap();
-        eprintln!("REVIEW2 next:\n{next}");
+        let next = digest(Some("last"), false, Width::FIXED).unwrap();
+        say!("REVIEW2 next:\n{next}");
         assert!(
             next.contains("probe-c"),
             "a commit that landed after the marker is missing:\n{next}"
@@ -2509,7 +2547,7 @@ mod tests {
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, home) = review_filed_tracker(dir.path());
-        let _ = digest(Some("last"), false).unwrap();
+        let _ = digest(Some("last"), false, Width::FIXED).unwrap();
         let marker: i64 = std::fs::read_to_string(home.join("state/ljos/digest-last"))
             .unwrap()
             .trim()
@@ -2534,7 +2572,7 @@ mod tests {
             ],
             &old,
         );
-        let next = digest(Some("last"), false).unwrap();
+        let next = digest(Some("last"), false, Width::FIXED).unwrap();
         assert!(next.contains("probe-old"), "{next}");
     }
 
@@ -2553,7 +2591,7 @@ mod tests {
         let mut leaked = Vec::new();
         for case in cases {
             let got = redact_secrets(case);
-            eprintln!("REVIEW2 {case:?} -> {got:?}");
+            say!("REVIEW2 {case:?} -> {got:?}");
             for secret in [
                 "hunter2",
                 "github_pat_11",
@@ -2729,7 +2767,7 @@ mod tests {
         unsafe { std::env::set_var("PACKSET_URL", "off") };
         let trace = dir.path().join("git.trace");
         unsafe { std::env::set_var("GIT_TRACE", &trace) };
-        let text = digest(Some("2026-06-01"), false).unwrap();
+        let text = digest(Some("2026-06-01"), false, Width::FIXED).unwrap();
         unsafe { std::env::remove_var("GIT_TRACE") };
         for (id, _, seat) in &old_in_window {
             let line = format!("filed {id}");
@@ -2777,7 +2815,7 @@ mod tests {
         );
         isolate(&root, &home, "/usr/bin:/bin");
         unsafe { std::env::set_var("PACKSET_URL", "off") };
-        let first = digest(Some("last"), false).unwrap();
+        let first = digest(Some("last"), false, Width::FIXED).unwrap();
         assert!(first.contains("filed old-out"), "{first}");
         let state: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(home.join("state/ljos/digest-last-state.json")).unwrap(),
@@ -2795,7 +2833,7 @@ mod tests {
         );
         let trace = dir.path().join("git.trace");
         unsafe { std::env::set_var("GIT_TRACE", &trace) };
-        let second = digest(Some("last"), false).unwrap();
+        let second = digest(Some("last"), false, Width::FIXED).unwrap();
         unsafe { std::env::remove_var("GIT_TRACE") };
         assert!(second.contains("filed late-old"), "{second}");
         assert!(!second.contains("filed old-out"), "{second}");

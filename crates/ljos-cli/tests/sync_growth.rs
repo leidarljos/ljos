@@ -3,6 +3,11 @@
 //! with nothing new commits nothing, and a log sealed as the single file
 //! an ljos before chunks wrote still imports every atom. Runs the built
 //! `ljos` binary against a pack that lists the test's atoms.
+
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();

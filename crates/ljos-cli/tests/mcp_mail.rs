@@ -2,6 +2,11 @@
 //! the `[mail]` table names. A cloud seat prints `cloud-seat-mail` and
 //! still reads the mailbox this machine holds.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 #[path = "common/maildir.rs"]
 mod maildir;

@@ -1290,7 +1290,7 @@ fn note_rules_read_error(err: &anyhow::Error) {
     if NOTED.swap(true, Ordering::Relaxed) {
         return;
     }
-    eprintln!("ljos: {err:#}");
+    say!("ljos: {err:#}");
 }
 
 /// A GitHub write the rules cover, warned on because the file could not
@@ -2419,7 +2419,7 @@ mod tests {
     #[test]
     fn a_deleted_lesson_is_not_stated_by_a_long_lived_reader() {
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         a_dropped_lesson_stays_dropped(None);
@@ -2428,7 +2428,7 @@ mod tests {
     #[test]
     fn a_retracted_lesson_is_not_stated_by_a_long_lived_reader() {
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         a_dropped_lesson_stays_dropped(Some("deed-patch-overlay"));
@@ -2440,7 +2440,7 @@ mod tests {
     #[test]
     fn a_pack_that_stops_answering_confirms_no_rule() {
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let (_lock, dir) = isolated();
@@ -2489,7 +2489,7 @@ mod tests {
     #[test]
     fn a_person_read_in_one_workspace_does_not_answer_for_another() {
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let (_lock, dir) = isolated();

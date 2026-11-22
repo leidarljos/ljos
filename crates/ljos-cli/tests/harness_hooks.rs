@@ -1,6 +1,11 @@
 //! The five real-harness fixes, each driven through `ljos hook` (the ballot
 //! case through `ljos vote`, which is the process that casts and tallies).
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 use std::io::Write;
 use std::path::{Path, PathBuf};

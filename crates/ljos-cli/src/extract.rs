@@ -257,7 +257,7 @@ pub fn schedule_finish(input: &str, session: Option<&str>) {
         "input": input,
     });
     if std::fs::write(&payload, body.to_string()).is_err() {
-        eprintln!("ljos extract: the session finish could not be queued");
+        say!("ljos extract: the session finish could not be queued");
         return;
     }
     let bin = std::env::current_exe()
@@ -271,7 +271,7 @@ pub fn schedule_finish(input: &str, session: Option<&str>) {
     let log = dir.join("session-finish.log");
     if crate::detach(&bin, &args, &log).is_err() {
         let _ = std::fs::remove_file(&payload);
-        eprintln!("ljos extract: the session finish could not be started");
+        say!("ljos extract: the session finish could not be started");
     }
 }
 
@@ -331,7 +331,7 @@ fn write_notes(input: &str, session: Option<&str>) -> Vec<String> {
     };
     let mut lines = Vec::new();
     let say = |lines: &mut Vec<String>, line: String| {
-        eprintln!("{line}");
+        say!("{line}");
         lines.push(line);
     };
     let found = facts(&text, &kept());

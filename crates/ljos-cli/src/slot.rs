@@ -281,12 +281,12 @@ fn partial_message() -> String {
 }
 
 fn partial_stopped() -> std::result::Result<Option<Vec<Vec<String>>>, String> {
-    eprintln!("{SLOT_HISTORY_PARTIAL}");
+    say!("{SLOT_HISTORY_PARTIAL}");
     Err(partial_message())
 }
 
 fn partial_unreadable() -> std::result::Result<Option<Vec<Vec<String>>>, String> {
-    eprintln!("{SLOT_HISTORY_PARTIAL}");
+    say!("{SLOT_HISTORY_PARTIAL}");
     Err(format!(
         "{SLOT_HISTORY_PARTIAL}: a commit tree could not be read; the next vote continues the read"
     ))

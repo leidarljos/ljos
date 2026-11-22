@@ -193,15 +193,15 @@ pub fn withdraw_ballot(issue: &str, who: &str) -> Result<String> {
     // soon as it lands, so a reader of a failure in the second still
     // sees which half went through.
     match crate::run_captured_as("vissue", &["vote", issue, "--withdraw"], Some(who)) {
-        Ok(said) => print!("{}", said.stdout),
+        Ok(said) => tell_raw!("{}", said.stdout),
         Err(e) if format!("{e:#}").contains("holds no ballot") => {
-            println!("{issue}: {who} holds no ballot; withdrawing the forecast");
+            tell!("{issue}: {who} holds no ballot; withdrawing the forecast");
         }
         Err(e) => return Err(e),
     }
     if let Some(standing) = standing.as_deref() {
         if let Err(e) = crate::ballot_sig::note_withdrawn_on(standing, who, issue) {
-            eprintln!("ljos withdraw: {e:#}");
+            say!("ljos withdraw: {e:#}");
         }
     }
     let n = crate::withdraw_prediction(issue, who)

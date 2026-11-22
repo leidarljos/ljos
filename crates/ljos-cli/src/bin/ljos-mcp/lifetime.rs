@@ -333,7 +333,7 @@ fn note_prctl(rc: i32) {
     if rc == 0 || PRCTL_LOGGED.swap(true, Ordering::Relaxed) {
         return;
     }
-    eprintln!(
+    ljos_cli::say!(
         "ljos-mcp: PR_SET_PDEATHSIG failed ({}); watching the client by its pid",
         std::io::Error::last_os_error()
     );

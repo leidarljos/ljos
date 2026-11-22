@@ -9,6 +9,11 @@
 //! lands after `inbox --sync` started is still read. A checkout with no
 //! remote only lists.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

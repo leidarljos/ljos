@@ -621,8 +621,8 @@ pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> i3
     if let Some(line) = first_prompt_start_line(runner, &raw, input) {
         out = with_start_line(&out, &line);
     }
-    print!("{out}");
-    eprint!("{err}");
+    emit_raw!("{out}");
+    say_raw!("{err}");
     code
 }
 

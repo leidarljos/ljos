@@ -132,7 +132,7 @@ pub fn admit() {
         }
         Err(why) => {
             note_time("allowed", started().elapsed(), Duration::ZERO);
-            eprintln!("ljos hook: hook queue: {why}; the call is judged in this process");
+            say!("ljos hook: hook queue: {why}; the call is judged in this process");
             let _ = (gate, input, event);
         }
     }
@@ -645,7 +645,7 @@ fn same_user(_stream: &UnixStream) -> bool {
 pub fn serve() -> i32 {
     let dir = run_dir();
     let Some(lock) = open_lock(&dir.join("hookd.lock")) else {
-        eprintln!(
+        say!(
             "ljos hookd: cannot open {}",
             dir.join("hookd.lock").display()
         );
@@ -659,7 +659,7 @@ pub fn serve() -> i32 {
     let listener = match UnixListener::bind(&sock) {
         Ok(listener) => listener,
         Err(e) => {
-            eprintln!("ljos hookd: cannot listen on {}: {e}", sock.display());
+            say!("ljos hookd: cannot listen on {}: {e}", sock.display());
             return 1;
         }
     };

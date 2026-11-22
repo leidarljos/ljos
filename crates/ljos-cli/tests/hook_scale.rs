@@ -5,6 +5,11 @@
 //! A fresh home and its own packsetd. The hook shows the writer's owner
 //! token, as a seat does, so it reads the listing as trusted.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 use std::io::Write;
 use std::path::{Path, PathBuf};

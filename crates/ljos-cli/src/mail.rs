@@ -954,7 +954,7 @@ pub fn inbox_sync(all: bool, until: Option<&str>) -> Result<String> {
         let named = commit_named(until);
         let note = super::sync::fetch_for_inbox(named.as_deref())?;
         if !note.trim().is_empty() {
-            eprint!("{note}");
+            say_raw!("{note}");
         }
     }
     // The fetch above is the tracker's. The pack budget starts after it,

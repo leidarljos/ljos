@@ -1619,7 +1619,7 @@ pub fn warnings(cwd: Option<&Path>) -> Vec<String> {
 pub fn emit() {
     let cwd = std::env::current_dir().ok();
     for line in warnings(cwd.as_deref()) {
-        eprintln!("warning: {line}");
+        say!("warning: {line}");
     }
 }
 

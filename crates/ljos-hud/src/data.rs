@@ -452,7 +452,7 @@ fn load_island(cue: &str) -> Result<(Vec<IslandRow>, Vec<String>)> {
 
 /// Weak/dense banners, wording from [`ljos_cli::format_island`].
 fn island_notices_of(body: &Value) -> Vec<String> {
-    let formatted = ljos_cli::format_island(body);
+    let formatted = ljos_cli::format_island(body, ljos_cli::output_wrap::Width::FIXED);
     let mut notices: Vec<String> = formatted
         .lines()
         .filter(|line| line.starts_with("weak island:"))
@@ -600,7 +600,7 @@ mod tests {
             "agreed_seeds": 1,
             "island": []
         });
-        let formatted = ljos_cli::format_island(&weak);
+        let formatted = ljos_cli::format_island(&weak, ljos_cli::output_wrap::Width::FIXED);
         let weak_line = formatted
             .lines()
             .find(|line| line.starts_with("weak island:"))

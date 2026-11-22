@@ -66,7 +66,7 @@ pub fn run(opts: HudLaunch) -> i32 {
         return 0;
     }
     let Some(bin) = resolve_hud_bin().filter(|p| p.is_file()) else {
-        eprintln!("{}", missing_bin_message());
+        say!("{}", missing_bin_message());
         return 127;
     };
     let mut cmd = std::process::Command::new(&bin);
@@ -87,7 +87,7 @@ pub fn run(opts: HudLaunch) -> i32 {
     {
         use std::os::unix::process::CommandExt;
         let err = cmd.exec();
-        eprintln!("ljos: exec {}: {err}", bin.display());
+        say!("ljos: exec {}: {err}", bin.display());
         1
     }
     #[cfg(not(unix))]
@@ -95,7 +95,7 @@ pub fn run(opts: HudLaunch) -> i32 {
         match cmd.status() {
             Ok(st) => st.code().unwrap_or(1),
             Err(e) => {
-                eprintln!("ljos: spawn {}: {e}", bin.display());
+                say!("ljos: spawn {}: {e}", bin.display());
                 1
             }
         }

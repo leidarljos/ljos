@@ -148,7 +148,7 @@ mod tests {
             "{:<22} {:<9} [#{}]  {}{}\n",
             "demo-kiln", "STARTED", "B", "Fire the kiln", suffix
         );
-        let text = crate::scan::ready_text(&raw);
+        let text = crate::scan::ready_page(&raw, None, crate::scan::Width::FIXED);
         assert!(text.contains("claimed 12m by ada"), "{text}");
         assert!(!text.contains("claimed -"), "{text}");
     }

@@ -19,6 +19,11 @@
 //! `--out DIR` writes `summary.json` and `per_question.csv` for the BM25+ arm.
 //! The download names a dataset revision. `main` is not a pin.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a benchmark run by bench/hf/run.sh, not shipped; its report is recorded as printed"
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

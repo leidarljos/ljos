@@ -930,6 +930,10 @@ pub(crate) fn open_dir_beneath(
 }
 
 /// [`open_dir_beneath`], making a missing component with `mode`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "owns a descriptor this function opened, never stdout or stderr"
+)]
 fn open_dir_beneath_mode(
     root: &Path,
     rel: &str,
@@ -3620,6 +3624,10 @@ fn kind_at(dir: &std::fs::File, name: &str) -> Result<WorktreeKind> {
 
 /// The bytes of `name` in `dir`. None when it is missing. A symlink or any
 /// other non-regular file is an error, and the read uses this fd.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "owns a descriptor this function opened, never stdout or stderr"
+)]
 fn read_at(dir: &std::fs::File, name: &str, label: &Path) -> Result<Option<Vec<u8>>> {
     use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -11712,7 +11720,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let _g = crate::test_env_lock();
@@ -11868,7 +11876,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let _g = crate::test_env_lock();
@@ -11984,7 +11992,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let _g = crate::test_env_lock();
@@ -12052,7 +12060,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let _g = crate::test_env_lock();
@@ -12127,7 +12135,7 @@ mod tests {
     #[test]
     fn the_merge_driver_reexports_an_extra_scope_without_primary_atoms() {
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let _g = crate::test_env_lock();
@@ -12376,7 +12384,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12438,7 +12446,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12498,7 +12506,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12541,7 +12549,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12582,7 +12590,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12649,7 +12657,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12726,7 +12734,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12794,7 +12802,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12905,7 +12913,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         fn git_text(cwd: &Path, args: &[&str]) -> String {
@@ -13056,7 +13064,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -13099,7 +13107,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -13156,7 +13164,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();

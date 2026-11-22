@@ -250,20 +250,20 @@ fn refresh_one(name: &str, path: &Path) -> bool {
     let before = std::fs::read_to_string(path).unwrap_or_default();
     let done = install(path, name, false);
     if !done.ok {
-        eprintln!("ljos: {}", done.detail);
+        say!("ljos: {}", done.detail);
         return false;
     }
     let after = std::fs::read_to_string(path).unwrap_or_default();
     if after != before {
-        eprintln!(
+        say!(
             "ljos: refreshed {name}: {}{}",
             path.display(),
             change_suffix(&before, &after, &template)
         );
     } else if done.detail.contains("edited by hand") {
-        eprintln!("ljos: {name}: {}{EDITED_MARK}", path.display());
+        say!("ljos: {name}: {}{EDITED_MARK}", path.display());
     } else if done.detail.contains("did not write") {
-        eprintln!("ljos: {name}: {}{FOREIGN_MARK}", path.display());
+        say!("ljos: {name}: {}{FOREIGN_MARK}", path.display());
     }
     true
 }
@@ -276,7 +276,7 @@ pub fn refresh_installed() -> bool {
     let all = match crate::harnesses_with_shipped(&crate::harnesses_path()) {
         Ok(all) => all,
         Err(err) => {
-            eprintln!("ljos: runner env files were not refreshed: {err:#}");
+            say!("ljos: runner env files were not refreshed: {err:#}");
             return true;
         }
     };

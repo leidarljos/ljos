@@ -5,6 +5,10 @@
 //! stands is read against a pack that answers with no personas.
 
 ljos_test_boot::harness!();
+
+#[path = "common/pty.rs"]
+mod pty;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -18,12 +22,17 @@ fn script(dir: &Path, name: &str, body: &str) {
 /// Fakes for the tracker and the model crate. `vissue vote ID --json`
 /// answers `ballots`; the settles print what each tool prints.
 fn fakes(ballots: &str) -> (tempfile::TempDir, PathBuf) {
+    fakes_with(ballots, "consensus: rrf 2 of 2, settled")
+}
+
+/// [`fakes`] whose `vissue consensus` prints `settle`.
+fn fakes_with(ballots: &str, settle: &str) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     script(
         dir.path(),
         "vissue",
         &format!(
-            "#!/bin/sh\ncase \"$1\" in\n  vote) echo '{ballots}' ;;\n  show) echo '{{\"id\":\"'\"$2\"'\"}}' ;;\n  consensus) echo 'consensus: rrf 2 of 2, settled' ;;\n  *) exit 1 ;;\nesac\n"
+            "#!/bin/sh\ncase \"$1\" in\n  vote) echo '{ballots}' ;;\n  show) echo '{{\"id\":\"'\"$2\"'\"}}' ;;\n  consensus) echo '{settle}' ;;\n  *) exit 1 ;;\nesac\n"
         ),
     );
     script(
@@ -255,6 +264,63 @@ fn the_vote_a_consensus_names_is_one_the_vote_command_takes() {
             !text.contains("a ballot records what it used"),
             "`ljos {}` was refused for a missing `--used`:\n{text}",
             args.join(" ")
+        );
+    }
+}
+
+/// The tracker's settle is the page a person reads. On a terminal it wraps
+/// to the width, and on a pipe it is the tracker's text as it printed it.
+#[test]
+fn the_tracker_settle_page_wraps_on_a_tty() {
+    let settle = "consensus: rrf 2 of 2 settled by social power over every ballot the tracker read for this issue";
+    let (dir, home) = fakes_with(
+        r#"[{"agent":"alice","choice":"rrf"},{"agent":"bob","choice":"rrf"}]"#,
+        settle,
+    );
+    let piped = consensus(dir.path(), &home, &["proj-v0te", "--no-file"]);
+    assert!(piped.status.success(), "{piped:?}");
+    let piped = String::from_utf8_lossy(&piped.stdout).into_owned();
+    assert!(piped.contains(&format!("{settle}\n")), "{piped}");
+
+    let cols = 40;
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    cmd.args(["consensus", "proj-v0te", "--no-file"])
+        .current_dir(dir.path())
+        .env_clear()
+        .env("PATH", path)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_STATE_HOME", home.join(".state"))
+        .env("XDG_RUNTIME_DIR", &home)
+        .env("VISSUE_ROOT", home.join("tracker"))
+        .env("PACKSET_URL", "off")
+        .env("LJOS_SEAT", "saddle")
+        .env("LJOS_UNSIGNED_BALLOTS", "allow")
+        .env("COLUMNS", cols.to_string())
+        .stdin(std::process::Stdio::null());
+    let term = pty::Pty::open();
+    term.attach_output(&mut cmd);
+    let child = term.spawn(&mut cmd);
+    let out = term.wait_output(child, 30);
+    term.finish_reading();
+    let shown = term.shown().replace("\r\n", "\n");
+    assert!(out.status.success(), "{shown}");
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(words(&shown).contains(settle), "{shown}");
+    assert!(
+        !shown.contains(settle),
+        "the settle line did not wrap:\n{shown}"
+    );
+    let page = &shown[shown.find("consensus: rrf").expect("the settle page")..];
+    for line in page.lines() {
+        assert!(
+            line.chars().count() <= cols,
+            "cols={cols}: {line:?}\n{shown}"
         );
     }
 }

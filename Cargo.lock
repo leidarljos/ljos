@@ -2776,6 +2776,8 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "unicode-normalization",
+ "unicode-segmentation",
+ "unicode-width",
  "ureq",
  "url",
  "vissue-core",

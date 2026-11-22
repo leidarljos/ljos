@@ -19,14 +19,14 @@ use rmcp::{transport::stdio, ServiceExt};
 fn flag_line() -> bool {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--version" || arg == "-V") {
-        println!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
+        ljos_cli::emit!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
         return true;
     }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
-        println!("Serve one seat over the Model Context Protocol on standard input.");
-        println!("--version  print the version and exit");
-        println!("--help     print this help and exit");
+        ljos_cli::emit!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
+        ljos_cli::tell!("Serve one seat over the Model Context Protocol on standard input.");
+        ljos_cli::tell!("--version  print the version and exit");
+        ljos_cli::tell!("--help     print this help and exit");
         return true;
     }
     false
@@ -36,7 +36,20 @@ fn flag_line() -> bool {
 /// cheap. A tool's work runs on the blocking pool or blocks a worker for
 /// one call, so two workers keep the stdin reader moving; the pool is
 /// capped and its threads leave after a short idle.
-fn main() -> anyhow::Result<()> {
+///
+/// Everything this binary writes is machine output and is never wrapped.
+/// An error that ends the server is written as a `main` that returns
+/// `Result` writes it, `Error: ` and its debug form, and the status is 1.
+fn main() {
+    ljos_cli::output::set_output_kind(ljos_cli::output::Kind::Machine);
+    ljos_cli::output::install_panic_hook();
+    if let Err(err) = run() {
+        ljos_cli::output::say_error(&err);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> anyhow::Result<()> {
     // `--version` and `--help` leave before the runtime, the seat env, a
     // pack connection or a read of stdin. A doctor probe and a wrapper
     // that execs this binary both stop here.

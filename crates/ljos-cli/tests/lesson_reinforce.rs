@@ -3,6 +3,11 @@
 //! person who says a derived lesson again, or the opposite of their own,
 //! gets a memory of their own.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 #[path = "common/terminal.rs"]
 mod terminal;

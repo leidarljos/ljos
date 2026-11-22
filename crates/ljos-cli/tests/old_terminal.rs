@@ -7,6 +7,11 @@
 //! Packset is seeded from `fixtures/old_terminal/legacy_atoms.json`. See
 //! `fixtures/old_terminal/README.md` for how each payload was derived.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 use std::path::Path;
 use std::process::{Command, Output, Stdio};

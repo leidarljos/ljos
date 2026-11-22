@@ -353,7 +353,7 @@ fn a_search_with_no_hits_names_the_next_command() {
     assert_eq!(out.status.code(), Some(0), "{said}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        ljos_cli::scan::empty_store_page("which fusion method"),
+        ljos_cli::scan::empty_store_page("which fusion method", ljos_cli::scan::Width::FIXED),
         "{said}"
     );
 }

@@ -4,6 +4,11 @@
 //! share one model family in the settle; labelled ones count one family
 //! each.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 
 use std::path::{Path, PathBuf};

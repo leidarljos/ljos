@@ -179,6 +179,10 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<File> {
 
 /// Open `name` in the directory `dir` for reading, without following a
 /// link and without waiting on a pipe. `None` when it cannot be opened.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "owns a descriptor this function opened, never stdout or stderr"
+)]
 fn open_in(dir: &File, name: &std::ffi::OsStr) -> Option<File> {
     use std::os::unix::ffi::OsStrExt as _;
     let name = std::ffi::CString::new(name.as_bytes()).ok()?;
@@ -224,6 +228,10 @@ pub(crate) fn open_private_file(path: &Path) -> Option<(File, Metadata)> {
 
 /// Open the directory `name` in `dir`, without following a link and
 /// without waiting on a pipe. `None` when it is not a directory.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "owns a descriptor this function opened, never stdout or stderr"
+)]
 fn open_dir_in(dir: &File, name: &std::ffi::OsStr) -> Option<File> {
     use std::os::unix::ffi::OsStrExt as _;
     let name = std::ffi::CString::new(name.as_bytes()).ok()?;

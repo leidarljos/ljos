@@ -15,6 +15,11 @@
 //! behind a proxy that changes the pack's search answers, or with its
 //! output rewritten. The fixture fails every one.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 use std::collections::HashMap;
 use std::io::{Read, Write};
