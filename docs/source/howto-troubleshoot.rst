@@ -155,7 +155,7 @@ The printed row is:
    # proseguard:on
 
 A tracker write waits for another seat's commit lock, which a push keeps until git exits, for ``LJOS_TRACKER_LOCK_WAIT`` seconds (20 when unset).
-A hook wall budget or a tool budget that ends sooner cuts that wait short.
+A wall budget, such as a hook's, a sitting's or a claim's, or a tool budget that ends sooner cuts that wait short.
 Only a lock that is still taken after that wait leaves the write on disk, with a line that says how long the write waited and that the commit is deferred to the next write or push.
 When a budget cut the wait short, the line names that budget and the ``LJOS_TRACKER_LOCK_WAIT`` it fell short of.
 
