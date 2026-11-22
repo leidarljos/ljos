@@ -51333,11 +51333,13 @@ fn prepare_split(path: &Path, writes: &[(String, String)], also: &[String]) -> S
 }
 
 #[cfg(test)]
+type SplitHook = Option<Box<dyn FnMut(&str)>>;
+
+#[cfg(test)]
 thread_local! {
     /// What a test runs at a named step of [`split_board`]: a writer killed
     /// there, or another writer landing there.
-    static SPLIT_STEP: std::cell::RefCell<Option<Box<dyn FnMut(&str)>>> =
-        const { std::cell::RefCell::new(None) };
+    static SPLIT_STEP: std::cell::RefCell<SplitHook> = const { std::cell::RefCell::new(None) };
 }
 
 fn split_step(step: &str) {
