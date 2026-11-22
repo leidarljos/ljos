@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Proof that a prompt which never names ljos still leaves a claim, a deed
-# and a finish on the tracker. One session per harness. The payloads are
-# the ones each harness actually posts to `ljos hook`.
+# Proof that a prompt which never names ljos leaves nothing on the
+# tracker. No hook files a ticket, takes a claim, cites a deed or
+# finishes a claim; the seat calls those itself. One session per
+# harness. The payloads are the ones each harness actually posts to
+# `ljos hook`. The fake vissue and deedar log every call, so a hook that
+# wrote would show up in those logs.
+# shellcheck disable=SC2317 # each drive_ function is called as drive_$name
 set -euo pipefail
 
 root=$(mktemp -d "${TMPDIR:-/tmp}/ljos-book.XXXX")
@@ -10,12 +14,13 @@ tracker="$root/tracker"
 repo="$root/repo"
 bin="$root/bin"
 run="$root/run"
-mkdir -p "$tracker" "$repo" "$bin" "$run" "$repo"
+mkdir -p "$tracker" "$repo" "$bin" "$run"
 
+here=$(cd "$(dirname "$0")" && pwd)
 LJOS=${LJOS:-}
 if [ -z "$LJOS" ]; then
-  if [ -x /workspace/target/debug/ljos ]; then
-    LJOS=/workspace/target/debug/ljos
+  if [ -x "$here/../target/debug/ljos" ]; then
+    LJOS="$here/../target/debug/ljos"
   else
     LJOS=$(command -v ljos)
   fi
@@ -35,83 +40,29 @@ git -C "$repo" commit -q -m seed
 
 cat > "$bin/vissue" << 'PY'
 #!/usr/bin/env python3
-import os, sys, pathlib, re
+import os, sys, pathlib
 root = pathlib.Path(os.environ["VISSUE_ROOT"])
-log = root / "vissue.log"
 args = sys.argv[1:]
-with log.open("a") as fh:
+with (root / "vissue.log").open("a") as fh:
     fh.write(" ".join(args) + "\n")
-cmd, rest = args[0], args[1:]
-
-def files():
-    return list(root.rglob("issues.org"))
-
-def rewrite(iid, state):
-    pat = re.compile(r"(\* )[A-Z]+( \[#[A-Z]\] [^\n]*\n:PROPERTIES:\n:ID:\s+" + re.escape(iid) + r"\n)")
-    for f in files():
-        text = f.read_text()
-        new, n = pat.subn(r"\1" + state + r"\2", text, count=1)
-        if n:
-            f.write_text(new)
-            return
-    sys.exit("no heading for " + iid)
-
-if cmd == "create":
-    proj, title, i = "agent", "agent work", 0
-    while i < len(rest):
-        if rest[i] == "-p" and i + 1 < len(rest):
-            proj = rest[i + 1]
-            i += 2
-            continue
-        if rest[i] == "-q":
-            i += 1
-            continue
-        title = rest[i]
-        i += 1
-    seq = root / ".seq"
-    n = int(seq.read_text()) + 1 if seq.exists() else 1
-    seq.write_text(str(n))
-    iid = f"{proj}-{n:04x}"
-    dest = root / "Software" / proj
-    dest.mkdir(parents=True, exist_ok=True)
-    with (dest / "issues.org").open("a") as fh:
-        fh.write(f"* TODO [#C] {title}\n:PROPERTIES:\n:ID:         {iid}\n:END:\n")
-    print(iid)
-elif cmd == "claim":
-    rewrite(rest[0], "STARTED")
-elif cmd == "update":
-    state = rest[rest.index("-s") + 1]
-    rewrite(rest[0], state)
-elif cmd == "deed":
-    iid, acc = rest[0], rest[rest.index("--add") + 1]
-    needle = f":ID:         {iid}\n:END:\n"
-    for f in files():
-        text = f.read_text()
-        if needle in text:
-            f.write_text(text.replace(needle, needle + f"cited {acc}\n", 1))
-            sys.exit(0)
-    sys.exit("no issue " + iid)
-elif cmd == "claims":
+cmd = args[0] if args else ""
+if cmd in ("claims", "children", "list", "ready"):
     print("[]")
 elif cmd == "show":
     print("{}")
-else:
-    sys.exit("unknown " + cmd)
 PY
 cat > "$bin/deedar" << 'PY'
 #!/usr/bin/env python3
-import os, pathlib
+import os, sys, pathlib
 root = pathlib.Path(os.environ["VISSUE_ROOT"])
-seq = root / ".deedseq"
-n = int(seq.read_text()) + 1 if seq.exists() else 1
-seq.write_text(str(n))
-print(f"id=deed-{n:04x}")
+with (root / "deedar.log").open("a") as fh:
+    fh.write(" ".join(sys.argv[1:]) + "\n")
 PY
 chmod 755 "$bin/vissue" "$bin/deedar"
 
 export PATH="$bin:$PATH"
 export VISSUE_ROOT="$tracker" VISSUE_NO_ROUTE=1 LJOS_TRACKER_GIT=commit
-export LJOS_PROJECT=probe XDG_RUNTIME_DIR="$run" PACKSET_URL=off
+export LJOS_PROJECT=probe XDG_RUNTIME_DIR="$run" PACKSET_URL=off LJOS_HOOKD=off
 unset LJOS_OFF LJOS_SESSION_ID || true
 
 fail=0
@@ -128,7 +79,7 @@ need() {
 }
 
 # One harness session: prompt, edit, commit, stop, end.
-# $1 harness label, $2 session id, $3 prompt (must not name the seat binary).
+# $1 session id, $2 prompt (must not name the seat binary), $3 event.
 claude_shape() {
   local session=$1 prompt=$2 event=$3
   shift 3
@@ -277,21 +228,21 @@ for row in "${prompts[@]}"; do
   "drive_$name" "book-$name" "$prompt"
 done
 
-log=$(git -C "$tracker" log --format='%s')
-say "---- tracker log ----"
-printf '%s\n' "$log"
-say "---- issues ----"
-grep '^\* ' "$tracker/Software/probe/issues.org" || true
+touch "$tracker/vissue.log" "$tracker/deedar.log"
+say "---- vissue calls ----"
+cat "$tracker/vissue.log"
+say "---- deedar calls ----"
+cat "$tracker/deedar.log"
 
-claimed=$(printf '%s\n' "$log" | grep -c 'claimed' || true)
-deeds=$(printf '%s\n' "$log" | grep -c 'cited a deed' || true)
-finished=$(printf '%s\n' "$log" | grep -c 'finished' || true)
-need "one claim per harness" test "$claimed" -eq 5
-need "one deed per harness" test "$deeds" -eq 5
-need "one finish per harness" test "$finished" -eq 5
-for name in claude codex opencode agy cursor; do
-  need "$name title is on the tracker" grep -q "Add a readme line for the $name harness" "$tracker/Software/probe/issues.org"
-done
+writes='^(create|q|claim|update|deed|note|append|close|cancel|release|refile)( |$)'
+tracker_writes=$(grep -cE "$writes" "$tracker/vissue.log" || true)
+deed_calls=$(grep -c . "$tracker/deedar.log" || true)
+commits=$(git -C "$tracker" rev-list --all --count)
+tickets=$(find "$tracker" -name issues.org | wc -l)
+need "no hook wrote the tracker" test "$tracker_writes" -eq 0
+need "no hook minted a deed" test "$deed_calls" -eq 0
+need "the tracker has no commit" test "$commits" -eq 0
+need "no hook filed a ticket" test "$tickets" -eq 0
 
 say "root $root"
 exit "$fail"

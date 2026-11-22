@@ -43,11 +43,11 @@ fn status_and_verdict_help_start_with_a_capital() {
     for (args, line) in [
         (
             &["finish", "--help"][..],
-            "Status to record: done, failed, or cancelled",
+            "Status: done, failed, or cancelled. Only `--close` with done or cancelled records it",
         ),
         (
             &["finish", "-h"][..],
-            "Status to record: done, failed, or cancelled",
+            "Status: done, failed, or cancelled. Only `--close` with done or cancelled records it",
         ),
         (
             &["complete", "--help"][..],

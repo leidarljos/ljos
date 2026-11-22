@@ -486,24 +486,6 @@ pub fn books(_event: &str) -> bool {
     false
 }
 
-/// A hook call writes a note only when it is a commit. Nothing else is booked.
-#[must_use]
-pub fn observe(raw: &str, call: &super::HookCall) -> (String, Vec<String>) {
-    if call.event == "PostToolUse" && call.cue.contains("git commit") {
-        let subject = call
-            .cue
-            .split_once("-m ")
-            .map(|(_, rest)| rest.trim().trim_matches('"').to_string())
-            .unwrap_or_default();
-        let repo = serde_json::from_str::<Value>(raw)
-            .ok()
-            .and_then(|v| v.get("cwd").and_then(Value::as_str).map(str::to_string))
-            .unwrap_or_default();
-        let _ = note_after_commit(&repo, "commit", &subject);
-    }
-    (String::new(), Vec::new())
-}
-
 /// Nothing to recall.
 #[must_use]
 pub fn recall_for(_raw: &str, _call: &super::HookCall) -> String {

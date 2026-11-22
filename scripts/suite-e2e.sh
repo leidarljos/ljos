@@ -187,7 +187,7 @@ run as alice ljos remember "Bad window." --valid-from 2026-05-01 --valid-to 2026
 
 # 8. finish
 run as bob ljos finish "$T1" --gen "$GEN" --assignee bob --lesson "The CHANGES line shipped in one commit. Review passed first time." --close
-chk "bob finishes $T1" has "completed"
+chk "bob finishes $T1" has "closed the ticket"
 chk "$T1 is DONE in the tracker" test "$(state "$T1")" = DONE
 run vissue claims --json; chk "no claim left on $T1" bash -c '! printf "%s" "$0" | grep -q "$1"' "$LAST" "$T1"
 run as alice ljos search "CHANGES line"; chk "the lesson is recallable by another seat" has "CHANGES"

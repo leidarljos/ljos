@@ -13651,7 +13651,8 @@ impl StopTurn {
 }
 
 /// An agy stop whose execution loop has actually ended. Mid-loop stops
-/// omit `fullyIdle`, and those must not finish the claim.
+/// omit `fullyIdle`. The Stop hook audits a mid-loop stop and does not
+/// book it; it skips the audit for an idle one. Neither finishes a claim.
 #[must_use]
 pub fn stop_is_idle(input: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(input.trim()) else {
@@ -25578,7 +25579,7 @@ A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook
 2. Grade due claims (`ljos graded ID`).
 3. Do the work on this claim only. Artefacts are deeds, then `ljos deed ISSUE --add ACCESSION`. Under a runner `ljos remember` is stored at once as an unreviewed lesson that the person reviews; keep it to two sentences.
 4. One playbook step is the whole sitting. A subagent takes this recipe and this issue; it does not resume a later phase.
-5. Close with `ljos finish ISSUE --lesson \"...\"`. Completing the node does not close the ticket. A person closes it when the work is accepted.
+5. End with `ljos finish ISSUE --lesson \"...\"`. It hands the session node back and leaves the ticket open. A person closes the ticket with `ljos finish ISSUE --close` when the work is accepted.
 ";
 
 const ARENA_BODY: &str = "\
@@ -25598,7 +25599,7 @@ Land a chosen design on the real surface.
 2. Prove on the real surface: the host the users run, the crate they install. A cheaper substitute is not the result.
 3. Keep A's fence: no 47 skills, no poteto-mode, no Benny, musl iced-free, `ljos vote --as` and DeGroot stay.
 4. One step per subagent. Open a sibling first when a second implementer is in flight.
-5. Close with finish. Do not ship a count as consensus.
+5. End with `ljos finish`. It leaves the ticket open. Do not ship a count as consensus.
 ";
 
 const COMPANY_PANEL_BODY: &str = "\
@@ -32267,8 +32268,14 @@ fn raw_tracker_write(line: &str) -> Option<Rule> {
     })
 }
 
-/// The tracker verb a command writes with and the ljos command that does
-/// the same write, its issue carried over. `None` for a read.
+/// The tracker verb a command writes with and the ljos command to run
+/// instead, its issue carried over. `None` for a read. A close or a state
+/// of DONE maps to a finish with no `--close`. That finish ends the
+/// sitting and leaves the ticket open, so it is not the same write. A
+/// cancel or a state of CANCELLED maps to `--status cancelled --close`,
+/// since a cancelled finish with no `--close` only releases the claim.
+/// A runner is refused on that close unless a standing grant covers this
+/// seat and this ticket.
 fn tracker_write_instead(words: &[String]) -> Option<(String, String)> {
     let (at, _) = prefix_end(words);
     let words = &words[at..];
@@ -32306,13 +32313,13 @@ fn tracker_write_instead(words: &[String]) -> Option<(String, String)> {
         "claim" => format!("ljos sitting {id}"),
         "release" => format!("ljos release {id}"),
         "close" => format!("ljos finish {id} --lesson \"...\""),
-        "cancel" => format!("ljos finish {id} --status cancelled"),
+        "cancel" => format!("ljos finish {id} --status cancelled --close"),
         "update" => match value(&["-s", "--state"])
             .map(str::to_ascii_uppercase)
             .as_deref()
         {
             Some("DONE") => format!("ljos finish {id} --lesson \"...\""),
-            Some("CANCELLED") => format!("ljos finish {id} --status cancelled"),
+            Some("CANCELLED") => format!("ljos finish {id} --status cancelled --close"),
             Some("STARTED") => format!("ljos sitting {id}"),
             _ => format!("ljos note {id} \"...\""),
         },
@@ -36928,9 +36935,10 @@ pub fn failing(rows: &[Habitat]) -> Vec<&str> {
 }
 
 /// Rows a sitting opens without. With no encoder the pack ranks by words
-/// alone and `finish` declines to fire a weak island, so the loop still
-/// holds. A binary that was never installed stays `info`. A child that
-/// died after answering once is [`ENCODER_DEGRADED`] and prints `warn`.
+/// alone and a verbose `finish` declines to fire a weak island, so the
+/// loop still holds. A plain finish fires no island. A binary that was
+/// never installed stays `info`. A child that died after answering once
+/// is [`ENCODER_DEGRADED`] and prints `warn`.
 const SITTING_DEGRADED: &[&str] = &["packset-embed", "encoder"];
 
 /// Tools a sitting opens without. `ljos claim` never asks them. Missing,
@@ -40999,8 +41007,9 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
         }
         Err(e) => {
             let text = e.to_string();
-            // A tracker id maps to one node. When an earlier sitting finished
-            // it, this is a new sitting on the same work: reopen, then claim.
+            // A tracker id maps to one node. When a completion ended it
+            // (`ljos complete`, or `finish --close`), this is a new sitting
+            // on the same work: reopen, then claim.
             if ["status done", "status failed", "status cancelled"]
                 .iter()
                 .any(|s| text.contains(s))
@@ -41364,9 +41373,10 @@ fn graph_holds(issue: &str) -> bool {
 
 /// Hand a session node back before it is terminal: ready again, assignee
 /// cleared, generation moved. A node the claim graph no longer holds (a
-/// lease reclaim freed it, a completion ended it, the graph never had it)
-/// still hands back a tracker heading left STARTED under this holder or
-/// under nobody.
+/// lease reclaim freed it, the graph never had it) still hands back a
+/// tracker heading left STARTED under this holder or under nobody. A node
+/// a completion already ended is left as it is, and the release prints
+/// nothing.
 ///
 /// # Errors
 ///
@@ -41808,7 +41818,7 @@ fn gone_same_seat_hold(id: &str, assignee: &str) -> Option<(String, Hold)> {
 
 /// The holder and hold record of node `id` when another conversation of
 /// this seat holds it and that conversation is gone on this host. The seat
-/// owns its conversations, so it may finish or hand back what an exited
+/// owns its conversations, so it may complete or hand back what an exited
 /// conversation or worker left. `None` when `actor` holds it, when the
 /// conversation is still running on this host, when no record on this host
 /// names the holder, or when the record names another seat or another
@@ -44286,9 +44296,11 @@ node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the
 `vissue claims` answers who has it; a tracker that refuses the name\n   \
 refuses the sitting, and `ljos release` frees the claim graph.\n   \
 A background worker you start sits under its own conversation's\n   \
-name and the same seat. The conversation that started it can\n   \
-complete, finish or release the worker's claim, and the worker can\n   \
-finish a claim its parent took.\n   \
+name and the same seat. Once the worker's conversation has exited,\n   \
+the conversation that started it can complete, finish or release\n   \
+the worker's claim. Once the parent's conversation has exited, the\n   \
+worker can finish a claim its parent took. A conversation that is\n   \
+still running keeps its claim.\n   \
 Another seat's claim is still refused, and the refusal names who\n   \
 has it. The claim is taken and this section is printed before the\n   \
 pack or recall is asked. Claims this seat already has in this\n   \
@@ -46828,13 +46840,35 @@ fn sitting_budget_left(step: &str, total: std::time::Duration) -> Result<()> {
     Ok(())
 }
 
+/// How long a sitting may wait for a tracker lock, and the limit that sets
+/// it. With no wall budget armed, the claim budget `total` stands in.
+fn sitting_lock_limit(total: std::time::Duration) -> (std::time::Duration, &'static str) {
+    let claim = WALL_DEADLINE.with(|cell| {
+        cell.get()
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+    });
+    let wall = match (claim, tool_bound::remaining()) {
+        (Some(claim), Some(tool)) if tool < claim => (tool, "the tool budget"),
+        (None, Some(tool)) => (tool, "the tool budget"),
+        (Some(claim), _) => (claim, "the claim budget"),
+        (None, None) => (total, "the claim budget"),
+    };
+    let lock = tracker_lock_wait();
+    if lock < wall.0 {
+        (lock, "LJOS_TRACKER_LOCK_WAIT")
+    } else {
+        wall
+    }
+}
+
 fn wait_for_sitting_lock(path: &Path, what: &str, total: std::time::Duration) -> Result<()> {
-    let left = wall_left().unwrap_or(total).min(tracker_lock_wait());
-    let Some(held) = CommitLock::acquire_by(path, std::time::Instant::now() + left) else {
+    let (left, limit) = sitting_lock_limit(total);
+    let started = std::time::Instant::now();
+    let Some(held) = CommitLock::acquire_by(path, started + left) else {
         bail!(
-            "sitting: another tracker writer held the {what} at {} past the {}s claim budget; nothing was claimed",
+            "sitting: another tracker writer held the {what} at {} for {}s, until {limit} ran out; nothing was claimed",
             path.display(),
-            total.as_secs()
+            started.elapsed().as_secs()
         );
     };
     drop(held);
@@ -47120,17 +47154,18 @@ fn reclaim_expired(lease: u64) -> String {
     out
 }
 
-/// Close a sitting: remember the lesson when there is one, fire the island
-/// the issue's title activates, complete the session node, and learn from
-/// the outcome when one is named. A finish that does not complete says
-/// nothing about a lesson. One that completes, and whose ticket has no
-/// lesson, says once that none was given.
-///
-/// # Errors
-///
-/// Any habitat refusing; the pack refuses a lesson longer than two
-/// sentences, the claim graph a status that is not terminal.
-/// Finish a session node only if `gen` is still the live lease.
+/// Complete the session node `node` under `assignee`, with `status` when
+/// one is given, only if `gen` is still the live lease. The claim graph
+/// frees the node, and the tracker drops `assignee`'s claim and keeps the
+/// issue's state, so the ticket stays open. A node a gone conversation of
+/// this seat holds is completed under that conversation's name, with no
+/// new claim, when its hold record names no claim graph or this one. When
+/// the record names another claim graph, the node is claimed first and
+/// then completed under `assignee`. It stores no lesson, fires no island
+/// and learns nothing. `ljos finish` runs this
+/// completion only with `--close` and a status of `done` or `cancelled`,
+/// and then closes the ticket itself. A finish that ends a sitting any
+/// other way calls [`release`].
 ///
 /// # Errors
 ///
@@ -47153,9 +47188,9 @@ pub fn complete(
 
 /// [`complete`], and with `reopen` the tracker issue goes back to the
 /// state it had before the claim, as a release puts it ([`unstamp_tracker`]).
-/// `ljos finish` without `--close` passes it: the sitting ends, the claim
-/// graph frees the node and the tracker drops the claim, and an issue kept
-/// STARTED then reads as taken by nobody and leaves every ready list.
+/// `ljos finish` never passes it. Without `--close`, or with `--close` and
+/// a `failed` status, finish calls [`release`], which hands the issue back
+/// that way.
 ///
 /// # Errors
 ///
@@ -47272,7 +47307,7 @@ fn complete_with_grant(
         Ok(said) => said,
         Err(e) if e.to_string().contains("not assignee") => {
             // A worker or older conversation of this seat holds it, and is gone:
-            // the seat finishes its own work.
+            // the seat completes its own work.
             if let Some((holder, hold)) = same_seat_hold(&id, &actor, assignee) {
                 let said = run(&holder)?;
                 drop_hold(&holder);
@@ -47293,7 +47328,7 @@ fn complete_with_grant(
             }
             // Another conversation of this seat holds the node, and `ljos
             // claim` would take it over: the conversation is gone, or the
-            // holder is this seat under its other name. Finish does that
+            // holder is this seat under its other name. This path does that
             // takeover, then completes. `--assignee <seat>` does not, because
             // the claim graph names the conversation.
             if let Some((_, hold)) = gone_same_seat_hold(&id, assignee) {
@@ -47347,7 +47382,7 @@ fn complete_with_grant(
                 }
                 // The name the tracker or the hold record gives is the seat this
                 // shell asked for: the claim was taken under a conversation or
-                // host-suffixed holder of the same seat, so finish under it.
+                // host-suffixed holder of the same seat, so complete under it.
                 let named: Vec<&str> = hold
                     .as_ref()
                     .map(|h| h.assignee.as_str())
@@ -47416,7 +47451,7 @@ pub fn bare_seat(name: &str, node: &str) -> String {
 }
 
 /// Whether `assignee` names the same seat as any of `named`, the holder
-/// names the hold record and the tracker give, so `complete` may finish
+/// names the hold record and the tracker give, so `complete` may complete
 /// under the claim graph's holder.
 pub fn adopts_holder<'a>(
     node: &str,
@@ -47518,13 +47553,6 @@ pub fn lesson_is_the_persons(under_runner: bool, terminal: bool) -> bool {
     !under_runner && terminal
 }
 
-/// Store the lesson of a finished sitting at once. A lesson learned on an
-/// issue belongs to the scope of the repository that holds the issue,
-/// wherever it was written. One the person typed in a terminal of their
-/// own is `user-declared`; any other is `agent-derived` at L0 (`derived`),
-/// unreviewed until `ljos accept` or `ljos memories review`. Called after
-/// the node completed, so a refusal is a line that names the pack's reason
-/// and the command that keeps the lesson, never an error.
 /// A lesson cut into claims the pack takes: at most two sentences each.
 /// The pack refuses an atom of three or more sentences, so a longer
 /// lesson is kept as several, in order, instead of being turned away.
@@ -47577,6 +47605,16 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Store one claim of the lesson `ljos finish` was given, at once. A
+/// lesson learned on an issue belongs to the scope of the repository that
+/// holds the issue, wherever it was written. One the person typed in a
+/// terminal of their own is `user-declared`; any other is `agent-derived`
+/// at L0 (`derived`), unreviewed until `ljos accept` or `ljos memories
+/// review`. Finish files it before the session node is released or
+/// completed, and a plain finish releases the node and does not complete
+/// it. A refusal is a line that names the pack's reason and the command
+/// that keeps the lesson, never an error, so the finish still goes on to
+/// end the sitting.
 fn finish_lesson(issue: &str, text: &str) -> String {
     let _call = SearchCall::enter();
     let filed = answer_after_start(std::time::Instant::now(), || {
@@ -47584,8 +47622,8 @@ fn finish_lesson(issue: &str, text: &str) -> String {
     });
     match filed {
         Ok(line) => line,
-        // The ticket is already closed. Queue the lesson, as a busy pack
-        // does, so the sentence is not dropped.
+        // A pack that is starting or busy has not judged the lesson.
+        // Queue it, so the sentence is not dropped.
         Err(e) if is_memory_starting(&e) || (!pack_turned_off(&e) && remember_should_queue(&e)) => {
             // A busy writer has not judged the words. Queue the sentence
             // as given. A second finish of the same lesson is the row
@@ -48192,10 +48230,10 @@ pub fn finish(
         }
         return Ok(ticked);
     }
-    let pending = retry_pending_claim(issue);
     // A close asks whether a person is present, before any write. A
     // runner with no terminal is refused unless a standing grant covers
-    // this seat and this ticket. The sitting can still end.
+    // this seat and this ticket. The sitting can still end. A pending
+    // claim is retried only after every close check below has passed.
     let close_note = if close {
         seat_roster::close_note(issue)?
     } else {
@@ -48245,6 +48283,7 @@ pub fn finish(
             Err(_) => {}
         }
     }
+    let pending = retry_pending_claim(issue);
     let terminal = ["done", "failed", "cancelled"];
     if !terminal.contains(&status) {
         bail!("finish: status {status:?} is not one of done, failed, cancelled");
@@ -48272,10 +48311,10 @@ pub fn finish(
             bail!("{line}");
         }
     }
-    // The lesson is filed before the node completes. A complete that
-    // refuses used to return first and the lesson never reached the pack
-    // `ljos memories list` reads. The refusal says nothing about the
-    // lesson, so the reason stays the whole error.
+    // The lesson is filed before the node is released or completed. A
+    // complete that refused used to return first and the lesson never
+    // reached the pack `ljos memories list` reads. The refusal says
+    // nothing about the lesson, so the reason stays the whole error.
     let supplied = lesson.map(str::trim).filter(|text| !text.is_empty());
     let lesson_lines = match supplied {
         Some(text) => {
@@ -48298,7 +48337,7 @@ pub fn finish(
     };
     let closing = closed_as.is_some();
     let ended = {
-        // The claim graph gets about two seconds. Past that the tracker is
+        // The claim graph gets three seconds. Past that the tracker is
         // handed back locally, and a later call reconciles the graph.
         let bound = arm_wall_budget_for(std::time::Duration::from_secs(3), "finish wall budget");
         let ended = if closing {
@@ -50428,7 +50467,7 @@ pub fn flush_tracker_commits() -> String {
         }
     }
     for (path, list) in files {
-        out.push_str(&persist_tracker_writes(&path, &list, &[], None));
+        out.push_str(&persist_tracker_writes(&path, &list, &[], &[], None));
     }
     out
 }
@@ -50457,7 +50496,13 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
 /// root is named from the root, beside the issue's path from there, so one
 /// commit carries both.
 fn persist_tracker_paths(path: &Path, issue: &str, verb: &str, also: &[String]) -> String {
-    persist_tracker_writes(path, &[(issue.to_string(), verb.to_string())], also, None)
+    persist_tracker_writes(
+        path,
+        &[(issue.to_string(), verb.to_string())],
+        also,
+        &[],
+        None,
+    )
 }
 
 /// One tracker commit for every id in `ids`, each written by `verb`.
@@ -50487,10 +50532,7 @@ pub fn persist_tracker_many(ids: &[String], verb: &str) -> String {
     }
     let seat = tracker_seat();
     let mut also = Vec::new();
-    for (path, writes) in &files[1..] {
-        for (issue, verb) in writes {
-            stamp_seat_logbook(path, issue, verb, &seat);
-        }
+    for (path, _) in &files[1..] {
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
             return format!(
                 "tracker git: could not place {} in the checkout\n",
@@ -50513,15 +50555,18 @@ pub fn persist_tracker_many(ids: &[String], verb: &str) -> String {
         )
     });
     let (path, writes) = &files[0];
-    persist_tracker_writes(path, writes, &also, subject.as_deref())
+    persist_tracker_writes(path, writes, &also, &files[1..], subject.as_deref())
 }
 
 /// [`persist_tracker_paths`] for several writes to the one file at
-/// `path`, in one commit.
+/// `path`, in one commit. `others` are files among `also` whose writes
+/// are stamped with `path`'s: after the checkout lock is held and before
+/// any issues lock, and only once nothing refuses the commit.
 fn persist_tracker_writes(
     path: &Path,
     writes: &[(String, String)],
     also: &[String],
+    others: &[(PathBuf, Vec<(String, String)>)],
     message: Option<&str>,
 ) -> String {
     let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
@@ -50638,6 +50683,11 @@ fn persist_tracker_writes(
     let seat = tracker_seat();
     for (issue, verb) in writes {
         stamp_seat_logbook(path, issue, verb, &seat);
+    }
+    for (other, list) in others {
+        for (issue, verb) in list {
+            stamp_seat_logbook(other, issue, verb, &seat);
+        }
     }
     let named: Vec<String> = writes
         .iter()
@@ -67501,6 +67551,9 @@ mod tests {
         std::env::remove_var("ISSUE_ROOT");
         std::env::set_var("LJOS_TRACKER_GIT", "off");
         super::PERSON_AT_TERMINAL.with(|p| p.set(true));
+        super::note_claim_pending("demo-p001", "seat", "the claim graph did not answer");
+        let pending = super::claim_pending_path("demo-p001").unwrap();
+        let before = std::fs::read_to_string(&pending).unwrap();
         let err = super::finish(
             "demo-p001",
             "done",
@@ -67518,6 +67571,11 @@ mod tests {
         assert!(err.contains("open child"), "{err}");
         assert!(err.contains("demo-c001"), "{err}");
         assert!(err.contains("Nothing was written"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&pending).ok(),
+            Some(before),
+            "a refused close leaves the pending claim untried"
+        );
         std::fs::write(
             &fake,
             "#!/bin/sh\ncase \"$1\" in\n  children) printf '%s' '[{\"id\":\"demo-c001\",\"state\":\"DONE\",\"title\":\"Name the index in the notes\"}]' ;;\n  *) exit 0 ;;\nesac\n",
@@ -68696,14 +68754,14 @@ mod tests {
         );
         assert!(
             after.contains("exit_code"),
-            "a command's exit reaches the deed hook"
+            "a command's exit reaches ljos hook"
         );
         assert!(
             after.contains("commands.get"),
             "the after hook keeps the command the before hook saw"
         );
         assert!(
-            after.contains("A zero exit still cites the commit"),
+            after.contains("A zero exit is not a failure, even with stderr on it."),
             "stderr on a clean commit is not a failed commit"
         );
         assert!(!text.contains("lets the work go on"));
@@ -68768,7 +68826,7 @@ mod tests {
             "the after hook keeps the command the before hook saw"
         );
         assert!(
-            text.contains("A zero exit still cites it"),
+            text.contains("reaches it when the result also carries stderr"),
             "stderr on a clean commit is not a failed commit"
         );
         assert!(
@@ -69490,11 +69548,12 @@ mod tests {
         std::env::remove_var("LJOS_SEAT");
     }
 
-    /// A claim another conversation of this seat left, named on the tracker
-    /// as `Claimed by <seat>`, is taken over the way `ljos claim` takes it
-    /// over. Passing `--assignee` of the seat does not.
+    /// `complete` takes over a claim another conversation of this seat
+    /// left, named on the tracker as `Claimed by <seat>`, the way
+    /// `ljos claim` takes it over, then completes it. Passing `--assignee`
+    /// of the seat does not.
     #[test]
-    fn finish_takes_over_a_claim_another_conversation_of_this_seat_left() {
+    fn complete_takes_over_a_claim_another_conversation_of_this_seat_left() {
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("holder");
@@ -69534,8 +69593,8 @@ mod tests {
         if let Some(parent) = hold.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        // The graph line is not this process's scope, so the finish path
-        // that completes as the old actor does not apply. The seat line is
+        // The graph line is not this process's scope, so the path that
+        // completes as the old actor does not apply. The seat line is
         // what `ljos claim` uses.
         std::fs::write(
             &hold,
@@ -69547,7 +69606,7 @@ mod tests {
         let said = with_fake_on_path(&bin, || {
             super::complete_as(issue, Some("done"), new_name, None, true)
         });
-        let said = said.expect("finish takes over this seat's claim");
+        let said = said.expect("complete takes over this seat's claim");
         assert!(
             said.contains("completed"),
             "the claim graph did not complete under this conversation: {said}"
@@ -69563,7 +69622,7 @@ mod tests {
         );
         assert!(
             calls.contains(&format!("complete {new_actor}")),
-            "finish did not complete as this conversation: {calls}"
+            "complete did not complete as this conversation: {calls}"
         );
         assert_eq!(std::fs::read_to_string(&state).unwrap(), new_actor);
         for var in [
@@ -87726,9 +87785,8 @@ lesson, due yesterday, seat ada
         assert!(line.contains("The door thermocouple reads low."), "{line}");
     }
 
-    /// A pack that refuses the lesson after the work is done leaves the
-    /// node completed. Finish says why the lesson was not kept and how to
-    /// keep it, and it does not fail.
+    /// A lesson longer than two sentences is kept as claims of two
+    /// sentences each. A blank lesson is no claim.
     #[test]
     fn a_long_lesson_is_kept_as_two_sentence_claims() {
         let three = "gvfsd reads XDG_DATA_HOME when it starts. Set the scratch folder first. \

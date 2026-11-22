@@ -83,7 +83,7 @@ playbook section before recall; absent a name, a closed-set token in the
 title else =sit=. The name is a tracker =playbook:= note until finish or
 release. =ljos panel= refuses until one is bound. The =start_a_sitting= prompt
 gives the same order to a runner that prefers single tools. A claim
-refused as busy names the issue you still hold; =ljos complete= finishes it
+refused as busy names the issue you still hold; =ljos complete= completes it
 and =ljos release= hands it back.
 
 #+begin_src console

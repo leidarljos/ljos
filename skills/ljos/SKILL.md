@@ -33,15 +33,16 @@ fails, run `doctor` before drawing any conclusion.
 
 ## The seat keeps the book
 
-A harness hook files the claim, the deed and the finish. You do not have to call them.
-At session start and on each prompt the hook injects recall. The first edit
-(Edit, Write, MultiEdit, apply_patch) files a vissue titled from the prompt
-and claims it, when this session has no claim on this repository. A git commit
-the tool hook sees is cited as a deed. Stop and the end of the session finish
-the claim, or extract what the session learned and release it. The same loop runs
-inside ljos-mcp for a client with no hooks: the first tool that writes claims,
-and the server finishes when it shuts down. Call claim, deed or finish
-yourself only to name an issue, an accession or a lesson.
+No hook files a claim, cites a deed or finishes a claim. Call them yourself.
+At session start and on each prompt the hook injects recall. An edit files
+no vissue and takes no claim. A git commit the hooks see is written as one
+`note:` line to the book log; it is not cited as a deed. Stop and the end
+of the session do not finish or release the claim: the end of the session
+fires the session's memories, writes its notes and drains a queued tracker
+push. In ljos-mcp, shutdown or an idle session leaves the claim in
+place. Claim with `sitting`, `start` or `claim`; `note` and `finish` retry
+a claim a sitting left pending. Cite with `deed`, and free the claim with
+`finish` or `release`.
 
 A bot with no harness hooks passes its own name as `seat` on every call.
 Before any repo work it calls `ljos sitting ISSUE`. `ljos start ISSUE` is
@@ -68,8 +69,15 @@ already has it. `ljos recall` lists those working notes apart from the
 facts, under an `unverified logbook notes` heading, each labelled by its
 agent-derived origin.
 `finish` takes the lesson, releases the claim, syncs, and pushes the
-tracker. The server also claims on the first write and finishes on
-shutdown or when the session goes idle.
+tracker. In ljos-mcp, `ljos_start`, `ljos_sitting` and `ljos_claim`
+claim. `ljos_note` and `ljos_finish` claim once more when a sitting left
+its claim pending. `ljos_finish` then releases the claim and does not
+complete the node; a node a gone conversation of this seat has claimed
+is released under that conversation's name. `ljos_complete` completes
+such a node under that conversation's name and takes no claim. Only
+when that conversation's hold record was written for another claim
+graph does `ljos_complete` claim the node first, then complete it. The
+server finishes nothing on shutdown or when the session goes idle.
 On a cloud seat, the one `ljos cloud up` marked, finish exports the deeds
 that seat cited on the issue into `.ljos/deeds/<seat>/`, and the tracker
 commit takes the bag.
@@ -102,9 +110,11 @@ sitting that gets that far.
    `vissue claims` answers who has it; a tracker that refuses the name
    refuses the sitting, and `ljos release` frees the claim graph.
    A background worker you start sits under its own conversation's
-   name and the same seat. The conversation that started it can
-   complete, finish or release the worker's claim, and the worker can
-   finish a claim its parent took.
+   name and the same seat. Once the worker's conversation has exited,
+   the conversation that started it can complete, finish or release
+   the worker's claim. Once the parent's conversation has exited, the
+   worker can finish a claim its parent took. A conversation that is
+   still running keeps its claim.
    Another seat's claim is still refused, and the refusal names who
    has it. The claim is taken and this section is printed before the
    pack or recall is asked. Claims this seat already has in this
@@ -576,22 +586,36 @@ acceptance: `ljos accept ID --quote "their words" --at TIME --via SEAT`
 keeps the sentence, the time and the seat that carried it. All three are
 needed, and the quote is the person's sentence word for word. A
 lesson the person types with `ljos remember` stays `user-declared`. The
-verb then fires the island,
-completes the session node, and learns from a named outcome. Without
+verb then hands the session node back to ready; with `--close` and a
+status of `done` or `cancelled` it completes the node instead. It links
+related memories only with `--verbose`, and learns from an outcome only
+when `--outcome` names one. Without
 `--lesson` it says so;
-a sitting that taught nothing worth two sentences is rare. By hand, the
-same four steps are:
+a sitting that taught nothing worth two sentences is rare. By hand, a
+plain `finish` is two steps:
 
-1. `ljos remember "..."` when the sitting taught a lesson.
-2. `ljos island TASK --fire` when the island served: the strongest memories
-   fire together and their links gain weight.
-3. `ljos complete ISSUE --status done` (`failed`, `cancelled`). Completing
-   the session node does not close the ticket, nor does a plain `finish`.
-   A person closes the ticket when the work is accepted.
-4. `ljos learn ISSUE --outcome OPTION` when the world says which option was
-   right. Every voter's record takes the outcome; the record moves a
-   voter's weight once it sets the voter apart from the panel, which a first
-   outcome cannot. A persona it refuted weighs less on its next ballot.
+1. `ljos remember "..."` when the sitting taught a lesson. `finish` files
+   its lesson tagged with the ticket's id.
+2. `ljos release ISSUE`. The session node goes back to ready and the
+   ticket stays open, whatever the status.
+
+Each flag adds a step:
+
+- `--verbose` runs `ljos island "TITLE" --fire` on the ticket's title: the
+  strongest memories fire together and their links gain weight. A plain
+  `finish` does not.
+- `--outcome OPTION` runs `ljos learn ISSUE --outcome OPTION`, for when the
+  world says which option was right. Every voter's record takes the
+  outcome; the record moves a voter's weight once it sets the voter apart
+  from the panel, which a first outcome cannot. A persona it refuted
+  weighs less on its next ballot.
+- `--close` with a status of `done` or `cancelled` completes the node, as
+  `ljos complete ISSUE --status done` (`cancelled`) does, in place of the
+  release, and then closes the ticket as `DONE` or `CANCELLED`.
+  `ljos complete` alone leaves the ticket open. With `failed`, `--close`
+  still releases the node and leaves the ticket open.
+
+A person closes the ticket when the work is accepted.
 
 Whatever the outcome, the claim and the finish commit the ticket when the tracker is a git checkout.
 `ljos claim` commits that claim, `sitting` commits after its claim and `finish` at the end of the work.
@@ -626,7 +650,7 @@ under equal weights is a count; under calibrated rows it is not.
 
 - `claim: assignee busy HEX`: that name still has that node.
   `ljos release HEX --assignee NAME` hands it back, `ljos complete HEX`
-  finishes it. Occupancy is per issue, so a second ticket does not take
+  completes it. Occupancy is per issue, so a second ticket does not take
   this path.
 - `already held by NAME; the sitting resumes`: not a refusal. A second
   `sitting` on the issue you hold renews the lease and goes on. Held by
@@ -637,8 +661,10 @@ under equal weights is a count; under calibrated rows it is not.
   named. `ljos playbook ISSUE NAME` or `ljos sitting ISSUE --playbook NAME`.
 - `playbook: ISSUE is bound to NAME until finish or release`: mid-sitting
   turns re-read that note. A new task is a new sitting.
-- A claim on an issue whose earlier sitting finished reopens its session
-  node and takes it: a new sitting on old work, with the ledger kept.
+- A claim on an issue whose session node was completed, by `ljos complete`
+  or `finish --close`, reopens the node and takes it: a new sitting on old
+  work, with the ledger kept. A node a plain `finish` handed back is ready
+  and is claimed as it is.
 - `not a deed accession`: `--why` on `forget` and `trust` takes accessions
   from `deedar`, never free text.
 - `the pack writer did not answer`: the pack is down, not empty.

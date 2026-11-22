@@ -974,6 +974,45 @@ fn book_log(hab: &Hab) -> String {
     fs::read_to_string(hab.run.join("ljos/book.log")).unwrap_or_default()
 }
 
+fn note_lines(log: &str) -> Vec<&str> {
+    log.lines().filter(|l| l.starts_with("note: ")).collect()
+}
+
+/// git's post-commit hook writes the commit note with the commit's sha.
+/// A runner's PostToolUse or SessionEnd call that carries the same
+/// `git commit` writes no second note.
+#[test]
+fn only_post_commit_writes_the_commit_note() {
+    let hab = Hab::new("repo");
+    install(&hab);
+    fs::write(hab.repo.join("one.txt"), "x\n").unwrap();
+    hab.git(&hab.repo, &["add", "one.txt"]);
+    hab.git(&hab.repo, &["commit", "-q", "-m", "noted once"]);
+    let head = String::from_utf8(hab.git(&hab.repo, &["rev-parse", "HEAD"]).stdout).unwrap();
+    let want = format!("note: {} noted once", &head.trim()[..12]);
+    let booked = book_log(&hab);
+    assert_eq!(note_lines(&booked), [want.as_str()], "{booked}");
+
+    for event in ["PostToolUse", "SessionEnd"] {
+        let payload = serde_json::json!({
+            "hook_event_name": event,
+            "session_id": "observe-note-session",
+            "cwd": hab.repo,
+            "tool_name": "Bash",
+            "tool_input": {"command": "git commit -m \"noted once\""},
+            "tool_response": {"stdout": "[main 0000000] noted once", "exit_code": 0},
+        })
+        .to_string();
+        hab.ljos_in(&hab.repo, &["hook"], Some(&payload), &[]);
+        let log = book_log(&hab);
+        assert_eq!(
+            note_lines(&log),
+            [want.as_str()],
+            "{event} wrote a note: {log}"
+        );
+    }
+}
+
 /// A commit made by hand in the tracker's own checkout is a tracker write.
 /// It is never booked, and a seat vissue.toml does not list, or no seat
 /// at all, is told so and kept in the book log.
