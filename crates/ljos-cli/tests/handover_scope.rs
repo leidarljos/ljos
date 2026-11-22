@@ -329,7 +329,6 @@ fn a_scope_with_no_recipients_writes_no_atoms() {
 /// cannot carry it. An export that cannot be removed stops the handover.
 #[test]
 fn a_plaintext_export_that_cannot_be_removed_stops_the_handover() {
-    use std::os::unix::fs::PermissionsExt;
     if tools::halt(tools::Tool::Packsetd) {
         return;
     }
@@ -364,14 +363,7 @@ fn a_plaintext_export_that_cannot_be_removed_stops_the_handover() {
     );
     let text = said(&out);
     let export = PathBuf::from(std::fs::read_to_string(&seen).expect("packset export ran"));
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    let _ = std::fs::set_permissions(
-        export.join("locked"),
-        std::fs::Permissions::from_mode(0o700),
-    );
+    let _ = ljos_cli::change_mode(export.join("locked"), 0o700);
     assert!(!out.status.success(), "{text}");
     assert!(text.contains("could not be removed"), "{text}");
     assert!(text.contains("nothing was handed over"), "{text}");

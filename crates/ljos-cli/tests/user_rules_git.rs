@@ -34,16 +34,7 @@ impl Scratch {
             std::fs::create_dir_all(dir.path().join(sub)).unwrap();
         }
         {
-            use std::os::unix::fs::PermissionsExt;
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(
-                dir.path().join("run"),
-                std::fs::Permissions::from_mode(0o700),
-            )
-            .unwrap();
+            ljos_cli::change_mode(dir.path().join("run"), 0o700).unwrap();
         }
         Self { dir, gitconfig }
     }

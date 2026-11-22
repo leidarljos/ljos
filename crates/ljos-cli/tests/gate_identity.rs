@@ -63,12 +63,7 @@ impl Box_ {
             std::fs::create_dir_all(d).unwrap();
         }
         {
-            use std::os::unix::fs::PermissionsExt;
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+            ljos_cli::change_mode(&run, 0o700).unwrap();
         }
         script(
             &bin.join("claimdag"),
@@ -1510,26 +1505,16 @@ fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
     )]
     std::fs::write(&bare_path, rlines.join("\n") + "\n").unwrap();
     home.card("inky");
-    let mut perms = std::fs::metadata(&bare_path).unwrap().permissions();
-    perms.set_readonly(true);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(&bare_path, perms).unwrap();
+    let mode = std::os::unix::fs::PermissionsExt::mode(
+        &std::fs::metadata(&bare_path).unwrap().permissions(),
+    );
+    ljos_cli::change_mode(&bare_path, mode & !0o222).unwrap();
     let _ = home.hook(CONV_X, MERGE, &[]);
     refused(
         &home.hook(CONV_Y, MERGE, &[]),
         "Y's merge after X adopted a bare record it could not rewrite",
     );
-    let mut perms = std::fs::metadata(&bare_path).unwrap().permissions();
-    #[allow(clippy::permissions_set_readonly_false)]
-    perms.set_readonly(false);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(&bare_path, perms).unwrap();
+    ljos_cli::change_mode(&bare_path, mode | 0o200).unwrap();
     let _ = srv1c.kill();
     let _ = srv1c.wait();
 

@@ -101,12 +101,7 @@ fn habitat() -> (Scratch, Habitat) {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     {
-        use std::os::unix::fs::PermissionsExt;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::change_mode(&dir, 0o755).unwrap();
     }
     let dir = Scratch(dir);
     let tracker = dir.0.join("tracker");
@@ -910,11 +905,7 @@ fn a_workdir_that_does_not_resolve_still_allows_the_command() {
         serde_json::json!({"prompt": "Fix the build"}),
     );
     let asked = hook_in(&hab, &prompt, &hab.repo, &on);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::change_mode(&locked, 0o755).unwrap();
     for (payload, out) in payloads.iter().zip(&denied) {
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);

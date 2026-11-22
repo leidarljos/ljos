@@ -1753,14 +1753,22 @@ fn looked_in(dirs: &[PathBuf]) -> String {
 }
 
 fn mkdir_private(dir: &Path) -> bool {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .is_ok()
     }
-    builder.create(dir).is_ok()
+    #[cfg(not(unix))]
+    {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .create(dir)
+            .is_ok()
+    }
 }
 
 /// The calling process's session id.
@@ -2231,7 +2239,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_install_root_holds_only_what_resolves_inside_it() {
-        use std::os::unix::fs::PermissionsExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-roots-")
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
@@ -2267,11 +2274,7 @@ mod tests {
         let climbed = home.join("../other/.local/bin/claude");
         assert_eq!(runner_here(&climbed, Some(&home), &store, &person), None);
 
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o757)).unwrap();
+        crate::change_mode(&claude, 0o757).unwrap();
         assert_eq!(runner_here(&claude, Some(&home), &store, &person), None);
 
         let open = bin.join("open");
@@ -2280,11 +2283,7 @@ mod tests {
             runner_here(&grok, Some(&home), &store, &person),
             Some("grok")
         );
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        crate::change_mode(&open, 0o777).unwrap();
         assert_eq!(runner_here(&grok, Some(&home), &store, &person), None);
     }
 
@@ -2295,7 +2294,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_root_in_a_directory_others_may_write_is_refused() {
-        use std::os::unix::fs::PermissionsExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-above-")
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
@@ -2329,11 +2327,7 @@ mod tests {
             std::fs::write(file, "").unwrap();
         }
         let set = |dir: &Path, mode| {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+            crate::change_mode(dir, mode).unwrap();
         };
         for root in install_roots(Some(&home))
             .iter()
@@ -2451,7 +2445,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_script_names_the_runner_only_for_an_installed_runtime() {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        use std::os::unix::fs::MetadataExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-runtime-")
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
@@ -2500,11 +2494,7 @@ mod tests {
                 planted.display()
             );
         }
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o757)).unwrap();
+        crate::change_mode(&node, 0o757).unwrap();
         assert_eq!(runner(&node, id(&node)), None);
     }
 
@@ -2516,7 +2506,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_nix_entry_is_a_runner_only_in_a_store_nix_keeps() {
-        use std::os::unix::fs::PermissionsExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-store-")
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
@@ -2528,11 +2517,7 @@ mod tests {
         crate::install_executable(&claude, "").unwrap();
         let person = Person::new(&SystemAccounts);
         let set = |mode| {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(&store, std::fs::Permissions::from_mode(mode)).unwrap();
+            crate::change_mode(&store, mode).unwrap();
         };
         let runner = || runner_here(&claude, None, &store, &person);
 

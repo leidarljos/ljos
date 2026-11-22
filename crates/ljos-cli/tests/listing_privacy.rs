@@ -199,11 +199,7 @@ fn keep_as(data: &Path, name: &str, stamp: &str, text: &str, mode: u32) {
         reason = "writes a file that is not a git hook"
     )]
     std::fs::write(&path, doc.to_string()).unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    ljos_cli::change_mode(&path, mode).unwrap();
 }
 
 #[test]
@@ -625,11 +621,7 @@ fn a_listing_in_a_directory_others_can_write_is_not_read() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("data").join("ljos");
         plant_listing_in(&dir, "DIR-WRITABLE-ROW kiln schedule");
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
+        ljos_cli::change_mode(&dir, mode).unwrap();
         let said = said_with(root.path(), false);
         assert!(
             !said.contains("DIR-WRITABLE-ROW"),
@@ -661,11 +653,7 @@ fn a_hook_takes_group_and_other_write_off_the_directory_it_keeps_a_listing_in() 
     let root = tempfile::tempdir().unwrap();
     let dir = root.path().join("data").join("ljos");
     std::fs::create_dir_all(&dir).unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+    ljos_cli::change_mode(&dir, 0o777).unwrap();
     let (url, atoms) = busy_writer("stamp-9");
     let said = run(root.path(), "bob", None, WORKSPACE, &url, true);
     assert!(
@@ -726,16 +714,8 @@ fn a_listing_under_a_parent_others_can_write_is_not_read_or_kept() {
         let data = root.path().join("data");
         let dir = data.join("ljos");
         plant_listing_in(&dir, "OPEN-PARENT-ROW kiln schedule");
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(mode)).unwrap();
+        ljos_cli::change_mode(&dir, 0o700).unwrap();
+        ljos_cli::change_mode(&data, mode).unwrap();
         for hook in [false, true] {
             let said = said_with(root.path(), hook);
             assert!(
@@ -747,11 +727,7 @@ fn a_listing_under_a_parent_others_can_write_is_not_read_or_kept() {
         let root = tempfile::tempdir().unwrap();
         let data = root.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(mode)).unwrap();
+        ljos_cli::change_mode(&data, mode).unwrap();
         let (url, _) = busy_writer("stamp-9");
         let said = run(root.path(), "bob", None, WORKSPACE, &url, true);
         let kept = kept_files(&data.join("ljos"));
@@ -767,11 +743,7 @@ fn a_listing_reached_through_a_linked_data_home_is_read_only_through_safe_direct
         &open.join("data").join("ljos"),
         "BEHIND-OPEN-ROW kiln schedule",
     );
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    ljos_cli::change_mode(&open, 0o777).unwrap();
     #[expect(
         clippy::disallowed_methods,
         reason = "links a path that is not a git hook"

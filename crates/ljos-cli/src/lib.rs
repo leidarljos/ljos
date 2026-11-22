@@ -15,8 +15,8 @@ use packset_client::Hit;
 use serde_json::Value;
 
 pub use exe_publish::{
-    copy_executable, install_executable, install_executable_mode, program, publish, write_file,
-    Content, Mode,
+    change_mode, change_mode_of, copy_executable, copy_file, install_executable,
+    install_executable_mode, program, publish, write_file, Content, Mode,
 };
 pub use pack_link::PacksetClient;
 
@@ -112,8 +112,6 @@ pub mod gates;
 pub mod git_hooks;
 pub mod graphify;
 mod handover_scope;
-#[cfg(all(test, unix))]
-mod hook_write_forms;
 pub mod hookd;
 pub mod hud;
 pub mod idle_drop;
@@ -19683,14 +19681,18 @@ fn prepare_state_home(dry: bool) {
         return;
     }
     let path = state_base_dir();
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
+        let _ = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path);
     }
-    let _ = builder.create(path);
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::DirBuilder::new().recursive(true).create(path);
+    }
 }
 
 fn probe_lists_ljos_run(argv: &[String]) -> std::result::Result<(), String> {
@@ -19998,12 +20000,7 @@ fn deed_store_step(dry: bool) -> Step {
     let made = std::fs::create_dir_all(&dir).and_then(|()| {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            crate::change_mode(&dir, 0o700)?;
         }
         Ok(())
     });
@@ -23058,7 +23055,7 @@ fn keep_listing(path: &Path, stamp: &str, atoms: &[Value], trusted: bool) {
 /// it is this user's own, see [`private_file::ensure_private_dir`].
 fn write_private_through(dir: &Path, tmp: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
     private_file::ensure_private_dir(dir)?;
     #[expect(
         clippy::disallowed_methods,
@@ -23071,7 +23068,7 @@ fn write_private_through(dir: &Path, tmp: &Path, path: &Path, bytes: &[u8]) -> s
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(tmp)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    crate::change_mode_of(&file, 0o600)?;
     file.write_all(bytes)?;
     #[expect(
         clippy::disallowed_methods,
@@ -35378,7 +35375,7 @@ pub(crate) fn open_state_dir(path: &Path) -> std::io::Result<(std::fs::File, std
 /// anything that is not a regular file: a fifo, a device, or a directory.
 /// `O_NONBLOCK` is cleared once that check passes, so a later read of a
 /// real log waits for its bytes. A symlink fails the open (`ELOOP`) and is
-/// reported as one.
+/// reported as one. A file this creates never has an execute bit.
 #[allow(
     clippy::disallowed_methods,
     reason = "owns a descriptor this function opened, never stdout or stderr"
@@ -35399,7 +35396,7 @@ pub(crate) fn open_regular_at(
         clippy::disallowed_methods,
         reason = "opens a path that is not a git hook"
     )]
-    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags, mode) };
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags, mode & 0o666) };
     if fd < 0 {
         let err = std::io::Error::last_os_error();
         // A directory opened for write is EISDIR before fstat, and a
@@ -35678,7 +35675,6 @@ impl Durability {
 /// chooses the append offset for the write, so concurrent rows stay whole.
 fn append_atomic_row(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
     let (dir, name) = open_state_dir(path)?;
     let mut tries = 0;
     let mut file = loop {
@@ -35696,7 +35692,7 @@ fn append_atomic_row(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             other => break other?,
         }
     };
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    crate::change_mode_of(&file, 0o600)?;
     file.write_all(bytes)
 }
 
@@ -35768,7 +35764,6 @@ fn with_locked_row_file(
     durability: Durability,
     write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::io::AsRawFd;
     let (dir, name) = open_state_dir(path)?;
     // O_RDWR, not O_WRONLY: the torn-tail check pread(2)s the last byte, and
@@ -35795,7 +35790,7 @@ fn with_locked_row_file(
             other => break other?,
         }
     };
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    crate::change_mode_of(&file, 0o600)?;
     let wait = durability.lock_wait();
     let started = std::time::Instant::now();
     let hard = started
@@ -59053,16 +59048,11 @@ mod tests {
 
     impl SeatDir {
         fn new(name: &str) -> Self {
-            use std::os::unix::fs::PermissionsExt;
             let dir = crate::test_seat_root::seat_root(crate::bookkeep::path_is_temp)
                 .join(format!("ljos-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::change_mode(&dir, 0o755).unwrap();
             Self(dir)
         }
 
@@ -59100,7 +59090,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_guard_shim_steps_aside_for_a_temp_home_and_ljos_off_only() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let guard = dir.path().join("guard-bin");
         let fake = dir.path().join("fake");
@@ -59180,16 +59169,8 @@ mod tests {
         let outside_proj = outside.path().join("proj");
         std::fs::create_dir_all(&outside_home).unwrap();
         std::fs::create_dir_all(&outside_cwd).unwrap();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&outside_home, std::fs::Permissions::from_mode(0o755)).unwrap();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&outside_cwd, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::change_mode(&outside_home, 0o755).unwrap();
+        crate::change_mode(&outside_cwd, 0o755).unwrap();
         let in_tmp = run(&outside_home, &[], &sandbox);
         judged(&in_tmp, "a temp working directory under a real home");
         let off = run(&outside_home, &[("LJOS_OFF", "1")], &outside_cwd);
@@ -59436,13 +59417,7 @@ mod tests {
         let outside_proj = outside.path().join("proj");
         std::fs::create_dir_all(&outside_home).unwrap();
         {
-            use std::os::unix::fs::PermissionsExt;
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(&outside_home, std::fs::Permissions::from_mode(0o755))
-                .unwrap();
+            crate::change_mode(&outside_home, 0o755).unwrap();
         }
         unsafe {
             std::env::set_var("POLICYD_BIN", &policyd);
@@ -64732,12 +64707,7 @@ mod tests {
         std::fs::create_dir_all(root.join("Software")).unwrap();
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+            crate::change_mode(&root, 0o555).unwrap();
             let (state, ok) = super::tracker_state(&id(&root.display().to_string()), "cwd");
             assert!(!ok, "{state}");
             assert!(
@@ -64756,11 +64726,7 @@ mod tests {
                 }),
                 "no"
             );
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::change_mode(&root, 0o755).unwrap();
         }
 
         // Another test may point XDG_DATA_HOME at its own directory between

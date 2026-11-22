@@ -279,7 +279,12 @@ fn world(slow_push: bool, reject: bool) -> (World, ljos_test_boot::Packsetd) {
         let copy = home.join(".config/ljos/age.key");
         ljos_cli::write_file(&copy, std::fs::read(&key).expect("age key")).expect("age key");
         std::fs::File::open(&copy)
-            .and_then(|file| file.set_permissions(std::fs::metadata(&key)?.permissions()))
+            .and_then(|file| {
+                let mode = std::os::unix::fs::PermissionsExt::mode(
+                    &std::fs::metadata(&key)?.permissions(),
+                );
+                ljos_cli::change_mode_of(&file, mode)
+            })
             .expect("age key mode");
         ljos_cli::write_file(
             home.join(".config/ljos/sync.toml"),
@@ -973,11 +978,7 @@ fn inbox_sync_with_no_remote_only_lists() {
         &local,
         &world.root.path().join("no-hooks"),
     );
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "copies a file that is not a git hook"
-    )]
-    std::fs::copy(
+    ljos_cli::copy_file(
         world.root.path().join("seed/.ljos/sync.toml"),
         local.join(".ljos/sync.toml"),
     )

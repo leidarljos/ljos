@@ -170,7 +170,7 @@ fn path_qualified_macro(dir: &Path) {
         clippy::disallowed_methods,
         reason = "fixture: std::fs::write in a macro called through its crate path"
     )]
-    let _ = crate::hook_write_forms::put!(dir.join("pre-push"));
+    let _ = crate::exe_publish::hook_write_forms::put!(dir.join("pre-push"));
     #[expect(
         clippy::disallowed_methods,
         reason = "fixture: std::fs::write in a macro reached through another macro"

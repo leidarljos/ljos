@@ -114,11 +114,7 @@ fn a_user_file_others_can_write_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = layer(&dir, "mail.toml", "[mail]\nnotmuch = \"notmuch\"\n");
     for mode in [0o620, 0o602, 0o666] {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        ljos_cli::change_mode(&path, mode).unwrap();
         let err = user(std::slice::from_ref(&path)).unwrap_err().to_string();
         assert!(err.contains("writable"), "{mode:o}: {err}");
     }
@@ -146,28 +142,16 @@ fn a_symlinked_user_file_or_one_under_a_directory_others_can_write_is_an_error()
     fs::create_dir(&shared).unwrap();
     let inside = layer(&dir, "shared/mail.toml", "[mail]\nnotmuch = \"notmuch\"\n");
     for mode in [0o770, 0o707, 0o777] {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        fs::set_permissions(&shared, fs::Permissions::from_mode(mode)).unwrap();
+        ljos_cli::change_mode(&shared, mode).unwrap();
         let err = user(std::slice::from_ref(&inside)).unwrap_err().to_string();
         assert!(
             err.contains("shared is group or world writable"),
             "{mode:o}: {err}"
         );
     }
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777)).unwrap();
+    ljos_cli::change_mode(&shared, 0o1777).unwrap();
     assert!(user(std::slice::from_ref(&inside)).unwrap().is_some());
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::change_mode(&shared, 0o755).unwrap();
     let linked = dir.path().join("linked");
     #[expect(
         clippy::disallowed_methods,

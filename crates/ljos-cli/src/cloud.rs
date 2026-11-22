@@ -2526,11 +2526,7 @@ fn release_asset(name: &str, to: &Path) -> Result<bool> {
         if !src.is_file() {
             return Ok(false);
         }
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "copies a file that is not a git hook"
-        )]
-        fs::copy(&src, to).with_context(|| format!("copy {}", src.display()))?;
+        crate::copy_file(&src, to).with_context(|| format!("copy {}", src.display()))?;
         return Ok(true);
     }
     let url = format!(
@@ -3497,7 +3493,6 @@ fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
 }
 
 fn set_mode_0600(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     let unwound = unwind_system_links(path);
     let path = unwound.as_path();
     // Linux returns ENOTDIR, not ELOOP, when O_DIRECTORY meets a symlink
@@ -3519,8 +3514,7 @@ fn set_mode_0600(path: &Path) -> Result<()> {
     if !file.metadata().is_ok_and(|meta| meta.file_type().is_file()) {
         bail!("mode 0600 {}: target is not a file", path.display());
     }
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("mode 0600 {}", path.display()))
+    crate::change_mode_of(&file, 0o600).with_context(|| format!("mode 0600 {}", path.display()))
 }
 
 /// Write `text` to `path` as mode 0600. A symlink at `path` is refused, so
@@ -3529,7 +3523,7 @@ fn set_mode_0600(path: &Path) -> Result<()> {
 /// link: a file or link already at that name is refused, not written
 /// through, so no other user can read the identity even for a moment.
 fn write_private(path: &Path, text: &str) -> Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::OpenOptionsExt;
     let unwound = unwind_system_links(path);
     let path = unwound.as_path();
     refuse_symlink_parent(path)?;
@@ -3560,7 +3554,7 @@ fn write_private(path: &Path, text: &str) -> Result<()> {
         .with_context(|| format!("create {}", tmp.display()))?;
     let write = (|| -> Result<()> {
         // The umask may clear bits of the mode asked for at creation.
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        crate::change_mode_of(&file, 0o600)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         #[expect(

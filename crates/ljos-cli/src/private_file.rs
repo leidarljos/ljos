@@ -9,10 +9,10 @@
 //! [`trusted_ancestors`], because another user who can rename one of them
 //! can put a directory of their own in its place.
 
-use std::fs::{File, Metadata, OpenOptions, Permissions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::Read as _;
 use std::os::fd::{AsRawFd as _, FromRawFd as _};
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Component, Path, PathBuf};
 
 /// Mode bits that let a group or another user change a file or directory.
@@ -180,7 +180,7 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<File> {
         return Err(refused("not a directory of this user"));
     }
     if meta.mode() & OTHERS_WRITE != 0 {
-        file.set_permissions(Permissions::from_mode(meta.mode() & 0o7777 & !OTHERS_WRITE))?;
+        crate::change_mode_of(&file, meta.mode() & 0o7777 & !OTHERS_WRITE)?;
     }
     Ok(file)
 }
@@ -341,7 +341,8 @@ pub(crate) fn read_open_file(mut file: File) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use std::fs::Permissions;
+    use std::os::unix::fs::{symlink, PermissionsExt as _};
 
     fn plain(dir: &Path, name: &str, mode: u32) -> std::path::PathBuf {
         let path = dir.join(name);
@@ -350,11 +351,7 @@ mod tests {
             reason = "writes a file that is not a git hook"
         )]
         std::fs::write(&path, "kept").unwrap();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&path, Permissions::from_mode(mode)).unwrap();
+        crate::change_mode(&path, mode).unwrap();
         path
     }
 
@@ -366,11 +363,7 @@ mod tests {
 
     fn home() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(root.path(), Permissions::from_mode(0o700)).unwrap();
+        crate::change_mode(root.path(), 0o700).unwrap();
         root
     }
 
@@ -381,11 +374,7 @@ mod tests {
         let file = plain(dir, "plain.json", 0o600);
         assert_eq!(read_private_file(&file).as_deref(), Some("kept"));
         for mode in [0o620, 0o602, 0o666] {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(&file, Permissions::from_mode(mode)).unwrap();
+            crate::change_mode(&file, mode).unwrap();
             assert!(read_private_file(&file).is_none(), "mode {mode:o}");
         }
         #[expect(
@@ -437,18 +426,10 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         let file = plain(&dir, "a.json", 0o600);
         for mode in [0o770, 0o707, 0o777] {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(&dir, Permissions::from_mode(mode)).unwrap();
+            crate::change_mode(&dir, mode).unwrap();
             assert!(read_private_file(&file).is_none(), "directory {mode:o}");
         }
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&dir, Permissions::from_mode(0o755)).unwrap();
+        crate::change_mode(&dir, 0o755).unwrap();
         assert!(read_private_file(&file).is_some(), "a directory of 755");
     }
 
@@ -477,11 +458,7 @@ mod tests {
         assert_eq!(mode(&made), 0o700, "a directory made for the purpose");
         let open = root.path().join("open");
         std::fs::create_dir(&open).unwrap();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&open, Permissions::from_mode(0o777)).unwrap();
+        crate::change_mode(&open, 0o777).unwrap();
         ensure_private_dir(&open).unwrap();
         assert_eq!(mode(&open), 0o755, "group and other write taken off");
         let real = root.path().join("real");
@@ -524,19 +501,11 @@ mod tests {
         let data = root.path().join("data");
         let dir = data.join("ljos");
         std::fs::create_dir_all(&dir).unwrap();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&dir, Permissions::from_mode(0o700)).unwrap();
+        crate::change_mode(&dir, 0o700).unwrap();
         let file = plain(&dir, "a.json", 0o600);
         assert!(read_private_file(&file).is_some());
         for mode in [0o777, 0o770, 0o707] {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(&data, Permissions::from_mode(mode)).unwrap();
+            crate::change_mode(&data, mode).unwrap();
             assert!(read_private_file(&file).is_none(), "parent {mode:o}");
             assert!(ensure_private_dir(&dir).is_err(), "parent {mode:o}");
             assert!(
@@ -545,11 +514,7 @@ mod tests {
             );
             assert!(!data.join("new").exists(), "made under parent {mode:o}");
         }
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&data, Permissions::from_mode(0o1777)).unwrap();
+        crate::change_mode(&data, 0o1777).unwrap();
         assert!(read_private_file(&file).is_some(), "a sticky parent");
     }
 
@@ -587,11 +552,7 @@ mod tests {
             reason = "links a path that is not a git hook"
         )]
         symlink(&good, open.join("link")).unwrap();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&open, Permissions::from_mode(0o777)).unwrap();
+        crate::change_mode(&open, 0o777).unwrap();
         assert!(
             read_private_file(&open.join("link/ljos/a.json")).is_none(),
             "a link in a 777 directory"
@@ -623,11 +584,7 @@ mod tests {
         let top = root.path();
         let slot = root.path().join("slot");
         std::fs::create_dir(&slot).unwrap();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&slot, Permissions::from_mode(0o775)).unwrap();
+        crate::change_mode(&slot, 0o775).unwrap();
         let index = plain(&slot, "index.jsonl", 0o664);
         assert_eq!(read_slot_file(top, &index).as_deref(), Some(&b"kept"[..]));
         #[expect(
@@ -694,11 +651,7 @@ mod tests {
             &top.join("imports/bob"),
             &slot,
         ] {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(dir, Permissions::from_mode(0o775)).unwrap();
+            crate::change_mode(dir, 0o775).unwrap();
         }
         let index = plain(&slot, "index.jsonl", 0o664);
         assert!(

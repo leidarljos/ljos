@@ -1789,15 +1789,12 @@ mod tests {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
     }
 
-    /// Write `text` at `path` and give it exactly `mode`.
+    /// Write `text` at `path` and give it exactly `mode`. A publish drops
+    /// setuid, setgid and sticky, so the fixture mode puts them back.
     #[cfg(unix)]
     fn hook_at(path: &std::path::Path, text: &str, mode: u32) {
-        use std::os::unix::fs::PermissionsExt;
-        crate::install_executable_mode(path, text, 0o700).unwrap();
-        std::fs::File::open(path)
-            .unwrap()
-            .set_permissions(std::fs::Permissions::from_mode(mode))
-            .unwrap();
+        crate::install_executable_mode(path, text, mode).unwrap();
+        crate::exe_publish::fixture_mode(path, mode);
         assert_eq!(mode_of(path), mode, "{}", path.display());
     }
 

@@ -227,12 +227,7 @@ fn save_atomic(wake_path: &Path, table: &BTreeMap<String, Wake>) -> Result<()> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
+        crate::change_mode(&tmp, mode & 0o666)
             .with_context(|| format!("wake: mode {mode:04o} {}", tmp.display()))?;
     }
     #[expect(

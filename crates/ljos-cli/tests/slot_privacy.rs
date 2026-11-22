@@ -10,7 +10,7 @@
 
 ljos_test_boot::harness!();
 
-use std::os::unix::fs::{symlink, PermissionsExt as _};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -44,11 +44,7 @@ fn put(dir: &Path, name: &str, body: &str, mode: u32) -> PathBuf {
         reason = "writes a file that is not a git hook"
     )]
     std::fs::write(&path, body).unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    ljos_cli::change_mode(&path, mode).unwrap();
     path
 }
 
@@ -386,11 +382,7 @@ fn forget_retires_a_row_in_a_slot_its_group_can_write() {
         &home.join("imports/bob"),
         &slot,
     ] {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o775)).unwrap();
+        ljos_cli::change_mode(dir, 0o775).unwrap();
     }
     let said = ljos(root.path(), "bob", &["forget", "imp:1"]);
     let text = std::fs::read_to_string(&index).unwrap();

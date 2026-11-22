@@ -22,7 +22,6 @@ mod pty;
 mod tools;
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -107,11 +106,7 @@ impl Seat {
             std::fs::create_dir_all(dir)
                 .unwrap_or_else(|err| panic!("create {}: {err}", dir.display()));
         }
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(root.join("run"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        ljos_cli::change_mode(root.join("run"), 0o700).unwrap();
         link_programs(&bin);
         let port = free_port();
         let mut env = BTreeMap::new();

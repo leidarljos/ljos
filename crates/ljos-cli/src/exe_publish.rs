@@ -14,7 +14,6 @@
 
 #[cfg(unix)]
 use std::ffi::{CStr, CString};
-#[cfg(unix)]
 use std::fs::File;
 use std::io::Error;
 #[cfg(unix)]
@@ -30,8 +29,9 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 #[cfg(unix)]
 const EXE: &CStr = c"exe";
 
-/// Programs that copy, move or link the paths they are given.
-const WRITING_PROGRAMS: &[&str] = &["cp", "mv", "install", "ln"];
+/// Programs that copy, move or link the paths they are given, or change
+/// their modes.
+const WRITING_PROGRAMS: &[&str] = &["cp", "mv", "install", "ln", "chmod"];
 
 /// Write `body` to `path`, a file that is not a git hook, without
 /// following a symlink at `path`.
@@ -45,7 +45,26 @@ const WRITING_PROGRAMS: &[&str] = &["cp", "mv", "install", "ln"];
 /// The file name of `path` is a git hook name, `path` is a symlink, or the
 /// write fails.
 pub fn write_file(path: impl AsRef<Path>, body: impl AsRef<[u8]>) -> Result<(), Error> {
-    let path = path.as_ref();
+    use std::io::Write;
+    create_data_file(path.as_ref())?.write_all(body.as_ref())
+}
+
+/// Copy the bytes of `src` to `dest`, a file that is not a git hook,
+/// without following a symlink at `dest`. Unlike `std::fs::copy`, the copy
+/// does not take the mode of `src`, so it never gains an execute bit.
+///
+/// # Errors
+///
+/// As [`write_file`], or `src` cannot be read.
+pub fn copy_file(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> Result<u64, Error> {
+    let mut from = File::open(src.as_ref())?;
+    let mut to = create_data_file(dest.as_ref())?;
+    std::io::copy(&mut from, &mut to)
+}
+
+/// Open `path` for writing, created or truncated, refusing a git hook name
+/// and a symlink at `path`.
+fn create_data_file(path: &Path) -> Result<File, Error> {
     if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
         if crate::git_hooks::HOOK_NAMES.contains(&name) {
             return Err(Error::new(
@@ -63,31 +82,33 @@ pub fn write_file(path: impl AsRef<Path>, body: impl AsRef<[u8]>) -> Result<(), 
     )]
     #[cfg(unix)]
     {
-        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(path)?
-            .write_all(body.as_ref())
+            .open(path)
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the writer the lint points to; a hook name is refused above"
+    )]
     #[cfg(not(unix))]
     {
-        std::fs::write(path, body.as_ref())
+        File::create(path)
     }
 }
 
 /// A [`std::process::Command`] for `program`, which must not be a program
-/// that copies, moves or links files.
+/// that copies, moves or links files or changes their modes.
 ///
 /// Every crate denies `clippy::disallowed_methods`, which refuses
 /// `Command::new`. This is the constructor it points to.
 ///
 /// # Errors
 ///
-/// The file name of `program` is `cp`, `mv`, `install` or `ln`.
+/// The file name of `program` is `cp`, `mv`, `install`, `ln` or `chmod`.
 pub fn program(program: impl AsRef<std::ffi::OsStr>) -> Result<std::process::Command, Error> {
     let program = program.as_ref();
     let name = Path::new(program).file_name().unwrap_or(program);
@@ -95,14 +116,14 @@ pub fn program(program: impl AsRef<std::ffi::OsStr>) -> Result<std::process::Com
         return Err(Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "program: {} writes the paths it is given; publish a hook with install_executable",
+                "program: {} writes the paths it is given or changes their modes; publish a hook with install_executable",
                 program.to_string_lossy()
             ),
         ));
     }
     #[expect(
         clippy::disallowed_methods,
-        reason = "the constructor the lint points to; cp, mv, install and ln are refused above"
+        reason = "the constructor the lint points to; cp, mv, install, ln and chmod are refused above"
     )]
     return Ok(std::process::Command::new(program));
 }
@@ -231,6 +252,177 @@ pub fn copy_executable(src: &Path, dest: &Path) -> Result<(), Error> {
     publish(dest, Content::CopyOf(src), Mode::OfSource)
 }
 
+/// Set the permission bits of the file or directory at `path` to `mode`,
+/// masked to `0o7777`, without following a symlink at `path`.
+///
+/// This and [`change_mode_of`] are the only mode changes outside
+/// [`publish`]. A directory takes any mode. Anything else may drop bits
+/// but never gains an execute bit, nor setuid or setgid while it can be
+/// executed: a file that is to be executed is published.
+///
+/// # Errors
+///
+/// `path` has no file name or is a symlink, the change would make a file
+/// executable, or the change fails.
+pub fn change_mode(path: impl AsRef<Path>, mode: u32) -> Result<(), Error> {
+    let path = path.as_ref();
+    #[cfg(unix)]
+    {
+        let leaf = leaf_of(path, "change the mode of")?;
+        let parent_path = dir_of(path).unwrap_or_else(|| Path::new("."));
+        let parent = open_dir(parent_path).map_err(|err| moded(err, "open", parent_path))?;
+        let st = stat_at(&parent, &leaf).map_err(|err| moded(err, "read", path))?;
+        if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
+            return Err(Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "change mode: {} is a symlink, and a mode is never changed through one",
+                    path.display()
+                ),
+            ));
+        }
+        match open_at(
+            &parent,
+            &leaf,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        ) {
+            Ok(file) => fchmod_checked(&file, mode, path),
+            // A directory or file without a read bit for its owner cannot be
+            // opened to fchmod. fchmodat on the held parent follows no link.
+            Err(err) if err.raw_os_error() == Some(libc::EACCES) => {
+                refuse_exec(&st, mode, path)?;
+                // SAFETY: parent is an open directory and leaf is
+                // NUL-terminated.
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "the mode change of a name in a held directory, not following a link; refuse_exec checked the mode"
+                )]
+                let rc = unsafe {
+                    libc::fchmodat(
+                        parent.as_raw_fd(),
+                        leaf.as_ptr(),
+                        (mode & 0o7777) as libc::mode_t,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                };
+                if rc != 0 {
+                    return Err(moded(Error::last_os_error(), "change the mode of", path));
+                }
+                Ok(())
+            }
+            Err(err) => Err(moded(err, "open", path)),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Ok(())
+    }
+}
+
+/// [`change_mode`] on an open descriptor, with the same refusal.
+///
+/// # Errors
+///
+/// The change would make a file executable, or it fails.
+pub fn change_mode_of(file: &std::fs::File, mode: u32) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        fchmod_checked(file, mode, Path::new("an open file"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, mode);
+        Ok(())
+    }
+}
+
+/// Give the file at `path` exactly `mode`, setuid and setgid included,
+/// for a test fixture [`change_mode`] refuses to make.
+#[cfg(all(test, unix))]
+pub(crate) fn fixture_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let file = File::open(path).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a test fixture's mode, which may carry setuid with an execute bit"
+    )]
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+        .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+}
+
+#[cfg(unix)]
+fn fchmod_checked(file: &File, mode: u32, path: &Path) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt;
+    let st = stat(file).map_err(|err| moded(err, "read", path))?;
+    refuse_exec(&st, mode, path)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the descriptor mode change change_mode and change_mode_of make after refuse_exec"
+    )]
+    file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))
+        .map_err(|err| moded(err, "change the mode of", path))
+}
+
+/// Refuse a `mode` that gives `st`, if it is not a directory, an execute
+/// bit it lacks, or setuid or setgid with any execute bit.
+#[cfg(unix)]
+fn refuse_exec(st: &libc::stat, mode: u32, path: &Path) -> Result<(), Error> {
+    if st.st_mode & libc::S_IFMT == libc::S_IFDIR {
+        return Ok(());
+    }
+    #[allow(
+        clippy::useless_conversion,
+        reason = "st_mode is a u16 on macOS and a u32 on Linux"
+    )]
+    let now = u32::from(st.st_mode) & 0o7777;
+    let mode = mode & 0o7777;
+    let added = mode & !now;
+    if added & 0o111 != 0 || (mode & 0o111 != 0 && added & 0o6000 != 0) {
+        return Err(Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "change mode: {} is not a directory, and {mode:o} would let it be executed with a bit it lacks ({now:o}); publish it with ljos_cli::publish",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn leaf_of(path: &Path, what: &str) -> Result<CString, Error> {
+    path.file_name()
+        .and_then(|name| CString::new(name.as_encoded_bytes()).ok())
+        .ok_or_else(|| {
+            Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{what} {}: no file name", path.display()),
+            )
+        })
+}
+
+#[cfg(unix)]
+fn open_dir(path: &Path) -> Result<File, Error> {
+    use std::os::unix::fs::OpenOptionsExt;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a directory read-only to hold it by descriptor"
+    )]
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn moded(err: Error, what: &str, path: &Path) -> Error {
+    Error::new(
+        err.kind(),
+        format!("change mode: {what} {}: {err}", path.display()),
+    )
+}
+
 /// What the writer puts in the staged file.
 #[cfg(unix)]
 enum Fill<'a> {
@@ -258,17 +450,8 @@ struct Stage {
 impl Stage {
     fn new(path: &Path) -> Result<Self, Error> {
         use std::hash::{BuildHasher, Hasher};
-        use std::os::unix::fs::OpenOptionsExt;
         let parent_path = dir_of(path).unwrap_or_else(|| Path::new(".")).to_path_buf();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "opens the destination's parent directory read-only"
-        )]
-        let parent = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
-            .open(&parent_path)
-            .map_err(|err| named(err, "open", &parent_path))?;
+        let parent = open_dir(&parent_path).map_err(|err| named(err, "open", &parent_path))?;
         let mut last = None;
         for _ in 0..16 {
             let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
@@ -307,6 +490,10 @@ impl Stage {
             }
             {
                 use std::os::unix::fs::PermissionsExt;
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "marks the held stage directory private"
+                )]
                 dir.set_permissions(std::fs::Permissions::from_mode(0o700))
                     .map_err(|err| named(err, "mark private", &path))?;
             }
@@ -406,6 +593,10 @@ impl Stage {
                 tmp.display()
             )));
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the mode of the staged file, through its descriptor, before the rename"
+        )]
         file.set_permissions(std::fs::Permissions::from_mode(mode))
             .map_err(|err| named(err, "mark executable", &tmp))?;
         flush(&file, &tmp).map_err(|err| named(err, "flush", &tmp))?;
@@ -754,6 +945,12 @@ fn text_file_busy(err: &Error) -> bool {
 }
 
 #[cfg(all(test, unix))]
+mod hook_write_forms;
+
+#[cfg(test)]
+mod mode_check;
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -820,10 +1017,7 @@ mod tests {
             (0o4755, 0o755),
         ] {
             install_executable_mode(&src, OURS, 0o700).unwrap();
-            File::open(&src)
-                .unwrap()
-                .set_permissions(std::fs::Permissions::from_mode(from))
-                .unwrap();
+            fixture_mode(&src, from);
             copy_executable(&src, &dest).unwrap();
             let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o7777;
             assert_eq!(mode, want, "a {from:o} source came back {mode:o}");
@@ -1470,9 +1664,89 @@ mod tests {
         assert_eq!(std::fs::read(&victim).unwrap(), b"SECRET");
     }
 
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    }
+
+    #[test]
+    fn a_mode_change_never_makes_a_file_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        write_file(&data, "x").unwrap();
+        change_mode(&data, 0o600).unwrap();
+        for mode in [0o700, 0o610, 0o601, 0o4700] {
+            let err = change_mode(&data, mode).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{mode:o}");
+            let err = change_mode_of(&File::open(&data).unwrap(), mode).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{mode:o}");
+        }
+        assert_eq!(mode_of(&data), 0o600);
+        change_mode(&data, 0o2600).unwrap();
+        assert_eq!(mode_of(&data), 0o2600);
+
+        let exe = dir.path().join("exe");
+        install_executable_mode(&exe, OURS, 0o755).unwrap();
+        change_mode(&exe, 0o757).unwrap();
+        change_mode_of(&File::open(&exe).unwrap(), 0o700).unwrap();
+        assert_eq!(mode_of(&exe), 0o700);
+        let err = change_mode(&exe, 0o4700).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        for mode in [0o1777, 0o000, 0o755] {
+            change_mode(&sub, mode).unwrap();
+            assert_eq!(mode_of(&sub), mode);
+        }
+    }
+
+    #[test]
+    fn a_mode_change_follows_no_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        write_file(&victim, "keep").unwrap();
+        change_mode(&victim, 0o600).unwrap();
+        let link = dir.path().join("link");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "plants a link that is not a git hook"
+        )]
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        let err = change_mode(&link, 0o644).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
+        assert_eq!(mode_of(&victim), 0o600);
+    }
+
+    #[test]
+    fn a_copied_file_takes_no_execute_bit_and_follows_no_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        install_executable_mode(&src, OURS, 0o755).unwrap();
+        let dest = dir.path().join("dest");
+        assert_eq!(copy_file(&src, &dest).unwrap(), OURS.len() as u64);
+        assert_eq!(std::fs::read(&dest).unwrap(), OURS);
+        assert_eq!(mode_of(&dest) & 0o111, 0, "{:o}", mode_of(&dest));
+        let victim = dir.path().join("victim");
+        write_file(&victim, "keep").unwrap();
+        let link = dir.path().join("link");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "plants a link that is not a git hook"
+        )]
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        assert!(copy_file(&src, &link).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(copy_file(&src, dir.path().join("pre-push")).is_err());
+    }
+
     #[test]
     fn program_refuses_a_program_that_writes_paths() {
-        for name in ["cp", "/bin/mv", "install", "/usr/bin/ln"] {
+        for name in ["cp", "/bin/mv", "install", "/usr/bin/ln", "/bin/chmod"] {
             let err = program(name).unwrap_err();
             assert_eq!(
                 err.kind(),
@@ -1482,274 +1756,6 @@ mod tests {
         }
         let out = program("true").unwrap().output().unwrap();
         assert!(out.status.success());
-    }
-
-    /// Files under `crates/` that may write an executable in this process,
-    /// each with the reason it has to.
-    const IN_PROCESS_EXECUTABLES: &[(&str, &str)] = &[];
-
-    /// A file written in this process and then given an exec bit can be
-    /// started while a forked child still has it open. Each of those goes
-    /// through this module instead.
-    #[test]
-    fn executables_are_published_through_this_module() {
-        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let mut hits = Vec::new();
-        for (rel, text) in crate_sources(crates) {
-            if IN_PROCESS_EXECUTABLES.iter().any(|(path, _)| rel == *path) {
-                continue;
-            }
-            for line in write_then_exec(&text) {
-                hits.push(format!("crates/{rel}:{line}"));
-            }
-        }
-        assert!(
-            hits.is_empty(),
-            "publish these with install_executable, install_executable_mode or copy_executable:\n{}",
-            hits.join("\n")
-        );
-    }
-
-    /// The sources under `crates/` other than this file, by path under
-    /// `crates/`.
-    fn crate_sources(crates: &Path) -> Vec<(String, String)> {
-        let mut files = Vec::new();
-        rust_sources(crates, &mut files);
-        files
-            .iter()
-            .filter(|file| !file.ends_with("exe_publish.rs"))
-            .map(|file| {
-                let rel = file.strip_prefix(crates).unwrap().to_string_lossy();
-                (rel.to_string(), std::fs::read_to_string(file).unwrap())
-            })
-            .collect()
-    }
-
-    #[test]
-    fn the_site_scan_names_a_write_then_chmod() {
-        let chmod = r##"
-fn stub(bin: &Path) {
-    fs::write(bin.join("a"), "#!/bin/sh\n").unwrap();
-    fs::write(bin.join("conf"), "x").unwrap();
-    for name in ["a"] {
-        fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
-    }
-}
-fn other(dest: &Path) {
-    std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755)).unwrap();
-}
-"##;
-        assert_eq!(write_then_exec(chmod), vec![3]);
-        let open = r#"
-fn server(path: &Path) {
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&path)
-        .unwrap();
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o700);
-    std::fs::set_permissions(&path, perms).unwrap();
-}
-"#;
-        assert_eq!(write_then_exec(open), vec![3]);
-        let fine = r#"
-fn dir(path: &Path) {
-    std::fs::write(path.join("f"), "x").unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::set_permissions(path.join("f"), std::fs::Permissions::from_mode(0o644)).unwrap();
-}
-"#;
-        assert!(write_then_exec(fine).is_empty());
-    }
-
-    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if path.file_name().is_some_and(|name| name != "target") {
-                    rust_sources(&path, out);
-                }
-            } else if path.extension().is_some_and(|ext| ext == "rs")
-                && path
-                    .components()
-                    .any(|part| part.as_os_str() == "src" || part.as_os_str() == "tests")
-            {
-                out.push(path);
-            }
-        }
-    }
-
-    /// One-based lines of in-process writes that `text` later marks
-    /// executable in the same function.
-    fn write_then_exec(text: &str) -> Vec<usize> {
-        let code: Vec<&str> = text
-            .lines()
-            .map(|line| {
-                if line.trim_start().starts_with("//") {
-                    ""
-                } else {
-                    line
-                }
-            })
-            .collect();
-        let joined = |from: usize, len: usize| code[from..(from + len).min(code.len())].join(" ");
-        let mut hits = Vec::new();
-        let mut writes: Vec<(usize, String)> = Vec::new();
-        let mut lists: Vec<(String, Vec<String>)> = Vec::new();
-        for (i, line) in code.iter().enumerate() {
-            let head = line.trim_start();
-            let item = ["pub(crate) ", "pub ", "async ", "const ", "unsafe "]
-                .iter()
-                .fold(head, |rest, pre| rest.strip_prefix(pre).unwrap_or(rest));
-            if item.starts_with("fn ") {
-                writes.clear();
-                lists.clear();
-            }
-            let ahead = joined(i, 4);
-            if let Some(rest) = head.strip_prefix("for ") {
-                if let Some((name, list)) = rest.split_once(" in [") {
-                    let names = list.split('"').skip(1).step_by(2);
-                    lists.push((
-                        name.trim().to_string(),
-                        names.map(|lit| format!("\"{lit}\"")).collect(),
-                    ));
-                }
-            }
-            let target = if line.contains("fs::write(") {
-                arg_after(&ahead, "fs::write(", 0)
-            } else if line.contains("File::create(") {
-                arg_after(&ahead, "File::create(", 0)
-            } else if line.contains("fs::copy(") {
-                arg_after(&ahead, "fs::copy(", 1)
-            } else if line.contains("OpenOptions::new()") {
-                arg_after(&joined(i, 8), ".open(", 0)
-            } else {
-                bare_write(line).and_then(|_| arg_after(&ahead, "write(", 0))
-            };
-            if let Some(target) = target.filter(|t| !t.is_empty()) {
-                writes.push((i, target));
-            }
-            if line.contains("set_permissions(") {
-                let (Some(target), Some(perm)) = (
-                    arg_after(&ahead, "set_permissions(", 0),
-                    arg_after(&ahead, "set_permissions(", 1),
-                ) else {
-                    continue;
-                };
-                let mode = mode_of(&perm).or_else(|| {
-                    let set = format!("{perm}.set_mode(");
-                    (i.saturating_sub(4)..i)
-                        .rev()
-                        .map(|at| code[at])
-                        .find(|line| squeeze(line).contains(&set))
-                        .and_then(mode_of)
-                });
-                if mode.is_some_and(|mode| mode & 0o111 != 0) {
-                    for (at, written) in &writes {
-                        if same_path(written, &target, &lists) {
-                            hits.push(at + 1);
-                        }
-                    }
-                }
-            }
-        }
-        hits.sort_unstable();
-        hits.dedup();
-        hits
-    }
-
-    fn bare_write(line: &str) -> Option<usize> {
-        let at = line.find("write(")?;
-        let before = line[..at].chars().next_back();
-        match before {
-            Some(c) if c.is_alphanumeric() || matches!(c, '_' | '.' | ':') => None,
-            _ => Some(at),
-        }
-    }
-
-    fn squeeze(text: &str) -> String {
-        text.split_whitespace().collect()
-    }
-
-    /// The `n`th top-level argument after `open`, without spaces or a
-    /// leading `&`.
-    fn arg_after(text: &str, open: &str, n: usize) -> Option<String> {
-        args_after(text, open)
-            .get(n)
-            .map(|arg| squeeze(arg).trim_start_matches('&').to_string())
-    }
-
-    /// The top-level arguments after the first `open` in `text`.
-    fn args_after(text: &str, open: &str) -> Vec<String> {
-        let Some(at) = text.find(open) else {
-            return Vec::new();
-        };
-        let rest = &text[at + open.len()..];
-        let mut args = vec![String::new()];
-        let mut depth = 0usize;
-        let mut quoted = false;
-        let mut escaped = false;
-        for c in rest.chars() {
-            if quoted {
-                quoted = escaped || c != '"';
-                escaped = !escaped && c == '\\';
-            } else if c == '"' {
-                quoted = true;
-            } else if matches!(c, '(' | '[' | '{') {
-                depth += 1;
-            } else if matches!(c, ')' | ']' | '}') {
-                if depth == 0 {
-                    break;
-                }
-                depth -= 1;
-            } else if c == ',' && depth == 0 {
-                args.push(String::new());
-                continue;
-            }
-            args.last_mut().unwrap().push(c);
-        }
-        args
-    }
-
-    fn mode_of(text: &str) -> Option<u32> {
-        ["from_mode(0o", "set_mode(0o"].iter().find_map(|open| {
-            let rest = &text[text.find(open)? + open.len()..];
-            let digits: String = rest.chars().take_while(|c| c.is_digit(8)).collect();
-            u32::from_str_radix(&digits, 8).ok()
-        })
-    }
-
-    /// `dir.join(name)` in a loop is the same path as `dir.join("a")` when
-    /// `"a"` is one of the names the loop walks, or any name when the loop
-    /// is not over a literal list.
-    fn same_path(written: &str, target: &str, lists: &[(String, Vec<String>)]) -> bool {
-        if written == target {
-            return true;
-        }
-        let (Some((dir_a, leaf_a)), Some((dir_b, leaf_b))) =
-            (written.split_once(".join("), target.split_once(".join("))
-        else {
-            return false;
-        };
-        if dir_a != dir_b {
-            return false;
-        }
-        let leaf_a = leaf_a.trim_end_matches(')');
-        let leaf_b = leaf_b.trim_end_matches(')');
-        let (literal, name) = match (leaf_a.starts_with('"'), leaf_b.starts_with('"')) {
-            (true, true) => return false,
-            (true, false) => (leaf_a, leaf_b),
-            (false, true) => (leaf_b, leaf_a),
-            (false, false) => return leaf_a == leaf_b,
-        };
-        lists
-            .iter()
-            .rev()
-            .find(|(bound, _)| bound == name)
-            .is_none_or(|(_, names)| names.iter().any(|lit| lit == literal))
     }
 
     /// Clippy refuses the calls in `clippy.toml` only where

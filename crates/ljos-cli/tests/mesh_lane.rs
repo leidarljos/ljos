@@ -649,27 +649,17 @@ struct OpenMode(PathBuf);
 
 impl Drop for OpenMode {
     fn drop(&mut self) {
-        use std::os::unix::fs::PermissionsExt;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        let _ = ljos_cli::change_mode(&self.0, 0o755);
     }
 }
 
 #[test]
 fn a_read_only_share_does_not_report_a_push() {
-    use std::os::unix::fs::PermissionsExt;
     let (home, root) = world();
     let dest = root.join("handoff");
     std::fs::create_dir(&dest).unwrap();
     let _open = OpenMode(dest.clone());
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o555)).unwrap();
+    ljos_cli::change_mode(&dest, 0o555).unwrap();
     let pushed = run_share(
         &root,
         home.path(),

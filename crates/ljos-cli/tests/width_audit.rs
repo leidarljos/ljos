@@ -350,16 +350,8 @@ fn clippy_on_raw_probe(root: &Path, conf_dir: &Path, target: &Path) -> std::proc
         reason = "writes a file that is not a git hook"
     )]
     std::fs::write(probe.join("src/lib.rs"), RAW_PROBE).unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "copies a file that is not a git hook"
-    )]
-    std::fs::copy(workspace.join("Cargo.lock"), probe.join("Cargo.lock")).unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "copies a file that is not a git hook"
-    )]
-    std::fs::copy(
+    ljos_cli::copy_file(workspace.join("Cargo.lock"), probe.join("Cargo.lock")).unwrap();
+    ljos_cli::copy_file(
         workspace.join("rust-toolchain.toml"),
         probe.join("rust-toolchain.toml"),
     )

@@ -72,6 +72,8 @@ unicode-width = "0.2"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2", features = ["hazmat"] }
+# Lexes the sources for the mode check in src/exe_publish/mode_check.rs.
+proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }
 tempfile = "3"
 vissue-core.workspace = true
 # Not used by the binary. ureq 2 reaches webpki-roots 1 through the 0.26

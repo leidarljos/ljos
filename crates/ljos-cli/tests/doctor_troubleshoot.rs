@@ -211,12 +211,7 @@ fn doctor_fails_an_unwritable_tracker_and_names_chmod() {
     std::fs::create_dir_all(tracker.join("Software")).unwrap();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&tracker, std::fs::Permissions::from_mode(0o555)).unwrap();
+        ljos_cli::change_mode(&tracker, 0o555).unwrap();
     }
     #[expect(
         clippy::disallowed_methods,
@@ -259,12 +254,7 @@ fn doctor_fails_an_unwritable_tracker_and_names_chmod() {
     );
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        let _ = std::fs::set_permissions(&tracker, std::fs::Permissions::from_mode(0o755));
+        let _ = ljos_cli::change_mode(&tracker, 0o755);
     }
 }
 

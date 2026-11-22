@@ -1415,12 +1415,7 @@ fn ensure_cache_dir(dir: &Path) -> Option<()> {
     std::fs::create_dir_all(dir).ok()?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        let _ = crate::change_mode(dir, 0o700);
     }
     Some(())
 }

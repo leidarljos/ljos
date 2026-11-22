@@ -140,17 +140,8 @@ fn hab(name: &str) -> Hab {
         std::fs::create_dir_all(dir).unwrap();
     }
     {
-        use std::os::unix::fs::PermissionsExt;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&hab.root, std::fs::Permissions::from_mode(0o755)).unwrap();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&hab.run, std::fs::Permissions::from_mode(0o700)).unwrap();
+        ljos_cli::change_mode(&hab.root, 0o755).unwrap();
+        ljos_cli::change_mode(&hab.run, 0o700).unwrap();
     }
     for dir in [&hab.tracker, &hab.repo] {
         git(dir, &["init", "-q", "-b", "main"]);
