@@ -294,9 +294,10 @@ impl Stage {
         }
     }
 
-    /// Mark the staged file `mode`, flush it, rename it onto `path`, check
-    /// that the name now holds that file, then flush the directory so the
-    /// new name survives a crash.
+    /// Mark the staged file `mode`, flush it, rename it onto `path` and
+    /// check that the name now holds that file, both under a lock on the
+    /// parent directory, then flush the directory so the new name survives
+    /// a crash.
     fn settle(self, path: &Path, mode: u32) -> Result<(), Error> {
         use std::os::unix::fs::PermissionsExt;
         let leaf = path
@@ -327,6 +328,8 @@ impl Stage {
         file.set_permissions(std::fs::Permissions::from_mode(mode))
             .map_err(|err| named(err, "mark executable", &tmp))?;
         flush(&file, &tmp).map_err(|err| named(err, "flush", &tmp))?;
+        let lock = DirLock::exclusive(&self.parent)
+            .map_err(|err| named(err, "lock", &self.parent_path))?;
         #[cfg(test)]
         at_step(Step::Moving, &self.path);
         // SAFETY: both descriptors are open directories and both names are
@@ -345,14 +348,13 @@ impl Stage {
         #[cfg(test)]
         at_step(Step::Renamed, &self.path);
         // `file` stays open until this check, so its inode number cannot be
-        // given to something else put at the name. A later publish of the
-        // same path by this user may already have replaced the file;
-        // anything else at the name was put there by someone else.
+        // given to something else put at the name. Every publish into this
+        // directory holds `lock` from its rename to this check, so no later
+        // publish of ours can have replaced the file: anything else at the
+        // name, a hard link to a file of ours included, was put there by
+        // someone else.
         match stat_at(&self.parent, &leaf) {
-            Ok(now)
-                if same_file(&now, &staged)
-                    || (now.st_mode & libc::S_IFMT == libc::S_IFREG
-                        && now.st_uid == staged.st_uid) => {}
+            Ok(now) if same_file(&now, &staged) => {}
             _ => {
                 return Err(Error::other(format!(
                     "install executable: {} was replaced after the rename",
@@ -360,6 +362,7 @@ impl Stage {
                 )))
             }
         }
+        drop(lock);
         drop(file);
         let _ = flush(&self.parent, &self.parent_path);
         Ok(())
@@ -507,6 +510,57 @@ fn stat_at(dir: &File, name: &CStr) -> Result<libc::stat, Error> {
         return Err(Error::last_os_error());
     }
     Ok(st)
+}
+
+/// How many times [`DirLock::exclusive`] tries the lock, [`LOCK_PAUSE`]
+/// apart, before it gives up.
+#[cfg(unix)]
+const LOCK_TRIES: u32 = 200;
+
+#[cfg(unix)]
+const LOCK_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// An exclusive `flock` on a directory descriptor, released on drop.
+///
+/// Another user who can open the directory can hold the lock too. A
+/// publish there waits [`LOCK_TRIES`] times [`LOCK_PAUSE`] for them and
+/// then fails.
+#[cfg(unix)]
+struct DirLock<'a>(&'a File);
+
+#[cfg(unix)]
+impl<'a> DirLock<'a> {
+    fn exclusive(dir: &'a File) -> Result<Self, Error> {
+        for _ in 0..LOCK_TRIES {
+            // SAFETY: dir is an open descriptor.
+            if unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(Self(dir));
+            }
+            let err = Error::last_os_error();
+            match err.kind() {
+                std::io::ErrorKind::Interrupted => {}
+                std::io::ErrorKind::WouldBlock => std::thread::sleep(LOCK_PAUSE),
+                _ => return Err(err),
+            }
+        }
+        Err(Error::new(
+            std::io::ErrorKind::WouldBlock,
+            format!(
+                "another process held the lock for {} ms",
+                LOCK_PAUSE.as_millis() * u128::from(LOCK_TRIES)
+            ),
+        ))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for DirLock<'_> {
+    /// A forked writer of another publish may still hold a copy of the
+    /// descriptor, so the lock is released here rather than at close.
+    fn drop(&mut self) {
+        // SAFETY: the descriptor is open for the life of the borrow.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
 }
 
 #[cfg(unix)]
@@ -963,6 +1017,115 @@ mod tests {
                 "{step}: {err}"
             );
         }
+    }
+
+    /// A hard link to another file of this user, put at the destination
+    /// after the rename, is reported. A check that took any regular file of
+    /// the same owner returned Ok with the linked `PWNED` body in place.
+    #[test]
+    fn a_hard_link_put_at_the_destination_after_the_rename_is_reported() {
+        for step in ["install", "copy"] {
+            let (dir, _, _, src) = arena(0o644, "victim");
+            let dest = dir.path().join("stub");
+            let evil = dir.path().join("evil-exec");
+            std::fs::write(&evil, "#!/bin/sh\necho PWNED\n").unwrap();
+            std::fs::set_permissions(&evil, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let (link, swap) = (dir.path().join("link"), dest.clone());
+            AT_STEP.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move |at, _: &Path| {
+                    if at == Step::Renamed {
+                        std::fs::hard_link(&evil, &link).unwrap();
+                        std::fs::rename(&link, &swap).unwrap();
+                    }
+                }));
+            });
+            let got = publish(step, &src, &dest);
+            AT_STEP.with(|hook| *hook.borrow_mut() = None);
+            let err = got.expect_err(step).to_string();
+            assert!(
+                err.contains("was replaced after the rename"),
+                "{step}: {err}"
+            );
+            assert_eq!(
+                std::fs::read(&dest).unwrap(),
+                b"#!/bin/sh\necho PWNED\n",
+                "{step}: the link is what the check saw"
+            );
+        }
+    }
+
+    /// A second publish of the destination, started between the first
+    /// one's rename and its check, waits for that check and then
+    /// publishes. Without the lock its rename would land in that gap and
+    /// the first publish would report the destination replaced.
+    #[test]
+    fn a_second_publish_waits_for_the_first_ones_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("stub");
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let waited = std::rc::Rc::new(std::cell::Cell::new(false));
+        let (hook_done, hook_second, hook_waited) = (
+            Arc::clone(&done),
+            std::rc::Rc::clone(&second),
+            std::rc::Rc::clone(&waited),
+        );
+        let target = dest.clone();
+        AT_STEP.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |at, _: &Path| {
+                if at != Step::Renamed || hook_second.borrow().is_some() {
+                    return;
+                }
+                let (target, done) = (target.clone(), Arc::clone(&hook_done));
+                *hook_second.borrow_mut() = Some(thread::spawn(move || {
+                    let got = install_executable(&target, b"#!/bin/sh\necho second\n");
+                    done.store(true, Ordering::SeqCst);
+                    got
+                }));
+                thread::sleep(std::time::Duration::from_millis(300));
+                hook_waited.set(!hook_done.load(Ordering::SeqCst));
+            }));
+        });
+        let first = install_executable(&dest, OURS);
+        AT_STEP.with(|hook| *hook.borrow_mut() = None);
+        first.unwrap();
+        let second = second.borrow_mut().take().expect("second publish started");
+        second.join().unwrap().unwrap();
+        assert!(
+            waited.get(),
+            "the second publish finished inside the first one's check"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"#!/bin/sh\necho second\n");
+    }
+
+    /// Another descriptor holds the directory's lock and never lets go.
+    /// A publish there gives up and names the directory instead of
+    /// waiting forever.
+    #[test]
+    fn a_publish_gives_up_on_a_lock_that_is_never_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let holder = File::open(dir.path()).unwrap();
+        // SAFETY: holder is an open descriptor.
+        assert_eq!(unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX) }, 0);
+        let dest = dir.path().join("stub");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let target = dest.clone();
+        thread::spawn(move || {
+            let _ = tx.send(install_executable(&target, OURS));
+        });
+        let bound = LOCK_PAUSE * LOCK_TRIES + std::time::Duration::from_secs(20);
+        let got = rx
+            .recv_timeout(bound)
+            .unwrap_or_else(|_| panic!("the publish still waits for the lock after {bound:?}"));
+        let err = got.expect_err("published while another descriptor held the lock");
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock, "{err}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("lock {}", dir.path().display())),
+            "{msg}"
+        );
+        assert!(!dest.exists());
+        drop(holder);
     }
 
     /// A failed publish removes the staged file through the held directory
