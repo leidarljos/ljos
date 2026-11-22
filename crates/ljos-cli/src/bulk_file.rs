@@ -386,8 +386,29 @@ fn rendered(project: &str, issues: &Path) -> Result<String> {
     Ok(doc.render_string())
 }
 
-/// What ends the log of a ledger file; a new file has no record after it.
-const LEDGER_LOG: &str = "\n#+VISSUE_LEDGER_LOG:\n";
+/// The whole of the file `vissue_core::ledger` writes for a new issue whose
+/// heading renders as `heading`, under a ledger whose preamble is
+/// `preamble`: the preamble and a blank line, `#+VISSUE_LEDGER:`, the lines
+/// the heading takes in that file, the heading, and an empty log.
+fn ledger_header(preamble: &str, heading: &str) -> String {
+    let preamble = preamble.trim_end();
+    let mut out = String::new();
+    let mut start = 3;
+    if !preamble.is_empty() {
+        out.push_str(preamble);
+        out.push_str("\n\n");
+        start += preamble.lines().count() + 1;
+    }
+    let end = start + heading.lines().count().max(1) - 1;
+    out.push_str(&format!(
+        "#+VISSUE_LEDGER:\n#+VISSUE_LINES: {start} {end}\n{heading}"
+    ));
+    if !heading.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("#+VISSUE_LEDGER_LOG:\n");
+    out
+}
 
 /// One row as it was handed to `vissue_core::ops::create`, with the id it
 /// came back with.
@@ -508,8 +529,9 @@ impl Board {
     /// After `want` was filed here, and under the issues lock: the directory
     /// and board if that create is the only change since `ours`, else
     /// `None`. A create changes one file: `issues.org`, rewritten as vissue
-    /// renders it, or on a ledger a new file for the id with no record in
-    /// its log. The new heading is the one this row asked for, with nothing
+    /// renders it, or on a ledger a new file for the id that is byte for
+    /// byte the header vissue writes for it. The new heading is the one this
+    /// row asked for, with nothing
     /// on it, and the board without it is the board the batch last left.
     /// Anything else may be another writer's, and a roll back would lose it.
     fn only_filed(&self, want: &Want) -> Result<Option<(Files, String)>> {
@@ -529,17 +551,6 @@ impl Board {
         let Some(found) = doc.headings.iter().find(|h| h.id == want.id) else {
             return Ok(None);
         };
-        let clean = if vissue_core::ledger::is_ledger(&self.issues) {
-            changed == doc.heading_path(want.id)
-                && !self.ours.contains_key(changed)
-                && text
-                    .split_once(LEDGER_LOG)
-                    .is_some_and(|(_, log)| log.is_empty())
-        } else {
-            let mut whole = doc.clone();
-            whole.refresh_statistics();
-            *changed == self.issues && whole.render_string() == text
-        };
         let house_new = !self.ours.contains_key(&self.issues);
         let priority = want
             .priority
@@ -548,7 +559,19 @@ impl Board {
             } else {
                 want.cfg_priority
             });
-        if !clean || want.heading(found, priority).map(|h| h.render()) != Some(found.render()) {
+        let Some(heading) = want.heading(found, priority).map(|h| h.render()) else {
+            return Ok(None);
+        };
+        let clean = if vissue_core::ledger::is_ledger(&self.issues) {
+            changed == doc.heading_path(want.id)
+                && !self.ours.contains_key(changed)
+                && text == ledger_header(&doc.preamble, &heading)
+        } else {
+            let mut whole = doc.clone();
+            whole.refresh_statistics();
+            *changed == self.issues && whole.render_string() == text
+        };
+        if !clean || heading != found.render() {
             return Ok(None);
         }
         doc.refresh_statistics();
@@ -926,6 +949,26 @@ mod tests {
         std::fs::write(&path, &theirs).unwrap();
         assert_eq!(refuse_next(&mut board, &want(&layout, &id)), None);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs);
+    }
+
+    #[test]
+    fn a_batch_never_takes_back_a_ledger_file_another_writer_added_to_above_its_log() {
+        let (_root, layout, board) = demo(true);
+        let id = file(&layout, "new");
+        let doc = vissue_core::IssueDoc::parse_file("demo", &board.issues).unwrap();
+        let path = doc.heading_path(&id).to_path_buf();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let theirs = text.replace(
+            "\n#+VISSUE_LEDGER_LOG:\n",
+            "\n* TODO Theirs\n:PROPERTIES:\n:ID:         demo-zzzz\n:END:\n#+VISSUE_LEDGER_LOG:\n",
+        );
+        assert_ne!(theirs, text);
+        std::fs::write(&path, &theirs).unwrap();
+        assert!(board.only_filed(&want(&layout, &id)).unwrap().is_none());
+        std::fs::write(&path, format!("# theirs\n{text}")).unwrap();
+        assert!(board.only_filed(&want(&layout, &id)).unwrap().is_none());
+        std::fs::write(&path, &text).unwrap();
+        assert!(board.only_filed(&want(&layout, &id)).unwrap().is_some());
     }
 
     #[test]
