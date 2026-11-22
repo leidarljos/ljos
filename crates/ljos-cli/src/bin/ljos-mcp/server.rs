@@ -230,6 +230,10 @@ fn scratch_file_in(base: &std::path::Path, name: &str, text: &str) -> std::io::R
         path: dir.join(name),
         dir,
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -2569,6 +2573,10 @@ impl LjosServer {
         let read = ljos_cli::deed_bytes::read_deed(&args.accession).map_err(refused)?;
         let text = match args.out.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
             Some(out) => {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "writes a file that is not a git hook"
+                )]
                 std::fs::write(out, &read.bytes)
                     .map_err(|e| refused(anyhow::anyhow!("deed: could not write {out}: {e}")))?;
                 format!(
@@ -6594,6 +6602,10 @@ mod tests {
     #[tokio::test]
     async fn cards_are_read_and_never_made() {
         let dir = tempfile::tempdir().expect("tempdir");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.path().join("USER.md"), "the user\n").expect("write");
         let server = LjosServer::at(dir.path().to_path_buf());
         let out = server
@@ -6783,6 +6795,10 @@ mod tests {
         let cursor = home.path().join(".cursor");
         std::fs::create_dir_all(&cursor).expect("cursor dir");
         std::fs::create_dir(&project).expect("project dir");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&cursor, project.join("seat")).expect("seat link");
         unsafe {
             std::env::set_var("POLICYD_BIN", &bin);

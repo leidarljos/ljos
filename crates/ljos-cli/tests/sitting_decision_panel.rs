@@ -45,12 +45,20 @@ impl Seat {
         script(&bin, "deedar", "#!/bin/sh\necho head\n");
         for name in ["vissue", "packset", "packsetd"] {
             if let Some(real) = found(name) {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "links a path that is not a git hook"
+                )]
                 std::os::unix::fs::symlink(real, bin.join(name)).unwrap();
             }
         }
         for sub in ["home", "run", "tracker/Software"] {
             std::fs::create_dir_all(dir.path().join(sub)).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.path().join("home/.gitconfig"),
             "[user]\n\tname = Your Name\n\temail = you@example.com\n",
@@ -68,6 +76,10 @@ impl Seat {
 
     fn run(&self, args: &[&str]) -> (i32, String) {
         let home = self.home();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(&home)

@@ -39,6 +39,10 @@ fn a_persona_ballot_is_recorded_when_no_seat_is_named() {
         std::env::var("PATH").unwrap_or_default()
     );
     let ljos = |seat: Option<&str>, args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()

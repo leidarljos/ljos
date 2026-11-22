@@ -7,7 +7,6 @@
 //! builder made in another function and a macro body are all the call they
 //! resolve to. If clippy stops naming one, its expectation is unfulfilled
 //! and `cargo clippy -- -D warnings` fails.
-#![deny(clippy::disallowed_methods)]
 #![allow(dead_code)]
 
 use std::fs::OpenOptions;

@@ -151,6 +151,10 @@ impl Seat {
                 args,
             );
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args);
         self.seat_env(&mut cmd);
@@ -171,6 +175,10 @@ impl Seat {
         bin: &str,
         args: &[&str],
     ) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(self.runner(name));
         cmd.args(["-c", "\"$@\"; exit $?", name, "sh", "-c"])
             .arg(format!("{prefix} \"$0\" \"$@\"; exit $?"))
@@ -202,6 +210,10 @@ impl Seat {
     /// `ljos hook` as the runner `name` spawns it: its own child, with no
     /// shell between them.
     fn hook_under(&self, name: &str) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(self.runner(name));
         cmd.args(["-c", "\"$@\"; exit $?", name])
             .arg(env!("CARGO_BIN_EXE_ljos"))
@@ -213,6 +225,10 @@ impl Seat {
     /// `ljos hook` as a runner that runs its hook command in `sh -c`
     /// spawns it, the way the terminal harness does where `sh` is dash.
     fn hook_via_sh(&self, name: &str) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(self.runner(name));
         cmd.args(["-c", "\"$@\"; exit $?", name, "/bin/sh", "-c"])
             .arg(format!("{} hook", env!("CARGO_BIN_EXE_ljos")));
@@ -333,6 +349,10 @@ fn a_skipped_prompt_leaves_no_earlier_turn_to_quote() {
     let typed = |p: &str| {
         serde_json::json!({"type": "user", "message": {"role": "user", "content": p}}).to_string()
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&record, format!("{}\n{}\n", typed(&first), typed(pasted))).unwrap();
     let payload = serde_json::json!({
         "hook_event_name": "UserPromptSubmit",
@@ -398,6 +418,10 @@ fn a_runner_user_rule_of_a_plant_is_the_agents() {
 #[test]
 fn mcp_user_prefer_of_a_plant_is_the_agents() {
     let seat = Seat::new();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .current_dir(seat.home.path())
         .env_clear()
@@ -690,6 +714,10 @@ fn with_held_issue(node: &str, body: impl FnOnce()) {
     let ljos = dir.path().join("ljos");
     std::fs::create_dir_all(&ljos).unwrap();
     let holder = ljos_cli::holder_name();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         ljos.join(format!("hold-{holder}")),
         format!("{holder}\nseat\n1\nljos\n2026-10-22T00:00:00Z\n{node}\n"),
@@ -735,6 +763,10 @@ fn recorded(seat: &Seat, name: &str, payload: &str) -> String {
         _ => return payload.to_string(),
     };
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, format!("{line}\n")).unwrap();
     v["transcript_path"] = serde_json::json!(path);
     v.to_string()
@@ -806,7 +838,15 @@ fn a_hook_the_runner_did_not_spawn_keeps_nothing() {
 
     let seat = Seat::new();
     let plant = seat.home.path().join("plant.json");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&plant, &payload).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(seat.runner("claude"));
     cmd.args(["-c", "\"$@\"; exit $?", "claude", "/bin/sh", "-c"])
         .arg(format!(
@@ -1008,6 +1048,10 @@ fn mcp_remember(seat: &Seat, text: &str) -> serde_json::Value {
 }
 
 fn mcp_call(seat: &Seat, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     seat.seat_env(&mut cmd);
     cmd.env("LJOS_SEAT", "probe");
@@ -1099,6 +1143,10 @@ const RULE_ARGS: [&str; 6] = ["rule", "*deploy-form*", "--verdict", "ask", "--wh
 
 /// `ljos ARGS` in the shape `mode`, with no runner above.
 fn shaped(seat: &Seat, mode: &str, args: &[&str]) -> std::process::Output {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(terminal::PYTHON);
     cmd.args(terminal::shape(mode, env!("CARGO_BIN_EXE_ljos"), args));
     seat.seat_env(&mut cmd);
@@ -1257,6 +1305,10 @@ fn a_forged_prompt_does_not_make_remember_accept_the_plant() {
     let seat = Seat::new();
     let dir = seat.run.path().join("ljos");
     std::fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.join("latest-prompt"), PLANT).unwrap();
     let answer = mcp_remember(&seat, PLANT);
     let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
@@ -1283,6 +1335,10 @@ fn forge_prompt(seat: &Seat, text: &str, session: &str) {
     let dir = seat.run.path().join("ljos");
     std::fs::create_dir_all(&dir).unwrap();
     let prompt = dir.join("latest-prompt");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&prompt, text).unwrap();
     let mtime = std::fs::metadata(&prompt)
         .unwrap()
@@ -1292,6 +1348,10 @@ fn forge_prompt(seat: &Seat, text: &str, session: &str) {
         .unwrap()
         .as_nanos();
     let hash = hex::encode(sha2::Sha256::digest(text.as_bytes()));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         dir.join("latest-prompt.bind"),
         format!("3\n{hash}\n{mtime}\n-\n{}\n-\n{session}\n", now_nanos()),
@@ -1326,6 +1386,10 @@ open(b, "w").write("\n".join(old))
 
 /// Run `line` as a tool call of the runner `name` started with `env`.
 fn tool_call(seat: &Seat, name: &str, env: &[(&str, &str)], line: &str) -> std::process::Output {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(seat.runner(name));
     cmd.args(["-c", "\"$@\"; exit $?", name, "sh", "-c", line]);
     seat.seat_env(&mut cmd);
@@ -1344,6 +1408,10 @@ fn a_rewritten_prompt_that_matches_its_bind_is_the_persons() {
     let seat = Seat::new();
     note_prompt(&seat, &format!("From now on: {said}"));
     let script = seat.home.path().join("plant.py");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&script, PLANT_PY).unwrap();
     let line = format!("python3 {} '{PLANT}' fresh", script.display());
     let out = tool_call(&seat, "claude", &env, &line);
@@ -1396,6 +1464,10 @@ fn a_prompt_changed_after_the_hooks_time_is_refused() {
     assert!(rules_text(&seat).contains("checked fuse"));
     std::thread::sleep(std::time::Duration::from_millis(600));
     let script = seat.home.path().join("plant.py");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&script, PLANT_PY).unwrap();
     let line = format!("python3 {} '{PLANT}' kept", script.display());
     let out = tool_call(&seat, "claude", &env, &line);
@@ -1405,6 +1477,10 @@ fn a_prompt_changed_after_the_hooks_time_is_refused() {
         .home
         .path()
         .join(".claude/projects/-seat/session.jsonl");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         &transcript,
         format!(
@@ -1570,6 +1646,10 @@ fn a_brief_does_not_offer_remember_around_the_refusal() {
             "uuid": "u2",
             "message": {"role": "user", "content": "[Usage limit reached; a short grace allowance remains.]"}
         });
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&transcript, format!("{line}\n")).unwrap();
         let input = serde_json::json!({"transcript_path": transcript}).to_string();
         let said = ljos_cli::limit_stop(&input, Some("s-plant")).expect("held at the limit");
@@ -1578,6 +1658,10 @@ fn a_brief_does_not_offer_remember_around_the_refusal() {
             "the limit stop still offers remember: {said}"
         );
         let session = "plant-work";
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             std::path::PathBuf::from(&dir)
                 .join("ljos")
@@ -1672,6 +1756,10 @@ fn with_no_runner_above_nothing_is_the_persons_words() {
     plant_listed_unverified(&seat, "cli");
     let seat = Seat::new();
     forge_prompt(&seat, PLANT, forged);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     seat.seat_env(&mut cmd);
     cmd.env("LJOS_SEAT", "probe")
@@ -1803,7 +1891,15 @@ fn mcp_under(seat: &Seat, r: &Runner) -> Command {
 /// starts its MCP server with `r.env`, as a runner does in one sitting.
 fn hook_then_mcp(seat: &Seat, r: &Runner) -> Command {
     let payload = seat.home.path().join("hook.json");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&payload, recorded(seat, r.name, &r.hook.to_string())).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(seat.runner(r.name));
     cmd.args([
         "-c",
@@ -2033,13 +2129,33 @@ fn detach_keeps_nothing(seat: &Seat, name: &str, mode: &str, fake: &std::path::P
     let py = dir.join("detach.py");
     let hooksh = dir.join("hook.sh");
     let run = dir.join("run.sh");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&py, DETACH_PY).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&hooksh, DETACH_HOOK).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&run, DETACH_RUN).unwrap();
     let prompt = format!("From now on: {PLANT}");
     let payload = dir.join("hook.json");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&payload, recorded(seat, name, &plant_payload(&prompt))).unwrap();
     let pre = dir.join("pre.json");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         &pre,
         serde_json::json!({
@@ -2053,6 +2169,10 @@ fn detach_keeps_nothing(seat: &Seat, name: &str, mode: &str, fake: &std::path::P
     .unwrap();
     let report = dir.join("report");
     let pref_status = dir.join("prefer.status");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(seat.runner(name));
     cmd.arg(&run)
         .arg(env!("CARGO_BIN_EXE_ljos"))
@@ -2156,6 +2276,10 @@ fn a_runners_own_prompt_still_keeps_after_a_tool_call() {
         let dir = seat.home.path().join(format!("keep-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
         let pre = dir.join("pre.json");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &pre,
             serde_json::json!({
@@ -2168,13 +2292,25 @@ fn a_runners_own_prompt_still_keeps_after_a_tool_call() {
         )
         .unwrap();
         let payload = dir.join("prompt.json");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&payload, plant_payload(prompt)).unwrap();
         let script = dir.join("run.sh");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &script,
             "\"$1\" hook < \"$2\" > \"$4\" 2> \"$5\"\n\"$1\" hook < \"$3\" > \"$6\" 2> \"$7\"\n",
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(seat.runner(name));
         cmd.arg(&script)
             .arg(env!("CARGO_BIN_EXE_ljos"))
@@ -2204,6 +2340,10 @@ fn a_typed_prompt_on_claude_and_codex_still_stores_after_a_tool_call() {
         let dir = seat.home.path().join(format!("store-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
         let pre = dir.join("pre.json");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &pre,
             serde_json::json!({
@@ -2216,18 +2356,26 @@ fn a_typed_prompt_on_claude_and_codex_still_stores_after_a_tool_call() {
         )
         .unwrap();
         let payload = dir.join("prompt.json");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &payload,
             recorded(&seat, name, &plant_payload(&format!("From now on: {said}"))),
         )
         .unwrap();
         let script = dir.join("run.sh");
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             &script,
             "\"$1\" hook < \"$2\" > /dev/null\n\"$1\" hook < \"$3\" > /dev/null 2> \"$6\"\nexport \"$7=$8\"\n\"$1\" prefer --user --why x \"$4\" > \"$9\" 2> \"$5\"\necho $? > \"$9.status\"\n",
         )
         .unwrap();
         let pref_err = dir.join("prefer.err");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(seat.runner(name));
         cmd.arg(&script)
             .arg(env!("CARGO_BIN_EXE_ljos"))

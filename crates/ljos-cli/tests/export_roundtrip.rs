@@ -30,6 +30,10 @@ struct Seat {
 
 impl Seat {
     fn run(&self, workspace: &str, root: &Path, args: &[&str], stdin: Option<&str>) -> Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args).current_dir(root);
         self.env(&mut cmd, workspace, root);
@@ -48,6 +52,10 @@ impl Seat {
     }
 
     fn run_slot(&self, workspace: &str, root: &Path, args: &[&str]) -> Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args).current_dir(root);
         self.env(&mut cmd, workspace, root);
@@ -170,6 +178,10 @@ fn export_import_integrate_round_trip_reaches_the_hook() {
     assert!(carried.is_some_and(|n| n > 0), "{}", text(&exported));
     let carried = carried.expect("exported count");
     let path = into.join("mem.jsonl");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, exported.stdout).expect("write the export");
 
     let imported = seat.run(

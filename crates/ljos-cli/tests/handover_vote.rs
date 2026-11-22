@@ -30,6 +30,10 @@ impl Home {
         ] {
             std::fs::create_dir_all(root.path().join(dir)).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.path().join("home/.config/deedar/host.key"), [9u8; 32]).unwrap();
         let mut dirs = vec![
             vissue.parent().unwrap().to_path_buf(),
@@ -54,6 +58,10 @@ impl Home {
 
     fn command(&self, program: &str) -> Command {
         let home = self.home();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(program);
         cmd.env_clear()
             .env("PATH", &self.path)

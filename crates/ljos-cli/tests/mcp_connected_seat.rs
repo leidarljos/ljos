@@ -13,6 +13,10 @@ fn the_connected_seat_reaches_policy_without_borrowing_a_historical_holder() {
     let root = tempfile::tempdir().unwrap();
     let tracker = root.path().join("tracker");
     std::fs::create_dir(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         tracker.join("vissue.toml"),
         "seats = [\"connected-runner\", \"connected-runner-other\", \"reviewer\"]\n",

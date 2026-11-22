@@ -44,7 +44,15 @@ fn hab(name: &str) -> Hab {
         std::fs::create_dir_all(dir).unwrap();
     }
     use std::os::unix::fs::PermissionsExt;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&hab.run, std::fs::Permissions::from_mode(0o700)).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let git = Command::new("git")
         .args(["init", "-q", "-b", "main"])
         .current_dir(&hab.repo)
@@ -56,10 +64,18 @@ fn hab(name: &str) -> Hab {
 
 fn put(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, text).unwrap();
 }
 
 fn hook(hab: &Hab, pack: Option<u16>) -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook")
         .env_clear()
@@ -124,6 +140,10 @@ fn a_rules_file_rewritten_in_place_does_not_deny_a_benign_write() {
         let path = path.clone();
         std::thread::spawn(move || {
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "writes a file that is not a git hook"
+                )]
                 let mut file = std::fs::File::create(&path).unwrap();
                 std::thread::sleep(Duration::from_millis(2));
                 file.write_all(ALAN.as_bytes()).unwrap();

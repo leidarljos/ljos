@@ -20,6 +20,10 @@ fn hook(payload: &str) -> serde_json::Value {
     let policyd = home.path().join("ljos-policyd");
     ljos_cli::install_executable(&policyd, POLICYD).unwrap();
     let payload = payload.replace("@W@", work.to_str().unwrap());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("hook")
         .current_dir(&work)

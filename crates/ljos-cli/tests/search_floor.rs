@@ -32,6 +32,10 @@ fn keep(dir: &Path, id: &str, text: &str) {
         "entities": ["seat:ada"],
     });
     let path = dir.join(format!("{id}.json"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, serde_json::to_vec_pretty(&body).unwrap()).unwrap();
 }
 
@@ -123,7 +127,11 @@ impl Seat {
     fn run(&self, args: &[&str]) -> std::process::Output {
         let root = self.root.path();
         let home = root.join("home");
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(root)
             .env_clear()
@@ -152,7 +160,7 @@ impl Seat {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .expect("ljos")
+            .expect("ljos");
     }
 }
 

@@ -475,6 +475,10 @@ mod tests {
     use super::*;
 
     fn git(root: &Path, args: &[&str]) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(root)
@@ -489,6 +493,10 @@ mod tests {
     }
 
     fn log_subjects(root: &Path) -> Vec<String> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(root)

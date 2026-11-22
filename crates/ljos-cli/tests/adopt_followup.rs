@@ -87,6 +87,10 @@ impl World {
     }
 
     fn ljos(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
@@ -119,6 +123,10 @@ fn text(out: &Output) -> String {
 fn a_mapped_main_conversation_sits_and_an_unresolved_one_exits_2() {
     let world = World::new();
     let id = "bc-1234abcd-rest-main";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.home.join(".config/ljos/seats.toml"),
         format!("{id:?} = \"saddle\"\n"),
@@ -156,6 +164,10 @@ fn an_unlisted_seat_exits_2() {
     let world = World::new();
     let tracker = world.home.join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let out = world.ljos(
         &["note", "proj-aaaa", "progress"],

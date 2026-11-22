@@ -43,6 +43,10 @@ impl Seat {
         let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
         let dir = self.run().join("ljos");
         std::fs::create_dir_all(&dir).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.join("hold-probe-sitting"),
             format!(
@@ -57,6 +61,10 @@ impl Seat {
 
 fn transcript(home: &std::path::Path) -> std::path::PathBuf {
     let path = home.join("transcript.jsonl");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         &path,
         format!(
@@ -76,6 +84,10 @@ fn transcript(home: &std::path::Path) -> std::path::PathBuf {
 
 fn hook(seat: &Seat, url: &str, payload: &str, extra: &[(&str, &str)]) -> Output {
     let home = seat.home();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(["hook"])
         .env_clear()

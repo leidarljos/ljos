@@ -102,6 +102,10 @@ impl Seat {
             std::fs::create_dir_all(dir)
                 .unwrap_or_else(|err| panic!("create {}: {err}", dir.display()));
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(root.join("run"), std::fs::Permissions::from_mode(0o700)).unwrap();
         link_programs(&bin);
         let port = free_port();
@@ -158,6 +162,10 @@ impl Seat {
         }
         let started = Instant::now();
         let term = pty::Pty::open();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new("bash");
         cmd.arg("-c").arg(line);
         cmd.current_dir(cwd);
@@ -177,6 +185,10 @@ impl Seat {
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new("kill")
                 .args(["-s", "KILL", "--", &format!("-{pid}")])
                 .status();
@@ -198,6 +210,10 @@ impl Seat {
             return (2, format!("could not read `{line}`"), started.elapsed());
         }
         let script = format!("{line}\nprintf '%s' \"${{{name}}}\"");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("bash")
             .arg("-c")
             .arg(&script)
@@ -232,6 +248,10 @@ impl Drop for Seat {
         {
             ljos_test_boot::reap_listener(port);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("packset")
             .arg("stop")
             .env_clear()
@@ -267,6 +287,10 @@ fn link_programs(bin: &Path) {
         "age-keygen",
     ] {
         if let Some(path) = which(name) {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             let _ = symlink(&path, bin.join(name));
         }
     }

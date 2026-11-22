@@ -38,6 +38,10 @@ impl Seat {
                     .map(|dir| dir.join(name))
                     .find(|p| p.is_file())
             }) {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "links a path that is not a git hook"
+                )]
                 let _ = std::os::unix::fs::symlink(&path, bin.join(name));
             }
         }
@@ -58,6 +62,10 @@ impl Seat {
         let root = self.root.path();
         let home = root.join("home");
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(root)

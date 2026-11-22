@@ -47,7 +47,15 @@ fn slow_pack(delay: Duration) -> (String, mpsc::Receiver<()>) {
 fn server(home: &std::path::Path) -> Command {
     let tracker = home.join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"probe\"]\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -93,6 +101,10 @@ fn stdin_eof_answers_the_call_in_flight_then_exits() {
     let (exited, watchdog) = mpsc::channel::<()>();
     std::thread::spawn(move || {
         if watchdog.recv_timeout(Duration::from_secs(60)).is_err() {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new("kill").arg(pid.to_string()).status();
         }
     });
@@ -335,6 +347,10 @@ fn a_call_longer_than_the_old_drain_still_answers_on_eof() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(90));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut stdin = child.stdin.take().unwrap();
@@ -383,6 +399,10 @@ fn process_ended(pid: u32) -> bool {
     }
     #[cfg(not(target_os = "linux"))]
     {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let Ok(out) = Command::new("ps")
             .args(["-o", "stat=", "-p", &pid.to_string()])
             .output()
@@ -400,6 +420,10 @@ fn process_ended(pid: u32) -> bool {
 
 #[cfg(unix)]
 fn stop(pid: u32) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let _ = Command::new("kill").arg(pid.to_string()).status();
 }
 
@@ -441,7 +465,11 @@ time.sleep(600)
 #[cfg(unix)]
 fn python_client(home: &std::path::Path, script: &str) -> std::process::Child {
     let template = server(home);
-    Command::new("python3")
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new("python3")
         .args(["-c", script, env!("CARGO_BIN_EXE_ljos-mcp")])
         .env_clear()
         .envs(template.get_envs().filter_map(|(k, v)| Some((k, v?))))
@@ -450,7 +478,7 @@ fn python_client(home: &std::path::Path, script: &str) -> std::process::Child {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap()
+        .unwrap();
 }
 
 #[cfg(unix)]

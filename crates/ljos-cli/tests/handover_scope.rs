@@ -37,12 +37,20 @@ fn sibling_dir() -> PathBuf {
 
 fn keygen(path: &Path) -> String {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let made = Command::new("age-keygen")
         .arg("-o")
         .arg(path)
         .output()
         .expect("age-keygen must be installed");
     assert!(made.status.success());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let public = Command::new("age-keygen")
         .arg("-y")
         .arg(path)
@@ -116,12 +124,12 @@ impl World {
         let tracker = root.path().join("tracker");
         std::fs::create_dir_all(tracker.join("Software/probe")).unwrap();
         std::fs::create_dir_all(tracker.join(".ljos")).unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             tracker.join("Software/probe/issues.org"),
             "#+VISSUE: 1\n#+TODO: TODO | DONE\n\n* TODO [#A] Probe\n:PROPERTIES:\n:ID:       probe-0001\n:END:\n",
         )
         .unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             tracker.join(".ljos/sync.toml"),
             format!(
                 "name = \"example-host\"\nrecipients = [\"{box_public}\"]\n[scopes]\ncloud = [\"{cloud_public}\"]\n"
@@ -155,7 +163,11 @@ impl World {
     /// [`World::ljos`] with `first` searched before the tools.
     fn ljos_with(&self, machine: &str, args: &[&str], first: &Path) -> Output {
         let home = self.root.path().join(machine);
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("HOME", &home)
@@ -178,7 +190,7 @@ impl World {
             .env("DEEDAR_HOST_SIGNING_KEY", "off")
             .current_dir(self.root.path())
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn bag(&self, name: &str) -> PathBuf {
@@ -352,6 +364,10 @@ fn a_plaintext_export_that_cannot_be_removed_stops_the_handover() {
     );
     let text = said(&out);
     let export = PathBuf::from(std::fs::read_to_string(&seen).expect("packset export ran"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     let _ = std::fs::set_permissions(
         export.join("locked"),
         std::fs::Permissions::from_mode(0o700),

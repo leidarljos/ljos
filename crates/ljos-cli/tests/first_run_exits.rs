@@ -133,6 +133,10 @@ impl Seat {
         std::fs::create_dir_all(&run).unwrap();
         let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
         let graph = std::fs::canonicalize(&self.claims).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             run.join("hold-sitting"),
             format!(
@@ -148,6 +152,10 @@ impl Seat {
     fn command(&self) -> Command {
         let home = self.root.path().join("home");
         let path = format!("{}:/usr/bin:/bin", self.root.path().display());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.current_dir(self.root.path())
             .env_clear()

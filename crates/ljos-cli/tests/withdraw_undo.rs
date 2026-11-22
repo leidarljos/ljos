@@ -26,6 +26,10 @@ impl Hab {
     fn new(logbook: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let record = dir.path().join("record.json");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &record,
             format!(
@@ -70,7 +74,11 @@ exit 0
             self.dir.path().display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .arg("withdraw")
             .args(args)
             .env_clear()
@@ -90,7 +98,7 @@ exit 0
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off")
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn calls(&self) -> String {

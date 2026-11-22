@@ -24,6 +24,10 @@ fn a_recall_sent_after_a_note_lists_the_note() {
     let tracker = home.path().join("tracker");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let notes = home.path().join("notes.txt");
     // `ljos note ID TEXT` stores the note a second after it starts.
@@ -53,6 +57,10 @@ esac
 exit 0
 "#,
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
@@ -73,6 +81,10 @@ exit 0
     // A server that never answers fails the test instead of hanging it.
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(60));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let call = |id: u32, name: &str, args: serde_json::Value| {

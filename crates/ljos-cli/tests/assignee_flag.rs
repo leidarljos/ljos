@@ -41,6 +41,10 @@ fn the_seat_named_on_the_command_line_holds_the_claim() {
         std::env::var("PATH").unwrap_or_default()
     );
     let ljos = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()

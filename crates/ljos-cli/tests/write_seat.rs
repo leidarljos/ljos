@@ -60,6 +60,10 @@ impl Bench {
 
     fn ljos_env(&self, env: &[(&str, &str)], args: &[&str]) -> Output {
         let home = self.root.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
@@ -81,6 +85,10 @@ impl Bench {
         let dir = self.root.join("home/.config/ljos");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("seats.toml");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, body).unwrap();
         path
     }
@@ -88,6 +96,10 @@ impl Bench {
     /// The tracker's seat list. This is who may write.
     fn roster(&self, body: &str) -> PathBuf {
         let path = self.tracker.join("vissue.toml");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, body).unwrap();
         path
     }
@@ -247,6 +259,10 @@ fn file_with_no_seat_names_the_unknown_seat() {
     let again = Bench::new();
     let log = again.root.join("home/.state/ljos/seat-writes.log");
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         &log,
         "2026-11-13T00:00:00.000Z\tunknown-box\tbox\t2c12969d-0000-4000-8000-000000000000\n",
@@ -284,6 +300,10 @@ fn a_filed_issue_is_created_as_the_seat_the_check_named() {
 
 fn open_panel(b: &Bench, env: &[(&str, &str)]) -> Output {
     let prompt = b.root.join("prompt.txt");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&prompt, "so what do we think? is this the right answer?").unwrap();
     let log = b.root.join("run/panel-open.log");
     let mut env = env.to_vec();
@@ -347,11 +367,15 @@ fn a_panel_decision_is_filed_as_the_seat_the_check_named() {
 fn one_module_bundle(b: &Bench) -> String {
     let bundle = b.root.join("bundle");
     std::fs::create_dir_all(bundle.join("locks")).unwrap();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         bundle.join("locks/default.lock.json"),
         r#"{"package":"eOn","version":"2.17.10","toolchain":{"name":"foss","version":"2026.1"},"dependencies":[]}"#,
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         bundle.join("package.sbom.cdx.json"),
         r#"{"dependencies":[]}"#,
@@ -673,6 +697,10 @@ fn ljos_seats_does_not_point_the_check_at_another_file() {
     let b = Bench::new();
     let path = b.roster("seats = [\"saddle\"]\n");
     let own = b.root.join("mine.toml");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&own, "seats = [\"stranger\"]\n").unwrap();
     let out = b.ljos_env(
         &[
@@ -700,6 +728,10 @@ fn a_vissue_file_that_links_to_nothing_refuses_every_write() {
     let b = Bench::new();
     let path = b.roster("");
     std::fs::remove_file(&path).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink(b.root.join("gone.toml"), &path).unwrap();
     for seat in ["saddle", "rohit"] {
         for args in WRITES {
@@ -738,6 +770,10 @@ fn a_vissue_file_that_links_to_nothing_refuses_every_write() {
 
 fn git_tracker(b: &Bench) {
     let git = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("git")
             .arg("-C")
             .arg(&b.tracker)

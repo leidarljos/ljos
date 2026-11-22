@@ -27,6 +27,10 @@ fn blackhole() -> String {
 
 fn large_transcript(dir: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("rollout.jsonl");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let mut file = std::fs::File::create(&path).unwrap();
     let pad = "y".repeat(120_000);
     let start = 1_700_000_000_i64;
@@ -51,6 +55,10 @@ fn run_hook(
     let run = home.join("run");
     std::fs::create_dir_all(&run).unwrap();
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()

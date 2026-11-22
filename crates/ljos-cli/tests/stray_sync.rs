@@ -18,6 +18,10 @@ struct Place {
 }
 
 fn git(dir: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -70,6 +74,10 @@ impl Place {
             std::fs::create_dir_all(dir).unwrap();
         }
         git(&product, &["init", "-q", "-b", "main"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(product.join("README"), "a product\n").unwrap();
         git(&product, &["add", "README"]);
         git(&product, &["commit", "-q", "-m", "product"]);
@@ -82,7 +90,11 @@ impl Place {
     }
 
     fn ljos(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(&self.product)
             .env_clear()
@@ -100,7 +112,7 @@ impl Place {
             .env("VISSUE_NO_ROUTE", "1")
             .stdin(Stdio::null())
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 

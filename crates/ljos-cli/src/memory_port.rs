@@ -470,7 +470,11 @@ fn rename_into_place(from: &Path, to: &Path) -> std::io::Result<()> {
     if let Some(code) = RENAME_FAULT.with(|cell| cell.get()) {
         return Err(std::io::Error::from_raw_os_error(code));
     }
-    std::fs::rename(from, to)
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
+    return std::fs::rename(from, to);
 }
 
 /// Write `bytes` onto `path` without following a symlink, then read the
@@ -478,6 +482,10 @@ fn rename_into_place(from: &Path, to: &Path) -> std::io::Result<()> {
 fn write_in_place(path: &Path, bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     use std::os::unix::fs::OpenOptionsExt;
     {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -510,6 +518,10 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_file_name(tmp_name);
     {
         use std::os::unix::fs::OpenOptionsExt;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -4471,6 +4483,10 @@ mod tests {
 
     fn write_stored(dir: &Path, name: &str, row: &Row) {
         std::fs::create_dir_all(dir).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join(name), serde_json::to_vec_pretty(row).unwrap()).unwrap();
     }
 
@@ -4531,6 +4547,10 @@ mod tests {
             .join("slot-bare");
         std::fs::create_dir_all(&imports).unwrap();
         let bare_import = stored_row("bare-import", "an import row with no seat", &[]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             imports.join("index.jsonl"),
             format!("{}\n", serde_json::to_string(&bare_import).unwrap()),
@@ -4547,6 +4567,10 @@ mod tests {
             "an import that names another seat",
             &["seat:seat-other"],
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             foreign.join("index.jsonl"),
             format!("{}\n", serde_json::to_string(&foreign_row).unwrap()),
@@ -4743,6 +4767,10 @@ mod tests {
         let lane = dir.path().join("handoff");
         std::fs::create_dir(&lane).unwrap();
         let file = lane.join("brine.jsonl");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &file,
             header_with_id("host-a", "brine", text, "2026-11-12T07:30:00Z", "row-1"),
@@ -4751,6 +4779,10 @@ mod tests {
         let done = import_path(&target, &file, None, None, None).unwrap();
         assert_eq!(done.rows, 1);
         assert_eq!(done.unchanged, 0);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &file,
             header_with_id("host-a", "brine", text, "2026-11-12T08:00:00Z", "row-1"),
@@ -4792,6 +4824,10 @@ mod tests {
         for id in ["abc111", "abc222"] {
             let slot = root.join(id);
             std::fs::create_dir_all(&slot).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(slot.join("manifest.json"), b"{}\n").unwrap();
         }
         let err = resolve_import(&place, "abc").unwrap_err();
@@ -4813,7 +4849,15 @@ mod tests {
             .join(path_segment(&place.seat))
             .join(id);
         std::fs::create_dir_all(&slot).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(slot.join("manifest.json"), b"{\"rows\":0}\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(slot.join("index.jsonl"), b"").unwrap();
         let err = integrate(&place, Some(id), false, false, false).unwrap_err();
         let line = err.to_string();
@@ -4869,6 +4913,10 @@ mod tests {
                 n += 1;
             }
             let path = handoff.join(format!("{lane}.jsonl"));
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&path, body).unwrap();
             files.push(path);
         }
@@ -4990,6 +5038,10 @@ mod tests {
                 n += 1;
             }
             let path = handoff.join(format!("{lane}.jsonl"));
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&path, &body).unwrap();
             files.push((path, count));
         }
@@ -5056,6 +5108,10 @@ mod tests {
 
         let changed = handoff.join("hh.jsonl");
         let fresh = "A new kiln stands on the west bench.";
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &changed,
             format!(

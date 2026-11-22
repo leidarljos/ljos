@@ -108,14 +108,26 @@ fn the_how_to_makes_a_seat_that_files_and_has_no_missing_rows() {
     std::fs::create_dir_all(&bin).unwrap();
     for name in ["vissue", "claimdag", "deedar", "packset", "packsetd"] {
         if let Some(path) = which(name) {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             std::os::unix::fs::symlink(path, bin.join(name)).unwrap();
         }
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ljos"), bin.join("ljos")).unwrap();
     let script = format!(
         "set -e\n{}ljos file 'First ticket' -p demo\nljos doctor || true\n",
         org_blocks(&docs("orgmode", "howto-by-hand.org")).concat()
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg("-c")
         .arg(&script)
@@ -165,6 +177,10 @@ fn the_refusal_with_no_tracker_names_the_how_to() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["ready"])
         .current_dir(&home)

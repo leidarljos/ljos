@@ -85,7 +85,15 @@ fn script(dir: &Path, name: &str, body: &str) {
 fn slow_lib(dir: &Path) -> std::path::PathBuf {
     let src = dir.join("slowstat.c");
     let so = dir.join("slowstat.so");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&src, SLOWSTAT).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("gcc")
         .args(["-shared", "-fPIC", "-o"])
         .arg(&so)
@@ -122,6 +130,10 @@ impl Seat {
         std::fs::create_dir_all(tracker.join("Software")).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&slow).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
         let so = slow_lib(dir.path());
         Self {
@@ -137,6 +149,10 @@ impl Seat {
 
     fn run(&self, cwd: &Path, args: &[&str], extra: &[(&str, &str)]) -> (Output, Duration) {
         let path = format!("{}:/usr/bin:/bin", self.bin.display());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(cwd)
@@ -270,6 +286,10 @@ fn a_fifo_git_link_does_not_hold_a_named_project() {
     );
     let cwd = seat.dir.path().join("fifo-cwd");
     std::fs::create_dir_all(&cwd).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let made = Command::new("mkfifo")
         .arg(cwd.join(".git"))
         .status()
@@ -323,6 +343,10 @@ fn an_umbrella_file_does_not_open_every_child_board() {
     );
     let nested = seat.tracker.join("Software/alpha/deep");
     std::fs::create_dir_all(&nested).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let made = Command::new("mkfifo")
         .arg(nested.join("issues.org"))
         .status()

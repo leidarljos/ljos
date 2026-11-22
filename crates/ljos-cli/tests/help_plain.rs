@@ -14,6 +14,10 @@ use std::process::Command;
 const UNEXPLAINED: &[&str] = &["pack", "writer", "island", "seed", "deed", "sitting"];
 
 fn run(args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env("LJOS_OFF", "1")

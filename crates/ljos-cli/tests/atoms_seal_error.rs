@@ -17,12 +17,20 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 fn keygen(path: &Path) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let made = Command::new("age-keygen")
         .arg("-o")
         .arg(path)
         .output()
         .expect("age-keygen must be installed");
     assert!(made.status.success(), "age-keygen");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let public = Command::new("age-keygen")
         .arg("-y")
         .arg(path)
@@ -33,6 +41,10 @@ fn keygen(path: &Path) -> String {
 }
 
 fn git(cwd: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let status = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -103,11 +115,19 @@ fn a_recipient_age_refuses_is_named_on_a_large_log() {
     git(&repo, &["config", "core.hooksPath", "/dev/null"]);
     git(&repo, &["config", "user.name", "probe"]);
     git(&repo, &["config", "user.email", "probe@example.invalid"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         repo.join(".ljos/sync.toml"),
         format!("name = \"probe\"\nrecipients = [\"{me}\", \"age1notakey\"]\n"),
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         config.join("ljos/sync.toml"),
         format!("repos = [\"{}\"]\n", repo.display()),
@@ -124,6 +144,10 @@ fn a_recipient_age_refuses_is_named_on_a_large_log() {
         })
         .collect();
     let url = pack(serde_json::json!({ "atoms": atoms }).to_string());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("sync")
         .env_clear()

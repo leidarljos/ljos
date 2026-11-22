@@ -131,6 +131,10 @@ struct Decoy {
 
 impl Drop for Decoy {
     fn drop(&mut self) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill")
             .args(["-9", &self.pid.to_string()])
             .stdout(Stdio::null())
@@ -151,6 +155,10 @@ fn spawn_decoy(bin: &Path, home: &Path, root: &Path) -> Decoy {
     std::fs::create_dir_all(home).unwrap();
     let port_file = root.join(format!("decoy-{}", std::process::id()));
     let _ = std::fs::remove_file(&port_file);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(bin)
         .arg(&port_file)
         .arg("daemon")
@@ -213,7 +221,15 @@ fn standin_bin(root: &Path) -> PathBuf {
     if bin.is_file() {
         return bin;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&src, STANDIN_C).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("cc")
         .args(["-O2", "-o"])
         .arg(&bin)
@@ -237,6 +253,10 @@ impl Writer {
     fn spawn(bin: &Path, home: &Path, root: &Path) -> Self {
         let port_file = root.join(format!("port-{}", std::process::id()));
         let _ = std::fs::remove_file(&port_file);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let child = Command::new(bin)
             .arg(&port_file)
             .env_clear()
@@ -283,6 +303,10 @@ struct Case {
 }
 
 fn ljos(seat: &Seat, path: &str, state: &Path, port: u16, args: &[&str]) -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
@@ -426,7 +450,7 @@ fn walk_commands(seat: &Seat, case: &Case, dead: u16) {
     assert_fault(case, "recall", &recall);
 
     let payload = state.join("prompt.json");
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         &payload,
         r#"{"hook_event_name":"UserPromptSubmit","session_id":"down-1","prompt":"where does the kiln fire at dusk"}"#,
     )
@@ -436,6 +460,10 @@ fn walk_commands(seat: &Seat, case: &Case, dead: u16) {
         env!("CARGO_BIN_EXE_ljos"),
         payload.display()
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let hook = Command::new("sh")
         .arg("-c")
         .arg(&script)
@@ -523,6 +551,10 @@ fn walk_mcp(seat: &Seat, case: &Case, dead: u16) {
         .root
         .join(format!("mcp-{}", case.name.replace(' ', "-")));
     std::fs::create_dir_all(&state).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("HOME", seat.home())
@@ -552,6 +584,10 @@ fn walk_mcp(seat: &Seat, case: &Case, dead: u16) {
     let pid = child.id();
     thread::spawn(move || {
         thread::sleep(Duration::from_secs(90));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut stdin = child.stdin.take().unwrap();
@@ -667,6 +703,10 @@ fn walk_mcp(seat: &Seat, case: &Case, dead: u16) {
 
     // A second server calls every listed tool. The queue is already full,
     // so a pack failure still has to name the same command.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("HOME", seat.home())
@@ -696,6 +736,10 @@ fn walk_mcp(seat: &Seat, case: &Case, dead: u16) {
     let pid = child.id();
     thread::spawn(move || {
         thread::sleep(Duration::from_secs(120));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut stdin = child.stdin.take().unwrap();
@@ -927,6 +971,10 @@ fn mesh_push_names_a_queued_lesson_instead_of_zero_memories() {
         "kind": "lesson",
         "seat": "ada"
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(state.join("ljos/note-queue.jsonl"), format!("{row}\n")).unwrap();
     let dest = seat.root.join("handoff");
     let mut cmd = ljos(

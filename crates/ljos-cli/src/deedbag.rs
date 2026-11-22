@@ -209,6 +209,10 @@ fn copy_payload(store: &Path, hex: &str, folder: &Path) -> Result<()> {
     }
     let dir = folder.join("bytes");
     std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "copies a file that is not a git hook"
+    )]
     std::fs::copy(&src, dir.join(hex)).with_context(|| format!("copying sha256:{hex}"))?;
     Ok(())
 }
@@ -255,6 +259,10 @@ fn write_link(
 fn write_two_line(dest: &Path, linked: &str, digests: &mut HashMap<String, String>) -> Result<()> {
     let digest = deed_digest(digests, linked)?;
     let body = format!("{linked}\n{digest}\n");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dest, body).with_context(|| format!("writing {}", dest.display()))?;
     Ok(())
 }
@@ -319,6 +327,10 @@ fn write_sources(
         body.push_str(&digest);
         body.push('\n');
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&dest, body).context("writing sources")?;
     Ok(())
 }
@@ -616,6 +628,10 @@ fn rename_at(
     use std::os::fd::AsRawFd;
     // SAFETY: both fds are open directories and both names are
     // NUL-terminated. renameat follows neither name.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     if unsafe {
         libc::renameat(
             from_dir.as_raw_fd(),
@@ -634,6 +650,10 @@ fn open_subdir(dir: &std::fs::File, name: &std::ffi::CStr) -> Result<std::fs::Fi
     use std::os::fd::{AsRawFd, FromRawFd};
     // SAFETY: dir is an open directory fd and name is NUL-terminated.
     // O_NOFOLLOW refuses a symlink swapped in for this entry.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let fd = unsafe {
         libc::openat(
             dir.as_raw_fd(),
@@ -731,6 +751,10 @@ fn rename_scratch(scratch: &Path, parent: &std::fs::File, staged: &std::ffi::CSt
         .and_then(|n| n.to_str())
         .context("the deed bag has no name")?;
     let from = c_component(from_name)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let src = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
@@ -777,6 +801,10 @@ fn copy_children(from: &Path, dest: &std::fs::File) -> Result<()> {
             let bytes = std::fs::read(entry.path())?;
             // SAFETY: dest is an open directory fd and cname is NUL-terminated.
             // O_EXCL with O_NOFOLLOW makes a new file or fails.
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "opens a path that is not a git hook"
+            )]
             let fd = unsafe {
                 libc::openat(
                     dest.as_raw_fd(),
@@ -864,11 +892,19 @@ mod tests {
         let prior = "deed-file-old";
         let digest = format!("sha256:{}", "ab".repeat(32));
         std::fs::create_dir_all(store.join("deeds")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             store.join("deeds").join(format!("{id}.supersedes")),
             format!("{prior}\n"),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             store.join("deeds").join(format!("{prior}.successor")),
             format!("{id}\n"),
@@ -879,10 +915,22 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::create_dir_all(&prior_folder).unwrap();
         let signed = format!("{prior}\n{digest}\ned25519:keep\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(folder.join("supersedes"), &signed).unwrap();
         let successor = format!("{id}\n{digest}\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(prior_folder.join("successor"), &successor).unwrap();
         let sources = format!("{prior}\t{digest}\ned25519:keep\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(folder.join("sources"), &sources).unwrap();
         seam(
             &store,
@@ -922,14 +970,26 @@ mod tests {
         let bag = dir.path().join("bag");
         let id = "deed-file-note";
         let outside = dir.path().join("outside");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&outside, b"not a digest\n").unwrap();
         std::fs::create_dir_all(store.join("deeds")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             store.join("deeds").join(format!("{id}.supersedes")),
             "deed-file-old\n",
         )
         .unwrap();
         std::fs::create_dir_all(bag.join(id)).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&outside, bag.join(id).join("supersedes")).unwrap();
         let err = seam(
             &store,
@@ -946,11 +1006,19 @@ mod tests {
         assert_eq!(std::fs::read(&outside).unwrap(), b"not a digest\n");
         std::fs::remove_file(bag.join(id).join("supersedes")).unwrap();
         let digest = format!("sha256:{}", "ab".repeat(32));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             bag.join(id).join("supersedes"),
             format!("deed-file-old\n{digest}\n"),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&outside, bag.join(id).join("sources")).unwrap();
         let err = seam(
             &store,
@@ -974,8 +1042,16 @@ mod tests {
         let bag = dir.path().join("bag");
         let id = "deed-file-note";
         let outside = dir.path().join("outside");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&outside, b"deed-file-old\n").unwrap();
         std::fs::create_dir_all(store.join("deeds")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(
             &outside,
             store.join("deeds").join(format!("{id}.supersedes")),
@@ -1005,8 +1081,16 @@ mod tests {
         let id = "deed-file-note";
         let hex = "cd".repeat(32);
         let outside = dir.path().join("outside.txt");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&outside, b"secret outside the store").unwrap();
         std::fs::create_dir_all(store.join("bytes")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&outside, store.join("bytes").join(&hex)).unwrap();
         std::fs::create_dir_all(bag.join(id)).unwrap();
         let err = seam(
@@ -1041,6 +1125,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("seat");
         std::fs::create_dir_all(dest.join("kept")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dest.join("kept").join("marker"), b"old bag").unwrap();
         // SAFETY: geteuid only reads this process's credentials.
         assert_ne!(
@@ -1057,20 +1145,40 @@ mod tests {
         let scratch = tempfile::tempdir_in(&parent_dir).unwrap();
         std::fs::create_dir_all(scratch.path().join("fresh")).unwrap();
         let blocked = scratch.path().join("fresh").join("blocked");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&blocked, b"new").unwrap();
         let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
         perms.set_mode(0o000);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&blocked, perms).unwrap();
         let mut dir_perms = std::fs::metadata(&parent_dir).unwrap().permissions();
         dir_perms.set_mode(0o555);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&parent_dir, dir_perms).unwrap();
         let parent = std::fs::File::open(dir.path()).unwrap();
         let err = publish(&parent, "seat", scratch.path());
         let mut dir_perms = std::fs::metadata(&parent_dir).unwrap().permissions();
         dir_perms.set_mode(0o755);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&parent_dir, dir_perms).unwrap();
         let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
         perms.set_mode(0o644);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&blocked, perms).unwrap();
         let err = err.expect_err("publish of an unreadable tree succeeded");
         let text = format!("{err:#}");
@@ -1150,6 +1258,10 @@ mod tests {
             } else {
                 outside.join("deeds")
             };
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             std::os::unix::fs::symlink(&target, &link).unwrap();
             git(&peer, &["add", "-A"]);
             git(&peer, &["commit", "-q", "-m", "link"]);
@@ -1165,6 +1277,10 @@ mod tests {
             );
             let scratch = dir.path().join("scratch");
             std::fs::create_dir_all(scratch.join("deed-1")).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(scratch.join("deed-1/proof.txt"), b"the new bag").unwrap();
             let placed = publish_bag(&root, "cloudseat", &scratch);
             assert!(!bag_holds(&outside, b"the new bag"), "{linked}: {placed:?}");
@@ -1187,6 +1303,10 @@ mod tests {
             std::fs::create_dir_all(&outside).unwrap();
             let scratch = dir.path().join("scratch");
             std::fs::create_dir_all(scratch.join("deed-1")).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(scratch.join("deed-1/proof.txt"), b"the new bag").unwrap();
             let hook_root = root.clone();
             let hook_outside = outside.clone();
@@ -1198,7 +1318,15 @@ mod tests {
                     if let Some(parent) = saved.parent() {
                         std::fs::create_dir_all(parent).unwrap();
                     }
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "renames a path that is not a git hook"
+                    )]
                     std::fs::rename(&path, &saved).unwrap();
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "links a path that is not a git hook"
+                    )]
                     std::os::unix::fs::symlink(&hook_outside, &path).unwrap();
                 }));
             });

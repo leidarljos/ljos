@@ -81,6 +81,10 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
     let home = root.path().join("home");
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
     std::fs::create_dir_all(root.path().join("run")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.join(".cursor/mcp.json"),
         r#"{"mcpServers":{"ljos":{"command":"/no/such/ljos-mcp"}}}"#,
@@ -120,6 +124,10 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
     let issue = doc.headings[0].id.clone();
     let (port, searches) = stall_search();
     let path = format!("{}:/usr/bin:/bin", root.path().display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["sitting", &issue, "--verbose"])
         .current_dir(root.path())
@@ -273,6 +281,10 @@ fn a_sitting_reads_related_memories_with_one_bounded_search() {
     let home = root.path().join("home");
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
     std::fs::create_dir_all(root.path().join("run")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.join(".cursor/mcp.json"),
         r#"{"mcpServers":{"ljos":{"command":"/no/such/ljos-mcp"}}}"#,
@@ -313,6 +325,10 @@ fn a_sitting_reads_related_memories_with_one_bounded_search() {
     let lines = Arc::new(Mutex::new(Vec::new()));
     let port = search_pack(Arc::clone(&lines));
     let path = format!("{}:/usr/bin:/bin", root.path().display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["sitting", &issue, "--verbose"])
         .current_dir(root.path())
@@ -435,6 +451,10 @@ fn sitting_fixture(root: &Path) -> (String, std::path::PathBuf, std::path::PathB
     let home = root.join("home");
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
     std::fs::create_dir_all(root.join("run")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.join(".cursor/mcp.json"),
         r#"{"mcpServers":{"ljos":{"command":"/no/such/ljos-mcp"}}}"#,
@@ -478,6 +498,10 @@ fn run_sitting(root: &Path, url: &str) -> (bool, String, Duration) {
     let (issue, home, tracker) = sitting_fixture(root);
     let path = format!("{}:/usr/bin:/bin", root.display());
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["sitting", &issue, "--verbose"])
         .current_dir(root)

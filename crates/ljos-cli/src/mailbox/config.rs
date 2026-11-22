@@ -146,6 +146,10 @@ pub(crate) fn open_owned(path: &Path, what: &str) -> Result<Option<(File, PathBu
         Err(e) => return Err(e).with_context(|| format!("{what} {}", path.display())),
     };
     let at = dir.join(name);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let file = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)

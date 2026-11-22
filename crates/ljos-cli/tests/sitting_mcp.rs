@@ -69,6 +69,10 @@ impl Host {
         let log = root.path().join("calls.log");
         let home = root.path().join("home");
         std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             home.join(".cursor/mcp.json"),
             r#"{"mcpServers":{"ljos":{"command":"/no/such/ljos-mcp"}}}"#,
@@ -117,7 +121,11 @@ impl Host {
     fn ljos(&self, args: &[&str]) -> std::process::Output {
         let home = self.root.path().join("home");
         let path = format!("{}:/usr/bin:/bin", self.root.path().display());
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.root.path())
             .env_clear()
@@ -134,7 +142,7 @@ impl Host {
             .env("PACKSET_URL", format!("http://127.0.0.1:{}", pack()))
             .stdin(Stdio::null())
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn calls(&self) -> String {

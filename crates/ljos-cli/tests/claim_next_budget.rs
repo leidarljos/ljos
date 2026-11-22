@@ -35,6 +35,10 @@ fn ljos(dir: &Path, claim_wait: Option<u64>, args: &[&str]) -> (Output, Duration
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&runtime).unwrap();
     let path = format!("{dir}:/usr/bin:/bin", dir = dir.display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .current_dir(dir)

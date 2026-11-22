@@ -58,11 +58,19 @@ impl Seat {
         for name in ["home", "run", "tmp", "tracker/Software/anneal"] {
             std::fs::create_dir_all(dir.path().join(name)).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.path().join("tracker/vissue.toml"),
             "prefix = \"Software\"\n",
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.path().join("tracker/Software/anneal/issues.org"), ORG).unwrap();
         Self { dir }
     }
@@ -72,6 +80,10 @@ impl Seat {
     fn hold(&self, issue: &str) {
         let run = self.dir.path().join("run/ljos");
         std::fs::create_dir_all(&run).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             run.join("hold-sitting"),
             format!("saddle\nsaddle\n1\nljos\n2026-01-01T00:00:00Z\n{issue}\n-\n"),
@@ -90,7 +102,11 @@ impl Seat {
     fn run(&self, args: &[&str]) -> Output {
         let home = self.dir.path().join("home");
         let path = format!("{}:/usr/bin:/bin", self.dir.path().display());
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("PATH", path)
@@ -111,7 +127,7 @@ impl Seat {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 

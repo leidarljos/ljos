@@ -55,6 +55,10 @@ impl Seat {
 
     fn command(&self, bin: &str, args: &[&str]) -> Command {
         let path = format!("{}:/usr/bin:/bin", self.home.path().join("bin").display());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(bin);
         cmd.args(args)
             .current_dir(self.home.path())
@@ -111,6 +115,10 @@ fn stage_doctor_bins(home: &Path) {
     ] {
         let dest = bin.join(name);
         if !dest.exists() {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             symlink(src, dest).unwrap();
         }
     }

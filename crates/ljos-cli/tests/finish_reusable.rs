@@ -32,11 +32,19 @@ impl World {
             std::fs::create_dir_all(path).unwrap();
         }
         script(&root.path().join("bin/deedar"), "#!/bin/sh\necho head\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.path().join("tracker/vissue.toml"),
             "prefix = \"Software\"\n",
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.path().join("tracker/Software/ljos/issues.org"),
             "\
@@ -60,7 +68,11 @@ impl World {
 
     fn run(&self, args: &[&str]) -> Output {
         let home = self.root.path().join("home");
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env(
@@ -86,7 +98,7 @@ impl World {
             .current_dir(self.root.path())
             .stdin(Stdio::null())
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn org(&self) -> String {

@@ -1197,6 +1197,10 @@ mod tests {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).expect("seat dir");
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, [seed; 32]).expect("seed");
         sign_entry(unsigned, &seat).unwrap_or_else(|err| panic!("seat-{seed}: {err:#}"))
     }
@@ -1545,6 +1549,10 @@ mod tests {
         let text = serde_json::to_string(&signed).expect("json");
         let checked = |body: &str| {
             let dir = tempfile::tempdir().expect("tempdir");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(dir.path().join("entry.json"), body).expect("write");
             check_dir(dir.path())
         };
@@ -2171,11 +2179,19 @@ mod tests {
         }
         for (cast_name, withdraw_name) in [("a.json", "b.json"), ("b.json", "a.json")] {
             let dir = tempfile::tempdir().expect("tempdir");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(
                 dir.path().join(cast_name),
                 serde_json::to_vec(&cast).expect("json"),
             )
             .expect("write cast");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(
                 dir.path().join(withdraw_name),
                 serde_json::to_vec(&withdrawal).expect("json"),
@@ -2262,11 +2278,19 @@ mod tests {
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
             5,
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.path().join("question.json"),
             serde_json::to_string_pretty(&q).expect("json"),
         )
         .expect("write question");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.path().join("ballot.json"),
             serde_json::to_string_pretty(&b).expect("json"),
@@ -2475,6 +2499,10 @@ mod tests {
         );
         let line = format!("alpha/run-101 {}\n", other.signature.key);
         let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&pin_path, line).expect("pin");
         let err = check_entries(std::slice::from_ref(&entry)).expect_err("pinned key");
         let text = err_chain(&err);
@@ -2491,12 +2519,20 @@ mod tests {
             unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
         });
         let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&pin_path, "alpha/run-101 deadbeef\n").expect("pin");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&pin_path).expect("meta").permissions();
             perms.set_mode(0o000);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "sets the mode of a path that is not a git hook"
+            )]
             std::fs::set_permissions(&pin_path, perms).expect("chmod");
         }
         let entry = sign_as(
@@ -2520,6 +2556,10 @@ mod tests {
             unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
         });
         let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(root.path().join("gone"), &pin_path).expect("symlink");
         let entry = sign_as(
             ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
@@ -2550,6 +2590,10 @@ mod tests {
             "alpha/run-101 {}\nalpha/run-101 {}\n",
             entry.signature.key, entry.signature.key
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
         let err = check_entries(std::slice::from_ref(&entry)).expect_err("duplicate pin voter");
         assert!(err_chain(&err).contains("duplicate"), "{}", err_chain(&err));
@@ -2572,6 +2616,10 @@ mod tests {
             2,
         );
         let line = format!("seat-a {}\n", pinned.signature.key);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
         let err = check_entries(std::slice::from_ref(&entry)).expect_err("seat pin mismatch");
         assert!(err_chain(&err).contains("seat-a"), "{}", err_chain(&err));
@@ -2594,6 +2642,10 @@ mod tests {
             format!("inky {k1}\nmallory/inky {k9}\n"),
             format!("alpha/inky {k1}\nmallory/inky {k9}\n"),
         ] {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&pin_path, &rows).expect("pin");
             let Err(err) = check_entries(std::slice::from_ref(&mallory)) else {
                 panic!("a second key voted under a pinned seat: {rows}");
@@ -2623,6 +2675,10 @@ mod tests {
             1,
         );
         let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&pin_path, format!("seat-a {}\n", pinned.signature.key)).expect("pin");
         entry.signature.key = entry.signature.key.to_ascii_uppercase();
         check_entries(std::slice::from_ref(&entry))
@@ -2654,6 +2710,10 @@ mod tests {
             "seat_a",
             "Alpha/run-101",
         ] {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&pin_path, format!("{voter} {key}\n")).expect("pin");
             let Err(err) = check_entries(std::slice::from_ref(&entry)) else {
                 panic!("the {voter:?} pin row was skipped");
@@ -2689,6 +2749,10 @@ mod tests {
         .iter()
         .map(|row| format!("{row} {key}\n"))
         .collect();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), rows).expect("pin");
         for (voter, seat) in [
             ("alpha/inky", "inky"),
@@ -2724,6 +2788,10 @@ mod tests {
             ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
             1,
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.path().join(crate::ballot_sig::PIN_FILE),
             format!("inky {}\n", pinned.signature.key),
@@ -2749,6 +2817,10 @@ mod tests {
         let bare = sign_as(ballot_entry("alpha/inky", "accept", at), 1);
         let tagged = sign_as(ballot_entry("beta/inky", "accept", at), 2);
         let (key1, key2) = (&bare.signature.key, &tagged.signature.key);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&pin_path, format!("inky {key1}\ninky@39u {key2}\n")).expect("pin");
         let entries = [bare.clone(), tagged.clone()];
         let Err(err) = check_entries(&entries) else {
@@ -2764,6 +2836,10 @@ mod tests {
         );
         let read = tally(&[later, bare.clone()]).expect("tally");
         assert!(read.is_empty(), "{read:?}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&pin_path, format!("inky {key1}\ninky@39u {key1}\n")).expect("pin");
         check_entries(std::slice::from_ref(&bare)).expect("one key under both names");
         let err = check_entries(std::slice::from_ref(&tagged)).expect_err("an unpinned key");
@@ -2791,6 +2867,10 @@ mod tests {
             2,
         );
         let line = format!("run-101 {}\n", pinned.signature.key);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
         let err = check_entries(std::slice::from_ref(&entry))
             .expect_err("alpha/run-101 passed beside a run-101 pin row");
@@ -2814,6 +2894,10 @@ mod tests {
             1,
         );
         let line = format!("seat-a {}\n", pinned.signature.key);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), line).expect("pin");
         let other = sign_unchecked(
             ballot_entry("alpha/Seat-a", "accept", "2026-10-21T11:00:00Z"),
@@ -2834,6 +2918,10 @@ mod tests {
 
     fn check_value(value: &serde_json::Value) -> anyhow::Result<CheckReport> {
         let dir = tempfile::tempdir().expect("tempdir");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.path().join("entry.json"),
             serde_json::to_vec(value).expect("json"),
@@ -2844,6 +2932,10 @@ mod tests {
 
     fn check_raw(raw: &str) -> anyhow::Result<CheckReport> {
         let dir = tempfile::tempdir().expect("tempdir");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.path().join("entry.json"), raw).expect("write");
         check_dir(dir.path())
     }

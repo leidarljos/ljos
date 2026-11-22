@@ -30,7 +30,15 @@ impl Home {
         ] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join("tracker/Software/demo/issues.org"),
             "\
@@ -57,11 +65,19 @@ impl Home {
     }
 
     fn write_issues(&self, body: &str) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(self.root.join("tracker/Software/demo/issues.org"), body).unwrap();
     }
 
     fn run(&self, args: &[&str], extra: &[(&str, &str)]) -> Output {
         let home = self.root.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(self.root.join("work"))
@@ -455,7 +471,15 @@ fn a_read_only_store_names_doctor_and_exits_1() {
     let home = Home::new();
     let config = home.root.join("home/.config");
     let mode = std::fs::Permissions::from_mode(0o555);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&config, mode).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(config.join("ljos"), std::fs::Permissions::from_mode(0o555)).unwrap();
     let out = home.run(
         &[
@@ -467,7 +491,15 @@ fn a_read_only_store_names_doctor_and_exits_1() {
         ],
         &[("LJOS_SEAT", "alice")],
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     let _open = std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     let _open =
         std::fs::set_permissions(config.join("ljos"), std::fs::Permissions::from_mode(0o755));
     let said = text(&out);
@@ -536,6 +568,10 @@ fn a_missing_tracker_names_ljos_onboard_and_exits_1() {
     std::fs::create_dir_all(&work).unwrap();
     let path_env = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
     let run_unboarded = |args: &[&str], extra_root: Option<&std::path::Path>| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(&work)
@@ -622,6 +658,10 @@ fn file_without_a_project_names_the_command_to_run() {
 #[test]
 fn a_corrupt_tracker_config_names_doctor() {
     let home = Home::new();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(home.root.join("tracker/vissue.toml"), "{bad toml").unwrap();
     let out = home.run(&["show", "demo-kiln"], &[("LJOS_SEAT", "alice")]);
     let said = text(&out);

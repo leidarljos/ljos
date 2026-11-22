@@ -51,6 +51,10 @@ fn session(program: &str, args: &[&str]) -> (String, String, Duration) {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(work.join("Software")).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let git = Command::new("git")
         .args(["init", "-q"])
         .current_dir(&work)
@@ -73,6 +77,10 @@ fn session(program: &str, args: &[&str]) -> (String, String, Duration) {
             &format!("#!/bin/sh\nprintf '%s\\n' \"{name} $*\" >> '{log_path}'\nexit 1\n"),
         );
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(program)
         .args(args)
         .env_clear()
@@ -88,6 +96,10 @@ fn session(program: &str, args: &[&str]) -> (String, String, Duration) {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(20));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let lines = [

@@ -33,6 +33,10 @@ fn executable(path: &Path, body: &str) {
 }
 
 fn sha256(path: &Path) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sha256sum").arg(path).output().unwrap();
     assert!(out.status.success());
     String::from_utf8_lossy(&out.stdout)
@@ -56,6 +60,10 @@ fn release(root: &Path, sum: Option<&str>) -> PathBuf {
     );
     executable(&stage.join("ljos"), "#!/bin/sh\necho \"release ljos $*\"\n");
     let tarball = rel.join(asset());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let made = Command::new("tar")
         .arg("-czf")
         .arg(&tarball)
@@ -66,6 +74,10 @@ fn release(root: &Path, sum: Option<&str>) -> PathBuf {
         .unwrap();
     assert!(made.status.success());
     let sum = sum.map_or_else(|| sha256(&tarball), str::to_string);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         rel.join(format!("{}.sha256", asset())),
         format!("{sum}  {}\n", asset()),
@@ -79,6 +91,10 @@ fn launch(home: &Path, rel: &Path, fetch: &str, shims: Option<&Path>) -> Command
         || "/usr/bin:/bin".to_string(),
         |dir| format!("{}:/usr/bin:/bin", dir.display()),
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new("sh");
     cmd.arg(launcher())
         .args(["ljos-mcp", "--probe"])
@@ -193,6 +209,10 @@ fn a_stale_fetch_lock_is_taken_over() {
     let bin = home.join(".local/bin");
     fs::create_dir_all(&bin).unwrap();
     let lock = bin.join(".ljos-plugin-fetch");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&lock, "4194303\n").unwrap();
     fs::create_dir_all(bin.join(".ljos-plugin-stage.4194302/unpacked")).unwrap();
     let rel = release(root.path(), None);
@@ -217,6 +237,10 @@ fn a_lock_with_no_pid_is_taken_over_at_once() {
         fs::create_dir_all(&bin).unwrap();
         let lock = bin.join(".ljos-plugin-fetch");
         if planted == "empty file" {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             fs::write(&lock, "").unwrap();
         } else {
             fs::create_dir(&lock).unwrap();
@@ -276,6 +300,10 @@ fn two_launchers_over_one_dead_lock_both_start_the_server() {
     let bin = home.join(".local/bin");
     fs::create_dir_all(&bin).unwrap();
     let lock = bin.join(".ljos-plugin-fetch");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&lock, "4194303\n").unwrap();
     let shims = root.path().join("shims");
     fs::create_dir_all(&shims).unwrap();

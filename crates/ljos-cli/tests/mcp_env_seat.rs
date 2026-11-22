@@ -38,6 +38,10 @@ fn call_mcp_env(
 ) -> Vec<serde_json::Value> {
     let runtime = home.join("run");
     std::fs::create_dir_all(&runtime).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
         .env("PATH", path)
@@ -67,6 +71,10 @@ fn call_mcp_env(
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(30));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut stdin = child.stdin.take().unwrap();
@@ -169,7 +177,15 @@ fn mcp_write_refusal_explains_ljos_seat_and_explicit_seat_succeeds() {
     std::fs::create_dir_all(&alice_home).unwrap();
     std::fs::create_dir_all(&bob_home).unwrap();
     std::fs::create_dir_all(tracker.join("Software/demo")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         tracker.join("Software/demo/issues.org"),
         "\
@@ -284,6 +300,10 @@ Options: keep, drop
 fn ljos_vote_schema_describes_issue_options() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -344,6 +364,10 @@ fn ljos_vote_schema_describes_issue_options() {
 
 fn listed_tools() -> Vec<serde_json::Value> {
     let dir = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -390,7 +414,15 @@ fn a_stamped_conversation_writes_under_ljos_seat_and_the_schema_says_so() {
     let tracker = dir.path().join("tracker");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(tracker.join("Software/demo")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         tracker.join("Software/demo/issues.org"),
         "\

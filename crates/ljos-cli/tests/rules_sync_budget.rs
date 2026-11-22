@@ -52,11 +52,19 @@ fn hab(name: &str) -> Hab {
         std::fs::create_dir_all(dir).unwrap();
     }
     use std::os::unix::fs::PermissionsExt;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&hab.run, std::fs::Permissions::from_mode(0o700)).unwrap();
     hab
 }
 
 fn git(cwd: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let status = Command::new("git")
         .arg("-c")
         .arg("core.hooksPath=/dev/null")
@@ -80,6 +88,10 @@ fn ident(cwd: &Path) {
 /// A tracker whose fetch sleeps `delay` seconds, holding the Alan rule
 /// in another machine's plaintext file.
 fn tracker(h: &Hab, delay: &str) -> PathBuf {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let pub_out = Command::new("age-keygen").output().expect("age-keygen");
     assert!(pub_out.status.success(), "age-keygen");
     let text = String::from_utf8_lossy(&pub_out.stdout);
@@ -89,6 +101,10 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
         .expect("age public key")
         .to_string();
     let bare = h.root.join("remote.git");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let status = Command::new("git")
         .args(["init", "-q", "--bare", "-b", "main"])
         .arg(&bare)
@@ -97,6 +113,10 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
         .unwrap();
     assert!(status.success());
     let other = h.root.join("other");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let status = Command::new("git")
         .args(["clone", "-q"])
         .arg(&bare)
@@ -107,6 +127,10 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
     assert!(status.success());
     ident(&other);
     std::fs::create_dir_all(other.join(".ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         other.join(".ljos/sync.toml"),
         format!("name = \"probe\"\nrecipients = [\"{rcpt}\"]\n"),
@@ -116,6 +140,10 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
     git(&other, &["commit", "-q", "-m", "scope"]);
     git(&other, &["push", "-q", "origin", "HEAD:main"]);
     let tracker = h.root.join("tracker");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let status = Command::new("git")
         .args(["clone", "-q"])
         .arg(&bare)
@@ -126,6 +154,10 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
     assert!(status.success());
     ident(&tracker);
     std::fs::create_dir_all(other.join(".ljos/user-rules")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(other.join(".ljos/user-rules/other.json"), ALAN).unwrap();
     git(&other, &["add", "-A"]);
     git(&other, &["commit", "-q", "-m", "rule"]);
@@ -144,6 +176,10 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
 }
 
 fn hook(h: &Hab, tracker: &Path, pack: Option<String>) -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook")
         .env_clear()

@@ -35,6 +35,10 @@ fn a_consensus_reads_each_ticket_once() {
         dir.path().display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["consensus", "demo-1", "--no-file"])
         .current_dir(dir.path())

@@ -81,9 +81,13 @@ fn put(path: &Path, call: &Call) {
         return;
     }
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes and renames a file that is not a git hook"
+    )]
     if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
-    }
+    };
 }
 
 fn read(path: &Path) -> Option<Call> {
@@ -477,11 +481,15 @@ fn claim_from(dirs: &[PathBuf], now: u64, fits: impl Fn(&Call) -> bool) -> Optio
 /// The first of `found` this process takes, so no other process takes it
 /// too. Its file is left as taken for [`spent`].
 fn take_newest(found: Vec<(PathBuf, Call)>) -> Option<Call> {
-    found.into_iter().find_map(|(path, c)| {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
+    return found.into_iter().find_map(|(path, c)| {
         std::fs::rename(&path, path.with_extension(TAKEN))
             .is_ok()
             .then_some(c)
-    })
+    });
 }
 
 /// The session and subagent of a terminal harness MCP call, by the tool use id
@@ -755,6 +763,10 @@ mod tests {
         let line = "vote demo-a --for ship --used none --as reviewer";
         let argv = words(line);
         let mine = crate::proc_tree::ancestors();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut sibling = std::process::Command::new("sleep")
             .arg("30")
             .spawn()

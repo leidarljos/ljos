@@ -18,6 +18,10 @@ fn script(path: &Path, version: &str) {
 }
 
 fn real_version() -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("--version")
         .output()
@@ -55,7 +59,7 @@ impl Seat {
         script(&bin_ljos, bin_version);
         script(&hook_ljos, hook_version);
         let hooks = root.join("hooks.json");
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             &hooks,
             format!(
                 "{{\"hooks\":{{\"UserPromptSubmit\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"{} hook\"}}]}}]}}}}\n",
@@ -64,9 +68,17 @@ impl Seat {
         )
         .unwrap();
         let placeholder = root.join("placeholder");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&placeholder, "leave this placeholder\n").unwrap();
         let config = root.join("config/ljos");
         std::fs::create_dir_all(&config).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             config.join("harnesses.toml"),
             format!(
@@ -89,6 +101,10 @@ impl Seat {
     }
 
     fn doctor(&self, all: bool) -> (i32, String) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.arg("doctor");
         if all {
@@ -178,6 +194,10 @@ fn a_mismatch_is_a_label_and_a_match_is_silent() {
     assert_eq!(lines, 2, "one line per mismatch:\n{text}");
     mismatch.untouched();
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let prompt = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["hook", "--prompt", "--text"])
         .env_clear()

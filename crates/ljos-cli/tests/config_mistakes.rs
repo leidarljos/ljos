@@ -39,14 +39,26 @@ impl World {
     }
 
     fn write_user(&self, body: &str) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(self.user_toml(), body).unwrap();
     }
 
     fn write_project(&self, body: &str) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(self.project.join("ljos.toml"), body).unwrap();
     }
 
     fn command(&self, args: &[&str], extra: &[(&str, &str)]) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(&self.project)
@@ -105,6 +117,10 @@ impl World {
     }
 
     fn mcp(&self, extra: &[(&str, &str)]) -> (bool, String) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.current_dir(&self.project)
             .env_clear()
@@ -292,12 +308,20 @@ fn an_unreadable_file_names_the_file() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
     }
     shows(&world, &[], &format!("{}: cannot be read", path.display()));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 }
@@ -332,6 +356,10 @@ fn an_unknown_ljos_variable_names_the_nearest_one() {
 fn an_environment_value_wins_and_names_both() {
     let world = world();
     let graph = world.root.join("home-graph.json");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&graph, "{}\n").unwrap();
     world.write_user(&format!("graphify = \"{}\"\n", graph.display()));
     shows(&world, &[("LJOS_GRAPHIFY", "off")], "LJOS_GRAPHIFY is used");
@@ -349,7 +377,15 @@ fn a_project_file_shadows_the_home_file() {
     let world = world();
     let home_graph = world.root.join("home-graph.json");
     let project_graph = world.root.join("project-graph.json");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&home_graph, "{}\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&project_graph, "{}\n").unwrap();
     world.write_user(&format!(
         "graphify = \"{}\"\nquorum = 4\n",

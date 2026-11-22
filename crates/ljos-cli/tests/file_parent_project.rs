@@ -27,6 +27,10 @@ fn a_child_is_filed_in_its_parents_project() {
         std::env::var("PATH").unwrap_or_default()
     );
     let file = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .arg("file")
             .args(args)

@@ -48,7 +48,15 @@ fn hab(name: &str) -> Hab {
         std::fs::create_dir_all(dir).unwrap();
     }
     use std::os::unix::fs::PermissionsExt;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&hab.run, std::fs::Permissions::from_mode(0o700)).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let git = Command::new("git")
         .args(["init", "-q", "-b", "main"])
         .current_dir(&hab.repo)
@@ -60,6 +68,10 @@ fn hab(name: &str) -> Hab {
 
 fn put(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, text).unwrap();
 }
 
@@ -181,6 +193,10 @@ fn prepare(h: &Hab, scenario: &str) -> Launch {
 }
 
 fn hook(h: &Hab, launch: &Launch) -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook");
     apply_env(&mut cmd, h, launch);
@@ -227,6 +243,10 @@ fn call(mut cmd: Command, payload: &str) -> Output {
 
 fn run_case(h: &Hab, launch: &Launch, payload: &str) -> Output {
     if let Some(json) = &launch.ancestor {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new("sh");
         cmd.args([
             "-c",

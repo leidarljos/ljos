@@ -7,6 +7,10 @@ use std::process::Command;
 
 #[test]
 fn a_lesson_after_the_issue_is_taken_without_the_flag() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["finish", "Rig-0000", "a lesson in plain words", "--help"])
         .output()
@@ -14,6 +18,10 @@ fn a_lesson_after_the_issue_is_taken_without_the_flag() {
     let text =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(!text.contains("unexpected argument"), "{text}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let both = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["finish", "Rig-0000", "words", "--lesson", "flag"])
         .output()
@@ -29,6 +37,10 @@ fn help_and_version_do_not_write_a_memory() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)

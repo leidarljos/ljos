@@ -68,6 +68,10 @@ impl Hab {
 
     fn command(&self, bin: &str) -> Command {
         let home = self.dir.path().join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(bin);
         cmd.env_clear()
             .env(
@@ -156,6 +160,10 @@ fn the_mcp_claim_tool_answers_a_blank_id_at_once() {
             cancelled.recv_timeout(WATCHDOG),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         ) {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new("kill").arg(pid.to_string()).status();
         }
     });

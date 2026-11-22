@@ -12,6 +12,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn ljos(args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env("LJOS_OFF", "1")
@@ -204,6 +208,10 @@ fn write_marked(path: &std::path::Path, begin: &str, end: &str, body: &str) {
         next.push('\n');
     }
     next.push_str(&text[stop..]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, next).unwrap();
 }
 

@@ -446,6 +446,10 @@ pub fn note_latest_prompt_from(
     let text: String = prompt.chars().take(LATEST_PROMPT_CHARS).collect();
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let wrote = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -568,6 +572,10 @@ fn write_prompt_bind(
         bind.transcript,
         ids.join("\n")
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)

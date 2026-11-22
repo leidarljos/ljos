@@ -652,6 +652,10 @@ mod tests {
     /// Use this test binary by path because parallel tests can change `PATH`.
     #[test]
     fn child_pids_names_a_live_child() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lifetime::tests::child_pid_process_helper"])
             .env("LJOS_CHILD_PID_TEST", "1")

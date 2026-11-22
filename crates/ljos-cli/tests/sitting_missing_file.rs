@@ -48,6 +48,10 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(dir: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -97,6 +101,10 @@ impl Place {
             std::fs::create_dir_all(dir).unwrap();
         }
         git(&product, &["init", "-q", "-b", "main"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(product.join("README"), "a product\n").unwrap();
         git(&product, &["add", "README"]);
         git(&product, &["commit", "-q", "-m", "product"]);
@@ -120,6 +128,10 @@ impl Place {
             "#!/bin/sh\nprintf 'seats = [\"intruder\"]\\n' >> vissue.toml\ncase \"$1\" in\n  get) exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\nexit 0\n",
         );
         script(&bin, "deedar", "#!/bin/sh\necho head\nexit 0\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ljos"), bin.join("ljos")).unwrap();
         Self {
             _root: root,
@@ -144,6 +156,10 @@ impl Place {
     }
 
     fn command(&self, program: &Path) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(program);
         cmd.current_dir(&self.cwd)
             .env_clear()
@@ -177,6 +193,10 @@ impl Place {
     }
 
     fn write_toml(&self, dir: &Path, text: &str) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("vissue.toml"), text).unwrap();
     }
 
@@ -200,6 +220,10 @@ impl Place {
         let pid = child.id();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(40));
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new("kill").arg(pid.to_string()).status();
         });
         let mut stdin = child.stdin.take().unwrap();

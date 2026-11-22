@@ -1224,6 +1224,10 @@ mod tests {
     }
 
     fn write_lane(dir: &Path, lane: &str, texts: &[&str]) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join(format!("{lane}.jsonl")), lane_body(lane, texts)).unwrap();
     }
 
@@ -1342,6 +1346,10 @@ mod tests {
                     "atom_id": "row-7",
                 })
             );
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(from.join("brine.jsonl"), body).unwrap();
         };
         write("alpha kiln");

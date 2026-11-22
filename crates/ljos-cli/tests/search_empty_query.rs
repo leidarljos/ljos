@@ -11,7 +11,11 @@ fn search(args: &[&str]) -> Output {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("search")
         .args(args)
         .current_dir(dir.path())
@@ -30,7 +34,7 @@ fn search(args: &[&str]) -> Output {
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 #[test]
@@ -88,6 +92,10 @@ fn empty_store_search_help_and_docs_name_lesson_placeholder() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["search", "lexical default"])
         .current_dir(dir.path())
@@ -145,11 +153,15 @@ fn an_empty_search_stays_one_line_even_with_a_queued_lesson() {
     let home = dir.path().join("home");
     let state = home.join(".local/state/ljos");
     std::fs::create_dir_all(&state).unwrap();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         state.join("note-queue.jsonl"),
         "{\"issue\":\"demo-kiln\",\"text\":\"The kiln fires at dusk.\",\"workspace\":\"ws\",\"at\":1}\n",
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["search"])
         .current_dir(dir.path())

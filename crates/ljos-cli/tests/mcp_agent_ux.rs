@@ -22,6 +22,10 @@ struct Session {
 impl Session {
     fn open(extra: &[(&str, &str)]) -> Self {
         let home = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -628,6 +632,10 @@ fn a_default_description_names_only_tools_the_server_lists() {
 #[test]
 fn a_labelled_result_does_not_say_to_carry_on() {
     let tracker = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         tracker.path().join("vissue.toml"),
         "prefix = \"proj\"\nseats = [\"alice\"]\n",
@@ -662,6 +670,10 @@ fn a_labelled_result_does_not_say_to_carry_on() {
 #[test]
 fn filing_with_no_project_says_which_argument_to_pass() {
     let tracker = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.path().join("vissue.toml"), "seats = [\"ada\"]\n").unwrap();
     let root = tracker.path().to_str().unwrap().to_string();
     let ljos = std::path::Path::new(env!("CARGO_BIN_EXE_ljos"))

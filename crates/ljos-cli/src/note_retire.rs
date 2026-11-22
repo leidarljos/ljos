@@ -60,6 +60,10 @@ pub fn mark_swept(dir: &Path, retired: usize) {
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let _ = std::fs::write(marker_path(dir), format!("{retired}\n"));
 }
 

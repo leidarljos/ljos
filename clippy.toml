@@ -1,9 +1,9 @@
-# Calls that put a file at a path or start a program. Code that names a
-# git hook denies `clippy::disallowed_methods`, so a hook there is
-# published only through `install_executable`, `install_executable_mode`
-# or `copy_executable`, its other files are written with `write_file`,
-# and its programs start through `program`. The lint is allowed
-# elsewhere through `[workspace.lints]` in Cargo.toml.
+# Calls that put a file at a path or start a program. `[workspace.lints]`
+# in Cargo.toml denies `clippy::disallowed_methods` in every crate, so each
+# of these calls fails clippy unless the statement around it carries
+# `#[expect(clippy::disallowed_methods, reason = "..")]`. A git hook is
+# published through `install_executable`, `install_executable_mode` or
+# `copy_executable`, not through an expected call.
 disallowed-methods = [
     { path = "std::fs::write", reason = "use ljos_cli::write_file, or install_executable for a hook" },
     { path = "std::fs::copy", reason = "use ljos_cli::copy_executable" },

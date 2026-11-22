@@ -848,6 +848,10 @@ esac
         assert!(kept[0].applied, "{kept:?}");
         assert_eq!(kept[0].ran, "uv run x.py --n 3");
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("ljos.toml"), "rewrite = false\n").unwrap();
         let _ = crate::take_guard_note();
         let verdict = crate::tcb_verdict_in(&call.cue, dir);

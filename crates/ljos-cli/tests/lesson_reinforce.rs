@@ -43,6 +43,10 @@ impl Seat {
         let home = root.path().join("home");
         std::fs::create_dir_all(home.join(".cursor")).unwrap();
         std::fs::create_dir_all(root.path().join("run")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             home.join(".cursor/mcp.json"),
             r#"{"mcpServers":{"ljos":{"command":"/no/such/ljos-mcp"}}}"#,
@@ -82,6 +86,10 @@ impl Seat {
     fn command(&self, bin: &str, args: &[&str]) -> Command {
         let root = self.root.path();
         let home = root.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(bin);
         cmd.args(args)
             .current_dir(root)

@@ -91,7 +91,7 @@ impl Board {
             ),
         );
         let gitconfig = root.join("gitconfig");
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             &gitconfig,
             format!(
                 "[user]\n\tname = seat\n\temail = seat@example.invalid\n[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n[core]\n\taskPass = {}\n",
@@ -129,6 +129,10 @@ impl Board {
     }
 
     fn git(&self, dir: &Path, args: &[&str]) -> String {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("git")
             .arg("-C")
             .arg(dir)
@@ -173,6 +177,10 @@ impl Board {
     fn tickets(&self, unreachable: &str) -> (String, String) {
         let seed = self.root.join("seed");
         let file = |title: &str| {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let mut cmd = Command::new(&self.vissue);
             self.env(&mut cmd, &seed);
             let out = cmd
@@ -206,6 +214,10 @@ impl Board {
     /// `None`). Stdin is a pipe held open and never written, so a read of
     /// it waits out the budget. Past the budget the run is killed.
     fn ljos(&self, mode: Option<&str>, args: &[&str]) -> (Output, Duration) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         self.env(&mut cmd, &self.tracker);
         cmd.args(args)
@@ -233,6 +245,10 @@ impl Board {
             let _ = tx.send(child.wait_with_output());
         });
         let Ok(out) = rx.recv_timeout(BUDGET) else {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new("kill")
                 .args(["-KILL", &pid.to_string()])
                 .status();
@@ -342,6 +358,10 @@ fn saves_and_later_syncs(board: &Board, unreachable: &str) {
     let said = text(&out);
     assert!(out.status.success(), "{said}");
     assert!(said.contains("sync: pushed pending commits"), "{said}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let remote = Command::new("git")
         .arg("--git-dir")
         .arg(&board.reachable)

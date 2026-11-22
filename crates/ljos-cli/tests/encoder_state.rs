@@ -96,6 +96,10 @@ fn run(seat: &Seat, args: &[&str]) -> (i32, String, String, Duration) {
     // `cargo install` rather than `cargo binstall`.
     ljos_cli::install_executable(&home.join("cargo"), "#!/bin/sh\nexit 0\n").unwrap();
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
@@ -392,6 +396,10 @@ fn exe(dir: &std::path::Path, name: &str) {
 
 fn packset_embed_line(path: &str, cwd: &std::path::Path) -> String {
     let home = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["doctor", "--all"])
         .current_dir(cwd)
@@ -437,6 +445,10 @@ fn doctor_names_an_encoder_install_command_that_runs_here() {
     exe(&curl_only, "curl");
     let script_home = root.path().join("checkout");
     std::fs::create_dir_all(script_home.join("scripts")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         script_home.join("scripts/install.sh"),
         "#!/bin/sh\nexit 0\n",

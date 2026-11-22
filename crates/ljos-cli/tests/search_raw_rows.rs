@@ -95,6 +95,10 @@ fn world_with(encoder: bool) -> Option<World> {
     ] {
         std::fs::create_dir_all(root.join(sub)).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
     let pack_home = root.join("home/.local/share/packset");
     let mut started = ljos_test_boot::Packsetd::build();
@@ -157,6 +161,10 @@ impl World {
 
     fn command(&self, seat: &str, args: &[&str]) -> Command {
         let home = self.root.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(self.root.join("work"))
@@ -357,6 +365,10 @@ fn mcp_search(world: &World) -> (String, String) {
 
 fn mcp_search_query(world: &World, query: &str) -> (String, String) {
     let home = world.root.join("home");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
         .env("PATH", &world.path)

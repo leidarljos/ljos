@@ -267,6 +267,10 @@ mod tests {
         ] {
             git(&root, &["config", key, value]);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join("Software/probe/issues.org"),
             "* TODO [#C] a\n:PROPERTIES:\n:ID:         probe-a\n:END:\n",
@@ -309,8 +313,16 @@ mod tests {
         );
         assert!(!line.contains("uncommitted"), "{line}");
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("Software/probe/issues.org"), "* DONE [#C] a\n").unwrap();
         std::fs::create_dir_all(root.join("Software/probe/issues")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("Software/probe/issues/extra.org"), "* TODO b\n").unwrap();
         let both = super::tracker_sync_line().unwrap();
         assert!(both.contains("1 unpushed, 2 uncommitted edits"), "{both}");
@@ -437,9 +449,17 @@ warn\ttickets\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted iss
         let (root, _) = checkout(dir.path());
         isolate(&root);
         std::fs::create_dir_all(root.join("Software/probe/issues")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("Software/probe/issues/extra.org"), "* TODO b\n").unwrap();
         let line = super::tracker_sync_line().unwrap();
         let fix = line.split_once("fix: ").unwrap().1.trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let ran = std::process::Command::new("sh")
             .arg("-c")
             .arg(&fix)
@@ -541,11 +561,23 @@ warn\ttickets\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted iss
         let dir = tempfile::tempdir().unwrap();
         let (root, origin) = checkout(dir.path());
         isolate(&root);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("Software/probe/issues.org"), "* DONE [#C] a\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("scratch.env"), "GITHUB_TOKEN=ghp_notreal\n").unwrap();
         let line = super::tracker_sync_line().unwrap();
         eprintln!("REVIEW2 line={line}");
         let fix = line.split_once("fix: ").unwrap().1.trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let ran = std::process::Command::new("sh")
             .arg("-c")
             .arg(&fix)

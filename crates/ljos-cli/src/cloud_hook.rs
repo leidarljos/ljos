@@ -100,7 +100,6 @@ pub(crate) fn ensure(repoint: bool) -> Result<String> {
 /// `core.hooksPath` that names [`hooks_dir`], the pre-push script there,
 /// and the stub it wrote into a hooks directory a path already named.
 /// Any other value or file stays as it is. One line per step taken.
-#[deny(clippy::disallowed_methods)]
 fn retire_old_hooks(seat: Option<&Path>) -> Vec<String> {
     let Some(ours) = hooks_dir() else {
         return Vec::new();
@@ -203,7 +202,6 @@ fn old_hook_script(path: &Path) -> bool {
 
 /// The stub ran the hook it moved aside, then the old script. Putting
 /// that hook back under its own name is what the directory held before.
-#[deny(clippy::disallowed_methods)]
 fn unchain(dir: &Path) -> Option<String> {
     let hook = dir.join("pre-push");
     if old_hook_script(&hook) {
@@ -225,7 +223,7 @@ fn unchain(dir: &Path) -> Option<String> {
     }
     let previous = dir.join(CHAIN_PREVIOUS);
     if previous.is_file() {
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "puts back the user's hook an earlier cloud up moved aside; no descriptor here wrote it"
         )]
@@ -465,7 +463,15 @@ fn write_lists(
         body.push('\n');
     }
     let tmp = path.with_extension("tmp");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&tmp, body).with_context(|| format!("write {}", tmp.display()))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     fs::rename(&tmp, &path).with_context(|| format!("install {}", path.display()))?;
     Ok(())
 }

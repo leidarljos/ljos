@@ -61,6 +61,10 @@ impl World {
     fn home(&self, name: &str) -> PathBuf {
         let home = self.dir.path().join(name);
         std::fs::create_dir_all(home.join("tracker/Software")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             home.join(".gitconfig"),
             "[user]\n\tname = Your Name\n\temail = you@example.com\n",
@@ -77,7 +81,11 @@ impl World {
             self.dir.path().join("bin").display(),
             vissue_dir().display()
         );
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(home)
             .env_clear()
@@ -99,7 +107,7 @@ impl World {
             .env("PACKSET_URL", "off")
             .stdin(Stdio::null())
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     /// Every hold record under the shared temporary directory.

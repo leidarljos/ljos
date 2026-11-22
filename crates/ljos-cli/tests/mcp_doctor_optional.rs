@@ -20,7 +20,15 @@ fn rows(home: &Path, cwd: &Path) -> Vec<Value> {
     let curl = stub.join("curl");
     ljos_cli::install_executable(&curl, "#!/bin/sh\nexit 0\n").unwrap();
     let gitconfig = home.join("gitconfig");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&gitconfig, "").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("mcp")
         .env_clear()
@@ -41,6 +49,10 @@ fn rows(home: &Path, cwd: &Path) -> Vec<Value> {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(90));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let lines = [
@@ -110,7 +122,15 @@ fn the_encoder_hint_is_the_same_in_a_checkout_and_out_of_one() {
     let home = tempfile::tempdir().unwrap();
     let checkout = home.path().join("checkout");
     std::fs::create_dir_all(checkout.join("scripts")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(checkout.join("scripts/install.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(checkout.join("install.sh"), "#!/bin/sh\nexit 0\n").unwrap();
     let bare = home.path().join("bare");
     std::fs::create_dir_all(&bare).unwrap();

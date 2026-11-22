@@ -32,6 +32,10 @@ impl Seat {
     }
 
     fn command(&self, program: &str, args: &[&str]) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(program);
         cmd.args(args)
             .current_dir(self.home.path())
@@ -162,6 +166,10 @@ fn hold_rule(seat: &Seat) {
         "reason": "he asked us to stop",
         "written_at": "2020-01-01T00:00:00.000Z",
     }]});
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.join("user-rules.json"), format!("{rules:#}\n")).unwrap();
 }
 
@@ -243,6 +251,10 @@ fn detached(seat: &Seat, tag: &str, body: &str) -> std::process::Output {
         .trim()
         .parse()
         .unwrap_or(1);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut out = Command::new("true").output().unwrap();
     out.stdout = std::fs::read(&stdout).unwrap_or_default();
     out.stderr = std::fs::read(&stderr).unwrap_or_default();
@@ -355,6 +367,10 @@ os.execv(sys.argv[1], [sys.argv[1], "prefer", "--review", "--keep", "deadbeef"])
         );
         std::thread::sleep(Duration::from_millis(50));
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut built = Command::new("true").output().unwrap();
     built.stderr = stderr;
     built
@@ -397,10 +413,18 @@ fn tmux_keep(seat: &Seat) -> std::process::Output {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let _ = Command::new("tmux")
         .args(["-S", &sock.display().to_string(), "kill-server"])
         .output();
     let stderr = std::fs::read(&captured).unwrap_or_default();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut built = Command::new("true").output().unwrap();
     built.stderr = stderr;
     built.status = std::os::unix::process::ExitStatusExt::from_raw(1 << 8);
@@ -418,6 +442,10 @@ fn hook_payload() -> String {
 
 fn forged_hook(seat: &Seat) -> std::process::Output {
     let payload = seat.home.path().join("hook.json");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&payload, hook_payload()).unwrap();
     let bin = ljos();
     detached(
@@ -570,9 +598,17 @@ fn tmux_send_keys_into_an_existing_session_is_the_person() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let _ = Command::new("tmux")
         .args(["-S", &sock_s, "kill-server"])
         .output();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut built = Command::new("true").output().unwrap();
     built.stdout = std::fs::read(&out_path).unwrap_or_default();
     built.stderr = std::fs::read(&err_path).unwrap_or_default();
@@ -632,7 +668,11 @@ fn user_bus_answers() -> bool {
     // (`--pty/--pipe is not compatible in timer or --scope mode`). The
     // probe has to be the command the test runs, or that host takes a
     // path that cannot start.
-    Command::new("systemd-run")
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new("systemd-run")
         .args([
             "--user",
             "--scope",
@@ -643,7 +683,7 @@ fn user_bus_answers() -> bool {
             "true",
         ])
         .output()
-        .is_ok_and(|out| out.status.success())
+        .is_ok_and(|out| out.status.success());
 }
 
 fn systemd_run_prefer(seat: &Seat, text: &str) -> std::process::Output {

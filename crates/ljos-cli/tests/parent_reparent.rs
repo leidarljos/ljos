@@ -37,6 +37,10 @@ impl Board {
         let git_cfg = dir.path().join("gitconfig");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&root).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&git_cfg, "").unwrap();
         let _bin = vissue_bin();
         git(&root, &["init", "-q"]);
@@ -58,7 +62,11 @@ impl Board {
         } else {
             PathBuf::from(bin)
         };
-        Command::new(program)
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(program)
             .args(args)
             .env_clear()
             .env("PATH", path_env())
@@ -73,7 +81,7 @@ impl Board {
             .env("GIT_CONFIG_GLOBAL", &self.git_cfg)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn vissue(&self, args: &[&str]) -> String {
@@ -114,6 +122,10 @@ impl Board {
     }
 
     fn note_texts(&self, issue: &str) -> Vec<String> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["show", issue, "--json"])
             .env_clear()
@@ -148,7 +160,11 @@ impl Board {
     }
 
     fn ljos_parent(&self, issue: &str, parent: &str) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["parent", issue, parent])
             .env_clear()
             .env("PATH", path_env())
@@ -166,12 +182,16 @@ impl Board {
             .env("GIT_CONFIG_GLOBAL", &self.git_cfg)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 
 fn git(dir: &Path, args: &[&str]) -> Output {
-    Command::new("git")
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -184,7 +204,7 @@ fn git(dir: &Path, args: &[&str]) -> Output {
         .env("GIT_COMMITTER_NAME", "seat")
         .env("GIT_COMMITTER_EMAIL", "seat@example.invalid")
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 fn said(out: &Output) -> String {

@@ -32,6 +32,10 @@ impl Seat {
         std::fs::create_dir_all(home.join("run")).unwrap();
         let demo = dir.path().join("tracker/Software/demo");
         std::fs::create_dir_all(&demo).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             demo.join("issues.org"),
             "\
@@ -58,6 +62,10 @@ impl Seat {
         let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
         let runtime = self.dir.path().join("home/run/ljos");
         std::fs::create_dir_all(&runtime).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             runtime.join("hold-rohit"),
             format!(
@@ -74,12 +82,20 @@ impl Seat {
         let path = self.hold_path();
         let mut text = std::fs::read_to_string(&path).unwrap();
         text.push_str(&format!("{}\tSoftware\n", root.display()));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, text).unwrap();
     }
 
     fn nested(&self) {
         let board = self.dir.path().join("tracker/Software/Software/hle-mm");
         std::fs::create_dir_all(&board).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             board.join("issues.org"),
             "\
@@ -108,7 +124,11 @@ impl Seat {
             self.dir.path().display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("PATH", &path)
@@ -125,7 +145,7 @@ impl Seat {
             .env("LJOS_OFF", "1")
             .current_dir(self.dir.path())
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn creates(&self) -> Vec<String> {

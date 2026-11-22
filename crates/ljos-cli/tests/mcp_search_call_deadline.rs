@@ -119,6 +119,10 @@ impl Session {
             Some(t) => format!("{}:/usr/bin:/bin", t.dir.path().display()),
             None => "/usr/bin:/bin".to_string(),
         };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut command = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         command
             .env_clear()

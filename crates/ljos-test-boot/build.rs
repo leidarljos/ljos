@@ -1,6 +1,10 @@
 fn compile(out_dir: &str, src: &str, obj_name: &str, lib_name: &str) {
     let obj = std::path::Path::new(out_dir).join(obj_name);
     let lib = std::path::Path::new(out_dir).join(lib_name);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let cc = std::process::Command::new("cc")
         .args(["-fPIC", "-O2", "-Wall", "-Wextra", "-c", src, "-o"])
         .arg(&obj)
@@ -9,6 +13,10 @@ fn compile(out_dir: &str, src: &str, obj_name: &str, lib_name: &str) {
     if !cc.success() {
         panic!("cc failed to compile {src}");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let ar = std::process::Command::new("ar")
         .args(["crs"])
         .arg(&lib)

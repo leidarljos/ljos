@@ -75,6 +75,10 @@ impl Home {
     }
 
     fn ljos(&self, args: &[&str], limit_secs: &str) -> Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("timeout")
             .arg(limit_secs)
             .arg(env!("CARGO_BIN_EXE_ljos"))
@@ -100,6 +104,10 @@ impl Drop for Home {
 }
 
 fn sha256(bytes: &[u8]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new("sha256sum")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -124,7 +132,15 @@ fn sha256(bytes: &[u8]) -> String {
 /// `written` is what ljos last wrote. `now` is the file as it stands.
 fn plant(path: &Path, written: &str, now: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(path, now).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         path.with_file_name(".ljos-skill-sha256"),
         format!("{}\n", sha256(written.as_bytes())),
@@ -136,7 +152,7 @@ fn harnesses(home: &Home, cursor: &Path, antigravity: &Path) {
     let dir = home.root.join("config/ljos");
     fs::create_dir_all(&dir).unwrap();
     fs::create_dir_all(home.root.join("home")).unwrap();
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         dir.join("harnesses.toml"),
         format!(
             "[[harness]]\nname = \"cursor\"\nskills = \"{}\"\n\n[[harness]]\nname = \"antigravity\"\nskills = \"{}\"\n",
@@ -315,6 +331,10 @@ fn the_mcp_server_refreshes_a_stale_skill_on_start() {
     );
     let kept = fs::read(&antigravity).unwrap();
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .envs(home.env())
@@ -350,6 +370,10 @@ fn a_same_version_stamp_from_an_older_build_does_not_block_skill_refresh() {
     );
     let stamp = home.root.join("share/ljos/skill-refresh-version");
     fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&stamp, format!("{}\n", env!("CARGO_PKG_VERSION"))).unwrap();
 
     let out = home.ljos(&["protocol"], "30");
@@ -379,6 +403,10 @@ fn onboard_turns_a_stale_example_host_env_and_skill_green() {
     let config = home.root.join("config/ljos");
     fs::create_dir_all(&config).unwrap();
     fs::create_dir_all(home.root.join("home")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         config.join("harnesses.toml"),
         "[[harness]]\nname = \"example-host\"\n",
@@ -386,6 +414,10 @@ fn onboard_turns_a_stale_example_host_env_and_skill_green() {
     .unwrap();
     let skill = home.root.join("home/.example-host/skills/ljos/SKILL.md");
     plant(&skill, OLD_SKILL, OLD_SKILL);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(config.join("example-host.env"), OLD_ENV).unwrap();
 
     let before = home.ljos(&["doctor", "--all"], "120");
@@ -443,7 +475,7 @@ fn the_first_run_refreshes_a_stale_env_and_leaves_what_ljos_did_not_write() {
     let config = home.root.join("config/ljos");
     fs::create_dir_all(&config).unwrap();
     fs::create_dir_all(home.root.join("home")).unwrap();
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         config.join("harnesses.toml"),
         "[[harness]]\nname = \"example-host\"\n\n[[harness]]\nname = \"shell\"\n\n[[harness]]\nname = \"box\"\nshell = true\n",
     )
@@ -452,9 +484,21 @@ fn the_first_run_refreshes_a_stale_env_and_leaves_what_ljos_did_not_write() {
     let foreign = config.join("shell.env");
     let edited = config.join("box.env");
     let user = "export LJOS_EXTRA=user\nexport BOX_NOTES=keep-me\n";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&host_env, format!("{OLD_ENV}{user}")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(env_record(&host_env), OLD_ENV).unwrap();
     let foreign_text = "# written by an older ljos\nexport BOX_NOTES=keep-me\n";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&foreign, foreign_text).unwrap();
     let body = "\
 # Source this in the shell that runs the agent's commands.\n\
@@ -465,7 +509,15 @@ _ljos_guard=\"${XDG_DATA_HOME:-$HOME/.local/share}/ljos/guard-bin\"\n";
         "# Source this in the shell that runs the agent's commands. edited",
         1,
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&edited, &hand).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(env_record(&edited), body).unwrap();
 
     let out = home.ljos(&["protocol"], "30");
@@ -490,6 +542,10 @@ _ljos_guard=\"${XDG_DATA_HOME:-$HOME/.local/share}/ljos/guard-bin\"\n";
         "{got}"
     );
     assert!(!got.contains("LJOS_OLD_MARKER"), "{got}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let syntax = Command::new("sh")
         .arg("-n")
         .arg(&host_env)
@@ -517,16 +573,32 @@ fn a_same_version_stamp_from_an_older_build_does_not_block_env_refresh() {
     let config = home.root.join("config/ljos");
     fs::create_dir_all(&config).unwrap();
     fs::create_dir_all(home.root.join("home")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         config.join("harnesses.toml"),
         "[[harness]]\nname = \"example-host\"\n",
     )
     .unwrap();
     let env_path = config.join("example-host.env");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&env_path, format!("{OLD_ENV}export BOX_NOTES=keep-me\n")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(env_record(&env_path), OLD_ENV).unwrap();
     let stamp = home.root.join("share/ljos/env-refresh-version");
     fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&stamp, format!("{}\n", env!("CARGO_PKG_VERSION"))).unwrap();
 
     let out = home.ljos(&["protocol"], "30");
@@ -553,14 +625,26 @@ fn the_mcp_server_refreshes_a_stale_env_on_start() {
     let config = home.root.join("config/ljos");
     fs::create_dir_all(&config).unwrap();
     fs::create_dir_all(home.root.join("home")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         config.join("harnesses.toml"),
         "[[harness]]\nname = \"example-host\"\n",
     )
     .unwrap();
     let env_path = config.join("example-host.env");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&env_path, format!("{OLD_ENV}export BOX_NOTES=keep-me\n")).unwrap();
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .envs(home.env())
@@ -589,6 +673,10 @@ fn doctor_warns_about_a_stale_env_and_fix_refreshes_it() {
     let config = home.root.join("config/ljos");
     fs::create_dir_all(&config).unwrap();
     fs::create_dir_all(home.root.join("home")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         config.join("harnesses.toml"),
         "[[harness]]\nname = \"example-host\"\n",
@@ -596,6 +684,10 @@ fn doctor_warns_about_a_stale_env_and_fix_refreshes_it() {
     .unwrap();
     let env_path = config.join("example-host.env");
     let stale = format!("{OLD_ENV}export BOX_NOTES=keep-me\n");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&env_path, &stale).unwrap();
 
     let out = home.ljos(&["doctor"], "120");
@@ -625,6 +717,10 @@ fn doctor_warns_about_a_stale_env_and_fix_refreshes_it() {
     let after = String::from_utf8(fixed.stdout).unwrap();
     assert!(row(&after, "runner env").starts_with("ok\t"), "{after}");
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&env_path, &stale).unwrap();
     let _ = fs::remove_file(env_record(&env_path));
     let quiet = home.ljos(&["protocol"], "30");
@@ -643,6 +739,10 @@ fn doctor_leaves_an_env_ljos_did_not_write() {
     let config = home.root.join("config/ljos");
     fs::create_dir_all(&config).unwrap();
     fs::create_dir_all(home.root.join("home")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         config.join("harnesses.toml"),
         "[[harness]]\nname = \"example-host\"\n",
@@ -650,6 +750,10 @@ fn doctor_leaves_an_env_ljos_did_not_write() {
     .unwrap();
     let env_path = config.join("example-host.env");
     let kept = "# written by an older ljos\nexport BOX_NOTES=keep-me\n";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&env_path, kept).unwrap();
 
     let doctor = home.ljos(&["doctor", "--all"], "120");

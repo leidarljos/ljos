@@ -29,6 +29,10 @@ fn says(name: &str, version: &str) -> String {
 }
 
 fn sha256(path: &Path) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sha256sum").arg(path).output().unwrap();
     assert!(out.status.success());
     String::from_utf8_lossy(&out.stdout)
@@ -54,6 +58,10 @@ fn fixture_release(root: &Path) -> PathBuf {
     let rel = root.join("release");
     fs::create_dir_all(&rel).unwrap();
     let tarball = rel.join(asset());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let made = Command::new("tar")
         .arg("-czf")
         .arg(&tarball)
@@ -67,6 +75,10 @@ fn fixture_release(root: &Path) -> PathBuf {
         "{}",
         String::from_utf8_lossy(&made.stderr)
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         rel.join(format!("{}.sha256", asset())),
         format!("{}  {}\n", sha256(&tarball), asset()),
@@ -80,6 +92,10 @@ fn run(home: &Path, dir: &Path, rel: Option<&Path>, version: &str) -> Output {
 }
 
 fn invoke(home: &Path, dir: &Path, rel: Option<&Path>, args: &[&str]) -> Output {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .arg("--dir")
@@ -98,6 +114,10 @@ fn invoke(home: &Path, dir: &Path, rel: Option<&Path>, args: &[&str]) -> Output 
 /// A small executable whose `--version` line is `{name} {version}`.
 fn built(dir: &Path, name: &str, version: &str) -> PathBuf {
     let src = dir.join(format!("{name}-{version}.c"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         &src,
         format!(
@@ -106,6 +126,10 @@ fn built(dir: &Path, name: &str, version: &str) -> PathBuf {
     )
     .unwrap();
     let bin = dir.join(format!("{name}-{version}"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("cc")
         .args(["-O0", "-o"])
         .arg(&bin)
@@ -129,6 +153,10 @@ fn stem_of(asset: &str) -> &str {
 /// The archive, its sha256 and `{repo}.version`, as a release would publish them.
 fn publish(rel: &Path, repo: &str, version: &str, asset: &str, bin_name: &str, bin: &Path) {
     fs::create_dir_all(rel).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join(format!("{repo}.version")), format!("{version}\n")).unwrap();
     let stage_root = rel.join(format!("stage-{repo}-{bin_name}"));
     let stage = stage_root.join(stem_of(asset));
@@ -136,6 +164,10 @@ fn publish(rel: &Path, repo: &str, version: &str, asset: &str, bin_name: &str, b
     let dest = stage.join(bin_name);
     ljos_cli::copy_executable(bin, &dest).unwrap();
     let tarball = rel.join(asset);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let made = Command::new("tar")
         .arg(if asset.ends_with(".tar.xz") {
             "-cJf"
@@ -153,6 +185,10 @@ fn publish(rel: &Path, repo: &str, version: &str, asset: &str, bin_name: &str, b
         "{}",
         String::from_utf8_lossy(&made.stderr)
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         rel.join(format!("{asset}.sha256")),
         format!("{}  {asset}\n", sha256(&tarball)),
@@ -185,6 +221,10 @@ fn text_of(out: &Output) -> String {
 }
 
 fn version_line(path: &Path) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(path).arg("--version").output().unwrap();
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
@@ -282,7 +322,15 @@ fn every_installed_component_at_its_release_says_current() {
     let root = tempfile::tempdir().unwrap();
     let rel = root.path().join("release");
     fs::create_dir_all(&rel).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join("vissue.version"), "1.2.3\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join("deedar.version"), "4.5.6\n").unwrap();
     let dir = root.path().join("bin");
     current_ljos(&dir);
@@ -323,6 +371,10 @@ fn a_component_behind_its_release_is_replaced_and_the_old_one_kept() {
         "vissue",
         &new,
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join("deedar.version"), "4.5.6\n").unwrap();
     let dir = root.path().join("bin");
     current_ljos(&dir);
@@ -394,6 +446,10 @@ fn a_checksum_mismatch_warns_and_keeps_the_old_binary() {
         "vissue",
         &built(&src, "vissue", "1.2.3"),
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         rel.join(format!("{asset}.sha256")),
         format!("{}  {asset}\n", "0".repeat(64)),
@@ -510,6 +566,10 @@ fn upgrade_names_a_running_mcp_server() {
     fs::create_dir_all(&dir).unwrap();
     executable(&dir.join("ljos"), &says("ljos", "0.1.0"));
     let src = root.path().join("sleeper.c");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         &src,
         r#"
@@ -527,6 +587,10 @@ int main(int argc, char **argv) {
     )
     .unwrap();
     let sleeper = root.path().join("ljos-mcp-old");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let compiled = Command::new("cc")
         .args(["-O0", "-o"])
         .arg(&sleeper)
@@ -539,6 +603,10 @@ int main(int argc, char **argv) {
         String::from_utf8_lossy(&compiled.stderr)
     );
     install_built(&dir, "ljos-mcp", &sleeper);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let child = Command::new(dir.join("ljos-mcp"))
         .stdin(std::process::Stdio::null())
         .spawn()

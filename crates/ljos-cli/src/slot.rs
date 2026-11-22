@@ -456,6 +456,10 @@ fn slot_index_paths(root: &Path) -> Option<(PathBuf, PathBuf)> {
     std::fs::create_dir_all(&dir).ok()?;
     // The directory is one this process made. 0700 matches the files under
     // it, which are opened with O_NOFOLLOW and written mode 0600.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     Some((dir.join(format!("{key}.lock")), dir.join(key)))
 }
@@ -2112,12 +2116,24 @@ mod tests {
 :END:
 - [X] elder: rail
 ";
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("issues.org"), board).unwrap();
         commit_all(dir, "ballot");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join(".ljos-seat-keys"), "eessi aa\n").unwrap();
         commit_all(dir, "pin");
         let with_slot =
             format!("{board}- Note: \"slot: eessi model=m run=r key=k ljosbot aa bb\"\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("issues.org"), with_slot).unwrap();
         commit_all(dir, "slot");
     }
@@ -2141,6 +2157,10 @@ mod tests {
 
     fn quiet_git_config(root: &std::path::Path) {
         let cfg = root.join("gitconfig");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&cfg, b"").unwrap();
         std::env::set_var("GIT_CONFIG_GLOBAL", &cfg);
         std::env::set_var("GIT_CONFIG_SYSTEM", &cfg);
@@ -2185,9 +2205,17 @@ mod tests {
         pinned_before_slots(&origin);
         let shallow = shallow_of(root.path(), &origin);
         let away = root.path().join("away");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         std::fs::rename(&origin, &away).unwrap();
         let err = require_tracker_history(&shallow).unwrap_err();
         assert!(err.contains(HISTORY_INCOMPLETE), "{err}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         std::fs::rename(&away, &origin).unwrap();
         require_tracker_history(&shallow).unwrap();
         assert_eq!(
@@ -2208,6 +2236,10 @@ mod tests {
         let origin = root.path().join("origin");
         pinned_before_slots(&origin);
         let shallow = shallow_of(root.path(), &origin);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -2394,15 +2426,31 @@ mod tests {
 :END:
 - [X] elder: rail
 ";
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("issues.org"), board).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join(".ljos-seat-keys"), "eessi aa\n").unwrap();
         commit_all(dir, "root");
         let root = git_ok(dir, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join(".ljos-seat-keys"), "").unwrap();
         commit_all(dir, "middle");
         let middle = git_ok(dir, &["rev-parse", "HEAD"]).trim().to_string();
         let with_slot =
             format!("{board}- Note: \"slot: eessi model=m run=r key=k ljosbot aa bb\"\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("issues.org"), with_slot).unwrap();
         commit_all(dir, "tip");
         (root, middle)
@@ -2469,6 +2517,10 @@ mod tests {
         std::fs::create_dir_all(grafts.parent().unwrap()).unwrap();
         // The slot commit's parent becomes the root, which still holds
         // the pin the middle commit removed.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&grafts, format!("{tip} {root_sha}\n")).unwrap();
 
         let parents = crate::ballot_sig::git_in(&repo, &["log", "-1", "--format=%P"]).unwrap();
@@ -2487,18 +2539,38 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("repo");
         init_repo(&repo);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("issues.org"), "board\n").unwrap();
         commit_all(&repo, "board");
         git_ok(&repo, &["branch", "side"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("a"), "main\n").unwrap();
         commit_all(&repo, "main extra");
         let main_parent = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("main-slot"), "Note: \"slot: main\"\n").unwrap();
         commit_all(&repo, "slot on main");
         git_ok(&repo, &["checkout", "-q", "side"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("b"), "side\n").unwrap();
         commit_all(&repo, "side extra");
         let side_parent = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("side-slot"), "Note: \"slot: side\"\n").unwrap();
         commit_all(&repo, "slot on side");
         git_ok(&repo, &["checkout", "-q", "main"]);
@@ -2564,16 +2636,36 @@ mod tests {
         std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
         let repo = root.path().join("repo");
         init_repo(&repo);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("issues.org"), "board\n").unwrap();
         commit_all(&repo, "base");
         let base = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("issues.org"), "board\n- Note: \"slot: first\"\n").unwrap();
         commit_all(&repo, "slot");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join(".ljos-seat-keys"), "newseat kk\n").unwrap();
         commit_all(&repo, "pin");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("issues.org"), "board\n").unwrap();
         commit_all(&repo, "remove");
         let removed = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("issues.org"), "board\n- Note: \"slot: again\"\n").unwrap();
         commit_all(&repo, "slot again");
         let at = starts_in(&repo).unwrap().expect("a git tracker");
@@ -2604,12 +2696,24 @@ mod tests {
         std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
         let repo = root.path().join("repo");
         init_repo(&repo);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("issues.org"), "board\n").unwrap();
         commit_all(&repo, "root");
         let root_sha = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("main-work"), "m\n").unwrap();
         commit_all(&repo, "main work");
         let main_parent = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("main-slot"), "Note: \"slot: main\"\n").unwrap();
         commit_all(&repo, "slot on main");
         git_ok(&repo, &["checkout", "-q", "-b", "side"]);
@@ -2618,12 +2722,24 @@ mod tests {
         std::fs::remove_file(repo.join("main-slot")).unwrap();
         commit_all(&repo, "drop main note");
         let side_parent = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("side-slot"), "Note: \"slot: side\"\n").unwrap();
         commit_all(&repo, "slot on side");
         git_ok(&repo, &["checkout", "-q", "-b", "third", &root_sha]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("third-work"), "t\n").unwrap();
         commit_all(&repo, "third work");
         let third_parent = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("third-slot"), "Note: \"slot: third\"\n").unwrap();
         commit_all(&repo, "slot on third");
         git_ok(&repo, &["checkout", "-q", "side"]);
@@ -2660,11 +2776,23 @@ mod tests {
         std::env::set_var("XDG_STATE_HOME", &state);
         let repo = root.path().join("repo");
         init_repo(&repo);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("issues.org"), "board\n").unwrap();
         commit_all(&repo, "base");
         let base = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("issues.org"), "board\n- Note: \"slot: one\"\n").unwrap();
         commit_all(&repo, "slot");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join(".ljos-seat-keys"), "newseat kk\n").unwrap();
         commit_all(&repo, "pin");
 
@@ -2712,8 +2840,16 @@ mod tests {
         std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
         let repo = root.path().join("repo");
         init_repo(&repo);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("issues.org"), "board\n- Note: \"slot: one\"\n").unwrap();
         commit_all(&repo, "slot");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join(".ljos-seat-keys"), "postslot kk\n").unwrap();
         commit_all(&repo, "pin");
         std::env::set_var("VISSUE_ROOT", &repo);
@@ -2733,9 +2869,17 @@ mod tests {
         std::env::set_var("XDG_STATE_HOME", &state);
         let repo = root.path().join("repo");
         init_repo(&repo);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("issues.org"), "board\n").unwrap();
         commit_all(&repo, "root");
         let root_sha = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("main-slot"), "Note: \"slot: main\"\n").unwrap();
         commit_all(&repo, "slot on main");
         let at = starts_in(&repo).unwrap().expect("a git tracker");
@@ -2750,9 +2894,17 @@ mod tests {
         assert_eq!(mode, 0o600, "cache mode {mode:o}");
 
         git_ok(&repo, &["checkout", "-q", "-b", "side", &root_sha]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("side-work"), "s\n").unwrap();
         commit_all(&repo, "side work");
         let side_parent = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("side-slot"), "Note: \"slot: side\"\n").unwrap();
         commit_all(&repo, "slot on side");
         git_ok(&repo, &["checkout", "-q", "main"]);
@@ -2782,9 +2934,17 @@ mod tests {
         std::env::set_var("XDG_STATE_HOME", &state);
         let repo = root.path().join("repo");
         init_repo(&repo);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("issues.org"), "board\n").unwrap();
         commit_all(&repo, "base");
         let base = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("slot"), "Note: \"slot: one\"\n").unwrap();
         commit_all(&repo, "slot");
         let count = git_ok(&repo, &["rev-list", "--count", "HEAD"])
@@ -2793,12 +2953,20 @@ mod tests {
         let sha = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
         let _ = starts_in(&repo).unwrap();
         let cache = cache_path(&state, &repo);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&cache, format!("complete {count} {sha}\n")).unwrap();
         let at = starts_in(&repo).unwrap().expect("a git tracker");
         assert!(
             at.iter().any(|parents| parents == &vec![base.clone()]),
             "an old cache hid the introduction: {at:?}"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&cache, format!("v2 complete {count} {sha}\n")).unwrap();
         let at = starts_in(&repo).unwrap().expect("a git tracker");
         assert!(
@@ -2820,8 +2988,16 @@ mod tests {
         std::env::set_var("XDG_STATE_HOME", &state);
         let repo = root.path().join("repo");
         init_repo(&repo);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("issues.org"), "board\n- Note: \"slot: one\"\n").unwrap();
         commit_all(&repo, "slot");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join(".ljos-seat-keys"), "postslot kk\n").unwrap();
         commit_all(&repo, "pin");
         override_lookup_budget_for_test(None);
@@ -2838,6 +3014,10 @@ mod tests {
             .trim()
             .to_string();
         let sha = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             cache_path(&state, &repo),
             format!("v2 complete {count} {sha}\n"),
@@ -2864,15 +3044,31 @@ mod tests {
         std::env::set_var("XDG_STATE_HOME", &state);
         let repo = root.path().join("repo");
         init_repo(&repo);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("issues.org"), "board\n").unwrap();
         commit_all(&repo, "base");
         let base = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("issues.org"), "board\n- Note: \"slot: one\"\n").unwrap();
         commit_all(&repo, "slot");
         for n in 0..8 {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(repo.join(format!("f{n}")), "x\n").unwrap();
             commit_all(&repo, "filler");
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join(".ljos-seat-keys"), "newseat kk\n").unwrap();
         commit_all(&repo, "pin");
 
@@ -2882,6 +3078,10 @@ mod tests {
         let saved_next = partial_next(&std::fs::read_to_string(cache_path(&state, &repo)).unwrap());
         assert!(saved_next > 0, "the first vote saved no progress");
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("between"), "y\n").unwrap();
         commit_all(&repo, "between votes");
         let commits: usize = git_ok(&repo, &["rev-list", "--count", "HEAD"])
