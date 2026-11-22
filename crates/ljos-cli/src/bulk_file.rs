@@ -362,7 +362,7 @@ fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
 /// Put back each file in `touched`: one the batch made is removed, one it
 /// rewrote gets its bytes back as they were. No other file is read or
 /// written. A file that cannot be put back does not stop the rest; each is
-/// returned with why. The caller holds the project's issues lock and has
+/// returned with why. The caller has the project's issues lock and has
 /// checked that each file is as the batch left it.
 fn restore(touched: &Touched) -> Vec<(&Path, anyhow::Error)> {
     let mut failed = Vec::new();
