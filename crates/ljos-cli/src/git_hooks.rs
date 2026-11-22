@@ -706,8 +706,11 @@ fn chain_user_hooks(dir: &Path) -> Result<()> {
             .map(|bytes| std::str::from_utf8(bytes).unwrap_or(""))
             .unwrap_or("");
         let next = merge_block(text, name);
-        if existing.is_none() || next != text {
+        if existing.is_none() {
             crate::install_executable(&path, next)
+                .with_context(|| format!("git-hooks: {}", path.display()))?;
+        } else if next != text {
+            crate::install_executable_mode(&path, next, file_mode(&path))
                 .with_context(|| format!("git-hooks: {}", path.display()))?;
         }
         ensure_executable(&path)?;
@@ -1703,6 +1706,28 @@ mod tests {
         let (ok, state) = super::hooks_state(&ours, Some(&ours_s));
         assert!(!ok, "{state}");
         assert!(state.contains(super::HOOKS_FIX), "{state}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chaining_a_user_hook_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let prior = "#!/bin/sh\nprintf 'user-hook\\n'\n";
+        for (from, want) in [(0o750, 0o750), (0o700, 0o700), (0o640, 0o751)] {
+            let hook = dir.path().join("post-commit");
+            crate::install_executable_mode(&hook, prior, from).unwrap();
+            super::chain_user_hooks(dir.path()).unwrap();
+            let text = std::fs::read_to_string(&hook).unwrap();
+            assert!(text.contains("# ljos:begin git-hook"), "{text}");
+            let mode = std::fs::metadata(&hook).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(mode, want, "a {from:o} hook came back {mode:o}");
+            let fresh = std::fs::metadata(dir.path().join("pre-push"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(fresh & 0o7777, 0o755);
+        }
     }
 
     /// The `pre-push` block a build before 64e489f5 wrote. `|| true`
