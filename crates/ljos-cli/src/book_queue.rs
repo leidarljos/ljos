@@ -421,6 +421,48 @@ fn wear_call(job: &Job) {
     crate::bind_call_conversation(&job.raw, &crate::hook_call_as(&job.raw, Some(&job.event)));
 }
 
+/// The apply process for `batch`: `exe` with the first job's environment
+/// and directory, as the hook call had them. Its
+/// `GIT_CEILING_DIRECTORIES` holds the ceilings the call carried and
+/// [`crate::git_ceilings`] as well, so the call's environment cannot
+/// drop the build tree's ceilings.
+fn batch_command(exe: &Path, head: &Job, batch: &[PathBuf]) -> std::process::Command {
+    let dir = if Path::new(&head.cwd).is_dir() {
+        PathBuf::from(&head.cwd)
+    } else {
+        PathBuf::from("/")
+    };
+    let carried = head
+        .env
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "GIT_CEILING_DIRECTORIES")
+        .map(|(_, v)| v.as_str());
+    let mut roots: Vec<PathBuf> = carried
+        .map(|v| std::env::split_paths(v).collect())
+        .unwrap_or_default();
+    for root in std::env::split_paths(&crate::git_ceilings()) {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("hook")
+        .arg("--apply-book")
+        .args(batch)
+        .env_clear()
+        .envs(head.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .env(
+            "GIT_CEILING_DIRECTORIES",
+            std::env::join_paths(roots).unwrap_or_else(|_| crate::git_ceilings()),
+        )
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    cmd
+}
+
 /// Apply `batch` in a child that has the first job's environment and
 /// directory, as the hook call had them. `false` when no child could
 /// start, which the book log names.
@@ -429,23 +471,7 @@ fn run_batch(head: &Job, batch: &[PathBuf]) -> bool {
         crate::bookkeep::log_line("book queue: the running binary has no path; drainer stops");
         return false;
     };
-    let dir = if Path::new(&head.cwd).is_dir() {
-        PathBuf::from(&head.cwd)
-    } else {
-        PathBuf::from("/")
-    };
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("hook")
-        .arg("--apply-book")
-        .args(batch)
-        .env_clear()
-        .env("GIT_CEILING_DIRECTORIES", crate::git_ceilings())
-        .envs(head.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .current_dir(dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let mut child = match cmd.spawn() {
+    let mut child = match batch_command(&exe, head, batch).spawn() {
         Ok(child) => child,
         Err(e) => {
             crate::bookkeep::log_line(&format!(
@@ -567,5 +593,47 @@ mod tests {
         );
         assert_eq!(head_now(&wt).as_deref(), Some(sha.as_str()), "worktree");
         assert_eq!(head_now(Path::new("/")), None);
+    }
+
+    #[test]
+    fn the_apply_process_keeps_the_build_ceilings_and_the_calls_own() {
+        let ours = crate::git_ceilings();
+        let ours: Vec<PathBuf> = std::env::split_paths(&ours).collect();
+        assert!(!ours.is_empty(), "a test binary runs from a build tree");
+        let head = Job {
+            raw: String::new(),
+            event: "PostToolUse".into(),
+            cue: String::new(),
+            session: String::new(),
+            payload_session: None,
+            owner: (0, 0),
+            ancestry: Vec::new(),
+            head: None,
+            cwd: "/".into(),
+            env: vec![
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("GIT_CEILING_DIRECTORIES".into(), "/carried/ceiling".into()),
+            ],
+        };
+        let cmd = batch_command(Path::new("/bin/true"), &head, &[]);
+        let set = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, v)| v)
+            .expect("the apply process gets a ceiling");
+        let set: Vec<PathBuf> = std::env::split_paths(set).collect();
+        assert!(set.contains(&PathBuf::from("/carried/ceiling")), "{set:?}");
+        for root in &ours {
+            assert!(
+                set.contains(root),
+                "{} dropped from {set:?}",
+                root.display()
+            );
+        }
+        let path = cmd.get_envs().find(|(k, _)| *k == "PATH");
+        assert_eq!(
+            path,
+            Some(("PATH".as_ref(), Some("/usr/bin:/bin".as_ref())))
+        );
     }
 }
