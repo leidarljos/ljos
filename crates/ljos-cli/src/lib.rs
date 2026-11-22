@@ -61895,17 +61895,14 @@ mod tests {
         let reads = std::fs::read_to_string(&log).unwrap_or_default();
         assert!(reads.lines().count() >= 2, "{reads}");
         assert!(!said.contains("held"), "{said}");
-        if said.contains("committed") {
-            let shown = git_text(
-                &root,
-                &["show", "HEAD:Software/probe/issues/probe-b007.org"],
-            );
-            assert_eq!(shown.matches("- Noted by saddle").count(), 1, "{shown}");
-            let left = board_left(&root);
-            assert!(left.is_empty(), "{said}\n{left}");
-        } else {
-            assert!(said.starts_with("tracker git: "), "{said}");
-        }
+        assert!(said.contains("committed"), "{said}");
+        let shown = git_text(
+            &root,
+            &["show", "HEAD:Software/probe/issues/probe-b007.org"],
+        );
+        assert_eq!(shown.matches("- Noted by saddle").count(), 1, "{shown}");
+        let left = board_left(&root);
+        assert!(left.is_empty(), "{said}\n{left}");
         clear_probe_env();
     }
 
