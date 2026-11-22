@@ -166,7 +166,7 @@ fn a_slow_writer_names_search_and_exits_75() {
     assert!(out.status.success(), "{said}");
     assert_eq!(
         one_line(&out.stdout),
-        "Memory busy: queued 1 write, it will be saved on a later call."
+        "Memory busy: queued 1 write. A later ljos call from any seat will try to save it, and the pack may still refuse it."
     );
     assert!(out.stderr.is_empty(), "{said}");
 }

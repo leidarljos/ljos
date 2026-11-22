@@ -13,9 +13,9 @@
 //! Later notes are still tried. The queue holds one entry per issue, text,
 //! workspace, kind
 //! and, for a lesson, the atoms it closes. The seat that queued the copy
-//! stays on the row, so a later seat does not take it. packsetd answers an
-//! identical issue and text with the claim it already holds, so a resend
-//! after a lost answer stores nothing new.
+//! stays on the row, so a later seat does not take it. packsetd answers a
+//! claim with the same text, kind, set, issue and agent with the claim it
+//! already holds, so a resend after a lost answer stores nothing new.
 
 use std::path::{Path, PathBuf};
 
@@ -54,6 +54,11 @@ pub struct Queued {
     /// was named, or on a line written before this field.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub project: String,
+    /// The whole remember that queued this lesson. A send writes the lesson
+    /// from it. Absent on a row no remember queued, and on a line written
+    /// before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remember: Option<crate::RememberRequest>,
 }
 
 impl Queued {
@@ -66,6 +71,7 @@ impl Queued {
             && self.seat == other.seat
             && self.home == other.home
             && self.project.trim() == other.project.trim()
+            && self.remember == other.remember
     }
 }
 
@@ -94,6 +100,23 @@ pub struct Drained {
     pub waiting_on: Option<String>,
     /// Queue bytes that were not a note, moved out before a rewrite.
     pub set_aside: Vec<SetAside>,
+    /// Issues whose finished lesson rows predate the whole remember record.
+    pub legacy: Vec<String>,
+}
+
+impl Drained {
+    /// This drain followed by `later`: what each finished, in order, and
+    /// what `later` left waiting.
+    #[must_use]
+    pub fn then(mut self, later: Self) -> Self {
+        self.kept.extend(later.kept);
+        self.refused.extend(later.refused);
+        self.set_aside.extend(later.set_aside);
+        self.legacy.extend(later.legacy);
+        self.left = later.left;
+        self.waiting_on = later.waiting_on;
+        self
+    }
 }
 
 /// Bytes of the queue a rewrite moved to a file beside it rather than
@@ -360,7 +383,11 @@ pub fn drain_in(dir: &Path, mut send: impl FnMut(&Queued) -> Sent) -> Result<Dra
                 if done.waiting_on.is_none() {
                     done.waiting_on = Some(why);
                 }
+                continue;
             }
+        }
+        if note.kind == "lesson" && note.remember.is_none() {
+            done.legacy.push(note.issue.clone());
         }
     }
     let _held = lock(dir);
@@ -380,6 +407,11 @@ pub fn drain_in(dir: &Path, mut send: impl FnMut(&Queued) -> Sent) -> Result<Dra
 #[must_use]
 pub fn drained_lines(done: &Drained) -> String {
     let mut out = String::new();
+    for issue in &done.legacy {
+        out.push_str(&format!(
+            "memory: the queued lesson on {issue} came from an older ljos; its row did not record route, basis, persona, horizon or validity\n"
+        ));
+    }
     if !done.kept.is_empty() {
         let ids: Vec<String> = done
             .kept
@@ -431,6 +463,7 @@ mod tests {
             seat: String::new(),
             home: String::new(),
             project: String::new(),
+            remember: None,
         }
     }
 

@@ -1773,8 +1773,7 @@ fn busy_line(err: &anyhow::Error) -> Option<String> {
     if !busy {
         return None;
     }
-    let full = format!("{err:#}");
-    if full.contains("queued") {
+    if ljos_cli::lesson_waits(err) {
         return Some("The pack is busy, so the write is queued. Run `ljos remember`.".to_string());
     }
     Some("The pack is busy, so run `ljos doctor`.".to_string())
@@ -2159,17 +2158,19 @@ impl LjosServer {
             None => None,
         };
         let _project = ljos_cli::RememberProject::set(project);
-        let body = ljos_cli::packset_write_mcp(
-            "Remember",
-            &args.text,
-            args.as_persona.as_deref(),
-            args.transient,
-        )
-        .map_err(refused)?;
-        Ok(Json(Said {
-            text: ljos_cli::remember_mcp_text(&body),
-            aside: None,
-        }))
+        let request =
+            ljos_cli::RememberRequest::said(&args.text, args.as_persona.as_deref(), args.transient);
+        let text = match ljos_cli::remember_with_retry(&request).map_err(refused)? {
+            ljos_cli::RememberOutcome::Stored(body) => ljos_cli::remember_mcp_text(&body),
+            ljos_cli::RememberOutcome::Queued(_) => ljos_cli::REMEMBER_QUEUED_LINE.to_string(),
+            ljos_cli::RememberOutcome::NotQueued(cause) => {
+                return Err(McpError::internal_error(
+                    ljos_cli::remember_not_queued_line(&cause),
+                    None,
+                ))
+            }
+        };
+        Ok(Json(Said { text, aside: None }))
     }
 
     #[tool(
@@ -5511,6 +5512,23 @@ fn card_named(uri: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
     use rmcp::handler::server::ServerHandler;
+
+    /// Whether a busy write was queued is read from the error's type. A
+    /// busy error whose words say queued is not a queued write.
+    #[test]
+    fn a_busy_line_reads_a_queued_write_from_the_error_type() {
+        let failed = anyhow::anyhow!(
+            "remember: the lesson could not be queued (append /tmp/busy/ljos/note-queue.jsonl: Is a directory). {}",
+            ljos_cli::REMEMBER_NOT_STORED_LINE
+        );
+        let line = busy_line(&failed).unwrap();
+        assert!(!line.contains("is queued"), "{line}");
+
+        let waits = anyhow::anyhow!("packsetd is busy: memory pressure")
+            .context(ljos_cli::LessonWaits::Queued)
+            .context("Remember: POST /v1/atoms failed");
+        assert!(busy_line(&waits).unwrap().contains("is queued"));
+    }
 
     #[test]
     fn a_scratch_file_is_private_unique_and_never_left_behind() {

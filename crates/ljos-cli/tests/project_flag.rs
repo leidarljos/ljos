@@ -456,8 +456,9 @@ fn queued_remember_keeps_the_project_when_the_pack_is_down() {
         serde_json::json!({"seat": "alice", "project": "Garden", "text": "MCP queued garden lesson."}),
         &dead,
     );
-    assert!(
-        mcp.to_string().contains("queued for the next send"),
+    assert_eq!(
+        mcp["result"]["structuredContent"]["text"],
+        ljos_cli::REMEMBER_QUEUED_LINE,
         "{mcp}"
     );
 

@@ -178,7 +178,7 @@ fn a_silent_pack_does_not_hold_a_remember() {
     );
     assert!(out.status.success(), "{said}");
     assert!(
-        said.contains("Memory busy: queued 1 write, it will be saved on a later call."),
+        said.contains("Memory busy: queued 1 write. A later ljos call from any seat will try to save it, and the pack may still refuse it."),
         "{said}"
     );
 }

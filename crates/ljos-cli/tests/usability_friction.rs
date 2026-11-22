@@ -70,7 +70,7 @@ fn search_and_remember_say_one_line_when_the_pack_is_down() {
     assert!(remember.status.success(), "{remember_out:?}");
     assert_eq!(
         remember_out,
-        ["Memory busy: queued 1 write, it will be saved on a later call."]
+        ["Memory busy: queued 1 write. A later ljos call from any seat will try to save it, and the pack may still refuse it."]
     );
 }
 
