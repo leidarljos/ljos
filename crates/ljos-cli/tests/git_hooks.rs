@@ -444,6 +444,7 @@ fn a_note_with_the_pack_off_leaves_nothing_waiting() {
 }
 
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn uninstall_restores_a_hooks_path_ljos_already_owns() {
     let hab = Hab::new("repo");
     let saved = hab.root.join("saved-hooks");
@@ -463,7 +464,7 @@ fn uninstall_restores_a_hooks_path_ljos_already_owns() {
         ours.display().to_string(),
         "{configured}"
     );
-    fs::write(
+    ljos_cli::write_file(
         ours.join("previous-hooks-path"),
         format!("{}\n", saved.display()),
     )
@@ -813,6 +814,7 @@ fn git_status(hab: &Hab, args: &[&str]) -> Output {
 /// A repository `pre-commit` that exits 1 still blocks the commit. `commit-msg`
 /// and `pre-push` still run, with the push's stdin.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn a_repo_pre_commit_still_blocks_and_later_hooks_still_run() {
     let hab = Hab::new("repo");
     install(&hab);
@@ -836,7 +838,7 @@ fn a_repo_pre_commit_still_blocks_and_later_hooks_still_run() {
         ),
     );
 
-    fs::write(hab.repo.join("blocked.txt"), "x\n").unwrap();
+    ljos_cli::write_file(hab.repo.join("blocked.txt"), "x\n").unwrap();
     hab.git(&hab.repo, &["add", "blocked.txt"]);
     let blocked = git_status(&hab, &["commit", "-q", "-m", "blocked"]);
     assert!(
@@ -1084,6 +1086,7 @@ fn an_ljos_tracker_commit_is_checked_as_the_seat_that_wrote() {
 /// A `core.hooksPath` the user already set stays put. Install chains the
 /// user's `post-commit`, and uninstall puts that file back.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn git_hooks_keep_a_user_hooks_path_and_chain_post_commit() {
     let hab = Hab::new("repo");
     let saved = hab.root.join("saved-hooks");
@@ -1127,7 +1130,7 @@ fn git_hooks_keep_a_user_hooks_path_and_chain_post_commit() {
     let status = String::from_utf8(hab.ljos(&["git-hooks", "status"]).stdout).unwrap();
     assert!(status.contains("ljos hooks run"), "{status}");
 
-    fs::write(hab.repo.join("one.txt"), "x\n").unwrap();
+    ljos_cli::write_file(hab.repo.join("one.txt"), "x\n").unwrap();
     hab.git(&hab.repo, &["add", "one.txt"]);
     hab.git(&hab.repo, &["commit", "-q", "-m", "book the readme"]);
     let marked = fs::read_to_string(&marker).unwrap();
@@ -1151,7 +1154,7 @@ fn git_hooks_keep_a_user_hooks_path_and_chain_post_commit() {
     assert_eq!(fs::read_to_string(saved.join("post-commit")).unwrap(), user);
     assert!(!saved.join("pre-push").exists());
     let before = book_log(&hab);
-    fs::write(hab.repo.join("two.txt"), "y\n").unwrap();
+    ljos_cli::write_file(hab.repo.join("two.txt"), "y\n").unwrap();
     hab.git(&hab.repo, &["add", "two.txt"]);
     hab.git(&hab.repo, &["commit", "-q", "-m", "after uninstall"]);
     assert_eq!(
@@ -1169,6 +1172,7 @@ fn git_hooks_keep_a_user_hooks_path_and_chain_post_commit() {
 /// An owned `post-rewrite` keeps stdin and hands that copy to the
 /// repository hook.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn owned_hooks_pass_post_rewrite_stdin_to_the_repo_hook() {
     let hab = Hab::new("repo");
     install(&hab);
@@ -1197,6 +1201,7 @@ fn owned_hooks_pass_post_rewrite_stdin_to_the_repo_hook() {
 /// `ljos git-hooks status`. The push goes out. Reinstall replaces the
 /// stub. The sitting gate is a label and the push still goes out.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
     let hab = Hab::new("repo");
     install(&hab);
@@ -1209,7 +1214,8 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
     );
     let runner = [("SEAT_SESSION_ID", "5b0c2a71-9d1e-4f3a-8c6b-2e7f1a0d9c43")];
     let push = |dest: &str| {
-        Command::new("/usr/bin/git")
+        ljos_cli::program("/usr/bin/git")
+            .unwrap()
             .arg("-C")
             .arg(&hab.repo)
             .args(["push", "-q", "origin", dest])
@@ -1221,7 +1227,8 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
             .unwrap()
     };
     let sent = |branch: &str| {
-        Command::new("/usr/bin/git")
+        ljos_cli::program("/usr/bin/git")
+            .unwrap()
             .arg("--git-dir")
             .arg(&bare)
             .args([
@@ -1238,7 +1245,8 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
             .success()
     };
     let hooks_row = || {
-        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        let out = ljos_cli::program(env!("CARGO_BIN_EXE_ljos"))
+            .unwrap()
             .args(["doctor", "--all"])
             .current_dir(&hab.repo)
             .env_clear()
@@ -1281,7 +1289,8 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         .unwrap();
     // The current hook already sent develop. Git does not run pre-push
     // when the remote has the commit, so drop that ref and send it again.
-    let dropped = Command::new("/usr/bin/git")
+    let dropped = ljos_cli::program("/usr/bin/git")
+        .unwrap()
         .arg("--git-dir")
         .arg(&bare)
         .args(["update-ref", "-d", "refs/heads/develop"])
@@ -1311,8 +1320,9 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
     assert!(status.contains("pre-push stub predates"), "{status}");
 
     install(&hab);
-    fs::write(hab.repo.join("again.txt"), "z\n").unwrap();
-    let add = Command::new("/usr/bin/git")
+    ljos_cli::write_file(hab.repo.join("again.txt"), "z\n").unwrap();
+    let add = ljos_cli::program("/usr/bin/git")
+        .unwrap()
         .arg("-C")
         .arg(&hab.repo)
         .args(["add", "again.txt"])
@@ -1325,7 +1335,8 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         "{}",
         String::from_utf8_lossy(&add.stderr)
     );
-    let commit = Command::new("/usr/bin/git")
+    let commit = ljos_cli::program("/usr/bin/git")
+        .unwrap()
         .arg("-C")
         .arg(&hab.repo)
         .args(["commit", "-q", "-m", "after reinstall"])
@@ -1338,7 +1349,8 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         "{}",
         String::from_utf8_lossy(&commit.stderr)
     );
-    let remote = Command::new("/usr/bin/git")
+    let remote = ljos_cli::program("/usr/bin/git")
+        .unwrap()
         .arg("--git-dir")
         .arg(&bare)
         .args(["rev-parse", "refs/heads/develop"])
@@ -1355,7 +1367,8 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
     );
     assert!(err.contains("sitting-gate"), "{err}");
     assert!(!err.contains("predates this gate"), "{err}");
-    let remote = Command::new("/usr/bin/git")
+    let remote = ljos_cli::program("/usr/bin/git")
+        .unwrap()
         .arg("--git-dir")
         .arg(&bare)
         .args(["rev-parse", "refs/heads/develop"])

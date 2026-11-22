@@ -14,7 +14,8 @@ use packset_client::Hit;
 use serde_json::Value;
 
 pub use exe_publish::{
-    copy_executable, install_executable, install_executable_mode, publish, Content, Mode,
+    copy_executable, install_executable, install_executable_mode, program, publish, write_file,
+    Content, Mode,
 };
 pub use pack_link::PacksetClient;
 
@@ -48,6 +49,8 @@ pub mod gates;
 pub mod git_hooks;
 pub mod graphify;
 mod handover_scope;
+#[cfg(all(test, unix))]
+mod hook_write_forms;
 pub mod hookd;
 pub mod hud;
 pub mod idle_drop;
@@ -58531,6 +58534,7 @@ mod tests {
     }
 
     #[test]
+    #[deny(clippy::disallowed_methods)]
     fn a_slow_tracker_push_finishes_in_the_background() {
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
@@ -58573,7 +58577,7 @@ mod tests {
         blocking_hook(&hook, "#!/bin/sh\nexit 0\n");
         let issues = root.join("Software/probe/issues.org");
         let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-c3d4\n:END:\n";
-        std::fs::write(&issues, heading).unwrap();
+        crate::write_file(&issues, heading).unwrap();
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "seed"]);
         git(
@@ -58589,7 +58593,7 @@ mod tests {
         std::env::set_var("LJOS_TRACKER_PUSH_WAIT", PUSH_BACKGROUND_AFTER_SECS);
         std::env::set_var("XDG_RUNTIME_DIR", dir.path());
 
-        std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
+        crate::write_file(&issues, heading.replace("TODO", "STARTED")).unwrap();
         let said = super::persist_tracker("probe-c3d4", "claimed");
         assert!(
             said.contains(&format!(
@@ -58610,7 +58614,8 @@ mod tests {
             .map(str::trim)
             .expect("the line names the push log");
         let pid = super::recorded_push_pid(std::path::Path::new(log)).expect("push pid");
-        let alive = std::process::Command::new("kill")
+        let alive = crate::program("kill")
+            .unwrap()
             .args(["-0", &pid.to_string()])
             .status()
             .expect("kill -0")
@@ -58623,7 +58628,7 @@ mod tests {
             "the pre-push hook did not finish"
         );
         blocking_hook(&hook, "#!/bin/sh\nexit 0\n");
-        std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
+        crate::write_file(&issues, heading.replace("TODO", "DONE")).unwrap();
         std::env::set_var("LJOS_TRACKER_PUSH_WAIT", PUSH_FOREGROUND_WAIT_SECS);
         let said = super::persist_tracker("probe-c3d4", "finished");
         assert!(said.contains("committed and pushed"), "{said}");
@@ -60136,6 +60141,7 @@ mod tests {
     /// lands once the push exits. The hook's lock is still there when the
     /// hook looks, so ljos did not remove it.
     #[test]
+    #[deny(clippy::disallowed_methods)]
     fn a_background_push_holds_the_tracker_lock_until_the_record_commits() {
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
@@ -60186,7 +60192,7 @@ mod tests {
         blocking_hook(&hook, "#!/bin/sh\nexit 0\n");
         let issues = root.join("Software/probe/issues.org");
         let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-lk11\n:END:\n";
-        std::fs::write(&issues, heading).unwrap();
+        crate::write_file(&issues, heading).unwrap();
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "seed"]);
         git(
@@ -60203,7 +60209,7 @@ mod tests {
         std::env::set_var("LJOS_SEAT", "saddle");
         std::env::set_var("XDG_RUNTIME_DIR", dir.path());
 
-        std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
+        crate::write_file(&issues, heading.replace("TODO", "STARTED")).unwrap();
         let said = super::persist_tracker("probe-lk11", "claimed");
         assert!(
             said.contains(&format!(
@@ -60239,7 +60245,7 @@ mod tests {
             "the hook's index.lock did not survive until the hook looked"
         );
         std::env::set_var("LJOS_TRACKER_PUSH_WAIT", PUSH_FOREGROUND_WAIT_SECS);
-        std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
+        crate::write_file(&issues, heading.replace("TODO", "DONE")).unwrap();
         let said = super::persist_tracker("probe-lk11", "finished");
         assert!(
             said.contains("committed") && !said.contains("commit refused"),
@@ -60283,6 +60289,7 @@ mod tests {
     /// A git killed before it printed anything is named, not an empty
     /// `commit refused: `.
     #[test]
+    #[deny(clippy::disallowed_methods)]
     fn a_commit_killed_by_a_signal_says_so() {
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
@@ -60299,7 +60306,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(set.success());
-        std::fs::write(
+        crate::write_file(
             &issues,
             "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
         )

@@ -43,6 +43,8 @@
 //! Booking writes one `note:` line to the book log; it cites no deed and
 //! takes no claim. An amend or a rebase notes the new sha.
 
+#![deny(clippy::disallowed_methods)]
+
 use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1492,7 +1494,7 @@ fn remember_booked(repo: &str, head: &str) {
     if lines.len() > 200 {
         lines.drain(0..lines.len() - 200);
     }
-    let _ = fs::write(path, lines.join("\n") + "\n");
+    let _ = crate::write_file(&path, lines.join("\n") + "\n");
 }
 
 fn booked_path() -> PathBuf {
@@ -1711,7 +1713,7 @@ mod tests {
 
         let config = dir.path().join("config");
         std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(
+        crate::write_file(
             config.join("env.sh"),
             format!("export LJOS_GIT_HOOKS={}\n", other.display()),
         )
@@ -1728,7 +1730,7 @@ mod tests {
         assert!(state.contains(&other_s), "{state}");
         assert!(state.contains(&ours_s), "{state}");
 
-        std::fs::write(
+        crate::write_file(
             config.join("env.sh"),
             format!("{}\n", super::HOOKS_ENV_LINE),
         )
@@ -1794,7 +1796,10 @@ mod tests {
     fn hook_at(path: &std::path::Path, text: &str, mode: u32) {
         use std::os::unix::fs::PermissionsExt;
         crate::install_executable_mode(path, text, 0o700).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        std::fs::File::open(path)
+            .unwrap()
+            .set_permissions(std::fs::Permissions::from_mode(mode))
+            .unwrap();
         assert_eq!(mode_of(path), mode, "{}", path.display());
     }
 
@@ -1840,6 +1845,10 @@ mod tests {
         crate::install_executable_mode(&hooks.join("pre-push"), pre_push, 0o750).unwrap();
         let target = dir.path().join("shared-hook");
         hook_at(&target, text, mode);
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the symlinked hook these tests install and uninstall around; hook_at published its target"
+        )]
         std::os::unix::fs::symlink(&target, hooks.join("post-commit")).unwrap();
         (dir, hooks, target)
     }
@@ -2001,14 +2010,14 @@ mod tests {
     fn hook_children_carry_the_guard_without_touching_the_process() {
         let before_hook = std::env::var_os("LJOS_GIT_HOOK");
         let before_dir = std::env::var_os("GIT_DIR");
-        let mut plain = Command::new("true");
+        let mut plain = crate::program("true").unwrap();
         plain.env("GIT_DIR", "keep");
         hook_child_env(&mut plain);
         assert_eq!(mapped(&plain, "GIT_DIR"), Some(Some(OsStr::new("keep"))));
         assert_eq!(mapped(&plain, "LJOS_GIT_HOOK"), None);
 
         let _guard = HookChildren::enter();
-        let mut cmd = Command::new("true");
+        let mut cmd = crate::program("true").unwrap();
         cmd.env("GIT_DIR", "from-the-hook");
         cmd.env("PATH", "/usr/bin");
         hook_child_env(&mut cmd);

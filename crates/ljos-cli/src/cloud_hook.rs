@@ -100,6 +100,7 @@ pub(crate) fn ensure(repoint: bool) -> Result<String> {
 /// `core.hooksPath` that names [`hooks_dir`], the pre-push script there,
 /// and the stub it wrote into a hooks directory a path already named.
 /// Any other value or file stays as it is. One line per step taken.
+#[deny(clippy::disallowed_methods)]
 fn retire_old_hooks(seat: Option<&Path>) -> Vec<String> {
     let Some(ours) = hooks_dir() else {
         return Vec::new();
@@ -202,6 +203,7 @@ fn old_hook_script(path: &Path) -> bool {
 
 /// The stub ran the hook it moved aside, then the old script. Putting
 /// that hook back under its own name is what the directory held before.
+#[deny(clippy::disallowed_methods)]
 fn unchain(dir: &Path) -> Option<String> {
     let hook = dir.join("pre-push");
     if old_hook_script(&hook) {
@@ -223,6 +225,10 @@ fn unchain(dir: &Path) -> Option<String> {
     }
     let previous = dir.join(CHAIN_PREVIOUS);
     if previous.is_file() {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "puts back the user's hook an earlier cloud up moved aside; no descriptor here wrote it"
+        )]
         fs::rename(&previous, &hook).ok()?;
         return Some(format!(
             "hooks: put {} back as {}, the hook an earlier cloud up chained",

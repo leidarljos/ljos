@@ -264,6 +264,7 @@ fn refusing_hooks(dir: &Path, marks: &Path, who: &str, names: &[&str]) {
 /// a mark, as a fail-closed sitting gate does. Sharing user rules fetches,
 /// merges, commits and pushes without running any of them.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn the_login_hooks_do_not_run_on_user_rules_git() {
     if tools::halt(tools::Tool::AgeKeygen) {
         return;

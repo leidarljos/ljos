@@ -300,6 +300,7 @@ fn warned(line: &str, cwd: &Path) {
 /// no hooks directory. A later run leaves the global and local values a
 /// person already had, byte for byte.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn cloud_up_sets_no_hooks_path() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -309,7 +310,7 @@ fn cloud_up_sets_no_hooks_path() {
     // The global level is the home's own `.gitconfig`, as on a fresh machine.
     std::env::remove_var("GIT_CONFIG_GLOBAL");
     let system = root.path().join("system-gitconfig");
-    fs::write(&system, b"").unwrap();
+    ljos_cli::write_file(&system, b"").unwrap();
     std::env::set_var("GIT_CONFIG_SYSTEM", &system);
     let (_origin, repo) = bare_repo(root.path(), "seat");
     std::env::set_current_dir(&repo).unwrap();
@@ -322,7 +323,7 @@ fn cloud_up_sets_no_hooks_path() {
 
     let mine = root.path().join("my-hooks");
     let gitconfig = format!("[core]\n\thooksPath = {}\n", mine.display());
-    fs::write(home.join(".gitconfig"), &gitconfig).unwrap();
+    ljos_cli::write_file(home.join(".gitconfig"), &gitconfig).unwrap();
 
     let booked = root.path().join("booked-hooks");
     fs::create_dir_all(&booked).unwrap();
@@ -357,6 +358,7 @@ const OLD_SCRIPT: &str =
 
 /// The stub an older `cloud up` wrote over a booked pre-push after moving
 /// that hook to `pre-push.ljos-previous`.
+#[deny(clippy::disallowed_methods)]
 fn chain_stub(booked: &Path, ours: &Path) -> String {
     let canon = ours.join("pre-push");
     format!(
@@ -379,6 +381,7 @@ fn chain_stub(booked: &Path, ours: &Path) -> String {
 /// the script in its local directory. A third run finds the person's own
 /// values at both levels and changes nothing.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn cloud_up_takes_back_the_hooks_an_earlier_cloud_up_set() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -531,6 +534,7 @@ fn cloud_up_takes_back_the_hooks_an_earlier_cloud_up_set() {
 /// reads, runs with one warning. A push outside the allowlist is still
 /// refused by the same rule name.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn shell_guard_warns_when_a_line_changes_the_hooks() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -682,6 +686,7 @@ fn the_hook_allows_a_hooks_change_and_prints_the_warning() {
 /// nothing. The directory follows `XDG_DATA_HOME`, `LJOS_GIT_HOOKS`, and
 /// a global `core.hooksPath` that names `ljos/git-hooks`.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn a_write_to_the_git_hooks_directory_runs_named_like_a_runner_hook() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -780,11 +785,11 @@ fn a_write_to_the_git_hooks_directory_runs_named_like_a_runner_hook() {
     std::env::remove_var("LJOS_GIT_HOOKS");
 
     let cfg = root.path().join("gitconfig");
-    fs::write(&cfg, "[core]\n\thooksPath = /tmp/not-the-ljos-hooks\n").unwrap();
+    ljos_cli::write_file(&cfg, "[core]\n\thooksPath = /tmp/not-the-ljos-hooks\n").unwrap();
     allow("touch /tmp/not-the-ljos-hooks/pre-push");
     allow("mkdir -p /tmp/not-the-ljos-hooks/x");
     let booked = root.path().join("booked/ljos/git-hooks");
-    fs::write(
+    ljos_cli::write_file(
         &cfg,
         format!("[core]\n\thooksPath = {}\n", booked.display()),
     )
@@ -792,7 +797,7 @@ fn a_write_to_the_git_hooks_directory_runs_named_like_a_runner_hook() {
     named(&format!("touch {}", booked.join("pre-push").display()));
     named(&format!("mkdir -p {}", booked.join("x").display()));
     allow("touch /tmp/not-the-ljos-hooks/pre-push");
-    fs::write(&cfg, "").unwrap();
+    ljos_cli::write_file(&cfg, "").unwrap();
 
     std::env::set_var("LJOS_SEAT", "probe");
     ljos_cli::cloud::up(false).unwrap();
@@ -884,9 +889,11 @@ fn send_pack_checks_the_destination_repository() {
     allowed("git push other develop", here);
 }
 
+#[deny(clippy::disallowed_methods)]
 fn hook_push(repo: &Path, local: &str, remote: &str) -> std::process::Output {
     let refs = format!("refs/heads/develop {local} refs/heads/develop {remote}\n");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let mut child = ljos_cli::program(env!("CARGO_BIN_EXE_ljos"))
+        .unwrap()
         .current_dir(repo)
         .args(["git-hook", "pre-push", "origin", "origin"])
         .stdin(std::process::Stdio::piped())
@@ -907,6 +914,7 @@ fn hook_push(repo: &Path, local: &str, remote: &str) -> std::process::Output {
 /// tree rebuilt with commit-tree, and a Tests paragraph, are allowed.
 /// A by-line with no blank line before it is refused too.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn a_commit_message_hook_is_refused_on_push() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -1039,13 +1047,15 @@ fn a_new_branch_omits_a_commit_already_on_a_remote() {
 
 /// A pre-push stdin line that is not a ref update is refused.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn a_pre_push_line_that_is_not_a_ref_is_refused() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_home, _xdg) = seat_env(root.path());
     clear_ids();
     let (_origin, repo) = bare_repo(root.path(), "seat");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let mut child = ljos_cli::program(env!("CARGO_BIN_EXE_ljos"))
+        .unwrap()
         .current_dir(&repo)
         .args(["git-hook", "pre-push"])
         .stdin(std::process::Stdio::piped())

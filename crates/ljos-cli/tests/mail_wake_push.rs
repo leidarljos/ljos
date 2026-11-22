@@ -161,10 +161,11 @@ fn home_dirs(home: &Path) {
     }
 }
 
+#[deny(clippy::disallowed_methods)]
 fn world(slow_push: bool, reject: bool) -> (World, ljos_test_boot::Packsetd) {
     let root = tempfile::tempdir().expect("root");
     let gitconfig = root.path().join("gitconfig");
-    std::fs::write(
+    ljos_cli::write_file(
         &gitconfig,
         "[user]\n\tname = seat\n\temail = seat@example.invalid\n[commit]\n\tgpgsign = false\n[safe]\n\tdirectory = *\n[init]\n\tdefaultBranch = main\n",
     )
@@ -203,17 +204,17 @@ fn world(slow_push: bool, reject: bool) -> (World, ljos_test_boot::Packsetd) {
     std::fs::create_dir_all(seed.join(".ljos")).expect("ljos");
     // `cloud` is reserved for the shared extra scope. These letters are
     // unscoped, so they stay on the primary log under another name.
-    std::fs::write(
+    ljos_cli::write_file(
         seed.join(".ljos/sync.toml"),
         format!("name = \"mail\"\nrecipients = [\"{public}\"]\n"),
     )
     .expect("sync.toml");
-    std::fs::write(
+    ljos_cli::write_file(
         seed.join(".gitattributes"),
         "*.org merge=ljos-org\n.ljos/atoms/* merge=ljos-atoms\n",
     )
     .expect("attributes");
-    std::fs::write(seed.join("README"), "tracker\n").expect("readme");
+    ljos_cli::write_file(seed.join("README"), "tracker\n").expect("readme");
     git(&gitconfig, &seed, &["add", "."]);
     git(&gitconfig, &seed, &["commit", "-q", "-m", "seed"]);
     git(&gitconfig, &seed, &["push", "-q", "-u", "origin", "HEAD"]);
@@ -255,8 +256,12 @@ fn world(slow_push: bool, reject: bool) -> (World, ljos_test_boot::Packsetd) {
         (&recipient_home, &recipient_repo),
     ] {
         home_dirs(home);
-        std::fs::copy(&key, home.join(".config/ljos/age.key")).expect("age key");
-        std::fs::write(
+        let copy = home.join(".config/ljos/age.key");
+        ljos_cli::write_file(&copy, std::fs::read(&key).expect("age key")).expect("age key");
+        std::fs::File::open(&copy)
+            .and_then(|file| file.set_permissions(std::fs::metadata(&key)?.permissions()))
+            .expect("age key mode");
+        ljos_cli::write_file(
             home.join(".config/ljos/sync.toml"),
             format!("repos = [\"{}\"]\n", repo.display()),
         )
@@ -849,6 +854,7 @@ fn a_recipients_inbox_sync_reads_the_pushed_letter() {
 /// fetches again until the remote has it, so a push that lands while the
 /// recipient is already fetching is still read.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn inbox_sync_waits_for_a_push_that_lands_late() {
     if !ljos_cli::tool_installed("packsetd") {
         eprintln!("skipped: packsetd is not installed");

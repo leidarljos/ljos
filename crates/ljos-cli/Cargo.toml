@@ -78,3 +78,6 @@ vissue-core.workspace = true
 webpki-roots = "1.0.10"
 ljos-test-boot = { path = "../ljos-test-boot" }
 ljos = { path = ".", features = ["test-hooks"] }
+
+[lints]
+workspace = true

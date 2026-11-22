@@ -193,6 +193,7 @@ impl Seat {
 
     /// `ljos git-hook pre-push` under the same runner, with git's ref list
     /// on stdin.
+    #[deny(clippy::disallowed_methods)]
     fn git_hook_push(&self, refs: &str, env: &[(&str, &str)]) -> Output {
         let mut cmd = self.command(
             "setsid",
@@ -663,6 +664,7 @@ fn a_gates_file_that_does_not_parse_warns_and_holds_the_git_hook() {
 /// program does not answer. A guard git on the search list is not the git
 /// the check starts.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn a_commit_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
     use std::os::unix::io::AsRawFd;
     use std::time::{Duration, Instant};
@@ -677,20 +679,22 @@ fn a_commit_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
     );
     let runtime = seat.run.join("ljos");
     std::fs::create_dir_all(&runtime).unwrap();
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(runtime.join("hold-adopt.lock"))
-        .unwrap();
+    let lock_path = runtime.join("hold-adopt.lock");
+    ljos_cli::write_file(&lock_path, "").unwrap();
+    let lock_file = std::fs::File::open(&lock_path).unwrap();
     assert_eq!(
         unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) },
         0
     );
     let fake = seat.bin.join("ljos-mcp");
-    std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
-    let mut sleeper = Command::new(&fake).arg("300").spawn().unwrap();
+    ljos_cli::copy_executable(Path::new("/bin/sleep"), &fake).unwrap();
+    let mut sleeper = ljos_cli::program(&fake)
+        .unwrap()
+        .arg("300")
+        .spawn()
+        .unwrap();
     let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
-    std::fs::write(
+    ljos_cli::write_file(
         runtime.join(format!("hold-{bare}")),
         format!(
             "inky\ninky\n{}\nljos-mcp\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n",
@@ -883,6 +887,7 @@ fn a_stalled_tracker_refuses_a_protected_push_and_passes_another() {
 /// program does not answer. The push continues, and the message names
 /// the sitting.
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn a_push_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
     use std::os::unix::io::AsRawFd;
     use std::time::Duration;
@@ -897,25 +902,24 @@ fn a_push_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
     );
     let runtime = seat.run.join("ljos");
     std::fs::create_dir_all(&runtime).unwrap();
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(runtime.join("hold-adopt.lock"))
-        .unwrap();
+    let lock_path = runtime.join("hold-adopt.lock");
+    ljos_cli::write_file(&lock_path, "").unwrap();
+    let lock_file = std::fs::File::open(&lock_path).unwrap();
     assert_eq!(
         unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) },
         0
     );
     let fake = seat.bin.join("ljos-mcp");
-    std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
-    let mut sleeper = Command::new(&fake)
+    ljos_cli::copy_executable(Path::new("/bin/sleep"), &fake).unwrap();
+    let mut sleeper = ljos_cli::program(&fake)
+        .unwrap()
         .arg("300")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
     let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
-    std::fs::write(
+    ljos_cli::write_file(
         runtime.join(format!("hold-{bare}")),
         format!(
             "inky\ninky\n{}\nljos-mcp\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n",
@@ -925,7 +929,7 @@ fn a_push_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
     .unwrap();
     let holder = format!("inky@{}", ljos_cli::session_tag(SESSION));
     let tagged = ljos_cli::work_id(&format!("{holder}:{ISSUE}"));
-    std::fs::write(
+    ljos_cli::write_file(
         runtime.join(format!("hold-{tagged}")),
         format!(
             "{holder}\ninky\n{}\nljos-mcp\n2026-10-25T00:00:01Z\n{ISSUE}\n-\n",

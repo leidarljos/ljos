@@ -3499,6 +3499,7 @@ fn two_vms_land_different_issues_and_merge_notes_on_one() {
 }
 
 #[test]
+#[deny(clippy::disallowed_methods)]
 fn a_refused_push_stays_queued_until_the_next_drain() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -3519,7 +3520,7 @@ fn a_refused_push_stays_queued_until_the_next_drain() {
     let vm = clone_of(root.path(), &origin, "vm");
     let issues = vm.join("Software/probe/issues.org");
     let text = fs::read_to_string(&issues).unwrap();
-    fs::write(
+    ljos_cli::write_file(
         &issues,
         text.replacen(
             ":LOGBOOK:\n",
@@ -3546,9 +3547,9 @@ fn a_refused_push_stays_queued_until_the_next_drain() {
         "packset-embed",
         "ljos-hud",
     ] {
-        fs::write(cache.join("ljos").join(format!("crate-{name}")), "9.9.9\n").unwrap();
+        ljos_cli::write_file(cache.join("ljos").join(format!("crate-{name}")), "9.9.9\n").unwrap();
     }
-    fs::write(
+    ljos_cli::write_file(
         home.join(".cursor/mcp.json"),
         "{\"mcpServers\":{\"ljos\":{\"command\":\"/no/such/ljos-mcp\",\"args\":[]}}}\n",
     )
@@ -3568,7 +3569,8 @@ fn a_refused_push_stays_queued_until_the_next_drain() {
         "a refused push still updated the remote"
     );
 
-    let doctor = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let doctor = ljos_cli::program(env!("CARGO_BIN_EXE_ljos"))
+        .unwrap()
         .arg("doctor")
         .env("HOME", &home)
         .env("XDG_RUNTIME_DIR", &runtime)

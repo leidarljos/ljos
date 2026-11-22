@@ -389,13 +389,15 @@ mod tests {
     /// The stub answers a hook with an allow, says nothing for a git hook,
     /// and refuses to stand in for the rest of the program.
     #[test]
+    #[deny(clippy::disallowed_methods)]
     fn the_stub_allows_hooks_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ljos");
         write_stub(&path).unwrap();
         let run = |args: &[&str], stdin: &str| {
             use std::io::Write as _;
-            let mut child = std::process::Command::new("sh")
+            let mut child = crate::program("sh")
+                .unwrap()
                 .arg(&path)
                 .args(args)
                 .stdin(std::process::Stdio::piped())
