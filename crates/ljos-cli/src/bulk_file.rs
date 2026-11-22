@@ -729,24 +729,17 @@ impl Board {
         self.board = own.board;
     }
 
-    /// Check under the issues lock that row `line`'s create, `want`, is
-    /// this batch's own, and take it. Another writer that changed the
-    /// directory meanwhile ends the batch, and its change is never put back
-    /// over; the error names `ids`, every ticket filed so far.
-    fn take(&mut self, line: usize, want: &Want, ids: &[String]) -> Result<()> {
-        let checked = locked(&self.issues, || self.only_filed(want)).map_err(|e| {
-            anyhow::anyhow!(
-                "file --from: row {line} was filed, but its write could not be checked ({e:#}), so the batch stopped; the {} tickets filed are on the tracker and not committed: {}",
-                ids.len(),
-                ids.join(" ")
-            )
-        })?;
+    /// Check under the issues lock that a row's create, `want`, is this
+    /// batch's own, and take it. The error says why it is not: its write
+    /// could not be checked, or another writer changed the directory
+    /// meanwhile, whose change is never put back over.
+    fn take(&mut self, want: &Want) -> Result<()> {
+        let checked = locked(&self.issues, || self.only_filed(want))
+            .map_err(|e| anyhow::anyhow!("its write could not be checked ({e:#})"))?;
         let Some(own) = checked else {
             bail!(
-                "file --from: another writer changed {} while row {line} was filed, so the batch stopped; the {} tickets filed are on the tracker and not committed: {}",
-                self.dir.display(),
-                ids.len(),
-                ids.join(" ")
+                "another writer changed {} while it was filed",
+                self.dir.display()
             );
         };
         self.accept(own);
@@ -843,6 +836,60 @@ fn undone(ids: &[String], undo: &Undo) -> String {
     out
 }
 
+/// Why a row stopped the batch.
+enum Stop {
+    /// Row `line` wrote nothing.
+    Refused { line: usize, error: anyhow::Error },
+    /// Row `line` filed `id`, but the batch could not take that write as its
+    /// own, so it stays.
+    Kept {
+        line: usize,
+        id: String,
+        why: anyhow::Error,
+    },
+}
+
+/// The error for a batch that `stop` ended after it filed `ids`. Every
+/// such end goes through here, so the tickets in `ids` are taken back
+/// wherever `roll_back` can put them back.
+fn stopped(
+    layout: &vissue_core::Layout,
+    boards: &[Board],
+    ids: &[String],
+    stop: Stop,
+) -> anyhow::Error {
+    let lead = match &stop {
+        Stop::Refused { line, error } => format!("file --from: row {line}: {error}"),
+        Stop::Kept { line, id, why } => format!(
+            "file --from: row {line} was filed as {id}, but {why:#}, so the batch stopped and {id} is on the tracker and not committed"
+        ),
+    };
+    if ids.is_empty() {
+        return match stop {
+            Stop::Refused { .. } => anyhow::anyhow!("{lead}; nothing was written"),
+            Stop::Kept { .. } => anyhow::anyhow!("{lead}"),
+        };
+    }
+    let undo = roll_back(boards);
+    for &at in &undo.wrote {
+        // A poller may have read the rows written so far;
+        // the log is append-only, so the undo is one more write.
+        let _ = vissue_core::events::emit_issues_write(
+            &vissue_core::events::events_dir(layout),
+            &boards[at].project,
+            &boards[at].issues,
+        );
+    }
+    let rest = match stop {
+        Stop::Kept { .. } if undo.failed.is_empty() => format!(
+            "the {} tickets written before it were taken back",
+            ids.len()
+        ),
+        _ => undone(ids, &undo),
+    };
+    anyhow::anyhow!("{lead}; {rest}")
+}
+
 /// File every placed row and commit the tracker once.
 ///
 /// # Errors
@@ -853,6 +900,21 @@ fn undone(ids: &[String], undo: &Undo) -> String {
 /// could not be put back; the error names those and the tickets they keep.
 pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
     let layout = vissue_core::Layout::resolve(None, None)?;
+    file_batch(&layout, placed, defaults, vissue_core::ops::create)
+}
+
+/// [`file_rows`] in `layout`, with `create` writing each row's ticket.
+fn file_batch(
+    layout: &vissue_core::Layout,
+    placed: &[Placed],
+    defaults: &Defaults,
+    mut create: impl FnMut(
+        &vissue_core::Layout,
+        &str,
+        &str,
+        vissue_core::ops::CreateOpts<'_>,
+    ) -> vissue_core::Result<String>,
+) -> Result<Filed> {
     layout
         .require_tracker_to_create()
         .context("file --from: no tracker to file in, so run `ljos onboard`")?;
@@ -861,7 +923,7 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
             .map_err(|_| anyhow::anyhow!("file --from: --priority {p:?} is not A, B or C"))?,
         None => None,
     };
-    let cfg_priority = vissue_core::VissueConfig::load(&layout)?
+    let cfg_priority = vissue_core::VissueConfig::load(layout)?
         .issues
         .default_priority;
     let projected = vissue_core::projection::boards(layout.root()).unwrap_or_default();
@@ -871,7 +933,7 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
         let line = at + 1;
         let named = crate::project_name(&place.project)
             .map_err(|e| anyhow::anyhow!("file --from: row {line}: {e}"))?;
-        let project = vissue_core::store::resolve_existing_project_case(&layout, &named)
+        let project = vissue_core::store::resolve_existing_project_case(layout, &named)
             .with_context(|| {
                 format!("file --from: row {line}: no project {named:?} in the tracker")
             })?;
@@ -905,68 +967,60 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
         });
     }
     let mut ids: Vec<String> = Vec::with_capacity(placed.len());
-    for (at, place) in placed.iter().enumerate() {
-        let line = at + 1;
-        let board = at_board[at];
-        let row = &place.row;
-        let kind = row.kind.clone().or_else(|| defaults.kind.clone());
-        let tags = row.tags.clone().or_else(|| defaults.tags.clone());
-        let known = if row.body.is_some() {
-            vissue_core::store::collect_org_ids(&layout)?
-        } else {
-            HashSet::new()
-        };
-        let first_day = vissue_core::model::today_inactive_bracket();
-        let made = vissue_core::ops::create(
-            &layout,
-            &boards[board].project,
-            &row.title,
-            vissue_core::ops::CreateOpts {
-                priority: row.priority.or(default_priority),
-                issue_type: kind.as_deref(),
-                tags: tags.as_deref(),
-                parent: place.parent.as_deref(),
-                body: row.body.as_deref(),
-                quiet: true,
-                ..vissue_core::ops::CreateOpts::default()
-            },
-        );
-        let days = [first_day, vissue_core::model::today_inactive_bracket()];
-        match made {
-            Ok(text) => {
-                let id = text.trim().to_string();
-                ids.push(id.clone());
-                let want = Want {
-                    id: &id,
-                    title: &row.title,
+    // Nothing in here returns but through `Stop`, so a row that fails
+    // after an earlier row wrote is always rolled back.
+    let mut file_each = || -> std::result::Result<(), Stop> {
+        for (at, place) in placed.iter().enumerate() {
+            let line = at + 1;
+            let refused = |error: anyhow::Error| Stop::Refused { line, error };
+            let board = at_board[at];
+            let row = &place.row;
+            let kind = row.kind.clone().or_else(|| defaults.kind.clone());
+            let tags = row.tags.clone().or_else(|| defaults.tags.clone());
+            let known = if row.body.is_some() {
+                vissue_core::store::collect_org_ids(layout).map_err(|e| refused(e.into()))?
+            } else {
+                HashSet::new()
+            };
+            let first_day = vissue_core::model::today_inactive_bracket();
+            let text = create(
+                layout,
+                &boards[board].project,
+                &row.title,
+                vissue_core::ops::CreateOpts {
                     priority: row.priority.or(default_priority),
-                    kind: kind.as_deref(),
+                    issue_type: kind.as_deref(),
                     tags: tags.as_deref(),
                     parent: place.parent.as_deref(),
                     body: row.body.as_deref(),
-                    cfg_priority,
-                    known,
-                    days,
-                };
-                boards[board].take(line, &want, &ids)?;
+                    quiet: true,
+                    ..vissue_core::ops::CreateOpts::default()
+                },
+            )
+            .map_err(|e| refused(e.into()))?;
+            let days = [first_day, vissue_core::model::today_inactive_bracket()];
+            let id = text.trim().to_string();
+            let want = Want {
+                id: &id,
+                title: &row.title,
+                priority: row.priority.or(default_priority),
+                kind: kind.as_deref(),
+                tags: tags.as_deref(),
+                parent: place.parent.as_deref(),
+                body: row.body.as_deref(),
+                cfg_priority,
+                known,
+                days,
+            };
+            if let Err(why) = boards[board].take(&want) {
+                return Err(Stop::Kept { line, id, why });
             }
-            Err(e) => {
-                if ids.is_empty() {
-                    bail!("file --from: row {line}: {e}; nothing was written");
-                }
-                let undo = roll_back(&boards);
-                for &at in &undo.wrote {
-                    // A poller may have read the rows written so far;
-                    // the log is append-only, so the undo is one more write.
-                    let _ = vissue_core::events::emit_issues_write(
-                        &vissue_core::events::events_dir(&layout),
-                        &boards[at].project,
-                        &boards[at].issues,
-                    );
-                }
-                bail!("file --from: row {line}: {e}; {}", undone(&ids, &undo));
-            }
+            ids.push(id);
         }
+        Ok(())
+    };
+    if let Err(stop) = file_each() {
+        return Err(stopped(layout, &boards, &ids, stop));
     }
     let persisted = crate::persist_tracker_many(&ids, "filed");
     Ok(Filed {
@@ -1286,26 +1340,91 @@ mod tests {
         assert_eq!(kept, [id]);
     }
 
+    /// Two rows, the first in `other` and the second in `demo`, filed by
+    /// `file_batch`; `meanwhile` runs on `demo`'s directory right after
+    /// the second row's create. The error, `other` as it was before the
+    /// batch, and the ids `demo` holds after it.
+    fn second_row_meanwhile(
+        meanwhile: impl Fn(&Path),
+    ) -> (String, bool, HashSet<String>, HashSet<String>) {
+        let (_root, layout, board) = demo(false);
+        let other = open(&layout, "other");
+        let before = demo_ids(&layout);
+        let placed = ["other", "demo"].map(|project| Placed {
+            row: Row {
+                title: format!("in {project}"),
+                ..Row::default()
+            },
+            project: project.into(),
+            parent: None,
+        });
+        let e = file_batch(
+            &layout,
+            &placed,
+            &Defaults::default(),
+            |layout, project, title, opts| {
+                let made = vissue_core::ops::create(layout, project, title, opts);
+                if project == "demo" {
+                    meanwhile(&board.dir);
+                }
+                made
+            },
+        )
+        .err()
+        .expect("the second row stops the batch");
+        let other_as_it_was = snapshot(&other.dir).unwrap() == other.ours;
+        (format!("{e:#}"), other_as_it_was, before, demo_ids(&layout))
+    }
+
+    fn demo_ids(layout: &vissue_core::Layout) -> HashSet<String> {
+        vissue_core::IssueDoc::parse_file("demo", &layout.project_issues_path("demo"))
+            .unwrap()
+            .known_ids()
+            .into_iter()
+            .collect()
+    }
+
     #[test]
-    fn a_row_whose_write_cannot_be_checked_names_the_tickets_filed() {
-        let (_root, layout, mut board) = demo(false);
-        let first = file(&layout, "new");
-        let id = file(&layout, "new");
-        let _held = hold_lock(&board);
-        let _wall = crate::arm_wall_budget_for(
-            std::time::Duration::from_millis(100),
-            "sitting wall budget",
+    fn a_row_another_writer_changed_stops_the_batch_and_takes_back_the_rows_before_it() {
+        let (e, other_as_it_was, before, after) = second_row_meanwhile(|dir| {
+            std::fs::write(dir.join("issues/side.txt"), "other writer\n").unwrap();
+        });
+        let [id] = after.difference(&before).collect::<Vec<_>>()[..] else {
+            panic!("demo holds {after:?}")
+        };
+        assert!(
+            e.contains("another writer changed")
+                && e.contains(&format!(
+                    "row 2 was filed as {id}, but another writer changed"
+                ))
+                && e.contains(&format!(
+                    "{id} is on the tracker and not committed; the 1 tickets written before it were taken back"
+                )),
+            "{e}"
         );
-        let e = board
-            .take(2, &want(&layout, &id), &[first.clone(), id.clone()])
-            .unwrap_err();
-        let e = format!("{e:#}");
+        assert!(other_as_it_was, "{e}");
+    }
+
+    #[test]
+    fn a_row_whose_write_cannot_be_checked_takes_back_the_rows_before_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (e, other_as_it_was, before, after) = second_row_meanwhile(|dir| {
+            let path = dir.join("issues/unreadable.txt");
+            std::fs::write(&path, "other writer\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        });
+        let [id] = after.difference(&before).collect::<Vec<_>>()[..] else {
+            panic!("demo holds {after:?}")
+        };
         assert!(
             e.contains(&format!(
-                "the 2 tickets filed are on the tracker and not committed: {first} {id}"
+                "row 2 was filed as {id}, but its write could not be checked ("
+            )) && e.contains(&format!(
+                "{id} is on the tracker and not committed; the 1 tickets written before it were taken back"
             )),
             "{e}"
         );
+        assert!(other_as_it_was, "{e}");
     }
 
     const BODY: &str = "why, see [[id:nowhere]]";

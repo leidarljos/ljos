@@ -294,6 +294,37 @@ fn a_taken_back_batch_leaves_the_issues_lock_file() {
 }
 
 #[test]
+fn a_row_whose_id_scan_fails_takes_back_the_rows_before_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let world = World::new();
+    let before = world.commits();
+    let files = tracked(&world);
+    let notes = world.tracker().join("Software/demo/notes.org");
+    std::fs::write(&notes, "* Notes\n").unwrap();
+    let mode = |bits| std::fs::set_permissions(&notes, std::fs::Permissions::from_mode(bits));
+    mode(0o000).unwrap();
+    let file = world.write(
+        "rows.jsonl",
+        format!(
+            "{{\"title\": \"First\"}}\n{{\"title\": \"Second\", \"body\": \"see [[id:{ISSUE}]]\"}}\n"
+        ),
+    );
+    let filed = world.ljos(&["file", "--from", &file, "-p", "demo"]);
+    mode(0o644).unwrap();
+    std::fs::remove_file(&notes).unwrap();
+    assert_eq!(filed.status.code(), Some(1), "{}", said(&filed));
+    assert!(
+        stderr(&filed).contains("row 2: ")
+            && stderr(&filed)
+                .contains("nothing was filed: the 1 tickets written before it were taken back"),
+        "{}",
+        said(&filed)
+    );
+    assert_eq!(tracked(&world), files, "{}", said(&filed));
+    assert_eq!(world.commits(), before);
+}
+
+#[test]
 fn a_commit_another_writer_holds_off_stamps_no_project() {
     use std::os::unix::io::AsRawFd as _;
     let world = World::new();
