@@ -50264,7 +50264,7 @@ fn paths_for_commit(dir: &Path, paths: &[&str]) -> Option<(PathBuf, Vec<String>)
     Some((root, rels))
 }
 
-/// The top of the worktree that holds `dir`. The pending list and the
+/// The top of the worktree `dir` is in. The pending list and the
 /// batch record are replaced through temporaries there, so the stale ones
 /// are swept once per process.
 fn worktree_root(dir: &Path) -> Option<PathBuf> {
@@ -51140,8 +51140,8 @@ fn clear_unlanded_split(board: &Path) -> vissue_core::Result<()> {
 }
 
 /// The per-issue files of the split of `board` when the split is still
-/// exactly what migrate wrote, else `None`: the marker holds the SHA-256
-/// digest of `issues.org`, the directory holds the marker and one file per
+/// exactly what migrate wrote, else `None`: the marker has the SHA-256
+/// digest of `issues.org`, the directory has the marker and one file per
 /// heading of `issues.org` and nothing more, and every file ends at its
 /// log mark with no record after it. A stale temporary is not counted.
 fn split_as_migrated(board: &Path) -> Option<Vec<PathBuf>> {
@@ -51184,7 +51184,7 @@ fn split_as_migrated(board: &Path) -> Option<Vec<PathBuf>> {
 /// so a reader goes back to `issues.org` at once, then each file, then
 /// what the refused commit's add left staged. The check and the removal
 /// run under the board's lock. A split that is no longer what migrate
-/// wrote ([`split_as_migrated`]) holds a write that went to it, and is
+/// wrote ([`split_as_migrated`]) has a write that went to it, and is
 /// kept. So is one whose issue files stay staged: with the marker gone,
 /// the next plain commit would carry them. Returns whether it went.
 fn roll_back_split(board: &Path) -> bool {
@@ -51353,7 +51353,7 @@ fn split_step(step: &str) {
 
 /// Split every unsplit board beside `board` into per-issue files
 /// (`vissue migrate-ledger`) and commit them with their boards in one
-/// commit. The caller holds the tracker lock, `lock`. `write` is the file,
+/// commit. The caller has the tracker lock, `lock`. `write` is the file,
 /// the writes and the `also` paths the caller persists: the writes are
 /// stamped and the paths kept pending when the split waits.
 fn split_board(
