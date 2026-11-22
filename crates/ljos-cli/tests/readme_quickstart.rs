@@ -450,12 +450,10 @@ fn expect_output(cmd: &str, output: &str) {
         }
         Some("search") if cmd.contains("lexical default") => {
             assert!(output.contains(LESSON), "{cmd}\n{output}");
-            if !ljos_cli::tool_installed("packset-embed") {
-                assert!(
-                    output.contains("matched by words (encoder not installed)"),
-                    "{cmd}\n{output}"
-                );
-            }
+            assert!(
+                output.contains("matched by words (encoder not installed)"),
+                "{cmd}\n{output}"
+            );
         }
         Some("file") => {
             for key in ["project:", "Pick a codec"] {
@@ -578,9 +576,7 @@ fn the_readme_quickstart_runs() {
             let extra = "ljos search \"which fusion\"";
             let (code, output) = seat.run_tty(extra);
             assert_eq!(code, 0, "{extra}\n{output}");
-            if !ljos_cli::tool_installed("packset-embed") {
-                assert!(output.contains(NO_HITS), "{extra}\n{output}");
-            }
+            assert!(output.contains(NO_HITS), "{extra}\n{output}");
         }
         ran += 1;
     }

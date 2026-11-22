@@ -3,7 +3,9 @@
 # trailer each fail. A committer date that differs from the author
 # date passes. A foreign commit that sits before the range is not
 # judged, including one that is already on another remote-tracking
-# branch.
+# branch. A merge or squash GitHub commits for Rohit passes; one that
+# brings a foreign commit or a trailer fails, and so does an agent or bot
+# author or committer.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -96,6 +98,68 @@ GIT_COMMITTER_NAME="GitHub" \
   git commit --allow-empty -q -m "Merge pull request #10" \
   -m "Co-authored-by: Ada Lovelace <ada@example.com>"
 must_fail "webflow committer with trailer" "$gate" "$base..HEAD"
+
+# The main push of 1dd43134: main is behind, and the push brings a
+# two-parent merge GitHub made of a pull request branch.
+git checkout -q -b behind-main "$base"
+git commit --allow-empty -q -m "release tip"
+main_before=$(git rev-parse HEAD)
+git checkout -q -b pr-branch "$base"
+git commit --allow-empty -q -m "fix: pull request work"
+pr_tip=$(git rev-parse HEAD)
+git checkout -q behind-main
+GIT_COMMITTER_NAME="GitHub" \
+  GIT_COMMITTER_EMAIL="noreply@github.com" \
+  git merge -q --no-ff --no-edit \
+  -m "Merge pull request #9 from leidarljos/fix/pr-work" "$pr_tip"
+"$gate" "$main_before..HEAD"
+
+git checkout -q -b pr-foreign "$base"
+GIT_AUTHOR_NAME="Ada Lovelace" \
+  GIT_AUTHOR_EMAIL="ada@example.com" \
+  git commit --allow-empty -q -m "foreign work in the pull request"
+foreign_tip=$(git rev-parse HEAD)
+git checkout -q -B behind-main "$main_before"
+GIT_COMMITTER_NAME="GitHub" \
+  GIT_COMMITTER_EMAIL="noreply@github.com" \
+  git merge -q --no-ff --no-edit \
+  -m "Merge pull request #12 from leidarljos/fix/foreign" "$foreign_tip"
+must_fail "webflow merge of a foreign commit" "$gate" "$main_before..HEAD"
+
+fail_id() {
+  desc=$1
+  shift
+  git checkout -q -B id "$base"
+  env "$@" git commit --allow-empty -q -m "identity case"
+  must_fail "$desc" "$gate" "$base..HEAD"
+}
+
+fail_id "Cursor committer" \
+  GIT_COMMITTER_NAME="Cursor Agent" GIT_COMMITTER_EMAIL="cursoragent@cursor.com"
+fail_id "Cursor author with webflow committer" \
+  GIT_AUTHOR_NAME="Cursor Agent" GIT_AUTHOR_EMAIL="cursoragent@cursor.com" \
+  GIT_COMMITTER_NAME="GitHub" GIT_COMMITTER_EMAIL="noreply@github.com"
+fail_id "actions bot committer" \
+  GIT_COMMITTER_NAME="github-actions[bot]" \
+  GIT_COMMITTER_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
+fail_id "dependabot author with webflow committer" \
+  GIT_AUTHOR_NAME="dependabot[bot]" \
+  GIT_AUTHOR_EMAIL="49699333+dependabot[bot]@users.noreply.github.com" \
+  GIT_COMMITTER_NAME="GitHub" GIT_COMMITTER_EMAIL="noreply@github.com"
+fail_id "webflow author" \
+  GIT_AUTHOR_NAME="GitHub" GIT_AUTHOR_EMAIL="noreply@github.com"
+fail_id "webflow author and committer" \
+  GIT_AUTHOR_NAME="GitHub" GIT_AUTHOR_EMAIL="noreply@github.com" \
+  GIT_COMMITTER_NAME="GitHub" GIT_COMMITTER_EMAIL="noreply@github.com"
+fail_id "lower case webflow name" \
+  GIT_COMMITTER_NAME="github" GIT_COMMITTER_EMAIL="noreply@github.com"
+
+git checkout -q -B squash "$base"
+GIT_COMMITTER_NAME="GitHub" \
+  GIT_COMMITTER_EMAIL="noreply@github.com" \
+  git commit --allow-empty -q -m "fix: squashed work (#13)" \
+  -m "Co-authored-by: Cursor Agent <cursoragent@cursor.com>"
+must_fail "webflow squash with a Cursor trailer" "$gate" "$base..HEAD"
 
 # Dates are not judged. A later committer instant still passes.
 authored=2026-11-02T20:17:15-06:00

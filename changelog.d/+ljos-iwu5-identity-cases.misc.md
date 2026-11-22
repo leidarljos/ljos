@@ -1,0 +1,1 @@
+`scripts/identity-gate-test.sh` replays the main push that brought a two-parent GitHub merge, and checks that a merge bringing a foreign commit, an agent or bot author or committer, a GitHub author, and a squash with a trailer all still fail.

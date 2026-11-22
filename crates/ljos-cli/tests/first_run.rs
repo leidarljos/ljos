@@ -134,6 +134,9 @@ impl Seat {
         env.insert("TERM".into(), "xterm".into());
         env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
         env.insert("GIT_CONFIG_NOSYSTEM".into(), "1".into());
+        // The writer this seat starts finds an encoder installed beside the
+        // packsetd it links. The pages below are the no-encoder ones.
+        env.insert("INSIDE_EMBED".into(), "off".into());
         env.insert("LANG".into(), "C.UTF-8".into());
         for name in SESSION_VARS {
             assert!(
@@ -883,27 +886,25 @@ fn expect_documented(command: &str, output: &str) {
         for key in keys {
             assert!(output.contains(key), "{command}\nmissing {key:?}\n{output}");
         }
-        if !ljos_cli::tool_installed("packset-embed") {
-            let seat = output.find("seat source").expect("seat source");
-            let encoder = output
-                .find("encoder")
-                .unwrap_or_else(|| panic!("{command}\nno encoder row:\n{output}"));
-            let gate = output.find("sitting gate").expect("sitting gate");
-            assert!(
-                seat < encoder && encoder < gate,
-                "{command}\nencoder row is not between the seat and the gate:\n{output}"
-            );
-            assert!(
-                output.contains(
-                    "not installed. Search matches words, so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`."
-                ),
-                "{command}\n{output}"
-            );
-            assert!(
-                !output.contains("cargo binstall"),
-                "{command}\ncargo-binstall is not on this PATH:\n{output}"
-            );
-        }
+        let seat = output.find("seat source").expect("seat source");
+        let encoder = output
+            .find("encoder")
+            .unwrap_or_else(|| panic!("{command}\nno encoder row:\n{output}"));
+        let gate = output.find("sitting gate").expect("sitting gate");
+        assert!(
+            seat < encoder && encoder < gate,
+            "{command}\nencoder row is not between the seat and the gate:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "not installed. Search matches words, so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`."
+            ),
+            "{command}\n{output}"
+        );
+        assert!(
+            !output.contains("cargo binstall"),
+            "{command}\ncargo-binstall is not on this PATH:\n{output}"
+        );
     }
     if command.contains("ljos remember") && command.contains("lexical default") {
         assert!(
@@ -917,17 +918,12 @@ fn expect_documented(command: &str, output: &str) {
     }
     if command.contains("ljos search") && command.contains("lexical default") {
         assert!(output.contains(LESSON), "{command}\n{output}");
-        if !ljos_cli::tool_installed("packset-embed") {
-            assert!(
-                output.contains("matched by words (encoder not installed)"),
-                "{command}\n{output}"
-            );
-        }
+        assert!(
+            output.contains("matched by words (encoder not installed)"),
+            "{command}\n{output}"
+        );
     }
-    if command.contains("ljos search")
-        && command.contains("which fusion")
-        && !ljos_cli::tool_installed("packset-embed")
-    {
+    if command.contains("ljos search") && command.contains("which fusion") {
         assert!(output.contains(NO_HITS), "{command}\n{output}");
     }
     if command.contains("ljos file") && command.contains("Pick a codec") {
@@ -946,12 +942,10 @@ fn expect_documented(command: &str, output: &str) {
             1,
             "{command}\nprinted next more than once:\n{output}"
         );
-        if !ljos_cli::tool_installed("packset-embed") {
-            assert!(
-                output.contains("matched by words (encoder not installed)"),
-                "{command}\n{output}"
-            );
-        }
+        assert!(
+            output.contains("matched by words (encoder not installed)"),
+            "{command}\n{output}"
+        );
     }
     if command.contains("ljos finish") {
         assert!(output.contains("ticked"), "{command}\n{output}");

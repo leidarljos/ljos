@@ -1,0 +1,1 @@
+A `packsetd` a test or a doc sample starts keeps its encoder off unless the test names one with `PACKSET_EMBED`, so a host with `packset-embed` installed beside `packsetd` or on `PATH` prints the same pages as one without.

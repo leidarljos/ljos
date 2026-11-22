@@ -29,6 +29,7 @@ The script does not build them.
 A test that needs `age-keygen`, `packsetd` or that `vissue` checks for the tool first.
 When it is missing the test prints one line naming the tool, the version and that command, and the test does not fail.
 `LJOS_TEST_REQUIRE_TOOLS=1` fails the test with that same line.
+A `packsetd` a test starts runs with `INSIDE_EMBED=off` unless the test names an encoder with `PACKSET_EMBED`, so an installed `packset-embed` does not change what a test or a doc sample prints.
 The cargo test job sets that variable.
 Run the suite from a shell with no `LJOS_OFF` set and outside an agent runner.
 
