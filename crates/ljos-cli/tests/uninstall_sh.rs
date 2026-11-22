@@ -2,6 +2,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -108,14 +111,11 @@ fn uninstall(home: &Path, args: &[&str]) -> Output {
 }
 
 fn hooks_path(home: &Path) -> String {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .args(["config", "--global", "--get", "core.hooksPath"])
-        .env_clear()
-        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin")
         .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     String::from_utf8_lossy(&out.stdout).trim().to_string()

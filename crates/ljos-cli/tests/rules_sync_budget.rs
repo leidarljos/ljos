@@ -5,6 +5,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -49,13 +52,12 @@ fn hab(name: &str) -> Hab {
 }
 
 fn git(cwd: &Path, args: &[&str]) {
-    let status = ljos_test_boot::git()
+    let status = isolated_git::command()
         .arg("-c")
         .arg("core.hooksPath=/dev/null")
         .arg("-C")
         .arg(cwd)
         .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .status()
         .unwrap();
     assert!(status.success(), "git {args:?} in {}", cwd.display());
@@ -81,19 +83,17 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
         .expect("age public key")
         .to_string();
     let bare = h.root.join("remote.git");
-    let status = ljos_test_boot::git()
+    let status = isolated_git::command()
         .args(["init", "-q", "--bare", "-b", "main"])
         .arg(&bare)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .status()
         .unwrap();
     assert!(status.success());
     let other = h.root.join("other");
-    let status = ljos_test_boot::git()
+    let status = isolated_git::command()
         .args(["clone", "-q"])
         .arg(&bare)
         .arg(&other)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .status()
         .unwrap();
     assert!(status.success());
@@ -108,11 +108,10 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
     git(&other, &["commit", "-q", "-m", "scope"]);
     git(&other, &["push", "-q", "origin", "HEAD:main"]);
     let tracker = h.root.join("tracker");
-    let status = ljos_test_boot::git()
+    let status = isolated_git::command()
         .args(["clone", "-q"])
         .arg(&bare)
         .arg(&tracker)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .status()
         .unwrap();
     assert!(status.success());

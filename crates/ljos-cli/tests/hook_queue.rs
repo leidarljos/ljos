@@ -5,6 +5,9 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
@@ -89,12 +92,11 @@ impl Drop for Hab {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = ljos_test_boot::git_at("/usr/bin/git")
+    let out = isolated_git::command_at("/usr/bin/git")
         .arg("-C")
         .arg(dir)
         .args(args)
         .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("HOME", dir)
         .output()
         .unwrap();

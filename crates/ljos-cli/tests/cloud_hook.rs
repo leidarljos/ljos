@@ -3,6 +3,9 @@
 //! lines against a seat with a local bare origin.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -48,6 +51,15 @@ impl Drop for Guard {
 fn sh_at(dir: &Path, script: &str) -> std::process::Output {
     let mut sh = Command::new("sh");
     ljos_test_boot::no_login_git_config(&mut sh);
+    // `git config --global` in the script writes the file this test named.
+    // The helper does not copy it; this command opts in.
+    if let Some(cfg) = std::env::var_os("GIT_CONFIG_GLOBAL") {
+        sh.env("GIT_CONFIG_GLOBAL", cfg);
+    }
+    if let Some(cfg) = std::env::var_os("GIT_CONFIG_SYSTEM") {
+        sh.env("GIT_CONFIG_SYSTEM", cfg);
+        sh.env_remove("GIT_CONFIG_NOSYSTEM");
+    }
     sh.current_dir(dir)
         .arg("-c")
         .arg(script)
@@ -76,13 +88,18 @@ fn sh_ok(dir: &Path, script: &str) -> String {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = ljos_test_boot::git()
-        .arg("-C")
+    let mut cmd = isolated_git::command();
+    cmd.arg("-C")
         .arg(dir)
         .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .unwrap();
+        .env("GIT_TERMINAL_PROMPT", "0");
+    // `config --global` writes the file `isolate_git` named. The helper
+    // does not copy that variable; this command opts in.
+    if args.contains(&"--global") {
+        let cfg = std::env::var_os("GIT_CONFIG_GLOBAL").expect("a global gitconfig for this seat");
+        cmd.env("GIT_CONFIG_GLOBAL", cfg);
+    }
+    let out = cmd.output().unwrap();
     assert!(
         out.status.success(),
         "git {args:?} in {}: {}",
@@ -231,7 +248,7 @@ fn bare_repo(root: &Path, name: &str) -> (PathBuf, PathBuf) {
 }
 
 fn has_ref(origin: &Path, name: &str) -> bool {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .arg("-C")
         .arg(origin)
         .args(["show-ref"])
@@ -244,16 +261,14 @@ fn has_ref(origin: &Path, name: &str) -> bool {
 
 /// Every `core.hooksPath` git reads in `dir`, one `origin<TAB>value` line
 /// each. `scope` is `--system`, `--global` or `--local`, or `None` for all.
-/// A config this process does not name is the one git finds itself, so a
-/// home's own `.gitconfig` counts.
-fn hooks_paths(dir: &Path, scope: Option<&str>) -> String {
-    let mut git = ljos_test_boot::git();
-    for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"] {
-        if std::env::var_os(key).is_none() {
-            git.env_remove(key);
-        }
-    }
-    let out = git
+/// `system` is the system file and `home` is the home whose `.gitconfig`
+/// is the global file. A `GIT_CONFIG_*` on this process is not used.
+fn hooks_paths(dir: &Path, home: &Path, system: &Path, scope: Option<&str>) -> String {
+    let out = isolated_git::Git::new()
+        .home(home)
+        .system(system)
+        .home_global()
+        .command()
         .arg("-C")
         .arg(dir)
         .arg("config")
@@ -262,6 +277,53 @@ fn hooks_paths(dir: &Path, scope: Option<&str>) -> String {
         .output()
         .unwrap();
     String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// `hooks_paths` reads the home and the system file it was given. A
+/// `GIT_CONFIG_GLOBAL` on this process, and `GIT_CONFIG_NOSYSTEM=0`, do
+/// not choose a different file.
+#[test]
+fn hooks_paths_reads_the_home_and_the_named_system_file() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let repo = root.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+    let mine = root.path().join("my-hooks");
+    let sys_hooks = root.path().join("sys-hooks");
+    let bad = root.path().join("bad-hooks");
+    fs::write(
+        home.join(".gitconfig"),
+        format!("[core]\n\thooksPath = {}\n", mine.display()),
+    )
+    .unwrap();
+    let system = root.path().join("system.gitconfig");
+    fs::write(
+        &system,
+        format!("[core]\n\thooksPath = {}\n", sys_hooks.display()),
+    )
+    .unwrap();
+    let hostile = root.path().join("hostile.gitconfig");
+    fs::write(
+        &hostile,
+        format!("[core]\n\thooksPath = {}\n", bad.display()),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("GIT_CONFIG_GLOBAL", &hostile);
+    std::env::set_var("GIT_CONFIG_SYSTEM", root.path().join("other-system"));
+    std::env::set_var("GIT_CONFIG_NOSYSTEM", "0");
+    git(root.path(), &["init", "-q", repo.to_str().unwrap()]);
+    let got = hooks_paths(&repo, &home, &system, None);
+    let mine_s = mine.display().to_string();
+    let sys_s = sys_hooks.display().to_string();
+    let bad_s = bad.display().to_string();
+    let system_s = system.display().to_string();
+    assert!(got.contains(&mine_s), "{got}");
+    assert!(got.contains(&sys_s), "{got}");
+    assert!(got.contains(&system_s), "{got}");
+    assert!(!got.contains(&bad_s), "{got}");
 }
 
 fn cloud_refusal(line: &str, cwd: &Path) -> Option<ljos_cli::Rule> {
@@ -327,7 +389,11 @@ fn cloud_up_sets_no_hooks_path() {
     let said = ljos_cli::cloud::up(false).unwrap();
     std::env::set_current_dir(root.path()).unwrap();
     for scope in [None, Some("--system"), Some("--global"), Some("--local")] {
-        assert_eq!(hooks_paths(&repo, scope), "", "{scope:?}\n{said}");
+        assert_eq!(
+            hooks_paths(&repo, &home, &system, scope),
+            "",
+            "{scope:?}\n{said}"
+        );
     }
     assert!(!xdg.join("ljos/hooks").exists(), "{said}");
 
@@ -343,11 +409,16 @@ fn cloud_up_sets_no_hooks_path() {
         &["config", "core.hooksPath", booked.to_str().unwrap()],
     );
     let local = fs::read(repo.join(".git/config")).unwrap();
-    let before = hooks_paths(&repo, None);
+    let before = hooks_paths(&repo, &home, &system, None);
+    assert!(
+        before.contains(&mine.display().to_string())
+            && before.contains(&booked.display().to_string()),
+        "{before}"
+    );
     std::env::set_current_dir(&repo).unwrap();
     let said = ljos_cli::cloud::up(false).unwrap();
     std::env::set_current_dir(root.path()).unwrap();
-    assert_eq!(hooks_paths(&repo, None), before, "{said}");
+    assert_eq!(hooks_paths(&repo, &home, &system, None), before, "{said}");
     assert_eq!(
         fs::read_to_string(home.join(".gitconfig")).unwrap(),
         gitconfig
@@ -393,7 +464,7 @@ fn chain_stub(booked: &Path, ours: &Path) -> String {
 fn cloud_up_takes_back_the_hooks_an_earlier_cloud_up_set() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
-    let (_home, xdg) = seat_env(root.path());
+    let (home, xdg) = seat_env(root.path());
     clear_ids();
     std::env::set_var("LJOS_SEAT", "probe");
     let global = root.path().join("gitconfig");
@@ -431,7 +502,11 @@ fn cloud_up_takes_back_the_hooks_an_earlier_cloud_up_set() {
     let global_bytes = fs::read(&global).unwrap();
 
     let said = up_in(&repo);
-    assert_eq!(hooks_paths(&repo, Some("--local")), "", "{said}");
+    assert_eq!(
+        hooks_paths(&repo, &home, &global, Some("--local")),
+        "",
+        "{said}"
+    );
     assert_eq!(fs::read(&global).unwrap(), global_bytes, "{said}");
     assert_eq!(
         fs::read_to_string(booked.join("pre-push")).unwrap(),
@@ -484,9 +559,13 @@ fn cloud_up_takes_back_the_hooks_an_earlier_cloud_up_set() {
         ],
     );
     let said = up_in(&repo);
-    assert_eq!(hooks_paths(&repo, Some("--global")), "", "{said}");
     assert_eq!(
-        hooks_paths(&repo, Some("--local")),
+        hooks_paths(&repo, &home, &global, Some("--global")),
+        "",
+        "{said}"
+    );
+    assert_eq!(
+        hooks_paths(&repo, &home, &global, Some("--local")),
         format!("file:.git/config\t{}\n", copied.display()),
         "{said}"
     );

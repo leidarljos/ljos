@@ -3,12 +3,15 @@
 //! and every row stayed green while no other host saw them.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)

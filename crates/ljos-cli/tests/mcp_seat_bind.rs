@@ -6,6 +6,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -19,12 +22,11 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(root: &Path, config: &Path, args: &[&str]) -> String {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .arg("-C")
         .arg(root)
         .args(args)
         .env("GIT_CONFIG_GLOBAL", config)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .unwrap();
@@ -80,12 +82,11 @@ fn two_seats_keep_their_notes_and_a_seatless_write_is_refused() {
         &["config", "core.hooksPath", "/dev/null"],
     );
     git(&tracker, &gitconfig, &["add", "."]);
-    let seeded = ljos_test_boot::git()
+    let seeded = isolated_git::command()
         .arg("-C")
         .arg(&tracker)
         .args(["commit", "-q", "-m", "seed"])
         .env("GIT_CONFIG_GLOBAL", &gitconfig)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "Ada Example")
         .env("GIT_AUTHOR_EMAIL", "ada@example.invalid")
         .env("GIT_COMMITTER_NAME", "Ada Example")

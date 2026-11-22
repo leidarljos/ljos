@@ -4,6 +4,9 @@
 //! either, the ticket goes in Software. Nothing is asked.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
@@ -164,7 +167,7 @@ fn a_scratch_checkout_without_a_project_names_p() {
     let seat = Seat::new("'vissue test'");
     let checkout = seat.dir.path().join("obchk");
     std::fs::create_dir_all(&checkout).unwrap();
-    let init = ljos_test_boot::git()
+    let init = isolated_git::command()
         .arg("init")
         .arg("-q")
         .current_dir(&checkout)
@@ -183,7 +186,7 @@ fn a_scratch_checkout_uses_ljos_project_when_set() {
     let seat = Seat::new("'vissue test'");
     let checkout = seat.dir.path().join("obchk");
     std::fs::create_dir_all(&checkout).unwrap();
-    let init = ljos_test_boot::git()
+    let init = isolated_git::command()
         .arg("init")
         .arg("-q")
         .current_dir(&checkout)

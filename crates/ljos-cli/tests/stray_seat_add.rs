@@ -8,6 +8,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -19,7 +22,7 @@ struct Place {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args([
@@ -31,8 +34,6 @@ fn git(dir: &Path, args: &[&str]) {
             "commit.gpgsign=false",
         ])
         .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(

@@ -7,6 +7,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -33,11 +36,10 @@ fn keygen(path: &Path) -> String {
 }
 
 fn git(cwd: &Path, args: &[&str]) {
-    let status = ljos_test_boot::git()
+    let status = isolated_git::command()
         .arg("-C")
         .arg(cwd)
         .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .status()
         .unwrap();
     assert!(status.success(), "git {args:?}");

@@ -10,6 +10,9 @@
 //! remote only lists.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -71,7 +74,7 @@ fn start_packsetd(
 }
 
 fn git(cfg: &Path, dir: &Path, args: &[&str]) -> String {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -91,7 +94,7 @@ fn git(cfg: &Path, dir: &Path, args: &[&str]) -> String {
 }
 
 fn git_at(cfg: &Path, args: &[&str]) -> String {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .args(args)
         .env("GIT_CONFIG_GLOBAL", cfg)
         .env("GIT_CONFIG_SYSTEM", cfg)
@@ -426,7 +429,7 @@ fn log_in_commit(host: &str) -> String {
 }
 
 fn open_log(world: &World, host: &str) -> String {
-    let listed = ljos_test_boot::git()
+    let listed = isolated_git::command()
         .arg("--git-dir")
         .arg(&world.origin)
         .args([
@@ -446,7 +449,7 @@ fn open_log(world: &World, host: &str) -> String {
         .find(|line| line.contains("/snap-"))
         .unwrap_or_else(|| panic!("no snapshot for {host} in {listed}"));
     let spec = format!("HEAD:{snap}");
-    let show = ljos_test_boot::git()
+    let show = isolated_git::command()
         .arg("--git-dir")
         .arg(&world.origin)
         .args(["show", &spec])
@@ -686,7 +689,7 @@ fn a_refused_push_still_wakes_and_is_logged() {
         log.contains("push refused"),
         "the wake log does not record the refusal: {log}"
     );
-    let remote = ljos_test_boot::git()
+    let remote = isolated_git::command()
         .arg("--git-dir")
         .arg(&world.origin)
         .args(["cat-file", "-e", "HEAD:.ljos/atoms/sender.jsonl.age"])

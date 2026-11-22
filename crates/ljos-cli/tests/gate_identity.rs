@@ -6,6 +6,9 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -74,7 +77,7 @@ impl Box_ {
                 c = card.display(),
             ),
         );
-        let init = ljos_test_boot::git()
+        let init = isolated_git::command()
             .args(["init", "-q"])
             .current_dir(&repo)
             .output()

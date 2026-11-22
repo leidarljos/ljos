@@ -7,6 +7,9 @@
 //! prints.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -58,7 +61,7 @@ impl Seat {
         for dir in ["bin", "guard", "work"] {
             std::fs::create_dir_all(home.path().join(dir)).unwrap();
         }
-        let init = ljos_test_boot::git()
+        let init = isolated_git::command()
             .args(["init", "-q"])
             .current_dir(home.path().join("work"))
             .output()
@@ -207,7 +210,7 @@ impl Seat {
         let work = self.path("work");
         let victim = fresh("victim");
         let repo = fresh("repo");
-        let init = ljos_test_boot::git()
+        let init = isolated_git::command()
             .args(["init", "-q"])
             .current_dir(&repo)
             .output()

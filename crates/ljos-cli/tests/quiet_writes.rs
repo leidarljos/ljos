@@ -6,6 +6,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -64,7 +67,7 @@ impl Board {
     }
 
     fn git_cmd(&self, args: &[&str], author: bool) {
-        let mut cmd = ljos_test_boot::git();
+        let mut cmd = isolated_git::command();
         cmd.arg("-C").arg(&self.root).args(args);
         cmd.env("GIT_CONFIG_GLOBAL", &self.gitconfig);
         cmd.env("GIT_CONFIG_NOSYSTEM", "1");
@@ -151,12 +154,11 @@ fn a_commit_mode_note_prints_no_tracker_or_sync_line() {
     board.dirty();
     let out = board.ljos(&["note", "probe-a1b2", "the parser kept the hyphen"]);
     assert_quiet(&out);
-    let log = ljos_test_boot::git()
+    let log = isolated_git::command()
         .arg("-C")
         .arg(&board.root)
         .args(["log", "-1", "--format=%s"])
         .env("GIT_CONFIG_GLOBAL", &board.gitconfig)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     let subject = String::from_utf8_lossy(&log.stdout);

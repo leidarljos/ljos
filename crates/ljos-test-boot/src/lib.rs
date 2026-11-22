@@ -284,18 +284,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A global or system config the process names is the one git reads.
+    /// A global or system config the process names does not reach this git.
     #[test]
-    fn a_git_config_the_process_names_is_kept() {
+    fn a_git_config_the_process_names_is_dropped() {
         let _env = ENV
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _global = PutEnv::set("GIT_CONFIG_GLOBAL", "/tmp/named-global");
         let _system = PutEnv::set("GIT_CONFIG_SYSTEM", "/tmp/named-system");
+        let _nosystem = PutEnv::set("GIT_CONFIG_NOSYSTEM", "0");
         let cmd = crate::git();
-        let set: Vec<_> = cmd.get_envs().map(|(k, _)| k.to_owned()).collect();
-        assert!(!set.iter().any(|k| k == "GIT_CONFIG_GLOBAL"), "{set:?}");
-        assert!(!set.iter().any(|k| k == "GIT_CONFIG_NOSYSTEM"), "{set:?}");
+        let val = |key: &str| {
+            cmd.get_envs()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.map(std::ffi::OsStr::to_owned))
+        };
+        assert_eq!(val("GIT_CONFIG_GLOBAL").unwrap().unwrap(), "/dev/null");
+        assert_eq!(val("GIT_CONFIG_NOSYSTEM").unwrap().unwrap(), "1");
+        assert!(val("GIT_CONFIG_SYSTEM").unwrap().is_none());
     }
 
     /// The target directory this binary runs from is a ceiling, wherever

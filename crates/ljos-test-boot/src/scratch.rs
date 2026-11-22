@@ -114,19 +114,13 @@ pub fn git_at(program: impl AsRef<OsStr>) -> Command {
 
 /// Keep a `HOME` or system git config out of `cmd`, so a
 /// `commit.gpgsign` or hook in `~/.gitconfig` or `/etc/gitconfig` does
-/// not reach a scratch commit. `GIT_CONFIG_GLOBAL` becomes `/dev/null`
-/// and `GIT_CONFIG_NOSYSTEM` becomes `1`, unless this process names a
-/// global or system config of its own: a test that set one under its
-/// lock meant git to read it. A later `env` on `cmd` overrides either.
+/// not reach a scratch commit. `GIT_CONFIG_GLOBAL` is `/dev/null` and
+/// `GIT_CONFIG_NOSYSTEM` is `1`. A `GIT_CONFIG_*` this process inherited
+/// is not left in place. A later `env` on `cmd` overrides either.
 pub fn no_login_git_config(cmd: &mut Command) {
-    if std::env::var_os("GIT_CONFIG_GLOBAL").is_none() {
-        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
-    }
-    if std::env::var_os("GIT_CONFIG_SYSTEM").is_none()
-        && std::env::var_os("GIT_CONFIG_NOSYSTEM").is_none()
-    {
-        cmd.env("GIT_CONFIG_NOSYSTEM", "1");
-    }
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env_remove("GIT_CONFIG_SYSTEM");
 }
 
 /// A new directory under `root`, mode `0o755`, named

@@ -2,6 +2,9 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -37,7 +40,7 @@ fn hab(name: &str) -> Hab {
     }
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&hab.run, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let git = ljos_test_boot::git()
+    let git = isolated_git::command()
         .args(["init", "-q", "-b", "main"])
         .current_dir(&hab.repo)
         .status()

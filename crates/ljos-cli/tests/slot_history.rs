@@ -3,6 +3,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -14,7 +17,7 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(repo: &Path, args: &[&str]) {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .arg("-C")
         .arg(repo)
         .args(args)

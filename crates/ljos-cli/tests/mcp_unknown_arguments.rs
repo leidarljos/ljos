@@ -2,6 +2,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -214,12 +217,11 @@ fn kind_and_issue_kind_together_are_refused_on_ljos_file() {
 }
 
 fn git(root: &Path, config: &Path, args: &[&str]) -> String {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .arg("-C")
         .arg(root)
         .args(args)
         .env("GIT_CONFIG_GLOBAL", config)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .unwrap();

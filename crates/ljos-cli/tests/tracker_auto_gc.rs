@@ -3,6 +3,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/sibling.rs"]
 mod sibling;
 #[path = "common/tools.rs"]
@@ -12,12 +15,10 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn git(dir: &Path, args: &[&str]) -> Output {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .stdin(Stdio::null())
         .output()
         .unwrap();

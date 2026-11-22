@@ -6,6 +6,9 @@
 //! person at their own terminal is never refused.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 #[path = "common/terminal.rs"]
 mod terminal;
 
@@ -91,7 +94,7 @@ impl Seat {
                 ballots.display()
             ),
         );
-        let init = ljos_test_boot::git()
+        let init = isolated_git::command()
             .args(["init", "-q"])
             .current_dir(&repo)
             .output()
@@ -221,7 +224,7 @@ impl Seat {
     /// to read and the sitting check still sees `develop`.
     fn same_commit_refs(&self) -> String {
         let git = |args: &[&str]| {
-            let out = ljos_test_boot::git()
+            let out = isolated_git::command()
                 .args(args)
                 .current_dir(&self.repo)
                 .output()
@@ -233,7 +236,7 @@ impl Seat {
         git(&["config", "user.name", "t"]);
         git(&["config", "commit.gpgsign", "false"]);
         git(&["config", "core.hooksPath", "/dev/null"]);
-        let head = ljos_test_boot::git()
+        let head = isolated_git::command()
             .args(["rev-parse", "HEAD"])
             .current_dir(&self.repo)
             .output()
@@ -459,7 +462,7 @@ fn write_allow(seat: &Seat, origin: &Path) {
 }
 
 fn git_ok(repo: &Path, args: &[&str]) {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .args(args)
         .current_dir(repo)
         .output()
@@ -559,7 +562,7 @@ fn a_solo_seat_clears_policy_and_the_git_hook() {
     let seat = Seat::new();
     let tracker = seat.home.join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
-    let init = ljos_test_boot::git()
+    let init = isolated_git::command()
         .args(["init", "-q"])
         .current_dir(&tracker)
         .output()
@@ -595,7 +598,7 @@ fn two_unslotted_seats_clear_a_protected_push() {
     let seat = Seat::new();
     let tracker = seat.home.join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
-    let init = ljos_test_boot::git()
+    let init = isolated_git::command()
         .args(["init", "-q"])
         .current_dir(&tracker)
         .output()
@@ -774,7 +777,7 @@ fn a_stalled_tracker_refuses_a_protected_push_and_passes_another() {
     let seat = Seat::new();
     let tracker = seat.home.join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
-    let init = ljos_test_boot::git()
+    let init = isolated_git::command()
         .args(["init", "-q"])
         .current_dir(&tracker)
         .output()

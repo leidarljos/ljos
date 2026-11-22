@@ -2,6 +2,9 @@
 //! case through `ljos vote`, which is the process that casts and tallies).
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -17,7 +20,7 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = ljos_test_boot::git_at("/usr/bin/git")
+    let out = isolated_git::command_at("/usr/bin/git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -45,7 +48,7 @@ fn record_evidence(repo: &Path) {
 }
 
 fn head(dir: &Path) -> String {
-    let out = ljos_test_boot::git_at("/usr/bin/git")
+    let out = isolated_git::command_at("/usr/bin/git")
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "HEAD"])

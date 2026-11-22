@@ -9,6 +9,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/pty.rs"]
 mod pty;
 
@@ -479,10 +482,9 @@ fn expect_output(cmd: &str, output: &str) {
 }
 
 fn git_value(seat: &Seat, key: &str) -> String {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .args(["config", "--global", "--get", key])
-        .env_clear()
-        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
+        .env_remove("GIT_CONFIG_GLOBAL")
         .envs(&seat.env)
         .stdin(Stdio::null())
         .output()

@@ -8,6 +8,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -62,11 +65,9 @@ impl Seat {
             std::fs::create_dir_all(dir.path().join(sub)).unwrap();
         }
         let seat = Self { dir };
-        let init = ljos_test_boot::git()
+        let init = isolated_git::command()
             .args(["init", "-q"])
             .current_dir(seat.tracker())
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
         assert!(init.status.success(), "{}", said(&init));

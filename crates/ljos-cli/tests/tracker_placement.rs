@@ -8,12 +8,15 @@
 //! ljos starts is told which tracker it means.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn git_repo(at: &Path) {
     std::fs::create_dir_all(at).unwrap();
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .args(["init", "-q"])
         .current_dir(at)
         .output()
@@ -220,11 +223,10 @@ fn a_file_does_not_commit_into_the_product_when_vissue_root_is_unset() {
     git_repo(&product);
     std::fs::write(product.join("README"), "a product\n").unwrap();
     let git = |args: &[&str]| {
-        let out = ljos_test_boot::git()
+        let out = isolated_git::command()
             .args(args)
             .current_dir(&product)
             .env("GIT_CONFIG_GLOBAL", dir.path().join("gitconfig"))
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
         assert!(out.status.success(), "git {args:?}: {out:?}");
@@ -305,7 +307,7 @@ fn a_file_does_not_commit_into_the_product_when_vissue_root_is_unset() {
 }
 
 fn git_stdout(at: &Path, args: &[&str]) -> String {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .args(args)
         .current_dir(at)
         .output()

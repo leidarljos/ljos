@@ -6,6 +6,9 @@
 //! `.git/config`.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
@@ -46,7 +49,7 @@ fn a_test_git_in_a_dir_without_git_does_not_reach_the_checkout() {
     std::fs::create_dir_all(&nested).unwrap();
     let before = local_config(&checkout);
 
-    let open = ljos_test_boot::git()
+    let open = isolated_git::command()
         .args(["rev-parse", "--absolute-git-dir"])
         .current_dir(&nested)
         .env_remove(ljos_test_boot::GIT_CEILING)
@@ -62,7 +65,7 @@ fn a_test_git_in_a_dir_without_git_does_not_reach_the_checkout() {
         return;
     }
 
-    let fenced = ljos_test_boot::git()
+    let fenced = isolated_git::command()
         .args(["rev-parse", "--absolute-git-dir"])
         .current_dir(&nested)
         .output()
@@ -80,11 +83,9 @@ fn a_test_git_in_a_dir_without_git_does_not_reach_the_checkout() {
         said(&fenced)
     );
 
-    let cleared = ljos_test_boot::git_at("/usr/bin/git")
+    let cleared = isolated_git::command_at("/usr/bin/git")
         .args(["rev-parse", "--absolute-git-dir"])
         .current_dir(&nested)
-        .env_clear()
-        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();

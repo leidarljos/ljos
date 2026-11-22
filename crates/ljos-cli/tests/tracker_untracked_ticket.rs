@@ -3,6 +3,9 @@
 //! a sibling untracked file stays out of the commit.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
@@ -36,7 +39,7 @@ impl Drop for OwnRuntime {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)

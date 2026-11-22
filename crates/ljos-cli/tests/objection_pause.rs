@@ -1,6 +1,9 @@
 //! Past the child cap, and at the descendant limit, every objection is
 //! filed or the reading pauses for a person. Nothing is only printed.
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
@@ -74,7 +77,7 @@ impl Tracker {
                 std::env::remove_var("LJOS_CONFIG");
             }
         }
-        let _ = ljos_test_boot::git()
+        let _ = isolated_git::command()
             .arg("-C")
             .arg(&root)
             .args(["init", "-q"])

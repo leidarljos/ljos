@@ -6,6 +6,9 @@
 //! and `LJOS_TRACKER_GIT=commit` commits each write.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
@@ -73,7 +76,7 @@ fn vissue_shim() {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = ljos_test_boot::git()
+    let out = isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)

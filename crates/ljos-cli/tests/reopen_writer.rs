@@ -3,6 +3,9 @@
 //! reopened like any other, so the writer of the close is not a reason
 //! to refuse; the absence of a person is.
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -154,15 +157,12 @@ impl Board {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Output {
-    ljos_test_boot::git()
+    isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)
-        .env_clear()
-        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", dir)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "seat")
         .env("GIT_AUTHOR_EMAIL", "seat@example.invalid")
         .env("GIT_COMMITTER_NAME", "seat")

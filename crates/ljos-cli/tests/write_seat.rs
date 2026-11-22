@@ -4,6 +4,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/seat_env.rs"]
 mod seat_env;
 
@@ -741,11 +744,10 @@ fn a_vissue_file_that_links_to_nothing_refuses_every_write() {
 
 fn git_tracker(b: &Bench) {
     let git = |args: &[&str]| {
-        let out = ljos_test_boot::git()
+        let out = isolated_git::command()
             .arg("-C")
             .arg(&b.tracker)
             .args(args)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("HOME", &b.tracker)
             .output()
             .unwrap();

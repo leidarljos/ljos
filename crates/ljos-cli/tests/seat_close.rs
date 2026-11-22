@@ -3,6 +3,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/seat_env.rs"]
 mod seat_env;
 
@@ -107,11 +110,10 @@ impl World {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, ORG).unwrap();
         let git = |args: &[&str]| {
-            let out = ljos_test_boot::git()
+            let out = isolated_git::command()
                 .arg("-C")
                 .arg(&tracker)
                 .args(args)
-                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("HOME", &tracker)
                 .output()
                 .unwrap();
