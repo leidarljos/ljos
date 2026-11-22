@@ -49026,10 +49026,11 @@ pub fn tracker_lock_busy(dir: &Path, waited: LockWait) -> String {
         |path| path.display().to_string(),
     );
     let wait = waited.wait;
-    let secs = if wait.subsec_millis() == 0 {
+    let tenths = wait.subsec_millis() / 100;
+    let secs = if tenths == 0 {
         format!("{}s", wait.as_secs())
     } else {
-        format!("{}.{}s", wait.as_secs(), wait.subsec_millis() / 100)
+        format!("{}.{tenths}s", wait.as_secs())
     };
     let cut = waited.cut_by.map_or_else(String::new, |budget| {
         format!(
@@ -58876,6 +58877,31 @@ mod tests {
         assert!(busy.contains("not committed"), "{busy}");
         drop(held);
         assert!(tracker_commit_lock_by(repo, std::time::Instant::now()).is_some());
+    }
+
+    /// A wait under a tenth of a second past the whole second prints as the
+    /// whole second, not as a zero tenth.
+    #[test]
+    fn a_lock_wait_prints_whole_seconds_when_its_tenths_are_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        for (millis, shown) in [
+            (1, " for 0s,"),
+            (99, " for 0s,"),
+            (2_000, " for 2s,"),
+            (2_001, " for 2s,"),
+            (2_099, " for 2s,"),
+            (2_100, " for 2.1s,"),
+            (2_999, " for 2.9s,"),
+        ] {
+            let busy = tracker_lock_busy(
+                dir.path(),
+                LockWait {
+                    wait: std::time::Duration::from_millis(millis),
+                    cut_by: None,
+                },
+            );
+            assert!(busy.contains(shown), "{millis} ms: {busy}");
+        }
     }
 
     /// Another writer keeps the commit lock for three seconds, about as long
