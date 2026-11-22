@@ -202,9 +202,10 @@ fn already_installed(dir: &Path, version: &str) -> bool {
     saw
 }
 
-/// Copy `installed` aside as `NAME.bak-pre-VERSION`, unless that file
-/// already holds some other version. That copy is the rollback, and a
-/// second install of the same release must not replace it with itself.
+/// Copy `installed` aside as `NAME.bak-pre-VERSION`, with `installed`'s
+/// mode, unless that file already holds some other version. That copy is
+/// the rollback, and a second install of the same release must not
+/// replace it with itself.
 fn keep_rollback(name: &str, installed: &Path, dir: &Path, version: &str) -> Result<()> {
     if !installed.exists() {
         return Ok(());
@@ -420,8 +421,11 @@ fn running_note(name: &str, pids: &[u32]) -> String {
     )
 }
 
-fn replace_installed(staged: &Path, installed: &Path, held: &[u32]) -> Result<()> {
-    if let Err(err) = std::fs::rename(staged, installed) {
+/// Publish a copy of `new` over `installed` with `new`'s mode. The publish
+/// stages under a name no one can guess and ends in a rename, so a running
+/// binary keeps its old inode.
+fn replace_installed(new: &Path, installed: &Path, held: &[u32]) -> Result<()> {
+    if let Err(err) = crate::copy_executable(new, installed) {
         let list = held
             .iter()
             .map(u32::to_string)
@@ -432,7 +436,7 @@ fn replace_installed(staged: &Path, installed: &Path, held: &[u32]) -> Result<()
         } else {
             format!("and the process using it must stop (kill {list}), so run `ljos upgrade`.")
         };
-        if err.raw_os_error() == Some(26) {
+        if err.kind() == std::io::ErrorKind::ExecutableFileBusy {
             bail!(
                 "upgrade: could not replace {}: Text file busy, {next}",
                 installed.display()
@@ -567,10 +571,8 @@ fn upgrade_ljos(version: Option<&str>, dir: &Path, only: Option<&str>) -> Result
     for (name, new, installed) in ready {
         let old = old_version(&installed);
         keep_rollback(name, &installed, dir, &version)?;
-        let staged = dir.join(format!("{name}.new"));
-        crate::copy_executable(&new, &staged)?;
         let held = pids_holding(&installed);
-        replace_installed(&staged, &installed, &held)?;
+        replace_installed(&new, &installed, &held)?;
         out.push_str(&running_note(name, &held));
         if only.is_some() {
             out.push_str(&format!("{name} {old} {version}\n"));
@@ -682,10 +684,8 @@ fn place_component(dir: &Path, name: &str, version: &str, tree: &Path) -> Result
     let installed = dir.join(name);
     let old = old_version(&installed);
     keep_rollback(name, &installed, dir, version).map_err(|e| one_line(&e))?;
-    let staged = dir.join(format!("{name}.new"));
-    crate::copy_executable(&new, &staged).map_err(|e| e.to_string())?;
     let held = pids_holding(&installed);
-    replace_installed(&staged, &installed, &held).map_err(|e| one_line(&e))?;
+    replace_installed(&new, &installed, &held).map_err(|e| one_line(&e))?;
     Ok(format!(
         "{name} {old} {version}\n{}",
         running_note(name, &held)
@@ -812,6 +812,60 @@ pub fn upgrade(version: Option<&str>, dir: Option<&Path>, only: Option<&str>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    }
+
+    /// A 0700 binary was kept as a 0755 rollback copy, which any user
+    /// could then run.
+    #[cfg(unix)]
+    #[test]
+    fn a_rollback_copy_keeps_a_0700_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("ljos");
+        let body = "#!/bin/sh\necho 'ljos 0.1.0'\n";
+        crate::install_executable_mode(&installed, body, 0o700).unwrap();
+        keep_rollback("ljos", &installed, dir.path(), "9.9.9").unwrap();
+        let keep = dir.path().join("ljos.bak-pre-9.9.9");
+        assert_eq!(mode_of(&keep), 0o700);
+        assert_eq!(std::fs::read_to_string(&keep).unwrap(), body);
+    }
+
+    /// The new binary was copied to `NAME.new` and that name renamed over
+    /// the installed one, so a link left at `NAME.new`, or swapped in
+    /// before the rename, was written through and then installed.
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_binary_takes_no_side_name_and_follows_no_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = dir.path().join("unpacked-ljos");
+        crate::install_executable_mode(&new, "#!/bin/sh\necho new\n", 0o750).unwrap();
+        let installed = dir.path().join("ljos");
+        crate::install_executable_mode(&installed, "#!/bin/sh\necho old\n", 0o700).unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep\n").unwrap();
+        let side = dir.path().join("ljos.new");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "plants a link that is not a git hook"
+        )]
+        std::os::unix::fs::symlink(&victim, &side).unwrap();
+        replace_installed(&new, &installed, &[]).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
+        assert_eq!(std::fs::read_link(&side).unwrap(), victim);
+        assert_eq!(
+            std::fs::read_to_string(&installed).unwrap(),
+            "#!/bin/sh\necho new\n"
+        );
+        assert_eq!(mode_of(&installed), 0o750);
+    }
 
     #[test]
     fn each_published_target_has_its_archive_triple() {

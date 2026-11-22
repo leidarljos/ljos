@@ -14,7 +14,9 @@ use anyhow::{bail, Context, Result};
 use packset_client::Hit;
 use serde_json::Value;
 
-pub use exe_publish::{copy_executable, install_executable, install_executable_mode};
+pub use exe_publish::{
+    copy_executable, install_executable, install_executable_mode, publish, Content, Mode,
+};
 pub use pack_link::PacksetClient;
 
 /// `eprintln!` for a person: the line wraps to the terminal stderr is on,

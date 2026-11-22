@@ -2118,24 +2118,13 @@ fn executable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Copy `src` beside `dest` and rename it over `dest`. A running binary
+/// Publish a copy of `src` at `dest` with `src`'s mode. A running binary
 /// cannot be opened for writing (ETXTBSY), and the `ljos` running cloud up
-/// is often the one being replaced; a rename leaves it running from the
-/// old inode.
+/// is often the one being replaced; the publish ends in a rename, which
+/// leaves it running from the old inode.
 fn install_binary(src: &Path, dest: &Path) -> Result<()> {
-    let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("ljos");
-    let tmp = dest.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
-    let _ = fs::remove_file(&tmp);
-    let copied = (|| -> Result<()> {
-        crate::copy_executable(src, &tmp)
-            .with_context(|| format!("copy {} to {}", src.display(), tmp.display()))?;
-        fs::rename(&tmp, dest).with_context(|| format!("install {}", dest.display()))?;
-        Ok(())
-    })();
-    if copied.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    copied
+    crate::copy_executable(src, dest)
+        .with_context(|| format!("install {} as {}", src.display(), dest.display()))
 }
 
 fn install_from_dir(bin_dir: &Path, src: &Path) -> Result<String> {
@@ -4348,6 +4337,44 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     const SECRET: &str = "AGE-SECRET-KEY-1PLANTED\n";
+
+    /// `install_binary` copied to `.NAME.tmp-PID` and renamed that name
+    /// over the binary, so a link put there before the copy, or swapped in
+    /// before the rename, became the installed binary. A link left at that
+    /// name and a link at the binary itself are now neither followed nor
+    /// installed.
+    #[test]
+    fn a_binary_install_takes_no_side_name_and_follows_no_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src-ljos");
+        crate::install_executable_mode(&src, "#!/bin/sh\necho new\n", 0o750).unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep\n").unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let dest = bin.join("ljos");
+        let side = bin.join(format!(".ljos.tmp-{}", std::process::id()));
+        for link in [&side, &dest] {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "plants a link that is not a git hook"
+            )]
+            std::os::unix::fs::symlink(&victim, link).unwrap();
+        }
+        install_binary(&src, &dest).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep\n");
+        assert_eq!(fs::read_link(&side).unwrap(), victim);
+        let meta = fs::symlink_metadata(&dest).unwrap();
+        assert!(meta.file_type().is_file(), "{meta:?}");
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o750);
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "#!/bin/sh\necho new\n");
+        let mut names: Vec<_> = fs::read_dir(&bin)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        names.sort();
+        assert_eq!(names, [side.clone(), dest.clone()]);
+    }
 
     fn temp_of(path: &Path) -> PathBuf {
         path.with_file_name(format!(".cloud.age.tmp-{}", std::process::id()))
