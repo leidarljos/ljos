@@ -392,6 +392,7 @@ imported, trust rows included. Learning travels with its evidence.
 =ljos git-hooks install= adds one post-commit hook. On the first commit, it opens
 the sitting or names the one already open. It notes the commit's SHA on the held ticket. It never
 refuses a commit.
+A runner's hook does not write this note, so a commit made from an agent is noted once.
 
 * Model and runner agnostic, human readable
 

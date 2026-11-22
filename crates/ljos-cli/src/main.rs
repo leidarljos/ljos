@@ -4573,7 +4573,6 @@ fn run_hook(hook: HookArgs) -> Result<()> {
     // and the transcript is read, in a detached process. This
     // process does not wait on the pack or the tracker.
     if call.event == "SessionEnd" {
-        let _ = ljos_cli::bookkeep::observe(&input, &call);
         ljos_cli::extract::at_session_end(&input, call.session.as_deref());
         return Ok(());
     }
