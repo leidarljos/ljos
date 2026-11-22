@@ -139,7 +139,6 @@ struct World {
 /// The `age` in [`World::shim`]. A refused `-d` says no identity
 /// matched, as age does for a file sealed to a key this home lost.
 fn age_shim(dir: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
     let real = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
@@ -148,7 +147,7 @@ fn age_shim(dir: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/usr/bin/age"));
     std::fs::create_dir_all(dir).unwrap();
     let age = dir.join("age");
-    std::fs::write(
+    ljos_cli::install_executable(
         &age,
         format!(
             "#!/bin/sh\ncase \" $* \" in *\" -d \"*) if [ -e \"$0.kill\" ]; then rm -f \"$0.kill\"; kill -9 \"$PPID\"; exit 1; fi; if [ -e \"$0.fail\" ]; then echo 'age: error: no identity matched any of the recipients' >&2; exit 1; fi;; esac\nexec '{}' \"$@\"\n",
@@ -156,7 +155,6 @@ fn age_shim(dir: &Path) -> PathBuf {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&age, std::fs::Permissions::from_mode(0o755)).unwrap();
     dir.to_path_buf()
 }
 
