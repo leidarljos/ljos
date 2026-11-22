@@ -4027,7 +4027,7 @@ fn installed_ljos() -> bool {
         return false;
     };
     let path = std::fs::canonicalize(&exe).unwrap_or(exe);
-    !ljos_cli::exe_from_cargo_target(&path)
+    !ljos_cli::exe_from_cargo_build(&path)
 }
 
 /// What `ljos` with no arguments prints.

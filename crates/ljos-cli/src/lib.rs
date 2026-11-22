@@ -6554,6 +6554,26 @@ pub fn exe_from_cargo_target(path: &Path) -> bool {
     false
 }
 
+/// True when `path` is a binary cargo built: [`exe_from_cargo_target`], or
+/// a binary in a profile directory, or its `deps`, of a target directory
+/// with another name, as `CARGO_TARGET_DIR` can give. Cargo keeps a
+/// `.cargo-lock` file in each profile directory it builds into.
+#[must_use]
+pub fn exe_from_cargo_build(path: &Path) -> bool {
+    if exe_from_cargo_target(path) {
+        return true;
+    }
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    let profile = if dir.file_name().is_some_and(|name| name == "deps") {
+        dir.parent()
+    } else {
+        Some(dir)
+    };
+    profile.is_some_and(|dir| dir.join(".cargo-lock").is_file())
+}
+
 /// `ljos seat`: who is sitting, one field a line.
 #[must_use]
 pub fn format_seat(seat: &Seat) -> String {

@@ -75,6 +75,27 @@ fn a_cargo_build_names_install_and_an_installed_copy_does_not() {
     )));
 }
 
+/// A `CARGO_TARGET_DIR` of another name is still a cargo build: cargo
+/// leaves `.cargo-lock` in the profile directory it builds into.
+#[test]
+fn a_cargo_build_in_another_target_dir_names_install() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join("build-out/debug");
+    std::fs::create_dir_all(profile.join("deps")).unwrap();
+    assert!(!ljos_cli::exe_from_cargo_build(&profile.join("ljos")));
+    std::fs::write(profile.join(".cargo-lock"), "").unwrap();
+    assert!(ljos_cli::exe_from_cargo_build(&profile.join("ljos")));
+    assert!(ljos_cli::exe_from_cargo_build(
+        &profile.join("deps/ljos-abc")
+    ));
+    let installed = dir.path().join("bin");
+    std::fs::create_dir_all(&installed).unwrap();
+    assert!(!ljos_cli::exe_from_cargo_build(&installed.join("ljos")));
+    assert!(ljos_cli::exe_from_cargo_build(std::path::Path::new(
+        "/work/ljos/target/debug/ljos"
+    )));
+}
+
 #[test]
 fn bare_ljos_names_the_seat_and_the_first_commands() {
     let dir = tempfile::tempdir().unwrap();
