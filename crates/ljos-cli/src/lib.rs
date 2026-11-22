@@ -50242,12 +50242,12 @@ fn paths_for_commit(dir: &Path, paths: &[&str]) -> Option<(PathBuf, Vec<String>)
     // refuse every later commit that tried to carry the rest.
     let missing: Vec<String> = rels
         .iter()
-        .filter(|rel| !root.join(rel).exists())
+        .filter(|rel| !root.join(rel).exists() || unmarked_issues_path(&root, rel))
         .cloned()
         .collect();
     if !missing.is_empty() {
         pending_remove(&root, &missing);
-        rels.retain(|rel| root.join(rel).exists());
+        rels.retain(|rel| !missing.contains(rel));
     }
     for path in paths {
         let rel = at_worktree(&prefix, path);
@@ -50266,6 +50266,24 @@ fn worktree_root(dir: &Path) -> Option<PathBuf> {
     let root = tracker_lock_path(dir).and_then(|lock| lock.parent().map(Path::to_path_buf))?;
     tracker_tmp::sweep_stale_once(&root);
     Some(root)
+}
+
+/// Whether `rel` under `root` is a board's issues directory, or a file in
+/// one, with no split marker: what a migrate killed before its marker
+/// left. Committed, it would be issue files no reader folds.
+fn unmarked_issues_path(root: &Path, rel: &str) -> bool {
+    let path = root.join(rel);
+    let dir = if path.file_name().is_some_and(|name| name == "issues") {
+        path.as_path()
+    } else {
+        match path.parent() {
+            Some(dir) if dir.file_name().is_some_and(|name| name == "issues") => dir,
+            _ => return false,
+        }
+    };
+    dir.parent()
+        .is_some_and(|board| board.join("issues.org").is_file())
+        && !dir.join(".ledger").is_file()
 }
 
 fn worktree_prefix(dir: &Path) -> String {
@@ -51266,6 +51284,25 @@ fn prepare_split(path: &Path, writes: &[(String, String)], also: &[String]) -> S
     split_board(&top, &board, &board_rel, lock, &rel, (path, writes, also))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// What a test runs at a named step of [`split_board`]: a writer killed
+    /// there, or another writer landing there.
+    static SPLIT_STEP: std::cell::RefCell<Option<Box<dyn FnMut(&str)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn split_step(step: &str) {
+    #[cfg(test)]
+    SPLIT_STEP.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(step);
+        }
+    });
+    #[cfg(not(test))]
+    let _ = step;
+}
+
 /// Split every unsplit board beside `board` into per-issue files
 /// (`vissue migrate-ledger`) and commit them with their boards in one
 /// commit. The caller holds the tracker lock, `lock`. `write` is the file,
@@ -51312,19 +51349,23 @@ fn split_board(
             return held(lock, could_not(&e), false);
         }
     }
-    let all: Vec<String> = boards
-        .iter()
-        .flat_map(|(_, b, i)| [b.clone(), i.clone()])
-        .collect();
+    // An issues directory goes on the pending list only once its marker
+    // is written. A writer killed mid-migrate leaves issue files and no
+    // marker, and a push that committed them would land half a split.
+    let all: Vec<String> = boards.iter().map(|(_, b, _)| b.clone()).collect();
     if let Err(e) = pending_add(top, &all) {
         return held(lock, could_not(&format!("the pending list: {e}")), false);
     }
     let layout = vissue_core::Layout::new(root, prefix.to_string_lossy());
+    split_step("migrate");
     let migrated = vissue_core::ledger::migrate(&layout, false);
+    split_step("migrated");
     let split: Vec<&(PathBuf, String, String)> = boards
         .iter()
         .filter(|(candidate, _, _)| vissue_core::ledger::is_ledger(candidate))
         .collect();
+    let marked: Vec<String> = split.iter().map(|(_, _, i)| i.clone()).collect();
+    let _ = pending_add(top, &marked);
     let unsplit: Vec<String> = boards
         .iter()
         .filter(|(candidate, _, _)| !vissue_core::ledger::is_ledger(candidate))
@@ -51610,7 +51651,7 @@ pub(crate) fn land_deferred_writes(dir: &Path, fallback: &str) {
     let mut rels = read_pending(&root);
     let missing: Vec<String> = rels
         .iter()
-        .filter(|rel| !root.join(rel).exists())
+        .filter(|rel| !root.join(rel).exists() || unmarked_issues_path(&root, rel))
         .cloned()
         .collect();
     if !missing.is_empty() {
@@ -51618,7 +51659,7 @@ pub(crate) fn land_deferred_writes(dir: &Path, fallback: &str) {
         rels.retain(|rel| !missing.contains(rel));
     }
     for rel in &batch.paths {
-        if !rels.contains(rel) && root.join(rel).exists() {
+        if !rels.contains(rel) && root.join(rel).exists() && !unmarked_issues_path(&root, rel) {
             rels.push(rel.clone());
         }
     }
@@ -61681,6 +61722,106 @@ mod tests {
             "{shown}"
         );
         clear_probe_env();
+    }
+
+    /// Run `hook` at each named step of a split on this thread until the
+    /// guard drops.
+    fn on_split_step(hook: impl FnMut(&str) + 'static) -> impl Drop {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                super::SPLIT_STEP.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        super::SPLIT_STEP.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        Clear
+    }
+
+    /// A writer killed partway through the migrate leaves issue files and
+    /// no marker. The issues directory is not on the pending list then,
+    /// and the push after it commits no issue file.
+    #[test]
+    fn a_split_killed_mid_migrate_leaves_no_issue_file_to_commit() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let issues = big_board(&root, 300);
+        probe_env(&root);
+        let layout = vissue_core::Layout::new(&root, "Software");
+        vissue_core::ops::note(&layout, "probe-b007", "first look").unwrap();
+        let part = root.join("Software/probe/issues/probe-b000.org");
+        let said = {
+            let part = part.clone();
+            let _hook = on_split_step(move |step| {
+                if step == "migrate" {
+                    std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+                    std::fs::write(
+                        &part,
+                        "#+VISSUE_LEDGER:\n#+VISSUE_LINES: 3 6\n* TODO [#C] Probe 0\n:PROPERTIES:\n:ID:         probe-b000\n:END:\n#+VISSUE_LEDGER_LOG:\n",
+                    )
+                    .unwrap();
+                    panic!("killed mid-migrate");
+                }
+            });
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                persist_tracker("probe-b007", "noted")
+            }))
+        };
+        assert!(said.is_err(), "the split was not killed");
+        assert!(part.is_file());
+        assert!(!vissue_core::ledger::is_ledger(&issues));
+        let pending =
+            std::fs::read_to_string(root.join(super::TRACKER_PENDING)).unwrap_or_default();
+        assert!(
+            !pending.lines().any(|l| l.ends_with("/issues")),
+            "{pending}"
+        );
+        super::tracker_push::land_deferred(&root);
+        let tracked = git_text(&root, &["ls-files", "Software/probe/issues"]);
+        assert!(tracked.is_empty(), "{tracked}");
+        clear_probe_env();
+    }
+
+    /// An issues directory with no marker that an older run left on the
+    /// pending list is dropped from it, not committed, by a push and by a
+    /// flush of the list.
+    #[test]
+    fn a_pending_issues_dir_with_no_marker_is_not_committed() {
+        let _env = env_guard();
+        for push in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            big_board(&root, 3);
+            probe_env(&root);
+            let part = root.join("Software/probe/issues/probe-b000.org");
+            std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+            std::fs::write(&part, "#+VISSUE_LEDGER:\n* TODO [#C] Pro").unwrap();
+            let text = std::fs::read_to_string(root.join("Software/probe/issues.org")).unwrap();
+            std::fs::write(
+                root.join("Software/probe/issues.org"),
+                text.replacen("TODO", "STARTED", 1),
+            )
+            .unwrap();
+            std::fs::write(
+                root.join(super::TRACKER_PENDING),
+                "Software/probe/issues\nSoftware/probe/issues.org\n",
+            )
+            .unwrap();
+            if push {
+                super::tracker_push::land_deferred(&root);
+            } else {
+                let made = super::commit_paths(&root, &[], "chore(issues): flush");
+                assert_eq!(made, super::PathCommit::Made);
+            }
+            let tracked = git_text(&root, &["ls-files", "Software/probe/issues"]);
+            assert!(tracked.is_empty(), "push {push}: {tracked}");
+            let shown = git_text(&root, &["show", "HEAD:Software/probe/issues.org"]);
+            assert!(shown.contains("STARTED"), "push {push}: {shown}");
+            let pending =
+                std::fs::read_to_string(root.join(super::TRACKER_PENDING)).unwrap_or_default();
+            assert!(pending.is_empty(), "push {push}: {pending}");
+            clear_probe_env();
+        }
     }
 
     /// A write across two boards that waits at the split keeps the second
