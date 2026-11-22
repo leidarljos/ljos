@@ -34,8 +34,9 @@ consensus              the weighting that settles a vote                        
 
 The claim graph shows itself least, by design. It answers one question while work runs: is
 anyone already on this ticket, here, now? ``ljos sitting`` takes the ticket's node before it
-returns. A second sitting on the same ticket learns who has it. ``ljos finish`` marks the node
-done. A reboot clears the store, and a lease never outlives its holder.
+returns. A second sitting on the same ticket learns who has it. ``ljos finish`` hands the node
+back and leaves the ticket open. With ``--close`` and a status of ``done`` or ``cancelled`` it completes
+the node and closes the ticket. With ``failed``, ``--close`` still hands the node back. A reboot clears the store, and a lease never outlives its holder.
 
 A deed accession is the one identifier the writable stores share. The tracker cites it on a
 ticket, and the pack cites it in a memory. The deed store answers for it.
@@ -45,7 +46,7 @@ The contracts
 
 - Citing a deed names it. The bytes stay in deedar.
 - A finish ends the sitting. A person closes the ticket when the work is accepted.
-- A finish hands the claim back and puts the ticket in the state it had before the claim.
+- A plain finish hands the claim back and puts the ticket in the state it had before the claim.
 - Cards are read-only. The seat writes to the pack, and a person writes the cards.
 - A tool that fails is a store refusing or down, and it says which. It is never an empty answer.
 - ljos calls no model, unless the person turns on Jev.
@@ -203,8 +204,8 @@ from a seat it does not list is refused.
 A grant is made with ``ljos seat grant SEAT close=own --quote "..." --at ISO --via RECORDER``. The
 row lives in ``vissue.toml``. It holds the quote, the time, the recorder and the tracker commit. A
 grant edited in by hand is ignored, because only the command writes the commit that backs the row.
-A seat cannot grant itself. Every close cites the grant record, so a close can be traced to the
-words that allowed it.
+A seat cannot grant itself. Every close that uses the grant cites the record, so that close can be
+traced to the words that allowed it. A person at a terminal closes with no grant note.
 
 A shell-only agent has no MCP client and no hook. ``ljos onboard`` for such a runner writes the skill
 and an env file. Source the file, and ``LJOS_SEAT`` is the name.

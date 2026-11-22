@@ -361,10 +361,36 @@ fn claim_file_and_deed_each_describe_their_own_call() {
         ),
         "{claim}"
     );
-    let deed = description_of(&tools, "ljos_deed");
+    assert!(!claim.contains("first write"), "{claim}");
+    let start = description_of(&tools, "ljos_start");
+    assert!(!start.contains("Shutdown finishes"), "{start}");
     assert!(
-        deed.contains("A git commit is cited as a deed for you"),
-        "{deed}"
+        start.contains("Shutdown and idle leave the claim"),
+        "{start}"
+    );
+    let deed = description_of(&tools, "ljos_deed");
+    assert!(deed.contains("A git commit is not cited for you"), "{deed}");
+    let finish = description_of(&tools, "ljos_finish");
+    assert!(!finish.contains("completes the session node"), "{finish}");
+    assert!(
+        finish.contains("releases the claim so the session node goes back to ready"),
+        "{finish}"
+    );
+    assert!(
+        finish.contains("retries a claim the sitting left pending"),
+        "{finish}"
+    );
+    let note = description_of(&tools, "ljos_note");
+    assert!(
+        note.contains("A claim a sitting left pending on that issue is retried"),
+        "{note}"
+    );
+    let complete = description_of(&tools, "ljos_complete");
+    assert!(
+        complete.contains(
+            "is completed under that conversation's name with no new claim; it is claimed first only when its hold record names another claim graph"
+        ),
+        "{complete}"
     );
 
     let prompt = session.request(

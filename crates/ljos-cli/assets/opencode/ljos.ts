@@ -22,7 +22,8 @@ const started = new Set<string>()
 
 type Answer = { ok: true; out: any | undefined } | { ok: false; why: string }
 
-// Edit tools the seat files a claim for, under the name ljos hook expects.
+// Tools the hook sees, under the name ljos hook expects. An edit files no
+// claim.
 function seatTool(name: string): { tool: string; bash: boolean } | undefined {
   const n = name.toLowerCase().replace(/-/g, "_")
   if (n === "bash" || n === "shell") return { tool: "Bash", bash: true }
@@ -100,7 +101,8 @@ export const LjosSeat: Plugin = async ({ directory }) => {
   // Remember it so the after hook does not look like a clean commit.
   const blocked = new Map<string, string>()
   // The before hook sees the command. Some builds do not put it on the
-  // after hook's input, and the deed still has to be cited.
+  // after hook's input, and the after hook still passes it to `ljos hook`.
+  // A commit gets a `note:` line from git's post-commit hook. No deed is cited.
   const commands = new Map<string, string>()
   let lastSession: string | undefined
   const remember = (id: string | undefined) => {
@@ -197,7 +199,7 @@ export const LjosSeat: Plugin = async ({ directory }) => {
     if (verdict) blocked.delete(key)
     const meta = output?.metadata ?? {}
     const exit = meta.exit ?? meta.exitCode ?? meta.exit_code
-    // A zero exit still cites the commit. stderr on that exit is not a failure.
+    // A zero exit is not a failure, even with stderr on it.
     const knownFail = exit !== undefined && exit !== null && String(exit) !== "0"
     const rawError = typeof output?.error === "string" ? output.error : ""
     const error = verdict ? `ljos: ${verdict}` : knownFail ? rawError || `exit ${exit}` : ""

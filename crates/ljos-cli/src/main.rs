@@ -2525,7 +2525,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Finish work on a ticket: remember the lesson, strengthen the memories it used, hand the claim back.
+    /// Finish work on a ticket: remember the lesson and hand the claim back. Without `--close` the ticket stays open.
     ///
     /// A sitting is one conversation's claim on an issue.
     /// With no id, this finishes that issue.
@@ -2535,7 +2535,7 @@ enum Cmd {
     /// that id and the issue this conversation holds.
     /// `--quiet` leaves that line off.
     /// Another conversation of this seat is not that issue.
-    /// With no lesson, a ticket that is still TODO and that nobody has claimed is left as it is.
+    /// Without `--close` and with no lesson, a ticket that is still TODO and that nobody has claimed is left as it is.
     /// The line names `ljos sitting ISSUE`.
     ///
     /// Example: `ljos finish --lesson "Cold metal seats."`
@@ -2543,7 +2543,7 @@ enum Cmd {
     Finish {
         /// The tracker id of the issue. Absent: the issue this conversation holds.
         issue: Option<String>,
-        /// Status to record: done, failed, or cancelled.
+        /// Status: done, failed, or cancelled. Only `--close` with done or cancelled records it. Any other finish checks it and records nothing.
         #[arg(long, default_value = "done")]
         status: String,
         /// The lesson this work taught, two sentences at most.
@@ -2567,11 +2567,12 @@ enum Cmd {
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
-        /// Close the tracker ticket. A runner is refused. CANCELLED with `--status cancelled`. Only when the work is accepted or dropped, not when the work session ends.
+        /// Complete the claim and close the tracker ticket. A runner is refused unless a standing grant covers this seat and this ticket. CANCELLED with `--status cancelled`. With `--status failed` the claim is handed back and the ticket stays open. Only when the work is accepted or dropped, not when the work session ends.
         #[arg(long)]
         close: bool,
-        /// Print whether related memories were linked, and the tracker and
-        /// sync lines. Without it, finish says the ticket and the next
+        /// Link the memories the ticket's title activates, say whether they
+        /// were linked, and print the tracker and sync lines. Without it,
+        /// finish links nothing and says the ticket and the next
         /// command. A commit that landed is quiet, and so is a push that
         /// landed or a sealed log. A refusal is one sentence.
         #[arg(long)]
@@ -4535,8 +4536,9 @@ fn run_hook(hook: HookArgs) -> Result<()> {
     }
     // An agent about to end its turn is audited once: a done claim
     // beside a red test run, or asked work put off, holds it for
-    // one more round. An agy stop with `fullyIdle` is the session
-    // end: it finishes even when a mid-loop stop would have held.
+    // one more round. An agy stop with `fullyIdle` has ended its loop
+    // and skips that audit. It finishes no claim: the session finish is
+    // the SessionEnd branch below.
     let agy_idle = call.shape == ljos_cli::HookShape::Steps
         && call.event == "Stop"
         && ljos_cli::stop_is_idle(&input);
@@ -4946,12 +4948,11 @@ fn run_hook(hook: HookArgs) -> Result<()> {
     // tracker that does not answer cannot hold the call. A call a
     // rule warned on runs, so it is booked too; a blocked call does
     // not run and is not booked.
-    // A Stop the audit held never reaches this line, except an agy
-    // stop that is idle: that one is the session end and finishes.
-    // A mid-loop agy stop, fullyIdle absent, does not finish.
-    // The book is queued, not kept in this call: it waits on a lock
-    // every seat shares, and a claim reads the whole tracker. A
-    // gate's book is queued once its answer is out.
+    // A Stop the audit held never reaches this line. An idle agy stop
+    // skipped the audit and is booked; a mid-loop agy stop, fullyIdle
+    // absent, is not. Booking queues no job for any event, so neither
+    // files or finishes a claim. A gate's book is queued once its answer
+    // is out.
     let agy_mid_loop = call.shape == ljos_cli::HookShape::Steps
         && call.event == "Stop"
         && !ljos_cli::stop_is_idle(&input);

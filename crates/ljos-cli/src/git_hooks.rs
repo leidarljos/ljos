@@ -40,7 +40,8 @@
 //! The holder is `SEAT@TAG`, the same name `ljos claim` uses. Paths in
 //! `[git_hooks] skip` of `ljos.toml`, plus `/tmp`, `/var/tmp`, `/dev/shm`,
 //! the tracker, `CLAIMDAG_DIR` and the deedar store, are not booked.
-//! An amend or a rebase moves the citation onto the new sha.
+//! Booking writes one `note:` line to the book log; it cites no deed and
+//! takes no claim. An amend or a rebase notes the new sha.
 
 use std::cell::Cell;
 use std::fs;
@@ -1206,8 +1207,7 @@ fn book_commit(hook: &str) -> Result<()> {
         return Ok(());
     };
     let _actor = crate::HookActor::enter(&seat);
-    // Every path below writes the tracker: a repointed citation, a named
-    // issue, an open sitting, a new claim.
+    // A seat that may not write the tracker books nothing.
     if let Err(e) = crate::write_seat("commit") {
         if tracker {
             refuse_tracker_commit(&head, &format!("{e:#}"));
@@ -1223,9 +1223,8 @@ fn book_commit(hook: &str) -> Result<()> {
         return Ok(());
     }
     let _children = HookChildren::enter();
-    // An amend or a rebase lists old and new shas. Move the citation
-    // before the "already booked" return: post-commit may have cited the
-    // new HEAD already, and the old sha would otherwise stay on the issue.
+    // Only HEAD is noted, after an amend or a rebase too, and once:
+    // post-commit may have noted it already.
     if already_booked(&repo, &head) {
         return Ok(());
     }

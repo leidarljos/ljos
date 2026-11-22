@@ -18,7 +18,7 @@ fail() { echo "herd: $1" >&2; exit 1; }
 
 seats=(brio acme vela orin)
 # The pack knows the topic first, so the island a title activates has
-# seeds two scorers agree on and a finish can fire it.
+# seeds two scorers agree on and a verbose finish can fire it.
 LJOS_SEAT=brio ljos remember "The Fuse relay trips at forty amps under the Herd load." >/dev/null
 LJOS_SEAT=acme ljos remember "The Herd load peaks when every seat writes at once through the Fuse." >/dev/null
 LJOS_SEAT=vela ljos remember "A Fuse that trips under the Herd load is reset by the relay board." >/dev/null
@@ -75,7 +75,7 @@ echo "herd: one ticket, two seats, one holder"
 for s in "${seats[@]}"; do
   for k in 1 2; do
     gen=$(sed -n 's/.*gen=\([0-9][0-9]*\).*/\1/p' "sit-$s-$k.out" | tail -1)
-    ( set +e; LJOS_SEAT=$s ljos finish "${issue[$s:$k]}" --gen "$gen" --lesson "Seat $s closed ticket $k. The herd held." --close > "fin-$s-$k.out" 2>&1; echo $? > "fin-$s-$k.rc" ) &
+    ( set +e; LJOS_SEAT=$s ljos finish "${issue[$s:$k]}" --gen "$gen" --lesson "Seat $s closed ticket $k. The herd held." --close --verbose > "fin-$s-$k.out" 2>&1; echo $? > "fin-$s-$k.rc" ) &
   done
 done
 wait
@@ -88,15 +88,15 @@ done
 echo "herd: eight finishes closed eight tickets"
 
 # The same island fired by several closings tightens once: the first
-# finish fires it, a second within the hour is held.
-fired=$(grep -l 'fired the island' fin-*.out 2>/dev/null | wc -l || true)
-held=$(grep -l 'fired within the hour' fin-*.out 2>/dev/null | wc -l || true)
-weak=$(grep -l 'did not fire the island' fin-*.out 2>/dev/null | wc -l || true)
+# verbose finish links it, a second within the hour is not linked again.
+fired=$(grep -lE '^linked [0-9]+ related memories' fin-*.out 2>/dev/null | wc -l || true)
+held=$(grep -l 'were linked within the hour' fin-*.out 2>/dev/null | wc -l || true)
+weak=$(grep -l 'did not link related memories' fin-*.out 2>/dev/null | wc -l || true)
 if [ "$weak" = 8 ]; then
   echo "herd: the island stayed weak on this scratch pack; the fire window is untested here"
 else
-  [ "$fired" = 1 ] || { grep -h "island" fin-*.out; fail "$fired finishes fired the same island, wanted one"; }
-  [ "$held" = 7 ] || { grep -h "island" fin-*.out; fail "$held finishes found it fired already, wanted seven"; }
+  [ "$fired" = 1 ] || { grep -h "related memories" fin-*.out; fail "$fired finishes fired the same island, wanted one"; }
+  [ "$held" = 7 ] || { grep -h "related memories" fin-*.out; fail "$held finishes found it fired already, wanted seven"; }
 fi
 echo "herd: $fired finishes fired an island, $held found it fired already"
 echo "herd: every loop ran"
