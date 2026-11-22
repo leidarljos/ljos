@@ -51744,7 +51744,11 @@ fn held_a_write_in(root: &Path) {
             }
             let flush = std::thread::Builder::new().spawn(move || {
                 for root in roots {
-                    let _ = flush_held_tracker_writes_in(&root);
+                    let said = flush_held_tracker_writes_in(&root);
+                    let failed = exit_flush_failures(&said);
+                    if !failed.is_empty() {
+                        eprint!("{failed}");
+                    }
                 }
             });
             if let Ok(flush) = flush {
@@ -51777,19 +51781,40 @@ pub fn flush_held_tracker_writes() -> String {
     }
 }
 
+/// The lines of a flush at exit that say a held write did not commit. A
+/// write that committed and did not push is tried again by the next push,
+/// so it is not one of them.
+fn exit_flush_failures(said: &str) -> String {
+    said.lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with("tracker git: committed"))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
 /// [`flush_held_tracker_writes`] for the checkout at `root`. A held file
-/// that is clean is in HEAD already, so its entries go.
+/// that is clean is in HEAD already, so its entries go. The batch is read
+/// under the tracker lock that the commit then runs under: a file whose
+/// held writes another seat committed meanwhile has none left, and a
+/// commit of it would name no write.
 fn flush_held_tracker_writes_in(root: &Path) -> String {
-    let paths = read_tracker_batch(root).paths;
+    let paths = {
+        let _held = tracker_commit_lock(root);
+        read_tracker_batch(root).paths
+    };
     if paths.is_empty() {
         return String::new();
     }
     for rel in &paths {
+        let lock = tracker_commit_lock(root);
+        let batch = read_tracker_batch(root);
+        if !batch.paths.contains(rel) || batch.held_in(std::slice::from_ref(rel)).is_empty() {
+            continue;
+        }
         let path = root.join(rel);
         if !path.exists() {
             continue;
         }
-        let said = persist_one_tracker_file(&path, &[], &[], &[], None, false, None);
+        let said = persist_one_tracker_file(&path, &[], &[], &[], None, false, Some(lock));
         if !said.contains("nothing to commit") {
             return said;
         }
@@ -61919,6 +61944,113 @@ mod tests {
         assert!(said.contains("is not in a commit"), "{said}\n{staged}");
         assert!(vissue_core::ledger::is_ledger(&issues), "{said}");
         clear_probe_env();
+    }
+
+    /// A flush that waits on the tracker lock while another seat commits
+    /// the held note reads the batch under the lock, finds nothing held,
+    /// and makes no commit of its own: no write would name it.
+    #[test]
+    fn a_flush_reads_the_batch_under_the_tracker_lock() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let issues = seeded_tracker(&root);
+        probe_env(&root);
+        std::env::set_var("LJOS_TRACKER_BATCH_SECS", "600");
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        let layout = vissue_core::Layout::new(&root, "Software");
+        vissue_core::ops::note(&layout, "probe-a1b2", "one").unwrap();
+        assert!(persist_tracker("probe-a1b2", "noted").contains("committed"));
+        vissue_core::ops::note(&layout, "probe-a1b2", "two").unwrap();
+        assert!(persist_tracker("probe-a1b2", "noted").contains("held"));
+        let held = super::tracker_commit_lock(&root.join("Software/probe"));
+        let lock = root.join(super::TRACKER_LOCK);
+        let mine = open_count(&lock);
+        let flusher = {
+            let root = root.clone();
+            std::thread::spawn(move || super::flush_held_tracker_writes_in(&root))
+        };
+        let start = std::time::Instant::now();
+        while open_count(&lock) <= mine {
+            assert!(
+                start.elapsed().as_secs() < 50,
+                "the flush never took the lock"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let made = super::commit_paths(
+            &root,
+            &["Software/probe/issues.org"],
+            "chore(issues): probe-a1b2 noted by another seat",
+        );
+        assert_eq!(made, super::PathCommit::Made);
+        std::fs::write(
+            root.join(super::TRACKER_BATCH_FILE),
+            format!("{}\n", super::unix_now()),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&issues).unwrap();
+        std::fs::write(&issues, format!("{text}not yet persisted\n")).unwrap();
+        let count = commit_count(&root);
+        drop(held);
+        let said = flusher.join().unwrap();
+        let subject = git_text(&root, &["log", "-1", "--format=%s"]);
+        assert_eq!(commit_count(&root), count, "{said}\n{subject}");
+        assert_eq!(
+            subject.trim(),
+            "chore(issues): probe-a1b2 noted by another seat"
+        );
+        clear_probe_env();
+    }
+
+    /// The flush a process runs at exit says on stderr when it did not
+    /// commit. The test runs itself again as a child that held a write.
+    #[test]
+    fn a_failed_flush_at_exit_says_so_on_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(root) = std::env::var_os("LJOS_TEST_EXIT_FLUSH_ROOT") {
+            super::held_a_write_in(Path::new(&root));
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let issues = seeded_tracker(&root);
+        let hooks = root.join(".git/refuse-all");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\necho 'no commit here' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git_text(
+            &root,
+            &["config", "core.hooksPath", hooks.to_str().unwrap()],
+        );
+        let text = std::fs::read_to_string(&issues).unwrap();
+        std::fs::write(&issues, format!("{text}held note\n")).unwrap();
+        std::fs::write(
+            root.join(super::TRACKER_BATCH_FILE),
+            format!(
+                "{}\npath Software/probe/issues.org\nwrite Software/probe/issues.org\tprobe-a1b2 noted by saddle\n",
+                super::unix_now()
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::a_failed_flush_at_exit_says_so_on_stderr",
+                "--test-threads=1",
+            ])
+            .env("LJOS_TEST_EXIT_FLUSH_ROOT", &root)
+            .env("LJOS_TRACKER_GIT", "commit")
+            .env("LJOS_SEAT", "saddle")
+            .env_remove("LJOS_OFF")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        assert!(stderr.contains("tracker git: commit refused"), "{stderr}");
+        assert!(stderr.contains("no commit here"), "{stderr}");
     }
 
     /// With no HEAD and a reset that fails, the staged issue files leave
