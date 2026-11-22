@@ -7,7 +7,7 @@
 //! refuses puts them back, so the tracker is left as it was. The commit names the first
 //! id and how many more.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -401,12 +401,37 @@ struct Want<'a> {
     body: Option<&'a str>,
     /// The tracker's configured default priority.
     cfg_priority: char,
+    /// The ids on the tracker just before the create; with no body, none.
+    known: HashSet<String>,
+    /// Today as an inactive Org date, read before and after the create.
+    days: [String; 2],
+}
+
+/// The first `[[id:ID]]` or `[[id:ID][label]]` in `body` whose id is in
+/// `known`, read as `vissue_core::ops::create` reads it for
+/// `DISCOVERED_FROM`.
+fn first_existing_id_link(body: &str, known: &HashSet<String>) -> Option<String> {
+    let mut rest = body;
+    while let Some(start) = rest.find("[[") {
+        let after_start = &rest[start + 2..];
+        let end = after_start.find("]]")?;
+        let raw = &after_start[..end];
+        let target = raw.split_once("][").map_or(raw, |(target, _)| target);
+        if let Some(id) = target.trim().strip_prefix("id:") {
+            let id = id.trim();
+            if known.contains(id) {
+                return Some(id.to_string());
+            }
+        }
+        rest = &after_start[end + 2..];
+    }
+    None
 }
 
 impl Want<'_> {
     /// The heading `ops::create` writes for this row at `priority`.
     /// `CREATED` is the day it ran, so it is read from `found`; `None` when
-    /// `found` has no `CREATED`.
+    /// `found` has no `CREATED` or it is not one of `days`.
     fn heading(
         &self,
         found: &vissue_core::IssueHeading,
@@ -415,17 +440,16 @@ impl Want<'_> {
         use vissue_core::{org::is_org_tag_char, props};
         let mut properties = BTreeMap::new();
         properties.insert("ID".to_string(), self.id.to_string());
-        properties.insert(
-            "CREATED".to_string(),
-            found.properties.get("CREATED")?.clone(),
-        );
-        if let Some(from) = props::get(&found.properties, props::DISCOVERED_FROM) {
-            if self
-                .body
-                .is_some_and(|body| body.contains(&format!("[[id:{from}]")))
-            {
-                props::insert(&mut properties, props::DISCOVERED_FROM, from.to_string());
-            }
+        let created = found.properties.get("CREATED")?;
+        if !self.days.contains(created) {
+            return None;
+        }
+        properties.insert("CREATED".to_string(), created.clone());
+        if let Some(from) = self
+            .body
+            .and_then(|body| first_existing_id_link(body, &self.known))
+        {
+            props::insert(&mut properties, props::DISCOVERED_FROM, from);
         }
         let mut org_tags: Vec<String> = Vec::new();
         if let Some(kind) = self.kind {
@@ -625,6 +649,12 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
         let row = &place.row;
         let kind = row.kind.clone().or_else(|| defaults.kind.clone());
         let tags = row.tags.clone().or_else(|| defaults.tags.clone());
+        let known = if row.body.is_some() {
+            vissue_core::store::collect_org_ids(&layout)?
+        } else {
+            HashSet::new()
+        };
+        let first_day = vissue_core::model::today_inactive_bracket();
         let made = vissue_core::ops::create(
             &layout,
             &boards[board].project,
@@ -639,6 +669,7 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
                 ..vissue_core::ops::CreateOpts::default()
             },
         );
+        let days = [first_day, vissue_core::model::today_inactive_bracket()];
         match made {
             Ok(text) => {
                 let id = text.trim().to_string();
@@ -655,6 +686,8 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
                     parent: place.parent.as_deref(),
                     body: row.body.as_deref(),
                     cfg_priority,
+                    known,
+                    days,
                 };
                 let Some((ours, filed)) = locked(&b.issues, || b.only_filed(&want))? else {
                     bail!(
@@ -821,6 +854,12 @@ mod tests {
                 .unwrap()
                 .issues
                 .default_priority,
+            known: vissue_core::store::collect_org_ids(layout).unwrap(),
+            days: [
+                chrono::Local::now() - chrono::Duration::minutes(1),
+                chrono::Local::now(),
+            ]
+            .map(|at| at.format("[%Y-%m-%d %a]").to_string()),
         }
     }
 
@@ -900,6 +939,53 @@ mod tests {
         other.priority = Some('A');
         assert!(board.only_filed(&other).unwrap().is_none());
         assert!(board.only_filed(&want(&layout, &id)).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_link_with_a_space_after_id_is_the_row_s_own_discovered_from() {
+        let (_root, layout, board) = demo(false);
+        let old = vissue_core::IssueDoc::parse_file("demo", &board.issues).unwrap();
+        let body = format!("found in [[id: {} ]]", old.headings[0].id);
+        let made = vissue_core::ops::create(
+            &layout,
+            "demo",
+            "new",
+            vissue_core::ops::CreateOpts {
+                issue_type: Some("task"),
+                tags: Some(TAGS),
+                body: Some(&body),
+                quiet: true,
+                ..vissue_core::ops::CreateOpts::default()
+            },
+        );
+        let id = made.unwrap().trim().to_string();
+        let mut row = want(&layout, &id);
+        row.body = Some(&body);
+        assert!(board.only_filed(&row).unwrap().is_some());
+    }
+
+    /// Set `key` on the heading `id` as another writer would, and write the
+    /// board back as vissue renders it.
+    fn forge(board: &Board, id: &str, key: &str, value: &str) {
+        let mut doc = vissue_core::IssueDoc::parse_file("demo", &board.issues).unwrap();
+        let at = doc.headings.iter().position(|h| h.id == id).unwrap();
+        doc.headings[at]
+            .properties
+            .insert(key.to_string(), value.to_string());
+        doc.write().unwrap();
+    }
+
+    #[test]
+    fn a_forged_created_or_discovered_from_is_not_the_row_s_create() {
+        let (_root, layout, board) = demo(false);
+        let id = file(&layout, "new");
+        forge(&board, &id, "CREATED", "[2001-01-01 Mon]");
+        assert!(board.only_filed(&want(&layout, &id)).unwrap().is_none());
+
+        let (_root, layout, board) = demo(false);
+        let id = file(&layout, "new");
+        forge(&board, &id, "DISCOVERED_FROM", "nowhere");
+        assert!(board.only_filed(&want(&layout, &id)).unwrap().is_none());
     }
 
     #[test]
