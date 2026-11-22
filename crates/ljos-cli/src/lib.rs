@@ -49751,10 +49751,16 @@ fn board_project(board: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// `BOARD_DIR/issues/ID.org` for `issue` on the split board `board`, named
-/// as vissue names it: bytes outside `[A-Za-z0-9._-]` are `%XX`. `None`
-/// when that file is not there.
+/// `BOARD_DIR/issues/ID.org` for `issue` on the split board `board`.
+/// `None` when that file is not there.
 fn ledger_issue_file(board: &Path, issue: &str) -> Option<PathBuf> {
+    let file = board.parent()?.join("issues").join(ledger_file_name(issue));
+    file.is_file().then_some(file)
+}
+
+/// The per-issue file name of `issue`, as vissue names it: bytes outside
+/// `[A-Za-z0-9._-]` are `%XX`.
+fn ledger_file_name(issue: &str) -> String {
     let mut name = String::new();
     for byte in issue.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
@@ -49764,8 +49770,7 @@ fn ledger_issue_file(board: &Path, issue: &str) -> Option<PathBuf> {
         }
     }
     name.push_str(".org");
-    let file = board.parent()?.join("issues").join(name);
-    file.is_file().then_some(file)
+    name
 }
 
 /// Remove the stale whole-file temporaries beside the tracker file at
@@ -51134,45 +51139,63 @@ fn clear_unlanded_split(board: &Path) -> vissue_core::Result<()> {
     })
 }
 
-/// The files of the issues directory of `board` and their bytes.
-fn issue_dir_files(board: &Path) -> Vec<(PathBuf, Vec<u8>)> {
-    let Ok(entries) = std::fs::read_dir(board_issues_dir(board)) else {
-        return Vec::new();
-    };
-    let mut out: Vec<(PathBuf, Vec<u8>)> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .filter(|path| {
-            !path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(tracker_tmp::is_temp_name)
-        })
-        .filter_map(|path| std::fs::read(&path).ok().map(|bytes| (path, bytes)))
+/// The per-issue files of the split of `board` when the split is still
+/// exactly what migrate wrote, else `None`: the marker holds the SHA-256
+/// digest of `issues.org`, the directory holds the marker and one file per
+/// heading of `issues.org` and nothing more, and every file ends at its
+/// log mark with no record after it. A stale temporary is not counted.
+fn split_as_migrated(board: &Path) -> Option<Vec<PathBuf>> {
+    use sha2::Digest as _;
+    const LOG_MARK: &str = "\n#+VISSUE_LEDGER_LOG:\n";
+    let content = std::fs::read_to_string(board).ok()?;
+    let digest = hex::encode(sha2::Sha256::digest(content.as_bytes()));
+    let dir = board_issues_dir(board);
+    let marker = std::fs::read_to_string(dir.join(".ledger")).ok()?;
+    if marker != format!("1\n{digest}\n") {
+        return None;
+    }
+    let doc =
+        vissue_core::IssueDoc::parse(&board_project(board), board.to_path_buf(), &content).ok()?;
+    let mut want: std::collections::BTreeSet<String> = doc
+        .headings
+        .iter()
+        .map(|heading| ledger_file_name(&heading.id))
         .collect();
-    out.sort();
-    out
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&dir).ok()? {
+        let entry = entry.ok()?;
+        let name = entry.file_name().into_string().ok()?;
+        if name == ".ledger" || tracker_tmp::is_temp_name(&name) {
+            continue;
+        }
+        if !want.remove(&name) || !entry.file_type().ok()?.is_file() {
+            return None;
+        }
+        let text = std::fs::read_to_string(entry.path()).ok()?;
+        if text.find(LOG_MARK)? + LOG_MARK.len() != text.len() {
+            return None;
+        }
+        files.push(entry.path());
+    }
+    want.is_empty().then_some(files)
 }
 
-/// Undo the split of `board` that migrate just wrote (`made`, the files
-/// and bytes it left): the marker first, so a reader goes back to
-/// `issues.org` at once, then each file, then what the refused commit's
-/// add left staged. A file that changed since, or one that appeared, is a
-/// write that went to the split, and the split is kept. Returns whether it
-/// went.
-fn roll_back_split(board: &Path, made: &[(PathBuf, Vec<u8>)]) -> bool {
+/// Undo the split of `board` that migrate just wrote: the marker first,
+/// so a reader goes back to `issues.org` at once, then each file, then
+/// what the refused commit's add left staged. The check and the removal
+/// run under the board's lock. A split that is no longer what migrate
+/// wrote ([`split_as_migrated`]) holds a write that went to it, and is
+/// kept. Returns whether it went.
+fn roll_back_split(board: &Path) -> bool {
     with_wall_bounded_issues_lock(board, || {
-        if issue_dir_files(board) != made {
+        let Some(files) = split_as_migrated(board) else {
             return Ok(false);
-        }
+        };
         let marker = board_issues_dir(board).join(".ledger");
         std::fs::remove_file(&marker)
             .map_err(|e| anyhow::anyhow!("remove {}: {e}", marker.display()))?;
-        for (file, _) in made {
-            if file != &marker {
-                let _ = std::fs::remove_file(file);
-            }
+        for file in &files {
+            let _ = std::fs::remove_file(file);
         }
         let _ = std::fs::remove_dir(board_issues_dir(board));
         if let Some(dir) = board.parent() {
@@ -51380,10 +51403,6 @@ fn split_board(
     if split.is_empty() {
         return held(lock, failed, false);
     }
-    let made: Vec<Vec<(PathBuf, Vec<u8>)>> = split
-        .iter()
-        .map(|(candidate, _, _)| issue_dir_files(candidate))
-        .collect();
     let mut rels = Vec::new();
     for (_, b, i) in &split {
         rels.push(b.clone());
@@ -51418,8 +51437,8 @@ fn split_board(
         PathCommit::Refused(why) | PathCommit::Deferred(why) => why,
     };
     let mut kept = false;
-    for ((candidate, kept_rel, issues), made) in split.iter().zip(&made) {
-        if roll_back_split(candidate, made) {
+    for (candidate, kept_rel, issues) in &split {
+        if roll_back_split(candidate) {
             pending_remove(top, std::slice::from_ref(issues));
         } else {
             let _ = pending_add(top, &[kept_rel.clone(), issues.clone()]);
@@ -61778,6 +61797,55 @@ mod tests {
         let tracked = git_text(&root, &["ls-files", "Software/probe/issues"]);
         assert!(tracked.is_empty(), "{tracked}");
         clear_probe_env();
+    }
+
+    /// A write that lands in the split after the migrate lets go of the
+    /// board's lock, and before the refused commit is rolled back, keeps
+    /// the split: a note appended to an issue file, or a new issue file.
+    /// The rollback does not delete it.
+    #[test]
+    fn a_write_into_the_split_before_its_rollback_keeps_the_split() {
+        let _env = env_guard();
+        for new_file in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            let issues = big_board(&root, 300);
+            refuse_split_commits(&root);
+            probe_env(&root);
+            let layout = vissue_core::Layout::new(&root, "Software");
+            vissue_core::ops::note(&layout, "probe-b007", "first look").unwrap();
+            let extra = root.join("Software/probe/issues/probe-new.org");
+            let said = {
+                let layout = layout.clone();
+                let extra = extra.clone();
+                let _hook = on_split_step(move |step| {
+                    if step != "migrated" {
+                        return;
+                    }
+                    if new_file {
+                        std::fs::write(
+                            &extra,
+                            "#+VISSUE_LEDGER:\n#+VISSUE_LINES: 3 6\n* TODO [#C] New\n:PROPERTIES:\n:ID:         probe-new\n:END:\n#+VISSUE_LEDGER_LOG:\n",
+                        )
+                        .unwrap();
+                    } else {
+                        vissue_core::ops::note(&layout, "probe-b001", "landed meanwhile").unwrap();
+                    }
+                });
+                persist_tracker("probe-b007", "noted")
+            };
+            assert!(said.contains("is not in a commit"), "{said}");
+            assert!(vissue_core::ledger::is_ledger(&issues), "{said}");
+            if new_file {
+                assert!(extra.is_file(), "{said}");
+            } else {
+                let kept =
+                    std::fs::read_to_string(root.join("Software/probe/issues/probe-b001.org"))
+                        .unwrap();
+                assert!(kept.contains("landed meanwhile"), "{said}\n{kept}");
+            }
+            clear_probe_env();
+        }
     }
 
     /// A sibling board the migrate could not split is not left on the
