@@ -40,9 +40,9 @@ pub fn install_executable_mode(
     let mode = mode & 0o7777;
     #[cfg(unix)]
     {
-        let tmp = temp_name(path)?;
-        let _ = std::fs::remove_file(&tmp);
-        let script = format!("/bin/cat > \"$1\" && /bin/chmod {mode:o} \"$1\"");
+        let stage = Stage::new(path)?;
+        let tmp = stage.file();
+        let script = format!("set -C && /bin/cat > \"$1\" && /bin/chmod {mode:o} \"$1\"");
         let mut child = Command::new("/bin/sh")
             .arg("-c")
             .arg(&script)
@@ -64,15 +64,13 @@ pub fn install_executable_mode(
         if let Err(err) = write_in {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = std::fs::remove_file(&tmp);
             return Err(err);
         }
         let out = child.wait_with_output()?;
         if !out.status.success() {
-            let _ = std::fs::remove_file(&tmp);
             return Err(writer_failed(&out.status, &out.stderr));
         }
-        settle(&tmp, path)
+        stage.settle(path)
     }
     #[cfg(not(unix))]
     {
@@ -95,8 +93,8 @@ pub fn copy_executable(src: &Path, dest: &Path) -> Result<(), Error> {
     }
     #[cfg(unix)]
     {
-        let tmp = temp_name(dest)?;
-        let _ = std::fs::remove_file(&tmp);
+        let stage = Stage::new(dest)?;
+        let tmp = stage.file();
         let out = Command::new("/bin/cp")
             .arg("--")
             .arg(src)
@@ -105,18 +103,15 @@ pub fn copy_executable(src: &Path, dest: &Path) -> Result<(), Error> {
             .stderr(Stdio::piped())
             .output()?;
         if !out.status.success() {
-            let _ = std::fs::remove_file(&tmp);
             return Err(writer_failed(&out.status, &out.stderr));
         }
+        stage.regular()?;
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Err(err) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
-            {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(err);
-            }
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+                .map_err(|err| named(err, "mark executable", &tmp))?;
         }
-        settle(&tmp, dest)
+        stage.settle(dest)
     }
     #[cfg(not(unix))]
     {
@@ -125,19 +120,86 @@ pub fn copy_executable(src: &Path, dest: &Path) -> Result<(), Error> {
     }
 }
 
-/// Flush the closed temporary file, rename it onto `path`, then flush the
-/// directory so the new name survives a crash.
+/// A directory of this process's own, made beside the destination, that the
+/// writer fills before the rename.
+///
+/// `mkdir` creates the name or fails, and never follows a symlink planted
+/// there. Its mode is `0o700`, so no other user can put a name inside it
+/// for the writer's redirect, `chmod` or `cp` to follow.
 #[cfg(unix)]
-fn settle(tmp: &Path, path: &Path) -> Result<(), Error> {
-    let _ = flush(tmp);
-    if let Err(err) = std::fs::rename(tmp, path) {
-        let _ = std::fs::remove_file(tmp);
-        return Err(err);
+struct Stage {
+    dir: PathBuf,
+}
+
+#[cfg(unix)]
+impl Stage {
+    fn new(path: &Path) -> Result<Self, Error> {
+        use std::hash::{BuildHasher, Hasher};
+        use std::os::unix::fs::DirBuilderExt;
+        let parent = dir_of(path).unwrap_or_else(|| Path::new("."));
+        let mut last = None;
+        for _ in 0..16 {
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_u64(NEXT.fetch_add(1, Ordering::Relaxed));
+            hasher.write_u32(std::process::id());
+            let dir = parent.join(format!(".ljos-exe.{:016x}", hasher.finish()));
+            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => return Ok(Self { dir }),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => last = Some(err),
+                Err(err) => return Err(named(err, "create a temporary directory in", parent)),
+            }
+        }
+        let err = last.unwrap_or_else(|| Error::other("no free name"));
+        Err(named(err, "create a temporary directory in", parent))
     }
-    if let Some(parent) = dir_of(path) {
-        let _ = flush(parent);
+
+    fn file(&self) -> PathBuf {
+        self.dir.join("exe")
     }
-    Ok(())
+
+    /// The writer left a regular file, not a link to somewhere else.
+    fn regular(&self) -> Result<(), Error> {
+        let tmp = self.file();
+        let meta = std::fs::symlink_metadata(&tmp).map_err(|err| named(err, "read", &tmp))?;
+        if meta.file_type().is_file() {
+            Ok(())
+        } else {
+            Err(Error::other(format!(
+                "install executable: {} is not a regular file",
+                tmp.display()
+            )))
+        }
+    }
+
+    /// Flush the closed temporary file, rename it onto `path`, then flush
+    /// the directory so the new name survives a crash.
+    fn settle(self, path: &Path) -> Result<(), Error> {
+        self.regular()?;
+        let tmp = self.file();
+        let _ = flush(&tmp);
+        std::fs::rename(&tmp, path).map_err(|err| named(err, "rename onto", path))?;
+        if let Some(parent) = dir_of(path) {
+            let _ = flush(parent);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Stage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.file());
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+/// `err` with what was being done and the path it was done to.
+#[cfg(unix)]
+fn named(err: Error, what: &str, path: &Path) -> Error {
+    Error::new(
+        err.kind(),
+        format!("install executable: {what} {}: {err}", path.display()),
+    )
 }
 
 #[cfg(test)]
@@ -161,12 +223,6 @@ fn dir_of(path: &Path) -> Option<&Path> {
         Some(dir) if !dir.as_os_str().is_empty() => Some(dir),
         _ => None,
     }
-}
-
-fn temp_name(path: &Path) -> Result<PathBuf, Error> {
-    let parent = dir_of(path).unwrap_or_else(|| Path::new("."));
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    Ok(parent.join(format!(".ljos-exe.{}.{n}", std::process::id())))
 }
 
 fn writer_failed(status: &std::process::ExitStatus, stderr: &[u8]) -> Error {
@@ -263,10 +319,59 @@ mod tests {
             }
             let done = FLUSHED.with(|done| done.borrow().clone());
             assert_eq!(done.len(), 2, "{step} flushed {done:?}");
-            let tmp = done[0].file_name().unwrap().to_string_lossy();
-            assert!(tmp.starts_with(".ljos-exe."), "{step} flushed {done:?}");
-            assert_eq!(done[0].parent(), Some(dir.path()), "{step}");
+            let stage = done[0].parent().unwrap();
+            let name = stage.file_name().unwrap().to_string_lossy();
+            assert!(name.starts_with(".ljos-exe."), "{step} flushed {done:?}");
+            assert_eq!(stage.parent(), Some(dir.path()), "{step}");
+            assert!(!stage.exists(), "{step} left {}", stage.display());
             assert_eq!(done[1], dir.path(), "{step} flushed {done:?}");
+        }
+    }
+
+    /// Another user can leave symlinks at temporary names in a directory
+    /// the publisher may create in but not unlink from. A publisher that
+    /// writes or chmods a guessable name there rewrites the link's target.
+    /// A directory this process cannot remove names from stands in for
+    /// that one: every name the old `.ljos-exe.<pid>.<n>` scheme could pick
+    /// links to `victim`.
+    #[test]
+    fn a_planted_temp_symlink_is_not_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "SECRET").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let src = dir.path().join("src");
+        install_executable(&src, b"#!/bin/sh\necho copied\n").unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        let pid = std::process::id();
+        for n in 0..NEXT.load(Ordering::Relaxed) + 4096 {
+            std::os::unix::fs::symlink(&victim, shared.join(format!(".ljos-exe.{pid}.{n}")))
+                .unwrap();
+        }
+        let lock = |mode| {
+            std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        lock(0o555);
+        if std::fs::File::create(shared.join("probe")).is_ok() {
+            lock(0o755);
+            eprintln!("skipped: this user writes into a 0555 directory");
+            return;
+        }
+        let dest = shared.join("stub");
+        let install = install_executable(&dest, b"#!/bin/sh\necho PWNED\n");
+        let copy = copy_executable(&src, &dest);
+        lock(0o755);
+        let body = std::fs::read_to_string(&victim).unwrap();
+        let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o7777;
+        assert_eq!((body.as_str(), mode), ("SECRET", 0o644), "victim rewritten");
+        assert!(!dest.exists());
+        for (step, got) in [("install", install), ("copy", copy)] {
+            let err = got.expect_err(step).to_string();
+            assert!(
+                err.contains(&shared.display().to_string()),
+                "{step} error does not name the directory: {err}"
+            );
         }
     }
 
