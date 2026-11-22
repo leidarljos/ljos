@@ -2,196 +2,548 @@
 //!
 //! A descriptor opened here is copied into a child at fork and stays open
 //! until that child reaches exec. Starting the new file in that window fails
-//! with ETXTBSY ("Text file busy"). The bytes are written by `/bin/sh`, which
-//! exits before this process renames the temporary name into place, so a fork
-//! here never sees that descriptor.
+//! with ETXTBSY ("Text file busy"). The bytes are written by a forked child
+//! that exits before this process renames the temporary name into place, so
+//! a fork here never sees that descriptor.
+//!
+//! The temporary name is in a directory this process makes and then holds
+//! by descriptor. The parent directory may let another user rename that
+//! directory and put a symlink at its name. Every step after the `mkdir` is
+//! relative to the held descriptors, so such a swap moves nothing this
+//! process writes, changes the mode of, or renames.
 
-use std::io::{Error, Write};
+#[cfg(unix)]
+use std::ffi::{CStr, CString};
+#[cfg(unix)]
+use std::fs::File;
+use std::io::Error;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
-/// Write `body` to `path` and mark it executable (`0o755`).
-///
-/// # Errors
-///
-/// The directory cannot be written, or the short-lived writer fails.
-pub fn install_executable(path: &Path, body: impl AsRef<[u8]>) -> Result<(), Error> {
-    install_executable_mode(path, body, 0o755)
+/// The name of the file inside a stage directory.
+#[cfg(unix)]
+const EXE: &CStr = c"exe";
+
+/// What [`publish`] puts at the destination.
+#[derive(Clone, Copy, Debug)]
+pub enum Content<'a> {
+    /// These bytes.
+    Bytes(&'a [u8]),
+    /// The bytes of this regular file, read through one descriptor.
+    CopyOf(&'a Path),
 }
 
-/// Write `body` to `path` and mark it with `mode`.
-///
-/// `mode` is the permission bits passed to `chmod`, masked to `0o777`: a
-/// published file never carries setuid, setgid or sticky.
-///
-/// # Errors
-///
-/// The directory cannot be written, or the short-lived writer fails.
-pub fn install_executable_mode(
-    path: &Path,
-    body: impl AsRef<[u8]>,
-    mode: u32,
-) -> Result<(), Error> {
-    if let Some(parent) = dir_of(path) {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mode = mode & 0o777;
-    #[cfg(unix)]
-    {
-        let stage = Stage::new(path)?;
-        let tmp = stage.file();
-        let script = format!("set -C && /bin/cat > \"$1\" && /bin/chmod {mode:o} \"$1\"");
-        let mut child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(&script)
-            .arg("install-executable")
-            .arg(&tmp)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let write_in = (|| {
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| Error::other("install executable: writer has no stdin"))?;
-            stdin.write_all(body.as_ref())?;
-            stdin.flush()?;
-            Ok(())
-        })();
-        if let Err(err) = write_in {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(err);
-        }
-        let out = child.wait_with_output()?;
-        if !out.status.success() {
-            return Err(writer_failed(&out.status, &out.stderr));
-        }
-        stage.settle(path)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = mode;
-        std::fs::write(path, body.as_ref())
-    }
+/// The permission bits [`publish`] gives the file. Either way they are
+/// masked to `0o777`, so a published file never carries setuid, setgid or
+/// sticky.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// These bits.
+    Exactly(u32),
+    /// The bits of the file [`Content::CopyOf`] names, read from the
+    /// descriptor the copy reads, so a copy never gains a bit its source
+    /// lacks.
+    OfSource,
 }
 
-/// Copy `src` onto `dest` as an executable.
+/// Put `content` at `dest` with `mode`. Every file this crate writes that
+/// may then be executed is written here.
 ///
-/// `cp` runs in another process and exits before the rename, so this process
-/// never has `dest` open for writing.
+/// A forked child creates an unguessable name with
+/// `O_CREAT|O_EXCL|O_NOFOLLOW`, relative to a private directory this
+/// process made beside `dest` and holds by descriptor, and writes it. This
+/// process then `fchmod`s and `fsync`s a descriptor of that file and
+/// `renameat`s it onto the name `dest`. A symlink at `dest` is replaced,
+/// never followed.
 ///
 /// # Errors
 ///
-/// The source cannot be read, or the destination directory cannot be written.
-pub fn copy_executable(src: &Path, dest: &Path) -> Result<(), Error> {
+/// The source is not a regular file or cannot be read, `mode` is
+/// [`Mode::OfSource`] for bytes, the directory cannot be written, the
+/// short-lived writer fails, or `dest` was replaced after the rename.
+pub fn publish(dest: &Path, content: Content<'_>, mode: Mode) -> Result<(), Error> {
+    if let (Mode::OfSource, Content::Bytes(_)) = (mode, content) {
+        return Err(Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "install executable: {} has no source to take a mode from",
+                dest.display()
+            ),
+        ));
+    }
     if let Some(parent) = dir_of(dest) {
         std::fs::create_dir_all(parent)?;
     }
     #[cfg(unix)]
     {
+        use std::os::unix::fs::PermissionsExt;
+        let from = match content {
+            Content::CopyOf(src) => {
+                let file = File::open(src).map_err(|err| named(err, "read", src))?;
+                let meta = file.metadata().map_err(|err| named(err, "read", src))?;
+                if !meta.file_type().is_file() {
+                    return Err(Error::other(format!(
+                        "install executable: {} is not a regular file",
+                        src.display()
+                    )));
+                }
+                Some((src, file, meta.permissions().mode()))
+            }
+            Content::Bytes(_) => None,
+        };
+        let mode = match (mode, &from) {
+            (Mode::Exactly(bits), _) => bits,
+            (Mode::OfSource, Some((_, _, source))) => *source,
+            (Mode::OfSource, None) => unreachable!("bytes with Mode::OfSource are refused above"),
+        } & 0o777;
         let stage = Stage::new(dest)?;
-        let tmp = stage.file();
-        let out = Command::new("/bin/cp")
-            .arg("--")
-            .arg(src)
-            .arg(&tmp)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()?;
-        if !out.status.success() {
-            return Err(writer_failed(&out.status, &out.stderr));
+        match (&content, &from) {
+            (_, Some((src, file, _))) => stage
+                .fill(Fill::Copy(file))
+                .map_err(|err| named(err, "copy", src))?,
+            (Content::Bytes(body), None) => stage.fill(Fill::Bytes(body))?,
+            (Content::CopyOf(_), None) => unreachable!("a copy opens its source above"),
         }
-        stage.regular()?;
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
-                .map_err(|err| named(err, "mark executable", &tmp))?;
-        }
-        stage.settle(dest)
+        stage.settle(dest, mode)
     }
     #[cfg(not(unix))]
     {
-        std::fs::copy(src, dest)?;
-        Ok(())
+        let _ = mode;
+        match content {
+            Content::Bytes(body) => std::fs::write(dest, body),
+            Content::CopyOf(src) => std::fs::copy(src, dest).map(|_| ()),
+        }
     }
 }
 
-/// A directory of this process's own, made beside the destination, that the
-/// writer fills before the rename.
+/// [`publish`] `body` at `path` with mode `0o755`.
 ///
-/// `mkdir` creates the name or fails, and never follows a symlink planted
-/// there. Its mode is `0o700`, so no other user can put a name inside it
-/// for the writer's redirect, `chmod` or `cp` to follow.
+/// # Errors
+///
+/// As [`publish`].
+pub fn install_executable(path: &Path, body: impl AsRef<[u8]>) -> Result<(), Error> {
+    publish(path, Content::Bytes(body.as_ref()), Mode::Exactly(0o755))
+}
+
+/// [`publish`] `body` at `path` with `mode`, masked to `0o777`.
+///
+/// # Errors
+///
+/// As [`publish`].
+pub fn install_executable_mode(
+    path: &Path,
+    body: impl AsRef<[u8]>,
+    mode: u32,
+) -> Result<(), Error> {
+    publish(path, Content::Bytes(body.as_ref()), Mode::Exactly(mode))
+}
+
+/// [`publish`] a copy of `src` at `dest` with `src`'s own mode, masked to
+/// `0o777`.
+///
+/// # Errors
+///
+/// As [`publish`].
+pub fn copy_executable(src: &Path, dest: &Path) -> Result<(), Error> {
+    publish(dest, Content::CopyOf(src), Mode::OfSource)
+}
+
+/// What the writer puts in the staged file.
+#[cfg(unix)]
+enum Fill<'a> {
+    Bytes(&'a [u8]),
+    Copy(&'a File),
+}
+
+/// A directory of this process's own, made beside the destination and held
+/// by descriptor, that the writer fills before the rename.
+///
+/// Its mode is `0o700`, so no other user can put a name inside it. The
+/// owner of the parent can still rename it or put something else at its
+/// name, so its name is used only to make it, to open it once, and to
+/// remove it when that name is still this directory.
 #[cfg(unix)]
 struct Stage {
-    dir: PathBuf,
+    parent: File,
+    parent_path: PathBuf,
+    dir: File,
+    name: CString,
+    path: PathBuf,
 }
 
 #[cfg(unix)]
 impl Stage {
     fn new(path: &Path) -> Result<Self, Error> {
         use std::hash::{BuildHasher, Hasher};
-        use std::os::unix::fs::DirBuilderExt;
-        let parent = dir_of(path).unwrap_or_else(|| Path::new("."));
+        use std::os::unix::fs::OpenOptionsExt;
+        let parent_path = dir_of(path).unwrap_or_else(|| Path::new(".")).to_path_buf();
+        let parent = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(&parent_path)
+            .map_err(|err| named(err, "open", &parent_path))?;
         let mut last = None;
         for _ in 0..16 {
             let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
             hasher.write_u64(NEXT.fetch_add(1, Ordering::Relaxed));
             hasher.write_u32(std::process::id());
-            let dir = parent.join(format!(".ljos-exe.{:016x}", hasher.finish()));
-            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
-                Ok(()) => return Ok(Self { dir }),
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => last = Some(err),
-                Err(err) => return Err(named(err, "create a temporary directory in", parent)),
+            let name = format!(".ljos-exe.{:016x}", hasher.finish());
+            let name = CString::new(name).map_err(Error::other)?;
+            // SAFETY: parent is an open directory and name is NUL-terminated.
+            // mkdirat creates the name or fails and follows no symlink there.
+            if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+                let err = Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    last = Some(err);
+                    continue;
+                }
+                return Err(named(err, "create a temporary directory in", &parent_path));
             }
+            let path = parent_path.join(name.to_string_lossy().as_ref());
+            let dir = open_at(
+                &parent,
+                &name,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            )
+            .map_err(|err| named(err, "open", &path))?;
+            let held = stat(&dir).map_err(|err| named(err, "read", &path))?;
+            // SAFETY: geteuid has no preconditions.
+            let me = unsafe { libc::geteuid() };
+            if held.st_mode & libc::S_IFMT != libc::S_IFDIR
+                || held.st_uid != me
+                || held.st_mode & 0o077 != 0
+            {
+                return Err(Error::other(format!(
+                    "install executable: {} was replaced before it was opened",
+                    path.display()
+                )));
+            }
+            {
+                use std::os::unix::fs::PermissionsExt;
+                dir.set_permissions(std::fs::Permissions::from_mode(0o700))
+                    .map_err(|err| named(err, "mark private", &path))?;
+            }
+            let stage = Self {
+                parent,
+                parent_path,
+                dir,
+                name,
+                path,
+            };
+            #[cfg(test)]
+            at_step(Step::Staged, &stage.path);
+            return Ok(stage);
         }
         let err = last.unwrap_or_else(|| Error::other("no free name"));
-        Err(named(err, "create a temporary directory in", parent))
+        Err(named(err, "create a temporary directory in", &parent_path))
     }
 
     fn file(&self) -> PathBuf {
-        self.dir.join("exe")
+        self.path.join("exe")
     }
 
-    /// The writer left a regular file, not a link to somewhere else.
-    fn regular(&self) -> Result<(), Error> {
+    /// Create the staged file in a forked child and write `fill` to it.
+    ///
+    /// The child makes only async-signal-safe calls: this process may have
+    /// other threads, and one of them may hold a lock the child would wait
+    /// on forever. It exits with 0 or the errno of the call that failed.
+    fn fill(&self, fill: Fill) -> Result<(), Error> {
+        let stage = self.dir.as_raw_fd();
+        // SAFETY: the child runs `write_staged` and `_exit` only, both of
+        // which make async-signal-safe calls on memory fork copied.
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            return Err(named(
+                Error::last_os_error(),
+                "fork a writer for",
+                &self.path,
+            ));
+        }
+        if pid == 0 {
+            let code = write_staged(stage, &fill);
+            // SAFETY: _exit ends the child without running this process's
+            // destructors or atexit handlers.
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        loop {
+            // SAFETY: pid is the child forked above and status is writable.
+            if unsafe { libc::waitpid(pid, &mut status, 0) } == pid {
+                break;
+            }
+            let err = Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                return Err(named(err, "wait for the writer of", &self.path));
+            }
+        }
+        if !libc::WIFEXITED(status) {
+            return Err(Error::other(format!(
+                "install executable: the writer of {} was stopped by a signal",
+                self.path.display()
+            )));
+        }
+        match libc::WEXITSTATUS(status) {
+            0 => Ok(()),
+            code => Err(named(Error::from_raw_os_error(code), "write", &self.file())),
+        }
+    }
+
+    /// Mark the staged file `mode`, flush it, rename it onto `path`, check
+    /// that the name now holds that file, then flush the directory so the
+    /// new name survives a crash.
+    fn settle(self, path: &Path, mode: u32) -> Result<(), Error> {
+        use std::os::unix::fs::PermissionsExt;
+        let leaf = path
+            .file_name()
+            .and_then(|name| CString::new(name.as_encoded_bytes()).ok())
+            .ok_or_else(|| {
+                Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("install executable: {} has no file name", path.display()),
+                )
+            })?;
+        #[cfg(test)]
+        at_step(Step::Written, &self.path);
         let tmp = self.file();
-        let meta = std::fs::symlink_metadata(&tmp).map_err(|err| named(err, "read", &tmp))?;
-        if meta.file_type().is_file() {
-            Ok(())
-        } else {
-            Err(Error::other(format!(
+        let file = open_at(
+            &self.dir,
+            EXE,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+        .map_err(|err| named(err, "open", &tmp))?;
+        let staged = stat(&file).map_err(|err| named(err, "read", &tmp))?;
+        if staged.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(Error::other(format!(
                 "install executable: {} is not a regular file",
                 tmp.display()
-            )))
+            )));
         }
-    }
-
-    /// Flush the closed temporary file, rename it onto `path`, then flush
-    /// the directory so the new name survives a crash.
-    fn settle(self, path: &Path) -> Result<(), Error> {
-        self.regular()?;
-        let tmp = self.file();
-        let _ = flush(&tmp);
-        std::fs::rename(&tmp, path).map_err(|err| named(err, "rename onto", path))?;
-        if let Some(parent) = dir_of(path) {
-            let _ = flush(parent);
+        file.set_permissions(std::fs::Permissions::from_mode(mode))
+            .map_err(|err| named(err, "mark executable", &tmp))?;
+        flush(&file, &tmp).map_err(|err| named(err, "flush", &tmp))?;
+        #[cfg(test)]
+        at_step(Step::Moving, &self.path);
+        // SAFETY: both descriptors are open directories and both names are
+        // NUL-terminated. renameat follows neither name.
+        if unsafe {
+            libc::renameat(
+                self.dir.as_raw_fd(),
+                EXE.as_ptr(),
+                self.parent.as_raw_fd(),
+                leaf.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(named(Error::last_os_error(), "rename onto", path));
         }
+        #[cfg(test)]
+        at_step(Step::Renamed, &self.path);
+        // `file` stays open until this check, so its inode number cannot be
+        // given to something else put at the name. A later publish of the
+        // same path by this user may already have replaced the file;
+        // anything else at the name was put there by someone else.
+        match stat_at(&self.parent, &leaf) {
+            Ok(now)
+                if same_file(&now, &staged)
+                    || (now.st_mode & libc::S_IFMT == libc::S_IFREG
+                        && now.st_uid == staged.st_uid) => {}
+            _ => {
+                return Err(Error::other(format!(
+                    "install executable: {} was replaced after the rename",
+                    path.display()
+                )))
+            }
+        }
+        drop(file);
+        let _ = flush(&self.parent, &self.parent_path);
         Ok(())
     }
 }
 
 #[cfg(unix)]
 impl Drop for Stage {
+    /// Remove what this stage made through the held descriptors. The stage
+    /// directory's name is removed only while it is still that directory: a
+    /// symlink or a directory put there by someone else is theirs.
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(self.file());
-        let _ = std::fs::remove_dir(&self.dir);
+        // SAFETY: dir is an open directory and EXE is NUL-terminated. No other
+        // user can make a name in a 0700 directory this process owns.
+        unsafe { libc::unlinkat(self.dir.as_raw_fd(), EXE.as_ptr(), 0) };
+        if let (Ok(held), Ok(named)) = (stat(&self.dir), stat_at(&self.parent, &self.name)) {
+            if same_file(&held, &named) {
+                // SAFETY: parent is an open directory and name is
+                // NUL-terminated. AT_REMOVEDIR removes only an empty directory.
+                unsafe {
+                    libc::unlinkat(
+                        self.parent.as_raw_fd(),
+                        self.name.as_ptr(),
+                        libc::AT_REMOVEDIR,
+                    )
+                };
+            }
+        }
     }
+}
+
+/// The child half of [`Stage::fill`]: create `exe` in `stage`, refusing a
+/// name that is already there, and write `fill` to it. Returns 0 or an
+/// errno.
+#[cfg(unix)]
+fn write_staged(stage: libc::c_int, fill: &Fill) -> libc::c_int {
+    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let mode: libc::c_uint = 0o600;
+    // SAFETY: stage is an open directory and EXE is NUL-terminated.
+    let fd = unsafe { libc::openat(stage, EXE.as_ptr(), flags, mode) };
+    if fd < 0 {
+        return errno();
+    }
+    let wrote = match fill {
+        Fill::Bytes(body) => write_all(fd, body),
+        Fill::Copy(from) => {
+            let src = from.as_raw_fd();
+            let mut buf = [0u8; 16 * 1024];
+            loop {
+                // SAFETY: src is open for reading and buf is writable for its
+                // whole length.
+                let n = unsafe { libc::read(src, buf.as_mut_ptr().cast(), buf.len()) };
+                if n < 0 {
+                    if errno() == libc::EINTR {
+                        continue;
+                    }
+                    break errno();
+                }
+                if n == 0 {
+                    break 0;
+                }
+                let got = usize::try_from(n).unwrap_or(0);
+                let code = write_all(fd, &buf[..got]);
+                if code != 0 {
+                    break code;
+                }
+            }
+        }
+    };
+    // SAFETY: fd was opened above and is closed once.
+    let closed = unsafe { libc::close(fd) };
+    if wrote != 0 {
+        wrote
+    } else if closed != 0 {
+        errno()
+    } else {
+        0
+    }
+}
+
+#[cfg(unix)]
+fn write_all(fd: libc::c_int, mut bytes: &[u8]) -> libc::c_int {
+    while !bytes.is_empty() {
+        // SAFETY: fd is open for writing and bytes is readable for its length.
+        let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+        if n < 0 {
+            if errno() == libc::EINTR {
+                continue;
+            }
+            return errno();
+        }
+        bytes = &bytes[usize::try_from(n).unwrap_or(0)..];
+    }
+    0
+}
+
+/// The calling thread's errno, as an exit code. Reading it allocates
+/// nothing, so the child of a fork may call it.
+#[cfg(unix)]
+fn errno() -> libc::c_int {
+    match Error::last_os_error().raw_os_error() {
+        Some(code) if (1..=255).contains(&code) => code,
+        _ => libc::EIO,
+    }
+}
+
+#[cfg(unix)]
+fn open_at(dir: &File, name: &CStr, flags: libc::c_int) -> Result<File, Error> {
+    // SAFETY: dir is an open directory and name is NUL-terminated.
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(Error::last_os_error());
+    }
+    // SAFETY: fd was just opened and nothing else owns it.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+#[cfg(unix)]
+fn stat(file: &File) -> Result<libc::stat, Error> {
+    // SAFETY: st is zeroed and only read after fstat fills it.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: file is an open descriptor and st is writable.
+    if unsafe { libc::fstat(file.as_raw_fd(), &mut st) } != 0 {
+        return Err(Error::last_os_error());
+    }
+    Ok(st)
+}
+
+/// `fstatat` of `name` in `dir`, not following a symlink there.
+#[cfg(unix)]
+fn stat_at(dir: &File, name: &CStr) -> Result<libc::stat, Error> {
+    // SAFETY: st is zeroed and only read after fstatat fills it.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: dir is an open directory, name is NUL-terminated and st is
+    // writable.
+    let rc = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc != 0 {
+        return Err(Error::last_os_error());
+    }
+    Ok(st)
+}
+
+#[cfg(unix)]
+fn same_file(a: &libc::stat, b: &libc::stat) -> bool {
+    a.st_dev == b.st_dev && a.st_ino == b.st_ino
+}
+
+/// Points in a publish where a test stands in for another user who renames
+/// the stage directory and puts something else at its name.
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// The stage directory is made and held.
+    Staged,
+    /// The writer has exited; the mode is not set yet.
+    Written,
+    /// The staged file is checked and flushed; the rename is next.
+    Moving,
+    /// The rename is done; the name is checked next.
+    Renamed,
+}
+
+#[cfg(all(test, unix))]
+type StepHook = Box<dyn FnMut(Step, &Path)>;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static AT_STEP: std::cell::RefCell<Option<StepHook>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn at_step(step: Step, stage: &Path) {
+    AT_STEP.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(step, stage);
+        }
+    });
 }
 
 /// `err` with what was being done and the path it was done to.
@@ -206,16 +558,24 @@ fn named(err: Error, what: &str, path: &Path) -> Error {
 #[cfg(test)]
 thread_local! {
     static FLUSHED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// When set, a flush of a staged file fails with EIO.
+    static FAIL_STAGED_FLUSH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// `sync_all` on `path`, a file or a directory. `settle` drops the error:
-/// the rename has already happened or is about to, and a flush cannot
-/// undo it.
+/// `sync_all` on `file`, a file or a directory, opened at `path`. `settle`
+/// returns the staged file's error before the rename. It drops the
+/// directory's error after the rename, which a flush cannot undo.
 #[cfg(unix)]
-fn flush(path: &Path) -> Result<(), Error> {
-    std::fs::File::open(path)?.sync_all()?;
+fn flush(file: &File, path: &Path) -> Result<(), Error> {
+    #[cfg(test)]
+    if FAIL_STAGED_FLUSH.get() && path.file_name() == Some(std::ffi::OsStr::new("exe")) {
+        return Err(Error::from_raw_os_error(libc::EIO));
+    }
+    file.sync_all()?;
     #[cfg(test)]
     FLUSHED.with(|done| done.borrow_mut().push(path.to_path_buf()));
+    #[cfg(not(test))]
+    let _ = path;
     Ok(())
 }
 
@@ -224,16 +584,6 @@ fn dir_of(path: &Path) -> Option<&Path> {
         Some(dir) if !dir.as_os_str().is_empty() => Some(dir),
         _ => None,
     }
-}
-
-fn writer_failed(status: &std::process::ExitStatus, stderr: &[u8]) -> Error {
-    let detail = String::from_utf8_lossy(stderr).trim().to_string();
-    let msg = if detail.is_empty() {
-        format!("install executable: writer exited {status}")
-    } else {
-        format!("install executable: {detail}")
-    };
-    Error::other(msg)
 }
 
 /// Linux and macOS both use 26 for ETXTBSY.
@@ -292,6 +642,38 @@ mod tests {
         assert_eq!(out.stdout, b"copied\n");
     }
 
+    /// A copy takes its source's bits from the descriptor it reads. A
+    /// 0700 source used to come back 0755.
+    #[test]
+    fn a_copy_keeps_its_sources_mode_and_drops_setuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dest = dir.path().join("dest");
+        for (from, want) in [(0o700, 0o700), (0o750, 0o750), (0o644, 0o644), (0o4755, 0o755)] {
+            install_executable_mode(&src, OURS, 0o700).unwrap();
+            File::open(&src)
+                .unwrap()
+                .set_permissions(std::fs::Permissions::from_mode(from))
+                .unwrap();
+            copy_executable(&src, &dest).unwrap();
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(mode, want, "a {from:o} source came back {mode:o}");
+            assert_eq!(std::fs::read(&dest).unwrap(), OURS);
+        }
+    }
+
+    #[test]
+    fn a_copy_of_something_that_is_not_a_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        let err = copy_executable(dir.path(), &dest).unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+        assert!(!dest.exists());
+        let err = super::publish(&dest, Content::Bytes(OURS), Mode::OfSource).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
+        assert!(!dest.exists());
+    }
+
     /// A relative source can start with a dash. `cp` has to read it as a
     /// file, not an option. The working directory is the crate's.
     #[test]
@@ -337,6 +719,36 @@ mod tests {
             assert_eq!(stage.parent(), Some(dir.path()), "{step}");
             assert!(!stage.exists(), "{step} left {}", stage.display());
             assert_eq!(done[1], dir.path(), "{step} flushed {done:?}");
+        }
+    }
+
+    /// The staged file's flush fails. The publish returns that error,
+    /// renames nothing onto the destination and removes its stage.
+    #[test]
+    fn a_failed_flush_of_the_staged_file_fails_the_publish() {
+        struct Unset;
+        impl Drop for Unset {
+            fn drop(&mut self) {
+                FAIL_STAGED_FLUSH.set(false);
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        install_executable(&src, OURS).unwrap();
+        let dest = dir.path().join("dest");
+        let _unset = Unset;
+        FAIL_STAGED_FLUSH.set(true);
+        for step in ["install", "copy"] {
+            let err = publish(step, &src, &dest).expect_err(step);
+            let msg = err.to_string();
+            assert!(msg.contains("install executable: flush "), "{step}: {msg}");
+            assert!(!dest.exists(), "{step}: published after a failed flush");
+            let stages: Vec<_> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .filter(|name| name.to_string_lossy().starts_with(".ljos-exe."))
+                .collect();
+            assert!(stages.is_empty(), "{step}: left {stages:?}");
         }
     }
 
@@ -387,14 +799,224 @@ mod tests {
         }
     }
 
+    const OURS: &[u8] = b"#!/bin/sh\necho ours\n";
+
+    /// Run `publish` while, at `when`, the stage directory is renamed aside
+    /// and a symlink to `attack` is put at its name, as the owner of a
+    /// sticky parent directory can do to another user's directory. Returns
+    /// what `publish` returned and where each stage directory went.
+    fn swapped_at<T>(when: Step, attack: &Path, publish: impl FnOnce() -> T) -> (T, Vec<PathBuf>) {
+        struct Unhook;
+        impl Drop for Unhook {
+            fn drop(&mut self) {
+                AT_STEP.with(|hook| *hook.borrow_mut() = None);
+            }
+        }
+        let asides = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&asides);
+        let attack = attack.to_path_buf();
+        AT_STEP.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |step, stage: &Path| {
+                if step != when {
+                    return;
+                }
+                let aside = stage.with_file_name(format!("aside-{}", seen.borrow().len()));
+                std::fs::rename(stage, &aside).unwrap();
+                std::os::unix::fs::symlink(&attack, stage).unwrap();
+                seen.borrow_mut().push(aside);
+            }));
+        });
+        let _unhook = Unhook;
+        let got = publish();
+        let asides = asides.borrow().clone();
+        (got, asides)
+    }
+
+    /// A directory with `victim` (`SECRET`, `mode`), an `attack` directory
+    /// whose `exe` links to `target` (a name in the same directory), and a
+    /// copy source `src` with `OURS`.
+    fn arena(mode: u32, target: &str) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "SECRET").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(mode)).unwrap();
+        let attack = dir.path().join("attack");
+        std::fs::create_dir(&attack).unwrap();
+        std::os::unix::fs::symlink(dir.path().join(target), attack.join("exe")).unwrap();
+        let src = dir.path().join("src");
+        install_executable(&src, OURS).unwrap();
+        (dir, victim, attack, src)
+    }
+
+    fn publish(step: &str, src: &Path, dest: &Path) -> Result<(), Error> {
+        if step == "install" {
+            install_executable(dest, OURS)
+        } else {
+            copy_executable(src, dest)
+        }
+    }
+
+    fn victim_state(victim: &Path) -> (String, u32) {
+        let body = std::fs::read_to_string(victim).unwrap();
+        let mode = std::fs::symlink_metadata(victim)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        (body, mode)
+    }
+
+    /// `dest` is a regular file, not a link, with `OURS` and mode `0o755`.
+    fn assert_published(step: &str, dest: &Path) {
+        let meta = std::fs::symlink_metadata(dest).unwrap();
+        assert!(meta.file_type().is_file(), "{step}: {dest:?} is {meta:?}");
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o755, "{step}");
+        assert_eq!(std::fs::read(dest).unwrap(), OURS, "{step}");
+    }
+
+    /// The stage directory is swapped for a symlink to a directory whose
+    /// `exe` links to a victim, before the writer runs. Writing by path
+    /// rewrote the victim; the held directory is still the one written.
+    #[test]
+    fn a_stage_swapped_before_the_write_is_not_written_through() {
+        for step in ["copy", "install"] {
+            let (dir, victim, attack, src) = arena(0o644, "victim");
+            let dest = dir.path().join("stub");
+            let (got, asides) = swapped_at(Step::Staged, &attack, || publish(step, &src, &dest));
+            assert_eq!(
+                victim_state(&victim),
+                ("SECRET".to_string(), 0o644),
+                "{step}: victim rewritten"
+            );
+            got.unwrap_or_else(|err| panic!("{step}: {err}"));
+            assert_eq!(asides.len(), 1, "{step}");
+            assert_published(step, &dest);
+        }
+    }
+
+    /// The swap comes after the writer and before the mode is set. A
+    /// `chmod` by path made a `0600` victim `0755`.
+    #[test]
+    fn a_stage_swapped_before_the_mode_is_set_is_not_chmod_through() {
+        for step in ["copy", "install"] {
+            let (dir, victim, attack, src) = arena(0o600, "victim");
+            let dest = dir.path().join("stub");
+            let (got, asides) = swapped_at(Step::Written, &attack, || publish(step, &src, &dest));
+            assert_eq!(
+                victim_state(&victim),
+                ("SECRET".to_string(), 0o600),
+                "{step}: victim's mode changed"
+            );
+            got.unwrap_or_else(|err| panic!("{step}: {err}"));
+            assert_eq!(asides.len(), 1, "{step}");
+            assert_published(step, &dest);
+        }
+    }
+
+    /// The swap comes after the staged file was checked and before the
+    /// rename. Renaming by path moved the planted link onto the
+    /// destination and returned Ok.
+    #[test]
+    fn a_stage_swapped_before_the_rename_publishes_the_staged_file() {
+        for step in ["install", "copy"] {
+            let (dir, _, attack, src) = arena(0o644, "evil");
+            std::fs::write(dir.path().join("evil"), "#!/bin/sh\necho PWNED\n").unwrap();
+            let dest = dir.path().join("stub");
+            let (got, asides) = swapped_at(Step::Moving, &attack, || publish(step, &src, &dest));
+            got.unwrap_or_else(|err| panic!("{step}: {err}"));
+            assert_eq!(asides.len(), 1, "{step}");
+            assert_published(step, &dest);
+            let out = Command::new(&dest).output().unwrap();
+            assert_eq!(out.stdout, b"ours\n", "{step}");
+            assert!(
+                std::fs::symlink_metadata(attack.join("exe"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{step}"
+            );
+        }
+    }
+
+    /// A symlink put at the destination after the rename is reported, not
+    /// taken for the published file.
+    #[test]
+    fn a_destination_replaced_after_the_rename_is_reported() {
+        for step in ["install", "copy"] {
+            let (dir, _, _, src) = arena(0o644, "victim");
+            let dest = dir.path().join("stub");
+            let evil = dir.path().join("evil");
+            let swap = dest.clone();
+            AT_STEP.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move |at, _: &Path| {
+                    if at == Step::Renamed {
+                        std::fs::remove_file(&swap).unwrap();
+                        std::os::unix::fs::symlink(&evil, &swap).unwrap();
+                    }
+                }));
+            });
+            let got = publish(step, &src, &dest);
+            AT_STEP.with(|hook| *hook.borrow_mut() = None);
+            let err = got.expect_err(step).to_string();
+            assert!(
+                err.contains("was replaced after the rename"),
+                "{step}: {err}"
+            );
+        }
+    }
+
+    /// A failed publish removes the staged file through the held directory
+    /// and leaves a name someone else put at the stage's name, and what it
+    /// links to.
+    #[test]
+    fn a_failed_publish_cleans_only_what_it_made() {
+        for step in ["install", "copy"] {
+            let (dir, victim, attack, src) = arena(0o644, "victim");
+            let dest = dir.path().join("stub");
+            std::fs::create_dir(&dest).unwrap();
+            std::fs::write(dest.join("keep"), "x").unwrap();
+            let (got, asides) = swapped_at(Step::Staged, &attack, || publish(step, &src, &dest));
+            assert!(got.is_err(), "{step}: renamed onto a directory");
+            let [aside] = &asides[..] else {
+                panic!("{step}: {asides:?}");
+            };
+            let left: Vec<_> = std::fs::read_dir(aside).unwrap().collect();
+            assert!(left.is_empty(), "{step}: {left:?} left in the stage");
+            let planted = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.to_string_lossy().contains(".ljos-exe."))
+                .unwrap_or_else(|| panic!("{step}: the planted stage name was removed"));
+            assert_eq!(std::fs::read_link(&planted).unwrap(), attack, "{step}");
+            assert!(
+                std::fs::symlink_metadata(attack.join("exe"))
+                    .is_ok_and(|meta| meta.file_type().is_symlink()),
+                "{step}: the planted exe was removed"
+            );
+            assert_eq!(victim_state(&victim), ("SECRET".to_string(), 0o644));
+
+            std::fs::remove_file(&planted).unwrap();
+            assert!(publish(step, &src, &dest).is_err(), "{step}");
+            let stages: Vec<_> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .filter(|name| name.to_string_lossy().starts_with(".ljos-exe."))
+                .collect();
+            assert!(stages.is_empty(), "{step}: left {stages:?}");
+        }
+    }
+
     /// `/dev/null` opens but cannot be synced, so a flush that skips the
     /// sync returns Ok here.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_flush_reaches_the_sync() {
-        let err = flush(Path::new("/dev/null")).unwrap_err();
+        let open = |path: &str| (std::fs::File::open(path).unwrap(), PathBuf::from(path));
+        let (null, at) = open("/dev/null");
+        let err = flush(&null, &at).unwrap_err();
         assert_eq!(err.raw_os_error(), Some(22), "{err}");
-        assert!(flush(Path::new("/")).is_ok());
+        let (root, at) = open("/");
+        assert!(flush(&root, &at).is_ok());
     }
 
     /// Many threads publish one stub and start it. A writer that leaves a
