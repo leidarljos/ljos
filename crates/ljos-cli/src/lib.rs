@@ -49480,6 +49480,39 @@ pub(crate) fn with_wall_bounded_issues_lock<R>(
     write()
 }
 
+/// [`with_wall_bounded_issues_lock`] for several files at once, locked in
+/// sorted order and each file once, as `vissue_core::store::with_issues_locks`
+/// takes them.
+pub(crate) fn with_wall_bounded_issues_locks<R>(
+    paths: &[&Path],
+    write: impl FnOnce() -> vissue_core::Result<R>,
+) -> vissue_core::Result<R> {
+    let Some(deadline) = wall_deadline() else {
+        return vissue_core::store::with_issues_locks(paths, write);
+    };
+    let mut ordered: Vec<&Path> = paths.to_vec();
+    ordered.sort();
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut held = Vec::with_capacity(ordered.len());
+    for path in ordered {
+        let identity = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if seen.contains(&identity) {
+            continue;
+        }
+        seen.push(identity);
+        let lock_path = issues_lock_path(path);
+        let Some(lock) = CommitLock::acquire_by(&lock_path, deadline) else {
+            return Err(anyhow::anyhow!(
+                "another tracker writer held {} past the active wall budget",
+                lock_path.display()
+            )
+            .into());
+        };
+        held.push(lock);
+    }
+    write()
+}
+
 /// `git log` subjects on the tracker that name a seat, optionally one seat.
 ///
 /// # Errors

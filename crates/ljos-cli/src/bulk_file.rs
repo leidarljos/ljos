@@ -729,6 +729,30 @@ impl Board {
         self.board = own.board;
     }
 
+    /// Check under the issues lock that row `line`'s create, `want`, is
+    /// this batch's own, and take it. Another writer that changed the
+    /// directory meanwhile ends the batch, and its change is never put back
+    /// over; the error names `ids`, every ticket filed so far.
+    fn take(&mut self, line: usize, want: &Want, ids: &[String]) -> Result<()> {
+        let checked = locked(&self.issues, || self.only_filed(want)).map_err(|e| {
+            anyhow::anyhow!(
+                "file --from: row {line} was filed, but its write could not be checked ({e:#}), so the batch stopped; the {} tickets filed are on the tracker and not committed: {}",
+                ids.len(),
+                ids.join(" ")
+            )
+        })?;
+        let Some(own) = checked else {
+            bail!(
+                "file --from: another writer changed {} while row {line} was filed, so the batch stopped; the {} tickets filed are on the tracker and not committed: {}",
+                self.dir.display(),
+                ids.len(),
+                ids.join(" ")
+            );
+        };
+        self.accept(own);
+        Ok(())
+    }
+
     /// Every id the batch filed here.
     fn ids(&self) -> impl Iterator<Item = &String> {
         self.touched.values().flat_map(|touch| &touch.ids)
@@ -785,7 +809,7 @@ fn roll_back(boards: &[Board]) -> Undo {
         }
         undo
     };
-    vissue_core::store::with_issues_locks(&paths, || Ok(under_lock())).unwrap_or_else(|e| Undo {
+    crate::with_wall_bounded_issues_locks(&paths, || Ok(under_lock())).unwrap_or_else(|e| Undo {
         failed: vec![format!("{e:#}")],
         kept: written.iter().flat_map(|(_, b)| b.ids().cloned()).collect(),
         ..Undo::default()
@@ -912,9 +936,6 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
             Ok(text) => {
                 let id = text.trim().to_string();
                 ids.push(id.clone());
-                // Another writer that changes a project directory mid-batch
-                // ends it, and its change is never put back over.
-                let b = &boards[board];
                 let want = Want {
                     id: &id,
                     title: &row.title,
@@ -927,15 +948,7 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
                     known,
                     days,
                 };
-                let Some(own) = locked(&b.issues, || b.only_filed(&want))? else {
-                    bail!(
-                        "file --from: another writer changed {} while row {line} was filed, so the batch stopped; the {} tickets filed are on the tracker and not committed: {}",
-                        b.dir.display(),
-                        ids.len(),
-                        ids.join(" ")
-                    );
-                };
-                boards[board].accept(own);
+                boards[board].take(line, &want, &ids)?;
             }
             Err(e) => {
                 if ids.is_empty() {
@@ -1229,6 +1242,70 @@ mod tests {
             "{said}"
         );
         assert!(!said.contains(&other_id), "{said}");
+    }
+
+    /// Hold the issues lock of `board` as another writer would, until the
+    /// file is dropped.
+    fn hold_lock(board: &Board) -> std::fs::File {
+        use std::os::unix::io::AsRawFd as _;
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(board.dir.join("issues.org.lock"))
+            .unwrap();
+        // SAFETY: flock on a descriptor this test owns until it drops it.
+        let locked = unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(locked, 0);
+        held
+    }
+
+    #[test]
+    fn a_roll_back_waits_on_a_held_lock_no_longer_than_the_wall_budget() {
+        let (_root, layout, mut board) = demo(false);
+        let id = file(&layout, "new");
+        let own = board.only_filed(&want(&layout, &id)).unwrap().unwrap();
+        board.accept(own);
+        let held = hold_lock(&board);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _wall = crate::arm_wall_budget_for(
+                std::time::Duration::from_millis(200),
+                "sitting wall budget",
+            );
+            let undo = roll_back(std::slice::from_ref(&board));
+            let _ = tx.send((undo.failed, undo.kept));
+        });
+        let (failed, kept) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the roll back waited past its wall budget");
+        drop(held);
+        assert!(
+            failed.len() == 1 && failed[0].contains("past the active wall budget"),
+            "{failed:?}"
+        );
+        assert_eq!(kept, [id]);
+    }
+
+    #[test]
+    fn a_row_whose_write_cannot_be_checked_names_the_tickets_filed() {
+        let (_root, layout, mut board) = demo(false);
+        let first = file(&layout, "new");
+        let id = file(&layout, "new");
+        let _held = hold_lock(&board);
+        let _wall = crate::arm_wall_budget_for(
+            std::time::Duration::from_millis(100),
+            "sitting wall budget",
+        );
+        let e = board
+            .take(2, &want(&layout, &id), &[first.clone(), id.clone()])
+            .unwrap_err();
+        let e = format!("{e:#}");
+        assert!(
+            e.contains(&format!(
+                "the 2 tickets filed are on the tracker and not committed: {first} {id}"
+            )),
+            "{e}"
+        );
     }
 
     const BODY: &str = "why, see [[id:nowhere]]";
