@@ -24,7 +24,8 @@ pub fn install_executable(path: &Path, body: impl AsRef<[u8]>) -> Result<(), Err
 
 /// Write `body` to `path` and mark it with `mode`.
 ///
-/// `mode` is the permission bits passed to `chmod`, masked to `0o7777`.
+/// `mode` is the permission bits passed to `chmod`, masked to `0o777`: a
+/// published file never carries setuid, setgid or sticky.
 ///
 /// # Errors
 ///
@@ -37,7 +38,7 @@ pub fn install_executable_mode(
     if let Some(parent) = dir_of(path) {
         std::fs::create_dir_all(parent)?;
     }
-    let mode = mode & 0o7777;
+    let mode = mode & 0o777;
     #[cfg(unix)]
     {
         let stage = Stage::new(path)?;
@@ -266,6 +267,17 @@ mod tests {
         let out = Command::new(&path).output().unwrap();
         assert!(out.status.success(), "{out:?}");
         assert_eq!(out.stdout, b"hi\n");
+    }
+
+    #[test]
+    fn a_published_mode_drops_setuid_setgid_and_sticky() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stub");
+        for (asked, want) in [(0o4755, 0o755), (0o2750, 0o750), (0o7700, 0o700)] {
+            install_executable_mode(&path, b"#!/bin/sh\n", asked).unwrap();
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
+            assert_eq!(mode, want, "asked {asked:o}, got {mode:o}");
+        }
     }
 
     #[test]
