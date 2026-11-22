@@ -39,6 +39,10 @@ impl Seat {
         ] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
         write_issue(
             &root.join("tracker/Software/finance/issues.org"),
@@ -70,7 +74,11 @@ impl Seat {
 
     fn run_with_url(&self, args: &[&str], url: &str) -> Output {
         let home = self.root.join("home");
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.root.join("work"))
             .env_clear()
@@ -97,11 +105,15 @@ impl Seat {
             .env("LC_ALL", "C.UTF-8")
             .stdin(std::process::Stdio::null())
             .output()
-            .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")))
+            .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")));
     }
 
     fn mcp(&self, name: &str, arguments: serde_json::Value, url: &str) -> serde_json::Value {
         let home = self.root.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
             .current_dir(self.root.join("work"))
             .env_clear()
@@ -132,6 +144,10 @@ impl Seat {
         let pid = child.id();
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(30));
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new("kill").arg(pid.to_string()).status();
         });
         let mut stdin = child.stdin.take().unwrap();
@@ -174,6 +190,10 @@ fn write_issue(path: &std::path::Path, project: &str, id: &str, title: &str) {
 :END:
 "
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, body).unwrap();
 }
 

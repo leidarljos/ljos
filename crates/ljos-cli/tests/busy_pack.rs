@@ -44,7 +44,15 @@ impl Seat {
         std::fs::create_dir_all(root.path().join("state")).unwrap();
         std::fs::create_dir_all(root.path().join("run")).unwrap();
         std::fs::create_dir_all(&project).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             project.join("issues.org"),
             "\
@@ -85,6 +93,10 @@ impl Seat {
             std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
         );
         let started = Instant::now();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.root.path())

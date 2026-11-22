@@ -75,6 +75,10 @@ fn start_packsetd(
 }
 
 fn git(cfg: &Path, dir: &Path, args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -95,6 +99,10 @@ fn git(cfg: &Path, dir: &Path, args: &[&str]) -> String {
 }
 
 fn git_at(cfg: &Path, args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .args(args)
         .env("GIT_CONFIG_GLOBAL", cfg)
@@ -119,6 +127,10 @@ fn write_exe(path: &Path, body: &str) {
 }
 
 fn age_key(path: &Path) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let made = Command::new("age-keygen")
         .arg("-o")
         .arg(path)
@@ -129,6 +141,10 @@ fn age_key(path: &Path) -> String {
         "age-keygen: {}",
         String::from_utf8_lossy(&made.stderr)
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let public = Command::new("age-keygen")
         .args(["-y"])
         .arg(path)
@@ -166,7 +182,6 @@ fn home_dirs(home: &Path) {
     }
 }
 
-#[deny(clippy::disallowed_methods)]
 fn world(slow_push: bool, reject: bool) -> (World, ljos_test_boot::Packsetd) {
     let root = tempfile::tempdir().expect("root");
     let gitconfig = root.path().join("gitconfig");
@@ -368,6 +383,10 @@ impl World {
         extra: &[(&str, &str)],
         args: &[&str],
     ) -> Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args);
         self.env(&mut cmd, home);
@@ -431,6 +450,10 @@ fn log_in_commit(host: &str) -> String {
 }
 
 fn open_log(world: &World, host: &str) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let listed = Command::new("git")
         .arg("--git-dir")
         .arg(&world.origin)
@@ -451,6 +474,10 @@ fn open_log(world: &World, host: &str) -> String {
         .find(|line| line.contains("/snap-"))
         .unwrap_or_else(|| panic!("no snapshot for {host} in {listed}"));
     let spec = format!("HEAD:{snap}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let show = Command::new("git")
         .arg("--git-dir")
         .arg(&world.origin)
@@ -465,7 +492,15 @@ fn open_log(world: &World, host: &str) -> String {
         String::from_utf8_lossy(&show.stderr)
     );
     let sealed = world.root.path().join(format!("{host}.jsonl.age"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&sealed, &show.stdout).expect("sealed");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let plain = Command::new("age")
         .args(["-d", "-i"])
         .arg(&world.key)
@@ -691,6 +726,10 @@ fn a_refused_push_still_wakes_and_is_logged() {
         log.contains("push refused"),
         "the wake log does not record the refusal: {log}"
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let remote = Command::new("git")
         .arg("--git-dir")
         .arg(&world.origin)
@@ -859,7 +898,6 @@ fn a_recipients_inbox_sync_reads_the_pushed_letter() {
 /// fetches again until the remote has it, so a push that lands while the
 /// recipient is already fetching is still read.
 #[test]
-#[deny(clippy::disallowed_methods)]
 fn inbox_sync_waits_for_a_push_that_lands_late() {
     if !ljos_cli::tool_installed("packsetd") {
         eprintln!("skipped: packsetd is not installed");
@@ -935,16 +973,28 @@ fn inbox_sync_with_no_remote_only_lists() {
         &local,
         &world.root.path().join("no-hooks"),
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "copies a file that is not a git hook"
+    )]
     std::fs::copy(
         world.root.path().join("seed/.ljos/sync.toml"),
         local.join(".ljos/sync.toml"),
     )
     .expect("scope");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(local.join("README"), "local\n").expect("readme");
     git(&world.gitconfig, &local, &["add", "."]);
     git(&world.gitconfig, &local, &["commit", "-q", "-m", "local"]);
     let head = git(&world.gitconfig, &local, &["rev-parse", "HEAD"]);
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.recipient_home.join(".config/ljos/sync.toml"),
         format!("repos = [\"{}\"]\n", local.display()),

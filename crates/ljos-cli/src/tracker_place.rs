@@ -695,6 +695,10 @@ mod tests {
     fn committed_tracker(at: &Path, toml: &str, prefix: &str) {
         git(at, &["init", "-q"]);
         std::fs::create_dir_all(at.join(prefix)).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(at.join("vissue.toml"), toml).unwrap();
         git(at, &["add", "vissue.toml"]);
         git(at, &["commit", "-q", "-m", "tracker"]);
@@ -722,6 +726,10 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().join("tracker");
         repo(&root);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
         assert_eq!(product_repo(&root), None);
 
@@ -747,6 +755,10 @@ mod tests {
         let untracked = dir.path().join("untracked");
         git(&untracked, &["init", "-q"]);
         std::fs::create_dir_all(untracked.join("Software")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(untracked.join("vissue.toml"), "").unwrap();
         assert!(!is_tracker(&untracked), "an untracked vissue.toml");
 
@@ -758,6 +770,10 @@ mod tests {
         let boards = dir.path().join("boards");
         git(&boards, &["init", "-q"]);
         std::fs::create_dir_all(boards.join("Software/app")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(boards.join("Software/app/issues.org"), "* TODO x\n").unwrap();
         git(&boards, &["add", "."]);
         git(&boards, &["commit", "-q", "-m", "fixtures"]);
@@ -768,6 +784,10 @@ mod tests {
         assert!(is_tracker(&real));
         let plain = dir.path().join("plain");
         std::fs::create_dir_all(plain.join("Software")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(plain.join("vissue.toml"), "").unwrap();
         assert!(is_tracker(&plain), "a directory in no checkout is nobody's");
     }
@@ -812,6 +832,10 @@ mod tests {
             .output()
             .unwrap();
         assert!(out.status.success(), "{out:?}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(product.join(".gitignore"), ".local/\n").unwrap();
         let root = product.join(".local/share/vissue/tracker");
         std::fs::create_dir_all(&root).unwrap();
@@ -869,10 +893,18 @@ mod tests {
         std::fs::create_dir_all(product.join("Software")).unwrap();
         // vissue takes this checkout before the seat file, because
         // `vissue.toml` is here. The verb has to name the seat's tracker.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(product.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
         let tracker = dir.path().join("vault");
         std::fs::create_dir_all(tracker.join("Software")).unwrap();
         let cfg = dir.path().join("config.toml");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &cfg,
             format!(
@@ -949,6 +981,10 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().join("vault");
         git(&root, &["init", "-q"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("README"), "tracker\n").unwrap();
         let saved = saved_tracker_env();
         clear_tracker_env();
@@ -991,12 +1027,20 @@ mod tests {
         let root = dir.path().join("tracker");
         git(&root, &["init", "-q"]);
         std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join("Software/probe/issues.org"),
             "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
         )
         .unwrap();
         std::fs::create_dir_all(root.join("Software/proj/issues")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join("Software/proj/issues/proj-nnnn.org"),
             "* TODO [#C] Fresh\n:PROPERTIES:\n:ID:         proj-nnnn\n:END:\n",
@@ -1009,8 +1053,16 @@ mod tests {
         let link_holder = dir.path().join("link-holder");
         std::fs::create_dir_all(&link_holder).unwrap();
         let link = link_holder.join("tracker");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&root, &link).unwrap();
         std::fs::create_dir_all(root.join("issues")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join("issues/proj-pppp.org"),
             "* TODO [#C] Linked\n:PROPERTIES:\n:ID:         proj-pppp\n:END:\n",
@@ -1021,6 +1073,10 @@ mod tests {
         let boards = dir.path().join("boards");
         git(&boards, &["init", "-q"]);
         std::fs::create_dir_all(boards.join("Software/app")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(boards.join("Software/app/issues.org"), "* TODO x\n").unwrap();
         let board_only = product_checkout(&boards);
         restore_tracker_env(saved);

@@ -480,6 +480,10 @@ pub fn import_open(budget_ms: u64) -> Imported {
         }
     }
     if out.left == 0 {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let _ = std::fs::write(&marker, format!("{}\n", crate::now_utc()));
     }
     out
@@ -1322,9 +1326,13 @@ fn remember_held(kind: &str, text: &str) {
         return;
     }
     let tmp = dir.join(format!(".{}.tmp", std::process::id()));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes and renames a file that is not a git hook"
+    )]
     if std::fs::write(&tmp, b"1\n").is_ok() && std::fs::rename(&tmp, &path).is_err() {
         let _ = std::fs::remove_file(&tmp);
-    }
+    };
 }
 
 fn proposal_kind(rec: &Record) -> String {
@@ -1836,6 +1844,10 @@ mod tests {
         let path = proposals_path();
         let mut bytes = std::fs::read(&path).unwrap();
         bytes.extend_from_slice(b"{\"id\":\"b\",\"text\":\"caf\xc3");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, bytes).unwrap();
         let ids: Vec<String> = read_latest().into_keys().collect();
         assert_eq!(ids, ["a"]);
@@ -1850,7 +1862,15 @@ mod tests {
         let path = proposals_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let outside = dir.path().join("outside");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&outside, "kept\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&outside, &path).unwrap();
         assert!(append(&record("a".into())).is_err());
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "kept\n");
@@ -2068,6 +2088,10 @@ mod tests {
             "atom": {"kind": "lesson", "text": text},
         });
         use std::io::Write;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)

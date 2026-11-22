@@ -111,6 +111,10 @@ impl Seat {
     fn ljos(&self, args: &[&str], stdin: &str) -> Output {
         let root = self.root.path();
         let home = root.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(root)
@@ -308,6 +312,10 @@ fn a_proposal_an_older_ljos_left_open_is_found_after_session_start() {
     });
     let rows = seat.root.path().join("home/state/ljos/proposals.jsonl");
     std::fs::create_dir_all(rows.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&rows, format!("{row}\n")).unwrap();
 
     seat.hook("SessionStart", "");

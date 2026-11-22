@@ -36,9 +36,9 @@ const WRITING_PROGRAMS: &[&str] = &["cp", "mv", "install", "ln"];
 /// Write `body` to `path`, a file that is not a git hook, without
 /// following a symlink at `path`.
 ///
-/// Code that names a git hook denies `clippy::disallowed_methods`, which
-/// refuses `std::fs::write` and the other ways to put a file at a path.
-/// This is how that code writes its other files.
+/// Every crate denies `clippy::disallowed_methods`, which refuses
+/// `std::fs::write` and the other ways to put a file at a path. This is
+/// the writer it points to.
 ///
 /// # Errors
 ///
@@ -57,6 +57,10 @@ pub fn write_file(path: impl AsRef<Path>, body: impl AsRef<[u8]>) -> Result<(), 
             ));
         }
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the writer the lint points to; a hook name is refused above and O_NOFOLLOW refuses a symlink"
+    )]
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -78,8 +82,8 @@ pub fn write_file(path: impl AsRef<Path>, body: impl AsRef<[u8]>) -> Result<(), 
 /// A [`std::process::Command`] for `program`, which must not be a program
 /// that copies, moves or links files.
 ///
-/// Code that names a git hook denies `clippy::disallowed_methods`, which
-/// refuses `Command::new`. This is how that code starts a program.
+/// Every crate denies `clippy::disallowed_methods`, which refuses
+/// `Command::new`. This is the constructor it points to.
 ///
 /// # Errors
 ///
@@ -96,7 +100,11 @@ pub fn program(program: impl AsRef<std::ffi::OsStr>) -> Result<std::process::Com
             ),
         ));
     }
-    Ok(std::process::Command::new(program))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the constructor the lint points to; cp, mv, install and ln are refused above"
+    )]
+    return Ok(std::process::Command::new(program));
 }
 
 /// What [`publish`] puts at the destination.
@@ -252,6 +260,10 @@ impl Stage {
         use std::hash::{BuildHasher, Hasher};
         use std::os::unix::fs::OpenOptionsExt;
         let parent_path = dir_of(path).unwrap_or_else(|| Path::new(".")).to_path_buf();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens the destination's parent directory read-only"
+        )]
         let parent = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
@@ -403,6 +415,10 @@ impl Stage {
         at_step(Step::Moving, &self.path);
         // SAFETY: both descriptors are open directories and both names are
         // NUL-terminated. renameat follows neither name.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames the staged file from the held stage directory onto the destination name"
+        )]
         if unsafe {
             libc::renameat(
                 self.dir.as_raw_fd(),
@@ -471,6 +487,10 @@ fn write_staged(stage: libc::c_int, fill: &Fill) -> libc::c_int {
     let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     let mode: libc::c_uint = 0o600;
     // SAFETY: stage is an open directory and EXE is NUL-terminated.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates the staged file with O_EXCL and O_NOFOLLOW in the stage directory this process made"
+    )]
     let fd = unsafe { libc::openat(stage, EXE.as_ptr(), flags, mode) };
     if fd < 0 {
         return errno();
@@ -545,6 +565,10 @@ fn errno() -> libc::c_int {
 #[cfg(unix)]
 fn open_at(dir: &File, name: &CStr, flags: libc::c_int) -> Result<File, Error> {
     // SAFETY: dir is an open directory and name is NUL-terminated.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a name read-only under a held directory descriptor; both callers pass O_NOFOLLOW"
+    )]
     let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags | libc::O_CLOEXEC) };
     if fd < 0 {
         return Err(Error::last_os_error());
@@ -746,6 +770,10 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"#!/bin/sh\necho hi\n");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(&path).output().unwrap();
         assert!(out.status.success(), "{out:?}");
         assert_eq!(out.stdout, b"hi\n");
@@ -769,6 +797,10 @@ mod tests {
         install_executable(&src, b"#!/bin/sh\necho copied\n").unwrap();
         let dest = dir.path().join("dest");
         copy_executable(&src, &dest).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(&dest).output().unwrap();
         assert!(out.status.success(), "{out:?}");
         assert_eq!(out.stdout, b"copied\n");
@@ -824,6 +856,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("dest");
         copy_executable(&src.0, &dest).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(&dest).output().unwrap();
         assert!(out.status.success(), "{out:?}");
         assert_eq!(out.stdout, b"dashed\n");
@@ -898,7 +934,15 @@ mod tests {
     fn a_planted_temp_symlink_is_not_written_through() {
         let dir = tempfile::tempdir().unwrap();
         let victim = dir.path().join("victim");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&victim, "SECRET").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
         let src = dir.path().join("src");
         install_executable(&src, b"#!/bin/sh\necho copied\n").unwrap();
@@ -906,13 +950,25 @@ mod tests {
         std::fs::create_dir(&shared).unwrap();
         let pid = std::process::id();
         for n in 0..NEXT.load(Ordering::Relaxed) + 4096 {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             std::os::unix::fs::symlink(&victim, shared.join(format!(".ljos-exe.{pid}.{n}")))
                 .unwrap();
         }
         let lock = |mode| {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "sets the mode of a path that is not a git hook"
+            )]
             std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(mode)).unwrap();
         };
         lock(0o555);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         if std::fs::File::create(shared.join("probe")).is_ok() {
             lock(0o755);
             eprintln!("skipped: this user writes into a 0555 directory");
@@ -957,7 +1013,15 @@ mod tests {
                     return;
                 }
                 let aside = stage.with_file_name(format!("aside-{}", seen.borrow().len()));
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "renames a path that is not a git hook"
+                )]
                 std::fs::rename(stage, &aside).unwrap();
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "links a path that is not a git hook"
+                )]
                 std::os::unix::fs::symlink(&attack, stage).unwrap();
                 seen.borrow_mut().push(aside);
             }));
@@ -974,10 +1038,22 @@ mod tests {
     fn arena(mode: u32, target: &str) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let victim = dir.path().join("victim");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&victim, "SECRET").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(mode)).unwrap();
         let attack = dir.path().join("attack");
         std::fs::create_dir(&attack).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(dir.path().join(target), attack.join("exe")).unwrap();
         let src = dir.path().join("src");
         install_executable(&src, OURS).unwrap();
@@ -1056,12 +1132,20 @@ mod tests {
     fn a_stage_swapped_before_the_rename_publishes_the_staged_file() {
         for step in ["install", "copy"] {
             let (dir, _, attack, src) = arena(0o644, "evil");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(dir.path().join("evil"), "#!/bin/sh\necho PWNED\n").unwrap();
             let dest = dir.path().join("stub");
             let (got, asides) = swapped_at(Step::Moving, &attack, || publish(step, &src, &dest));
             got.unwrap_or_else(|err| panic!("{step}: {err}"));
             assert_eq!(asides.len(), 1, "{step}");
             assert_published(step, &dest);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let out = Command::new(&dest).output().unwrap();
             assert_eq!(out.stdout, b"ours\n", "{step}");
             assert!(
@@ -1087,6 +1171,10 @@ mod tests {
                 *hook.borrow_mut() = Some(Box::new(move |at, _: &Path| {
                     if at == Step::Renamed {
                         std::fs::remove_file(&swap).unwrap();
+                        #[expect(
+                            clippy::disallowed_methods,
+                            reason = "links a path that is not a git hook"
+                        )]
                         std::os::unix::fs::symlink(&evil, &swap).unwrap();
                     }
                 }));
@@ -1110,13 +1198,29 @@ mod tests {
             let (dir, _, _, src) = arena(0o644, "victim");
             let dest = dir.path().join("stub");
             let evil = dir.path().join("evil-exec");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&evil, "#!/bin/sh\necho PWNED\n").unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "sets the mode of a path that is not a git hook"
+            )]
             std::fs::set_permissions(&evil, std::fs::Permissions::from_mode(0o777)).unwrap();
             let (link, swap) = (dir.path().join("link"), dest.clone());
             AT_STEP.with(|hook| {
                 *hook.borrow_mut() = Some(Box::new(move |at, _: &Path| {
                     if at == Step::Renamed {
+                        #[expect(
+                            clippy::disallowed_methods,
+                            reason = "links a path that is not a git hook"
+                        )]
                         std::fs::hard_link(&evil, &link).unwrap();
+                        #[expect(
+                            clippy::disallowed_methods,
+                            reason = "renames a path that is not a git hook"
+                        )]
                         std::fs::rename(&link, &swap).unwrap();
                     }
                 }));
@@ -1219,6 +1323,10 @@ mod tests {
             let (dir, victim, attack, src) = arena(0o644, "victim");
             let dest = dir.path().join("stub");
             std::fs::create_dir(&dest).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(dest.join("keep"), "x").unwrap();
             let (got, asides) = swapped_at(Step::Staged, &attack, || publish(step, &src, &dest));
             assert!(got.is_err(), "{step}: renamed onto a directory");
@@ -1286,6 +1394,10 @@ mod tests {
             let exec_busy = Arc::clone(&exec_busy);
             let write_busy = Arc::clone(&write_busy);
             let spawns = Arc::clone(&spawns);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             threads.push(thread::spawn(move || {
                 for _ in 0..40 {
                     match install_executable(&path, b"#!/bin/sh\nexit 0\n") {
@@ -1338,8 +1450,16 @@ mod tests {
             );
         }
         let victim = dir.path().join("victim");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&victim, "SECRET").unwrap();
         let link = dir.path().join("link");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&victim, &link).unwrap();
         assert!(write_file(&link, "x").is_err());
         assert_eq!(std::fs::read(&victim).unwrap(), b"SECRET");
@@ -1625,5 +1745,64 @@ fn dir(path: &Path) {
             .rev()
             .find(|(bound, _)| bound == name)
             .is_none_or(|(_, names)| names.iter().any(|lit| lit == literal))
+    }
+
+    /// Clippy refuses the calls in `clippy.toml` only where
+    /// `clippy::disallowed_methods` is denied, so the workspace denies it
+    /// and every member takes the workspace lints.
+    #[test]
+    fn every_crate_denies_the_hook_write_methods() {
+        let read = |path: &Path| -> toml::Table {
+            std::fs::read_to_string(path)
+                .unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+                .parse()
+                .unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+        };
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let out = program(cargo)
+            .unwrap()
+            .args([
+                "metadata",
+                "--no-deps",
+                "--offline",
+                "--format-version",
+                "1",
+            ])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let meta: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let root = Path::new(meta["workspace_root"].as_str().unwrap());
+        let workspace = read(&root.join("Cargo.toml"));
+        let level = &workspace["workspace"]["lints"]["clippy"]["disallowed_methods"];
+        let level = level
+            .as_str()
+            .or_else(|| level.get("level").and_then(toml::Value::as_str));
+        assert!(
+            matches!(level, Some("deny" | "forbid")),
+            "[workspace.lints.clippy] disallowed_methods is {level:?}"
+        );
+        let members = meta["workspace_members"].as_array().unwrap();
+        let packages = meta["packages"].as_array().unwrap();
+        assert_eq!(members.len(), packages.len());
+        assert!(packages.len() >= 4, "found {} members", packages.len());
+        for package in packages {
+            let manifest = Path::new(package["manifest_path"].as_str().unwrap());
+            let lints = read(manifest).get("lints").cloned();
+            assert_eq!(
+                lints,
+                Some(toml::Value::Table(toml::Table::from_iter([(
+                    "workspace".to_string(),
+                    toml::Value::Boolean(true),
+                )]))),
+                "{} must have [lints] workspace = true and nothing else",
+                manifest.display()
+            );
+        }
     }
 }

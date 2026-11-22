@@ -188,6 +188,10 @@ fn look(path: &OsStr, tool: Tool) -> Result<(), String> {
 }
 
 fn version_of(bin: &Path, path: &OsStr) -> Option<String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let output = Command::new(bin)
         .arg("--version")
         .env("PATH", path)

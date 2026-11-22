@@ -16,6 +16,10 @@ fn expand(home: &Path, path: &str) -> PathBuf {
 
 fn write(path: &Path, text: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(path, text).unwrap();
 }
 
@@ -99,7 +103,11 @@ fn run(home: &Path, bin: &Path, args: &[&str]) -> Output {
         std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&inherited)),
     )
     .unwrap();
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -113,7 +121,7 @@ fn run(home: &Path, bin: &Path, args: &[&str]) -> Output {
         .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 #[test]
@@ -401,6 +409,10 @@ fn offboard_names_a_hand_edit_it_cannot_undo() {
     let skill = home.join(".cursor/skills/ljos/SKILL.md");
     let mut skill_text = fs::read_to_string(&skill).unwrap();
     skill_text.push_str("\n# a note added by hand\n");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&skill, &skill_text).unwrap();
 
     let off = run(home, &bin, &["offboard"]);

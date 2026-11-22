@@ -49,6 +49,10 @@ fn ljos_at(dir: &Path, pack: &str, args: &[&str], token: bool) -> (std::process:
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
     );
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .current_dir(dir)
@@ -97,6 +101,10 @@ fn a_sitting_dies_when_the_pack_probe_is_signalled() {
     let dir = tempfile::tempdir().unwrap();
     let home = home_of(dir.path());
     let pack = silent_pack();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["sitting", "demo-sig"])
         .current_dir(dir.path())
@@ -114,6 +122,10 @@ fn a_sitting_dies_when_the_pack_probe_is_signalled() {
         .spawn()
         .unwrap();
     std::thread::sleep(Duration::from_millis(200));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let _ = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status();
@@ -197,6 +209,10 @@ fn a_silent_pack_does_not_hold_a_consensus() {
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
     );
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["consensus", "demo-q", "--no-file"])
         .current_dir(dir.path())
@@ -260,6 +276,10 @@ fn a_note_returns_when_the_tracker_does_not_answer() {
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
     );
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["note", "demo-n", "hello"])
         .current_dir(dir.path())
@@ -312,6 +332,10 @@ fn a_tracker_timeout_then_retry_writes_one_note() {
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
     );
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["note", "demo-n", "hello"])
         .current_dir(dir.path())

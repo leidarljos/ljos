@@ -102,7 +102,11 @@ fn pack(text: &str) -> Pack {
 }
 
 fn ljos(home: &Path, root: &Path, url: &str, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .current_dir(root)
         .env_clear()
@@ -123,7 +127,7 @@ fn ljos(home: &Path, root: &Path, url: &str, args: &[&str]) -> std::process::Out
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("ljos")
+        .expect("ljos");
 }
 
 fn said(out: &std::process::Output) -> String {

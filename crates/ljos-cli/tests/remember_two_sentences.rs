@@ -49,7 +49,11 @@ impl Seat {
 
     fn remember(&self, text: &str) -> Output {
         let home = self.root.join("home");
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["remember", text])
             .current_dir(self.root.join("work"))
             .env_clear()
@@ -74,7 +78,7 @@ impl Seat {
             .env("LC_ALL", "C.UTF-8")
             .stdin(std::process::Stdio::null())
             .output()
-            .unwrap_or_else(|err| panic!("ljos remember: {err}"))
+            .unwrap_or_else(|err| panic!("ljos remember: {err}"));
     }
 }
 

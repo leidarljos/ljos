@@ -33,6 +33,10 @@ impl Hab {
             ),
         );
         script(dir.path(), "claimdag", "#!/bin/sh\nexit 1\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ljos"), dir.path().join("ljos")).unwrap();
         for name in ["home", "run"] {
             std::fs::create_dir_all(dir.path().join(name)).unwrap();
@@ -47,6 +51,10 @@ impl Hab {
         let run = self.dir.path().join("run/ljos");
         std::fs::create_dir_all(&run).unwrap();
         let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             run.join("hold-sitting"),
             format!(
@@ -60,6 +68,10 @@ impl Hab {
 
     fn command(&self, bin: &str) -> Command {
         let path = format!("{}:/usr/bin:/bin", self.dir.path().display());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(bin);
         cmd.env_clear()
             .env("PATH", &path)
@@ -218,6 +230,10 @@ fn a_blank_mcp_note_goes_on_the_held_issue() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(30));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut stdin = child.stdin.take().unwrap();
@@ -255,6 +271,10 @@ fn a_note_with_no_issue_is_stored_unattached() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(30));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut stdin = child.stdin.take().unwrap();

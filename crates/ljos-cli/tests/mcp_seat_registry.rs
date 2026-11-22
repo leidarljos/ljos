@@ -8,6 +8,10 @@ use std::path::Path;
 fn server(root: &Path) -> impl Fn(&str, serde_json::Value) -> String {
     let tracker = root.join("tracker");
     std::fs::create_dir(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
     let server = root.join("server");
@@ -142,6 +146,10 @@ fn a_listed_seat_records_a_persona_ballot() {
     let call = server(root.path());
     let seats = root.path().join("config/ljos/seats.toml");
     std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&seats, "seats = [\"saddle\", \"stranger\"]\n").unwrap();
     for args in [
         serde_json::json!({"issue": "proj-aaaa", "choice": "accept", "used": "none"}),

@@ -33,6 +33,10 @@ fn a_sleeping_consensus_is_killed_and_named() {
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
     );
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["consensus", "demo-q", "--no-file"])
         .current_dir(dir.path())
@@ -70,6 +74,10 @@ fn a_sleeping_consensus_is_killed_and_named() {
     );
     let pid = std::fs::read_to_string(&pidfile).unwrap_or_default();
     assert!(!pid.trim().is_empty(), "the sleeper did not start\n{said}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let alive = Command::new("kill")
         .args(["-0", pid.trim()])
         .stdout(Stdio::null())

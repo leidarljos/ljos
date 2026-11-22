@@ -65,7 +65,15 @@ fn a_tampered_blob_is_refused_and_nothing_is_printed() {
     let mut perms = std::fs::metadata(&blob).unwrap().permissions();
     #[allow(clippy::permissions_set_readonly_false)]
     perms.set_readonly(false);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&blob, perms).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&blob, CSV.replace("0.87", "0.99")).unwrap();
 
     let shown = world.ljos(&["deed", "--show", &accession]);

@@ -37,6 +37,10 @@ fn keep(data: &Path, name: &str, trusted: bool, atoms: Vec<serde_json::Value>) {
     let dir = data.join("ljos");
     std::fs::create_dir_all(&dir).unwrap();
     let doc = serde_json::json!({"stamp": "an-older-write", "trusted": trusted, "atoms": atoms});
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.join(name), doc.to_string()).unwrap();
 }
 
@@ -75,6 +79,10 @@ fn run_in(
     url: &str,
     hook: bool,
 ) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new("/bin/sh");
     cmd.args([
         "-c",
@@ -186,7 +194,15 @@ fn keep_as(data: &Path, name: &str, stamp: &str, text: &str, mode: u32) {
         "atoms": [row("p", text, "bob")],
     });
     let path = dir.join(name);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, doc.to_string()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
 }
 
@@ -386,8 +402,20 @@ fn plant_symlink_to_alices_listing(root: &Path) {
             {"id": "u", "kind": "lesson", "text": "UNTAGGED-LEAK kiln schedule", "ts": "2026-11-01T08:00:00Z"},
         ],
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&target, doc.to_string()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     symlink(&target, dir.join("listing-ws@bob-open.json")).unwrap();
 }
 
@@ -451,6 +479,10 @@ fn a_listing_that_is_a_fifo_is_left_alone() {
 fn a_listing_that_is_a_symlink_to_dev_zero_is_left_alone() {
     for hook in [false, true] {
         let root = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         plant(root.path(), |path| symlink("/dev/zero", path).unwrap());
         let said = said_with(root.path(), hook);
         assert!(
@@ -477,8 +509,20 @@ fn plant_hardlink_to_alices_listing(root: &Path) {
     let dir = root.join("data").join("ljos");
     std::fs::create_dir_all(&dir).unwrap();
     let alice = dir.join("listing-ws@alice-open.json");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&alice, alices_two_rows().to_string()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&alice, std::fs::Permissions::from_mode(0o600)).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::fs::hard_link(&alice, dir.join("listing-ws@bob-open.json")).unwrap();
 }
 
@@ -506,7 +550,15 @@ fn plant_for(root: &Path, header_seat: Option<&str>, rows: Vec<serde_json::Value
         doc["seat"] = seat.into();
     }
     let path = dir.join("listing-ws@bob-open.json");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, doc.to_string()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
@@ -555,7 +607,15 @@ fn plant_listing_in(dir: &Path, text: &str) {
         "trusted": false,
         "atoms": [row("p", text, "bob")],
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, doc.to_string()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
@@ -565,6 +625,10 @@ fn a_listing_in_a_directory_others_can_write_is_not_read() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("data").join("ljos");
         plant_listing_in(&dir, "DIR-WRITABLE-ROW kiln schedule");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
         let said = said_with(root.path(), false);
         assert!(
@@ -581,6 +645,10 @@ fn a_listing_in_a_directory_that_is_a_link_is_not_read() {
     plant_listing_in(&real, "LINKED-DIR-ROW kiln schedule");
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     symlink(&real, data.join("ljos")).unwrap();
     let said = said_with(root.path(), false);
     assert!(!said.contains("LINKED-DIR-ROW"), "{said}");
@@ -593,6 +661,10 @@ fn a_hook_takes_group_and_other_write_off_the_directory_it_keeps_a_listing_in() 
     let root = tempfile::tempdir().unwrap();
     let dir = root.path().join("data").join("ljos");
     std::fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
     let (url, atoms) = busy_writer("stamp-9");
     let said = run(root.path(), "bob", None, WORKSPACE, &url, true);
@@ -615,6 +687,10 @@ fn a_hook_keeps_no_listing_in_a_directory_that_is_a_link() {
     std::fs::create_dir_all(&real).unwrap();
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     symlink(&real, data.join("ljos")).unwrap();
     let (url, atoms) = busy_writer("stamp-9");
     let said = run(root.path(), "bob", None, WORKSPACE, &url, true);
@@ -650,7 +726,15 @@ fn a_listing_under_a_parent_others_can_write_is_not_read_or_kept() {
         let data = root.path().join("data");
         let dir = data.join("ljos");
         plant_listing_in(&dir, "OPEN-PARENT-ROW kiln schedule");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&data, std::fs::Permissions::from_mode(mode)).unwrap();
         for hook in [false, true] {
             let said = said_with(root.path(), hook);
@@ -663,6 +747,10 @@ fn a_listing_under_a_parent_others_can_write_is_not_read_or_kept() {
         let root = tempfile::tempdir().unwrap();
         let data = root.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&data, std::fs::Permissions::from_mode(mode)).unwrap();
         let (url, _) = busy_writer("stamp-9");
         let said = run(root.path(), "bob", None, WORKSPACE, &url, true);
@@ -679,7 +767,15 @@ fn a_listing_reached_through_a_linked_data_home_is_read_only_through_safe_direct
         &open.join("data").join("ljos"),
         "BEHIND-OPEN-ROW kiln schedule",
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     symlink(open.join("data"), root.path().join("data")).unwrap();
     let said = said_with(root.path(), false);
     assert!(
@@ -692,6 +788,10 @@ fn a_listing_reached_through_a_linked_data_home_is_read_only_through_safe_direct
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://127.0.0.1:{}", closed.local_addr().unwrap().port());
     drop(closed);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     symlink(&good, open.join("link")).unwrap();
     let said = run_in(
         root.path(),
@@ -707,6 +807,10 @@ fn a_listing_reached_through_a_linked_data_home_is_read_only_through_safe_direct
         "a link in a 777 directory was followed:\n{said}"
     );
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     symlink(&good, root.path().join("mine")).unwrap();
     let said = run_in(
         root.path(),

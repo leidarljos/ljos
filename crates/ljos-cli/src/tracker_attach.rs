@@ -322,6 +322,10 @@ pub(crate) fn store_token(home: &Path, token: &str) -> Result<String> {
     }
     let tmp = dir.join(format!(".tracker.token.tmp-{}", std::process::id()));
     let _ = fs::remove_file(&tmp);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -334,6 +338,10 @@ pub(crate) fn store_token(home: &Path, token: &str) -> Result<String> {
         file.write_all(token.as_bytes())?;
         file.write_all(b"\n")?;
         file.sync_all()?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         fs::rename(&tmp, &path).with_context(|| format!("install {}", path.display()))?;
         Ok(())
     })();
@@ -531,6 +539,10 @@ mod tests {
         for file in files {
             let path = at.join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             fs::write(&path, "").unwrap();
         }
         git(&["add", "."]);

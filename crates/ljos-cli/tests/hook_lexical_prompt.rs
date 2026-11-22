@@ -143,6 +143,10 @@ fn hook_with(
     line: &str,
     args: &[&str],
 ) -> std::process::Output {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()

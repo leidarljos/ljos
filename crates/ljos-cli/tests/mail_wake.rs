@@ -37,6 +37,10 @@ struct Home {
 impl Home {
     /// One `ljos` run as `seat`, with only this home's environment.
     fn ljos(&self, seat: &str, args: &[&str], stdin: Option<&str>) -> Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args);
         self.env(&mut cmd);
@@ -242,7 +246,7 @@ fn a_send_wakes_the_recipient_and_an_interrupt_holds_its_stop() {
     );
 
     let script = home.dir.path().join("wake.sh");
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         &script,
         "#!/bin/sh\nljos inbox > \"$HOME/woke.tmp\" && mv \"$HOME/woke.tmp\" \"$HOME/woke.$LJOS_WAKE_INTERRUPT\"\n",
     )

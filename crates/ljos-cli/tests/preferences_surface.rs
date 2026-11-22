@@ -189,6 +189,10 @@ impl Seat {
     }
 
     fn command(&self, args: &[&str]) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(self.home.path())

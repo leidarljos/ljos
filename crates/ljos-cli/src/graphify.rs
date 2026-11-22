@@ -868,6 +868,10 @@ mod tests {
         let outer = tempfile::tempdir().unwrap();
         let outer_out = outer.path().join("graphify-out");
         std::fs::create_dir(&outer_out).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(outer_out.join("graph.json"), "{}").unwrap();
         let repo = outer.path().join("repo");
         let nested = repo.join("src");
@@ -877,6 +881,10 @@ mod tests {
         let inner = repo.join("graphify-out");
         std::fs::create_dir(&inner).unwrap();
         let file = inner.join("graph.json");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&file, "{}").unwrap();
         assert_eq!(find_default_graph(&nested).unwrap(), file);
     }
@@ -885,6 +893,10 @@ mod tests {
     fn a_graphify_key_resolves_against_its_file() {
         let dir = tempfile::tempdir().unwrap();
         let toml = dir.path().join("ljos.toml");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&toml, "graphify = \"custom/graph.json\"\n").unwrap();
         assert_eq!(graphify_key(&toml).as_deref(), Some("custom/graph.json"));
         let setting = resolve_setting(&graphify_key(&toml).unwrap(), dir.path());

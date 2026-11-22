@@ -893,6 +893,10 @@ mod tests {
     }
 
     fn seed(dir: &Path) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("f.txt"), "one\n").unwrap();
         git(dir, &["add", "f.txt"]);
         git(dir, &["commit", "-q", "-m", "note the seat"]);
@@ -900,6 +904,10 @@ mod tests {
 
     fn gates(dir: &Path, body: &str) {
         std::fs::create_dir_all(dir.join(".ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join(".ljos").join("gates.toml"), body).unwrap();
     }
 
@@ -954,6 +962,10 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(path, body).unwrap();
     }
 

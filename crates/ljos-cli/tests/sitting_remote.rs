@@ -20,6 +20,10 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(dir: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -135,7 +139,15 @@ fn a_sitting_claims_when_the_tracker_remote_cannot_be_reached() {
             &["commit", "-q", "--allow-empty", "-m", &format!("local {n}")],
         );
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("Software/other.org"), "* TODO side\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("Software/sixth.org"), "* TODO sixth\n").unwrap();
 
     let show = format!(r#"{{"id":"{issue}","title":"probe work","state":"TODO","blocked_by":[]}}"#);
@@ -168,6 +180,10 @@ fn a_sitting_claims_when_the_tracker_remote_cannot_be_reached() {
 
     let path = format!("{}:/usr/bin:/bin", root.path().display());
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["sitting", &issue])
         .current_dir(root.path())

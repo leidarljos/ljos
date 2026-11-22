@@ -777,6 +777,10 @@ mod tests {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let prompt_file = dir.path().join("member.prompt");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&prompt_file, "vote on the issue").unwrap();
         let none = |_: &str| false;
 
@@ -804,6 +808,10 @@ mod tests {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let prompt_file = dir.path().join("member.prompt");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&prompt_file, "review the diff").unwrap();
 
         let words = split_template_line(

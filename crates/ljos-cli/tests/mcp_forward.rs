@@ -52,8 +52,16 @@ printf '{"jsonrpc":"2.0","id":1,"result":%s}\n' "$answer"
 fn a_forwarded_call_is_answered_by_the_fresh_server() {
     let runtime = tempfile::tempdir().unwrap();
     let cards = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(cards.path().join("USER.md"), "frozen by the test\n").unwrap();
     let tracker = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         tracker.path().join("vissue.toml"),
         "seats = [\"acme-cli\"]\n",
@@ -99,6 +107,10 @@ read -r call
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"busy-ok"}]}}'
 "#,
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let held = std::fs::OpenOptions::new()
         .write(true)
         .open(&program)

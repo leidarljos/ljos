@@ -60,6 +60,10 @@ impl Hab {
 
     fn command(&self, bin: &str) -> Command {
         let home = self.dir.path().join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(bin);
         cmd.env_clear()
             .env(

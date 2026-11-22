@@ -93,6 +93,10 @@ fn a_busy_pack_costs_one_read_and_the_sitting_stays_quiet() {
     let pack = busy_pack(Arc::clone(&paths));
     let path = format!("{}:/usr/bin:/bin", dir.path().display());
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["sitting", &issue])
         .current_dir(dir.path())
@@ -159,6 +163,10 @@ fn finishing_the_last_plan_item_names_the_parent_finish_command() {
     let home = dir.path().join("home");
     std::fs::create_dir_all(tracker.join("Software/day")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
     let layout = vissue_core::Layout::new(&tracker, "Software");
     let parent = vissue_core::ops::create(
@@ -200,6 +208,10 @@ fn finishing_the_last_plan_item_names_the_parent_finish_command() {
     );
     script(dir.path(), "deedar", "#!/bin/sh\necho head\nexit 0\n");
     let path = format!("{}:/usr/bin:/bin", dir.path().display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["finish", &child])
         .current_dir(dir.path())

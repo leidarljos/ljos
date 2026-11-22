@@ -13,6 +13,10 @@ use std::process::{Command, Output};
 
 fn git_repo(at: &Path) {
     std::fs::create_dir_all(at).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .args(["init", "-q"])
         .current_dir(at)
@@ -39,7 +43,11 @@ fn said(out: &Output) -> String {
 fn onboard(product: &Path, args: &[&str]) -> Output {
     let home = product.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("onboard")
         .args(args)
         .current_dir(product)
@@ -52,7 +60,7 @@ fn onboard(product: &Path, args: &[&str]) -> Output {
         .env("PACKSET_URL", "off")
         .env("LJOS_SEAT", "saddle")
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 fn tracker_row(text: &str) -> &str {
@@ -91,6 +99,10 @@ fn a_path_the_checkout_ignores_is_still_a_place_for_a_tracker() {
     let dir = tempfile::TempDir::new().unwrap();
     let product = dir.path().join("myapp");
     git_repo(&product);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(product.join(".gitignore"), "home/\n").unwrap();
 
     let made = said(&onboard(&product, &["--harness", "claude"]));
@@ -132,6 +144,10 @@ impl Seat {
         );
         let cfg = seat.dir.path().join("home/.config/vissue/config.toml");
         std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &cfg,
             format!(
@@ -159,7 +175,11 @@ impl Seat {
     /// habitat call every other write takes.
     fn note(&self, from: &Path) -> Output {
         let home = self.dir.path().join("home");
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["note", "proj-aaaa", "The parser kept the hyphen."])
             .current_dir(from)
             .env_clear()
@@ -179,7 +199,7 @@ impl Seat {
             .env("LJOS_SEAT", "saddle")
             .env("LJOS_TRACKER_GIT", "off")
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn roots(&self) -> Vec<String> {
@@ -214,8 +234,16 @@ fn a_file_does_not_commit_into_the_product_when_vissue_root_is_unset() {
     let dir = tempfile::TempDir::new().unwrap();
     let product = dir.path().join("myapp");
     git_repo(&product);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(product.join("README"), "a product\n").unwrap();
     let git = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("git")
             .args(args)
             .current_dir(&product)
@@ -225,6 +253,10 @@ fn a_file_does_not_commit_into_the_product_when_vissue_root_is_unset() {
             .unwrap();
         assert!(out.status.success(), "git {args:?}: {out:?}");
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         dir.path().join("gitconfig"),
         "[user]\n\tname = seat\n\temail = seat@example.test\n\
@@ -251,6 +283,10 @@ fn a_file_does_not_commit_into_the_product_when_vissue_root_is_unset() {
     );
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["file", "-p", "app", "crash on start"])
         .current_dir(&product)
@@ -300,6 +336,10 @@ fn a_file_does_not_commit_into_the_product_when_vissue_root_is_unset() {
 }
 
 fn git_stdout(at: &Path, args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .args(args)
         .current_dir(at)
@@ -316,6 +356,10 @@ fn standing_in_a_tracker_still_means_that_tracker() {
     let seat = Seat::new();
     let other = seat.dir.path().join("vault/second");
     std::fs::create_dir_all(other.join("Software")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(other.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
     seat.note(&other);
     assert_eq!(seat.roots(), ["unset"], "the directory it stands in lost");

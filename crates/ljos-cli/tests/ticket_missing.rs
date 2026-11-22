@@ -26,7 +26,11 @@ impl Home {
 
     fn ljos(&self, args: &[&str]) -> std::process::Output {
         let path = format!("{}:/usr/bin:/bin", self.dir.path().display());
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.dir.path())
             .env_clear()
@@ -44,7 +48,7 @@ impl Home {
             .env("LJOS_ASK_PACK", "off")
             .env("LJOS_OFF", "1")
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 

@@ -98,6 +98,10 @@ impl Walk {
         ] {
             std::fs::create_dir_all(root.path().join(sub)).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.path().join("tracker/vissue.toml"),
             "prefix = \"Software\"\n",
@@ -105,6 +109,10 @@ impl Walk {
         .unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "sets the mode of a path that is not a git hook"
+            )]
             std::fs::set_permissions(
                 root.path().join("run"),
                 std::fs::Permissions::from_mode(0o700),
@@ -116,10 +124,18 @@ impl Walk {
             let store = home.join(".local/share/deedar/store");
             std::fs::create_dir_all(&store).unwrap();
             use std::os::unix::fs::PermissionsExt;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "sets the mode of a path that is not a git hook"
+            )]
             std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
         for name in ["vissue", "claimdag", "deedar", "packset", "packsetd"] {
             let path = which(name).unwrap_or_else(|| panic!("{name} is not on PATH"));
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             std::os::unix::fs::symlink(path, root.path().join("bin").join(name)).unwrap();
         }
         Self {
@@ -132,6 +148,10 @@ impl Walk {
     fn run(&mut self, args: &[&str]) -> Step {
         let root = self.root.path();
         let home = root.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(&home)

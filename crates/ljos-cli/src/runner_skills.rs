@@ -48,7 +48,11 @@ fn record(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = sidecar(path).parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(sidecar(path), format!("{}\n", skill_hash(bytes)))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    return std::fs::write(sidecar(path), format!("{}\n", skill_hash(bytes)));
 }
 
 fn looks_like_ljos_skill(bytes: &[u8]) -> bool {
@@ -78,6 +82,10 @@ fn write_skill_file(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, text)?;
     record(path, text.as_bytes())
 }
@@ -221,6 +229,10 @@ fn write_stamp() {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let _ = std::fs::write(path, format!("{stamp}\n"));
 }
 
@@ -255,11 +267,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("SKILL.md");
         let old = old_skill();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, old).unwrap();
         record(&path, old.as_bytes()).unwrap();
         let want = "---\nname: ljos\ndescription: new\n---\n\n# The seat protocol\n\nnew\n";
         assert_eq!(classify(&path, want), SkillKind::StaleOwned);
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, format!("{old}hand\n")).unwrap();
         assert_eq!(classify(&path, want), SkillKind::HandEdited);
 
@@ -269,8 +289,16 @@ mod tests {
             SkillKind::StaleOwned,
             "a skill with no hash that still starts as ljos is refreshed once"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, b"not a skill\n").unwrap();
         assert_eq!(classify(&path, want), SkillKind::HandEdited);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, want).unwrap();
         assert_eq!(classify(&path, want), SkillKind::Current);
     }
@@ -280,6 +308,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("SKILL.md");
         let old = old_skill();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, old).unwrap();
         record(&path, old.as_bytes()).unwrap();
         let step = install_skill(&path, false);
@@ -291,6 +323,10 @@ mod tests {
         );
 
         let edited = format!("{}hand\n", crate::skill_text());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, &edited).unwrap();
         let step = install_skill(&path, false);
         assert!(step.ok, "{step:?}");

@@ -69,10 +69,18 @@ fn vissue_shim() {
             .to_string(),
         _ => panic!("the shim does not run vissue {args:?}"),
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(out, said).unwrap();
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -125,6 +133,10 @@ impl Box {
                 "* TODO [#C] Pick a rail for {id}\n:PROPERTIES:\n:ID:         {id}\n:END:\n"
             ));
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(board.join("issues.org"), org).unwrap();
         git(&tracker, &["add", "."]);
         git(&tracker, &["commit", "-q", "-m", "seed"]);
@@ -137,6 +149,10 @@ impl Box {
     }
 
     fn ljos(&self, seat: &str, agent: &str, session: &str, args: &[&str]) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(&self.tracker)

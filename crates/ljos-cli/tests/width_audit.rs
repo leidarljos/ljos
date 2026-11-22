@@ -334,6 +334,10 @@ fn clippy_on_raw_probe(root: &Path, conf_dir: &Path, target: &Path) -> std::proc
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let probe = root.join("probe");
     std::fs::create_dir_all(probe.join("src")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         probe.join("Cargo.toml"),
         "[package]\nname = \"raw-probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
@@ -341,14 +345,30 @@ fn clippy_on_raw_probe(root: &Path, conf_dir: &Path, target: &Path) -> std::proc
          [workspace]\n",
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(probe.join("src/lib.rs"), RAW_PROBE).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "copies a file that is not a git hook"
+    )]
     std::fs::copy(workspace.join("Cargo.lock"), probe.join("Cargo.lock")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "copies a file that is not a git hook"
+    )]
     std::fs::copy(
         workspace.join("rust-toolchain.toml"),
         probe.join("rust-toolchain.toml"),
     )
     .unwrap();
-    std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
         .args(["clippy", "--offline", "--quiet", "--", "-D", "warnings"])
         .current_dir(&probe)
         .env("CLIPPY_CONF_DIR", conf_dir)
@@ -356,7 +376,7 @@ fn clippy_on_raw_probe(root: &Path, conf_dir: &Path, target: &Path) -> std::proc
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 /// The revert proof for [`RAW_WRITERS`]: with the workspace `clippy.toml`
@@ -401,6 +421,10 @@ fn clippy_refuses_the_raw_writers_and_passes_them_without_the_paths() {
     assert_ne!(reverted, text);
     let conf = root.path().join("reverted");
     std::fs::create_dir_all(&conf).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(conf.join("clippy.toml"), reverted).unwrap();
     let passed = clippy_on_raw_probe(root.path(), &conf, &root.path().join("target-reverted"));
     assert!(

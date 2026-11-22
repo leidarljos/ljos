@@ -198,6 +198,10 @@ pub fn run(tool: &str, argv: &[String]) -> Result<Ran> {
     let Some((bin, rest)) = argv.split_first() else {
         bail!("{tool}: an empty verb");
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(bin)
         .args(rest)
         .stdin(std::process::Stdio::null())
@@ -226,13 +230,17 @@ pub fn answers(argv: &[String]) -> bool {
     let Some((bin, rest)) = argv.split_first() else {
         return false;
     };
-    std::process::Command::new(bin)
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return std::process::Command::new(bin)
         .args(rest)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok_and(|s| s.success())
+        .is_ok_and(|s| s.success());
 }
 
 /// The pane `open` named, read through `pointer` from its JSON output.

@@ -8,6 +8,10 @@ use std::process::{Command, Stdio};
 
 fn call_doctor(server: &Path, bin_dir: &Path) -> serde_json::Value {
     let home = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(server);
     cmd.env_clear()
         .env("HOME", home.path())

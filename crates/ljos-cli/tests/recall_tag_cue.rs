@@ -123,6 +123,10 @@ fn stand_in(log: Arc<Mutex<Vec<String>>>) -> String {
 fn tracker(root: &Path) {
     let project = root.join("Software/cue");
     std::fs::create_dir_all(&project).expect("project dir");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         project.join("issues.org"),
         "\
@@ -170,6 +174,10 @@ impl Seat {
     }
 
     fn recall(&self, issue: &str) -> String {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["recall", issue])
             .current_dir(self.home.path())

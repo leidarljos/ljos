@@ -270,6 +270,10 @@ printf '%s' "$2" > "$d/$id.prompt"
             self.bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(exe);
         cmd.args(args)
             .current_dir(&self.bin)
@@ -479,11 +483,19 @@ fn one_sand_subagent_five_personas_count_as_the_first_ballot() {
             .map(|persona| serde_json::json!({"agent": persona, "choice": "bus"}))
             .collect::<Vec<_>>()),
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.state.join("notes.json"),
         serde_json::to_string(&serde_json::json!({issue: notes})).unwrap(),
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.state.join("ballots.json"),
         serde_json::to_string(&serde_json::Value::Object(ballots)).unwrap(),
@@ -683,11 +695,15 @@ fn a_session_that_filed_a_candidate_stores_its_vote_with_a_label() {
 #[test]
 fn a_design_that_saw_another_candidate_is_flagged_and_distinct_sessions_still_settle() {
     let world = World::new();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         world.state.join("issues.json"),
         r#"{"demo-blind":{"id":"demo-blind","title":"Ship the cache only.","body":"Ship the cache only."},"demo-b":{"id":"demo-b","title":"design: other","body":"OTHER-CANDIDATE-BODY"}}"#,
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.state.join("children.json"),
         r#"{"demo-blind":[{"id":"demo-b"}]}"#,
@@ -735,7 +751,7 @@ fn a_design_that_saw_another_candidate_is_flagged_and_distinct_sessions_still_se
 #[test]
 fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
     let world = World::new();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         world.state.join("issues.json"),
         r#"{"demo-brief":{"id":"demo-brief","title":"Ship the cache only.","body":"Ship the cache only."},"demo-b":{"id":"demo-b","title":"design: other","body":"OTHER-CANDIDATE-BODY"}}"#,
     )
@@ -804,6 +820,10 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
         "{said}"
     );
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let nested = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args([
             "panel",
@@ -840,6 +860,10 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
         "{said}"
     );
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let spawned = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["panel", "run", "demo-brief", "--designers", "3"])
         .current_dir(&world.bin)
@@ -930,17 +954,21 @@ fn panel_run_gives_each_designer_its_own_session_and_only_the_brief() {
 #[test]
 fn a_session_that_cast_on_one_child_can_cast_on_its_sibling() {
     let world = World::new();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         world.state.join("issues.json"),
         r#"{"parent-1":{"id":"parent-1","title":"parent","body":""},"child-a":{"id":"child-a","title":"child a","body":"","parent":"parent-1"},"child-b":{"id":"child-b","title":"child b","body":"","parent":"parent-1"}}"#,
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.state.join("children.json"),
         r#"{"parent-1":[{"id":"child-a"},{"id":"child-b"}]}"#,
     )
     .unwrap();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         world.state.join("notes.json"),
         r#"{"child-a":[{"note":"candidate-sig: child-a alice sess-author-0001 n-author - ab cd"}]}"#,
     )
@@ -982,11 +1010,15 @@ fn a_session_that_cast_on_one_child_can_cast_on_its_sibling() {
 /// A world holding parent-1 and its children child-a and child-b.
 fn siblings() -> World {
     let world = World::new();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         world.state.join("issues.json"),
         r#"{"parent-1":{"id":"parent-1","title":"parent","body":""},"child-a":{"id":"child-a","title":"child a","body":"","parent":"parent-1"},"child-b":{"id":"child-b","title":"child b","body":"","parent":"parent-1"}}"#,
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.state.join("children.json"),
         r#"{"parent-1":[{"id":"child-a"},{"id":"child-b"}]}"#,
@@ -1064,6 +1096,10 @@ fn a_family_only_ballot_blocks_a_second_cli_vote() {
         "sess-saddle-0001",
         "n-saddle",
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.state.join("notes.json"),
         serde_json::to_string(&serde_json::json!({
@@ -1098,6 +1134,10 @@ fn a_family_only_ballot_blocks_a_second_mcp_vote() {
         "sess-mcp-0001",
         "n-saddle",
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.state.join("notes.json"),
         serde_json::to_string(&serde_json::json!({
@@ -1142,6 +1182,10 @@ fn a_family_ballot_names_where_to_withdraw_over_cli() {
         "sess-saddle-0001",
         "n-saddle",
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.state.join("notes.json"),
         serde_json::to_string(&serde_json::json!({
@@ -1188,6 +1232,10 @@ fn a_family_ballot_names_where_to_withdraw_over_mcp() {
         "sess-mcp-0001",
         "n-saddle",
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.state.join("notes.json"),
         serde_json::to_string(&serde_json::json!({
@@ -1263,6 +1311,10 @@ fn a_withdrawal_on_another_issue_does_not_clear_a_family_ballot() {
         "sess-saddle-0001",
         "n-saddle",
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.state.join("notes.json"),
         serde_json::to_string(&serde_json::json!({
@@ -1324,6 +1376,10 @@ fn a_withdraw_on_child_keeps_parents_row_over_cli() {
     if let Some(obj) = notes.as_object_mut() {
         obj.remove("child-a");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(world.state.join("notes.json"), notes.to_string()).unwrap();
     let withdrawn = world.ljos(
         "saddle",
@@ -1379,6 +1435,10 @@ fn a_withdraw_on_child_keeps_parents_row_over_mcp() {
     if let Some(obj) = notes.as_object_mut() {
         obj.remove("child-a");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(world.state.join("notes.json"), notes.to_string()).unwrap();
     let withdraw = serde_json::json!({"jsonrpc": "2.0", "id": 17, "method": "tools/call", "params": {
         "name": "ljos_vote",
@@ -1416,6 +1476,10 @@ fn a_withdraw_on_child_keeps_parents_row_over_mcp() {
 #[test]
 fn an_issue_with_no_signature_gets_no_withdraw_note() {
     let world = siblings();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.state.join("ballots.json"),
         serde_json::to_string(&serde_json::json!({
@@ -2038,6 +2102,10 @@ fn forge_call(world: &World, session: &str, agent: &str, args: &[&str], tree: se
         "at": now_ms(),
         "tree": tree,
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.join(format!("toolu_{agent}.0.json")), call.to_string()).unwrap();
 }
 
@@ -2048,6 +2116,10 @@ fn a_call_record_no_hook_above_this_shell_left_names_no_session() {
     // stays its own unverified session.
     let world = World::new();
     let issue = "demo-forged-calls";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut sibling = Command::new("sleep").arg("30").spawn().unwrap();
     let elsewhere = ljos_cli::proc_tree::of(sibling.id()).unwrap();
     let a = [
@@ -2743,6 +2815,10 @@ fn a_seat_no_harness_names_is_an_unverified_session() {
         .as_array_mut()
         .unwrap()
         .push(serde_json::json!({"agent": "reviewer-b", "choice": "hold"}));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&ballots_path, ballots.to_string()).unwrap();
     let notes_path = world.state.join("notes.json");
     let mut notes: serde_json::Value =
@@ -2760,6 +2836,10 @@ fn a_seat_no_harness_names_is_an_unverified_session() {
         .as_array_mut()
         .unwrap()
         .insert(0, serde_json::json!({ "note": sig }));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&notes_path, notes.to_string()).unwrap();
     let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", raw]);
     let said = text(&tally);
@@ -2785,6 +2865,10 @@ fn signed_key(said: &str, voter: &str) -> String {
 }
 
 fn account_name() -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("id").arg("-un").output().unwrap();
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }

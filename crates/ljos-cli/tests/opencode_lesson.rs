@@ -16,6 +16,10 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn git(dir: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -76,7 +80,15 @@ fn opencode_lesson_writes_succeed_through_cli_and_mcp() {
     ] {
         std::fs::create_dir_all(d).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         project.join("issues.org"),
         "\
@@ -100,6 +112,10 @@ fn opencode_lesson_writes_succeed_through_cli_and_mcp() {
     let path = format!("{}:/usr/bin:/bin", vissue.parent().unwrap().display());
     let session = "ses_opencode_12345678";
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut onb_cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     onb_cmd
         .args(["onboard", "--harness", "opencode"])
@@ -132,6 +148,10 @@ fn opencode_lesson_writes_succeed_through_cli_and_mcp() {
     assert!(home.join(".config/opencode/plugins/ljos.ts").is_file());
 
     // Simulate the opencode plugin's UserPromptSubmit hook with OPENCODE_SESSION_ID.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut hook_cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     hook_cmd
         .arg("hook")
@@ -182,6 +202,10 @@ fn opencode_lesson_writes_succeed_through_cli_and_mcp() {
     );
 
     // Write a lesson via `ljos remember` with OPENCODE_SESSION_ID set (as opencode's shell.env sets it).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut rem_cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     rem_cmd
         .args([
@@ -221,6 +245,10 @@ fn opencode_lesson_writes_succeed_through_cli_and_mcp() {
     );
 
     // Write lessons through `ljos mcp` as opencode (start -> remember -> finish with lesson).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut mcp_cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     mcp_cmd
         .current_dir(&work)
@@ -249,6 +277,10 @@ fn opencode_lesson_writes_succeed_through_cli_and_mcp() {
     let pid = mcp.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(30));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut stdin = mcp.stdin.take().unwrap();

@@ -57,6 +57,10 @@ pub fn install(home: &Path, exe: &Path, xdg_data: Option<&Path>) -> io::Result<R
     fs::create_dir_all(&apps)?;
     let desktop = apps.join("ljos-hud.desktop");
     let exec = exe.display();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         &desktop,
         format!(
@@ -78,6 +82,10 @@ pub fn install(home: &Path, exe: &Path, xdg_data: Option<&Path>) -> io::Result<R
     let ljos_cfg = config.join("ljos");
     fs::create_dir_all(&ljos_cfg)?;
     let sway = ljos_cfg.join("sway-hud.conf");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&sway, sway_overlay_rules())?;
     report.wrote.push(sway);
     Ok(report)
@@ -131,6 +139,10 @@ mod tests {
         let root = root_dir.path();
         let exe = root.join("bin/ljos-hud");
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(&exe, b"x").unwrap();
         let data = root.join("share");
         let config = root.join("config");

@@ -142,6 +142,10 @@ impl Seat {
         ] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
         Self { root, url }
     }
@@ -150,11 +154,19 @@ impl Seat {
         let dir = self.root.join("tracker/Software").join(project);
         std::fs::create_dir_all(&dir).unwrap();
         let head = "#+TITLE: issues\n#+VISSUE: 1\n#+CATEGORY: Software\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n";
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("issues.org"), format!("{head}{body}")).unwrap();
     }
 
     fn command(&self, args: &[&str]) -> Command {
         let home = self.root.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(self.root.join("work"))

@@ -13,6 +13,10 @@ use std::process::{Command, Output, Stdio};
 /// `ljos ARGS` the way an agent runner's tool call runs it: a runner
 /// variable set and no controlling terminal, so no person is at it.
 fn as_agent(home: &Path, args: &[&str]) -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env("HOME", home)

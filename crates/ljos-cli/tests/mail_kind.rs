@@ -112,6 +112,10 @@ fn inbox(port: u16) -> Output {
     ] {
         std::fs::create_dir_all(home.path().join(sub)).expect("dirs");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(["inbox"])
         .env_clear()

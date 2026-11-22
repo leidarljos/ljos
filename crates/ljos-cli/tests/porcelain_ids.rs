@@ -64,7 +64,11 @@ exit 0
     }
 
     fn ljos(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("PATH", &self.path)
@@ -76,7 +80,7 @@ exit 0
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off")
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 
@@ -148,6 +152,10 @@ fn porcelain_file_prints_only_the_new_id() {
         assert!(err.contains("file:"), "{flag}: {said}");
         let id = String::from_utf8_lossy(&filed.stdout);
         let id = id.trim();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let sitting = Command::new("timeout")
             .args(["30", env!("CARGO_BIN_EXE_ljos"), "sitting", id])
             .env_clear()

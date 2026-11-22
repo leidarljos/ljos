@@ -53,6 +53,10 @@ fn a_quiet_pack_does_not_hold_consensus_for_every_read() {
     let pack = silent_pack();
     // One read is two seconds. Five reads are ten. The harness is eight,
     // so a run that waits on every read is cut off.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("timeout")
         .args([
             "8",

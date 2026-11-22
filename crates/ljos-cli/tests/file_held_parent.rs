@@ -35,6 +35,10 @@ impl Seat {
         let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
         let runtime = self.dir.path().join("home/run/ljos");
         std::fs::create_dir_all(&runtime).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             runtime.join("hold-rohit"),
             format!(
@@ -62,6 +66,10 @@ impl Seat {
             self.dir.path().display(),
             std::env::var("PATH").unwrap_or_default()
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.arg("file")
             .args(args)
@@ -161,6 +169,10 @@ fn a_scratch_checkout_without_a_project_names_p() {
     let seat = Seat::new("'vissue test'");
     let checkout = seat.dir.path().join("obchk");
     std::fs::create_dir_all(&checkout).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let init = Command::new("git")
         .arg("init")
         .arg("-q")
@@ -180,6 +192,10 @@ fn a_scratch_checkout_uses_ljos_project_when_set() {
     let seat = Seat::new("'vissue test'");
     let checkout = seat.dir.path().join("obchk");
     std::fs::create_dir_all(&checkout).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let init = Command::new("git")
         .arg("init")
         .arg("-q")

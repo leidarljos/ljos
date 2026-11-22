@@ -233,7 +233,7 @@ fn release_dir() -> Option<PathBuf> {
 fn obtain(name: &str, to: &Path, url: &str) -> Result<()> {
     if let Some(dir) = release_dir() {
         let src = dir.join(name);
-        std::fs::copy(&src, to).with_context(|| {
+        #[expect(clippy::disallowed_methods, reason = "copies a file that is not a git hook")] std::fs::copy(&src, to).with_context(|| {
             format!(
                 "upgrade: could not read {} from the release directory, and the archive must be there or LJOS_RELEASE_DIR must be unset, so run `ljos upgrade`.",
                 src.display()
@@ -263,6 +263,10 @@ fn fetch(url: &str, to: &Path) -> Result<()> {
         .with_context(|| {
             download_failed(url, "the download stopped before the file was complete")
         })?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(to, body)?;
     Ok(())
 }
@@ -324,6 +328,10 @@ fn latest() -> Result<String> {
 }
 
 fn run_ok(cmd: &str, args: &[&str]) -> Result<String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(cmd)
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -850,7 +858,7 @@ mod tests {
         let installed = dir.path().join("ljos");
         crate::install_executable_mode(&installed, "#!/bin/sh\necho old\n", 0o700).unwrap();
         let victim = dir.path().join("victim");
-        std::fs::write(&victim, "keep\n").unwrap();
+        crate::write_file(&victim, "keep\n").unwrap();
         let side = dir.path().join("ljos.new");
         #[expect(
             clippy::disallowed_methods,

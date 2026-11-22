@@ -64,7 +64,15 @@ impl Seat {
         }
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&project).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(project.join("issues.org"), ORG).unwrap();
         script(&bin.join("deedar"), "#!/bin/sh\necho head\nexit 0\n");
         script(
@@ -216,7 +224,11 @@ sys.exit(0)
         };
         let root = self.dir.path();
         let path = format!("{}:/usr/bin:/bin", root.join("bin").display());
-        Command::new("bash")
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new("bash")
             .args(["--noprofile", "--norc", "-c", &script])
             .env_clear()
             .env("PATH", path)
@@ -240,7 +252,7 @@ sys.exit(0)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 

@@ -142,6 +142,10 @@ impl Home {
             .local_addr()
             .unwrap()
             .port();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(program);
         cmd.env_clear()
             .env("HOME", home)

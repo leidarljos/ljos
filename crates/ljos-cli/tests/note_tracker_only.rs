@@ -71,7 +71,11 @@ impl Hab {
             self.dir.path().display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["note", "proj-aaaa", text])
             .env_clear()
             .env("PATH", &path)
@@ -91,7 +95,7 @@ impl Hab {
             .env("PACKSET_TIMEOUT_MS", "2000")
             .env("PACKSET_URL", pack)
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn calls(&self) -> String {

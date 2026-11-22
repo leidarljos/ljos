@@ -389,7 +389,6 @@ mod tests {
     /// The stub answers a hook with an allow, says nothing for a git hook,
     /// and refuses to stand in for the rest of the program.
     #[test]
-    #[deny(clippy::disallowed_methods)]
     fn the_stub_allows_hooks_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ljos");
@@ -486,8 +485,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("ljos"), "x").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("ljos-mcp"), "x").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("packset"), "x").unwrap();
         let opts = Options {
             dry: true,
@@ -519,8 +530,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("packset"), "x").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("packsetd"), "x").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("vissue"), "x").unwrap();
         let step = seat_programs_stay(&bin, false).unwrap();
         assert_eq!(step.what, "programs");

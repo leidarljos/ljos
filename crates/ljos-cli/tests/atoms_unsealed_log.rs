@@ -16,12 +16,20 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 fn keygen(path: &Path) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let made = Command::new("age-keygen")
         .arg("-o")
         .arg(path)
         .output()
         .expect("age-keygen must be installed");
     assert!(made.status.success(), "age-keygen");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let public = Command::new("age-keygen")
         .arg("-y")
         .arg(path)
@@ -32,6 +40,10 @@ fn keygen(path: &Path) -> String {
 }
 
 fn git(cwd: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let status = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -58,11 +70,19 @@ fn a_large_log_for_another_machine_is_skipped() {
     std::fs::create_dir_all(repo.join(".ljos/atoms")).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "core.hooksPath", "/dev/null"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         repo.join(".ljos/sync.toml"),
         format!("name = \"probe\"\nrecipients = [\"{other}\"]\n"),
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         config.join("ljos/sync.toml"),
         format!("repos = [\"{}\"]\n", repo.display()),
@@ -75,6 +95,10 @@ fn a_large_log_for_another_machine_is_skipped() {
             "x".repeat(200)
         ));
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut seal = Command::new("age")
         .args(["-r", &other, "-o"])
         .arg(repo.join(".ljos/atoms/peer.jsonl.age"))
@@ -87,6 +111,10 @@ fn a_large_log_for_another_machine_is_skipped() {
         .write_all(plain.as_bytes())
         .unwrap();
     assert!(seal.wait().unwrap().success(), "age seal");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["sync", "--import"])
         .env_clear()

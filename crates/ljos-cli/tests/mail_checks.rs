@@ -34,6 +34,10 @@ struct Setup {
 fn setup(deny: &str) -> Setup {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("deny.txt");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, deny).unwrap();
     Setup {
         config: MailConfig {
@@ -345,10 +349,22 @@ fn a_deny_file_others_could_change_refuses_everything() {
     let real = s.config.deny_file.clone().unwrap();
     let dir = real.parent().unwrap();
     let link = dir.join("linked.txt");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink(&real, &link).unwrap();
     let shared = dir.join("shared");
     std::fs::create_dir(&shared).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(shared.join("deny.txt"), DENY).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&shared, PermissionsExt::from_mode(0o775)).unwrap();
     for (path, why) in [(link, "symlink"), (shared.join("deny.txt"), "writable")] {
         let config = MailConfig {

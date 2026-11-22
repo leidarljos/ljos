@@ -52,6 +52,10 @@ impl Tracker {
             format!("{dir}:/usr/bin:/bin:{rest}")
         };
         let git_cfg = dir.path().join("gitconfig");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&git_cfg, "").unwrap();
         unsafe {
             std::env::set_var("PATH", path);
@@ -68,12 +72,20 @@ impl Tracker {
             std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
             if let Some(text) = config {
                 let path = dir.path().join("ljos.toml");
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "writes a file that is not a git hook"
+                )]
                 std::fs::write(&path, text).unwrap();
                 std::env::set_var("LJOS_CONFIG", &path);
             } else {
                 std::env::remove_var("LJOS_CONFIG");
             }
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("git")
             .arg("-C")
             .arg(&root)
@@ -86,6 +98,10 @@ impl Tracker {
     }
 
     fn vissue(&self, args: &[&str]) -> String {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("vissue").args(args).output().unwrap();
         assert!(
             out.status.success(),
@@ -96,6 +112,10 @@ impl Tracker {
     }
 
     fn show(&self, id: &str) -> serde_json::Value {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("vissue")
             .args(["show", id, "--json"])
             .output()

@@ -76,7 +76,11 @@ impl Home {
             .local_addr()
             .unwrap()
             .port();
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("HOME", home)
@@ -94,7 +98,7 @@ impl Home {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 
@@ -102,6 +106,10 @@ fn write(path: &Path, text: &str) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, text).unwrap();
 }
 

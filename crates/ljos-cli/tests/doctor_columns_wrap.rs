@@ -11,6 +11,10 @@ fn run_doctor(columns: Option<&str>) -> (bool, String, String) {
     std::fs::create_dir_all(home.join(".state")).unwrap();
     std::fs::create_dir_all(root.path().join("run")).unwrap();
     std::fs::create_dir_all(root.path().join("tmp")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("doctor")
         .env_clear()

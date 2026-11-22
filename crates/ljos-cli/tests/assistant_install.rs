@@ -69,7 +69,11 @@ impl Home {
         // temporary home, and the onboard lines here are the memory-off ones.
         // TMPDIR is the temp dir the home was made in, so the home is a
         // temporary one wherever the process TMPDIR is.
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("HOME", home)
@@ -86,7 +90,7 @@ impl Home {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 
@@ -462,6 +466,10 @@ fn a_lesson_comes_back_without_a_seat_sitting_or_ticket() {
     let daemon = started.spawn();
 
     let run = |args: &[&str], stdin: Option<&str>| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(dir.path())

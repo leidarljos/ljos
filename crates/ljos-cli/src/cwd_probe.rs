@@ -467,7 +467,6 @@ mod tests {
     }
 
     #[test]
-    #[deny(clippy::disallowed_methods)]
     fn a_git_hook_is_not_a_command_that_probes_its_directory() {
         let args = |words: &[&str]| {
             words
@@ -542,11 +541,19 @@ mod tests {
             struct Restore(std::path::PathBuf, std::fs::Permissions);
             impl Drop for Restore {
                 fn drop(&mut self) {
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "sets the mode of a path that is not a git hook"
+                    )]
                     let _ = std::fs::set_permissions(&self.0, self.1.clone());
                 }
             }
             let original = std::fs::metadata(&unreadable).unwrap().permissions();
             let _restore = Restore(unreadable.clone(), original);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "sets the mode of a path that is not a git hook"
+            )]
             std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
             let started = std::time::Instant::now();
             settle_for(&unreadable);

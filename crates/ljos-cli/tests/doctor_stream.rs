@@ -45,6 +45,10 @@ struct Run {
 
 impl Run {
     fn start(root: &Path, bin: &Path, args: &[&str]) -> Self {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.arg("doctor")
             .args(args)

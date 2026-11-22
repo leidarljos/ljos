@@ -465,6 +465,10 @@ fn move_aside(path: &Path) -> std::io::Result<PathBuf> {
         if dest.exists() {
             continue;
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         std::fs::rename(path, &dest)?;
         return Ok(dest);
     }
@@ -498,6 +502,10 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut file = options.open(path)?;
     file.write_all(text.as_bytes())?;
     file.sync_all()

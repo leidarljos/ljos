@@ -93,6 +93,10 @@ fn record_hint() {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let _ = std::fs::write(path, "1\n");
 }
 
@@ -181,6 +185,10 @@ pub fn note_seat_write(seat: &str) {
         write_stamp(),
         crate::sync::host()
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

@@ -5,6 +5,10 @@ ljos_test_boot::harness!();
 use std::process::Command;
 
 fn protocol(home: &std::path::Path, full: bool) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("protocol");
     if full {

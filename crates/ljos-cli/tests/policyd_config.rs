@@ -57,6 +57,10 @@ impl Seat {
         for dir in ["bin", "guard", "work"] {
             std::fs::create_dir_all(home.path().join(dir)).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let init = Command::new("git")
             .args(["init", "-q"])
             .current_dir(home.path().join("work"))
@@ -78,6 +82,10 @@ impl Seat {
     fn write(&self, rel: &str, body: &str) {
         let path = self.path(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(path, body).unwrap();
     }
 
@@ -108,6 +116,10 @@ impl Seat {
     }
 
     fn ljos(&self, args: &[&str], stdin: &str) -> Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env("PATH", "/usr/bin:/bin")
@@ -174,6 +186,10 @@ impl Seat {
     /// `line` through the guard shims from `cwd`, with `victim` as what it
     /// would remove.
     fn shim(&self, line: &str, cwd: &Path, victim: &Path) -> Shimmed {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(line).env(
             "PATH",
@@ -205,14 +221,26 @@ impl Seat {
         let work = self.path("work");
         let victim = fresh("victim");
         let repo = fresh("repo");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let init = Command::new("git")
             .args(["init", "-q"])
             .current_dir(&repo)
             .output()
             .unwrap();
         assert!(init.status.success(), "{init:?}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("untracked"), "").unwrap();
         let found = fresh("found");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(found.join("file"), "").unwrap();
         [
             (

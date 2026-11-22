@@ -27,5 +27,9 @@ pub fn runner_at(path: &Path) {
         return;
     }
     ljos_cli::copy_executable(Path::new("/bin/sh"), path).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let _ = std::process::Command::new(path).args(["-c", ":"]).status();
 }

@@ -126,6 +126,10 @@ impl Home {
     }
 
     fn program(&self, program: &str) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(program);
         cmd.env("HOME", self.root.path())
             .env("XDG_CONFIG_HOME", self.root.path().join(".config"))
@@ -350,6 +354,10 @@ const RUNNER_ENV: &[(&str, &str)] = &[
 
 /// Run one test of this file again in a child that carries `env`.
 fn rerun(test: &str, env: &[(&str, &str)]) -> std::process::Output {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(std::env::current_exe().unwrap());
     cmd.args(["--exact", test, "--test-threads=1"]);
     for (key, value) in env {

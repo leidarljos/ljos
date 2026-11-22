@@ -55,7 +55,11 @@ impl Seat {
     }
 
     fn run(&self, seat: &str, args: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("HOME", &self.home)
@@ -72,7 +76,7 @@ impl Seat {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .expect("ljos")
+            .expect("ljos");
     }
 }
 
@@ -130,6 +134,10 @@ fn local_rows(home: &Path, n: usize) {
             "at": "2026-11-01T00:00:00Z",
             "retired": false,
         });
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             kept.join(format!("{i}.json")),
             serde_json::to_vec_pretty(&row).unwrap(),
@@ -250,6 +258,10 @@ fn a_busy_writer_names_the_reason_and_the_next_command() {
     // One fast encode, then wait until status says the encoder is answering.
     // Until that, search reports the encoder as loading and never asks the
     // writer for rows.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let warmed = Command::new("curl")
         .args([
             "--max-time",
@@ -274,6 +286,10 @@ fn a_busy_writer_names_the_reason_and_the_next_command() {
     let status_url = format!("{url}/v1/status");
     let ready_at = Instant::now();
     loop {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let status = Command::new("curl")
             .args(["--max-time", "2", "--silent", &status_url])
             .output()
@@ -290,6 +306,10 @@ fn a_busy_writer_names_the_reason_and_the_next_command() {
     }
     let held = stub.with_file_name("embed-held");
     let hold = std::thread::spawn(move || {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("curl")
             .args([
                 "--max-time",
@@ -321,6 +341,10 @@ fn a_busy_writer_names_the_reason_and_the_next_command() {
         let url = seat.url.clone();
         let pack = seat.pack.clone();
         writers.push(std::thread::spawn(move || {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new(env!("CARGO_BIN_EXE_ljos"))
                 .args(["remember", &format!("{name} notes the kiln schedule")])
                 .env_clear()

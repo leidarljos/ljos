@@ -11,7 +11,11 @@ use std::path::Path;
 use std::process::Command;
 
 fn policy(home: &Path, line: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("policy")
         .arg(line)
         .env("HOME", home)
@@ -26,7 +30,7 @@ fn policy(home: &Path, line: &str) -> std::process::Output {
         .env_remove("POLICYD_REQUIRED")
         .env_remove("LJOS_SEAT")
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 fn stdout_of(line: &str) -> String {

@@ -236,6 +236,10 @@ impl World {
     }
 
     fn ljos_env(&self, seat: &str, args: &[&str], extra: &[(&str, &str)]) -> Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(self.root.path())
@@ -665,6 +669,10 @@ fn self_comm_quiet() -> String {
 #[cfg(target_os = "macos")]
 fn self_comm_quiet() -> String {
     let pid = std::process::id();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("/bin/ps")
         .args(["-o", "comm=", "-p", &pid.to_string()])
         .output()
@@ -739,6 +747,10 @@ case \"$1\" in\n\
     );
     let run_dir = world.root.path().join("run/ljos");
     std::fs::create_dir_all(&run_dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         run_dir.join(format!("hold-{live_actor}")),
         format!(

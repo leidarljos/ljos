@@ -127,6 +127,10 @@ pub fn require_on(path: &OsStr, name: &str) -> Result<PathBuf, String> {
     let Some(bin) = found else {
         return Err(missing(&pin));
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let output = Command::new(&bin)
         .arg("--version")
         .env("PATH", path)

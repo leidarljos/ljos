@@ -14,6 +14,10 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn run(root: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
@@ -83,6 +87,10 @@ fn a_cargo_build_in_another_target_dir_names_install() {
     let profile = dir.path().join("build-out/debug");
     std::fs::create_dir_all(profile.join("deps")).unwrap();
     assert!(!ljos_cli::exe_from_cargo_build(&profile.join("ljos")));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(profile.join(".cargo-lock"), "").unwrap();
     assert!(ljos_cli::exe_from_cargo_build(&profile.join("ljos")));
     assert!(ljos_cli::exe_from_cargo_build(

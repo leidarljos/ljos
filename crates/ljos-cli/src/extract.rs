@@ -256,6 +256,10 @@ pub fn schedule_finish(input: &str, session: Option<&str>) {
         "session": session,
         "input": input,
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     if std::fs::write(&payload, body.to_string()).is_err() {
         say!("ljos extract: the session finish could not be queued");
         return;
@@ -304,6 +308,10 @@ fn mark_done(lines: &[String]) {
     } else {
         format!("{}\n", lines.join("\n"))
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let _ = std::fs::write(path, body);
 }
 
@@ -391,6 +399,10 @@ fn write_notes(input: &str, session: Option<&str>) -> Vec<String> {
         all.extend(keys);
         // Bounded: the newest 5000 forms.
         let skip = all.len().saturating_sub(5000);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let _ = std::fs::write(&p, all[skip..].join("\n") + "\n");
     }
     lines
@@ -457,6 +469,10 @@ mod tests {
             body.push_str(&pad);
         }
         body.push_str("Never push to main without a green CI run on the branch.\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, &body).unwrap();
         let got = read_tail(&path, 800).unwrap();
         assert!(got.contains("Never push"), "{got}");

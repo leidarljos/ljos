@@ -1160,6 +1160,10 @@ fn pinned_walk(file: &Path, expect: (u64, u64)) -> Option<Vec<Owner>> {
     let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     let open = |dir: libc::c_int, name: &std::ffi::CStr| {
         // SAFETY: name is NUL-terminated, and openat only reads it.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
         // SAFETY: a descriptor openat returned is open and owned here.
         (fd >= 0).then(|| std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }))
@@ -1813,6 +1817,10 @@ fn mark_broken() {
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let _ = options.open(dir.join("tool-calls.broken"));
     }
 }
@@ -1830,6 +1838,10 @@ fn append_record(dir: &Path, name: &str, line: &str) -> bool {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut file = match options.open(dir.join(name)) {
         Ok(file) => file,
         Err(_) => return false,
@@ -2241,6 +2253,10 @@ mod tests {
         );
 
         let away = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(program(away.path(), "codex"), bin.join("codex")).unwrap();
         assert_eq!(
             runner_here(&bin.join("codex"), Some(&home), &store, &person),
@@ -2251,6 +2267,10 @@ mod tests {
         let climbed = home.join("../other/.local/bin/claude");
         assert_eq!(runner_here(&climbed, Some(&home), &store, &person), None);
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o757)).unwrap();
         assert_eq!(runner_here(&claude, Some(&home), &store, &person), None);
 
@@ -2260,6 +2280,10 @@ mod tests {
             runner_here(&grok, Some(&home), &store, &person),
             Some("grok")
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert_eq!(runner_here(&grok, Some(&home), &store, &person), None);
     }
@@ -2298,9 +2322,17 @@ mod tests {
         );
         for file in &files {
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(file, "").unwrap();
         }
         let set = |dir: &Path, mode| {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "sets the mode of a path that is not a git hook"
+            )]
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
         };
         for root in install_roots(Some(&home))
@@ -2351,6 +2383,10 @@ mod tests {
         let other = home.join("other");
         for dir in [&versions, &other] {
             std::fs::create_dir_all(dir).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(dir.join("2.1.3"), "").unwrap();
         }
         let id = |path: &Path| {
@@ -2362,12 +2398,24 @@ mod tests {
         let runner = |expect| runner_at(&file, Some(&home), &store, &person, expect);
         assert_eq!(runner(running), Some("claude"));
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         std::fs::rename(&versions, home.join("held")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&other, &versions).unwrap();
         assert_eq!(runner(running), None);
         assert_eq!(runner(planted), None);
 
         std::fs::remove_file(&versions).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         std::fs::rename(&other, &versions).unwrap();
         assert_eq!(runner(running), None);
     }
@@ -2452,6 +2500,10 @@ mod tests {
                 planted.display()
             );
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o757)).unwrap();
         assert_eq!(runner(&node, id(&node)), None);
     }
@@ -2476,6 +2528,10 @@ mod tests {
         crate::install_executable(&claude, "").unwrap();
         let person = Person::new(&SystemAccounts);
         let set = |mode| {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "sets the mode of a path that is not a git hook"
+            )]
             std::fs::set_permissions(&store, std::fs::Permissions::from_mode(mode)).unwrap();
         };
         let runner = || runner_here(&claude, None, &store, &person);
@@ -2634,6 +2690,10 @@ mod tests {
     #[test]
     fn a_primary_group_is_listed_only_from_a_passwd_file_read_whole() {
         let etc = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let write = |name: &str, text: &str| std::fs::write(etc.path().join(name), text).unwrap();
         let passwd = "root:x:0:0::/root:/bin/sh\nu:x:1000:1000::/home/u:/bin/sh\n";
         write("passwd", passwd);
@@ -2679,6 +2739,10 @@ mod tests {
     #[test]
     fn a_group_is_read_only_from_one_line_of_a_group_file_read_whole() {
         let etc = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let write = |name: &str, text: &str| std::fs::write(etc.path().join(name), text).unwrap();
         let group = "root:x:0:\nu:x:1000:\nstaff:x:50:u,v\n";
         write("group", group);
@@ -2741,6 +2805,10 @@ mod tests {
         assert!(why.contains("tool call"), "{why}");
         assert!(confirm_runner(&opener).is_ok(), "the opener recorded it");
         assert!(confirm_runner(&old).is_ok(), "older than the record");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(crate::runtime_dir().join("tool-calls"), "nope\n").unwrap();
         let why = confirm_runner(&old).unwrap_err();
         assert!(why.contains("corrupt"), "{why}");
@@ -2816,6 +2884,10 @@ mod tests {
         // A broken sentinel means a record should exist; with no records, the
         // error names every location that was checked.
         std::fs::create_dir_all(home.path().join(".cache/ljos/run")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(home.path().join(".cache/ljos/run/tool-calls.broken"), "").unwrap();
         let why = match tool_marks() {
             Ok(_) => panic!("tool marks unexpectedly found"),
@@ -2934,6 +3006,10 @@ mod tests {
 
     #[test]
     fn a_reaped_child_is_not_alive() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
@@ -2949,6 +3025,10 @@ mod tests {
 
     #[test]
     fn a_child_is_read_with_the_environment_it_was_started_with() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .env("LJOS_PROC_TREE_PROBE", "started-with")

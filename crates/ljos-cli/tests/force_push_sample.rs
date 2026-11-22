@@ -11,6 +11,10 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 fn git(dir: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -25,13 +29,17 @@ fn git(dir: &Path, args: &[&str]) {
 fn sit(tracker: &Path, run: &Path) {
     let project = tracker.join("Software/sample");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         project.join("issues.org"),
         "* STARTED [#C] sample work\n:PROPERTIES:\n:ID:         sample-0001\n:CLAIMED_BY: sample-holder\n:END:\n",
     )
     .unwrap();
     let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
     std::fs::create_dir_all(run.join("ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         run.join("ljos/hold-sample"),
         format!(
@@ -57,6 +65,10 @@ fn hook(payload: &str) -> String {
         "#!/bin/sh\nprintf 'allow\\twarn\\tgit-force-push\\ta force push rewrites a published branch\\n'\n",
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("hook")
         .current_dir(&repo)

@@ -129,7 +129,15 @@ impl Seat {
         std::fs::create_dir_all(root.path().join("state")).unwrap();
         std::fs::create_dir_all(root.path().join("run")).unwrap();
         std::fs::create_dir_all(&project).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             project.join("issues.org"),
             "\
@@ -169,7 +177,11 @@ impl Seat {
     fn run(&self, pack: &str, args: &[&str]) -> std::process::Output {
         let home = self.root.path().join("home");
         let path = format!("{}:/usr/bin:/bin", self.root.path().display());
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.root.path())
             .env_clear()
@@ -191,7 +203,7 @@ impl Seat {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn queue(&self) -> String {
@@ -304,6 +316,10 @@ fn a_busy_pack_queues_the_lesson_and_a_healthy_pack_saves_it_once() {
         seat.queue()
     );
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         seat.root.path().join("state/ljos/note-queue.jsonl"),
         &waiting,

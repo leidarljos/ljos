@@ -55,6 +55,10 @@ impl Board {
     }
 
     fn command(&self, args: &[&str], columns: usize) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut command = Command::new(env!("CARGO_BIN_EXE_ljos"));
         command
             .args(args)
@@ -80,6 +84,10 @@ impl Board {
     }
 
     fn command_without_columns(&self, args: &[&str]) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut command = Command::new(env!("CARGO_BIN_EXE_ljos"));
         command
             .args(args)
@@ -211,6 +219,10 @@ fn doctor_on_a_tty_uses_spaces_not_tab_rows() {
     std::fs::create_dir_all(home.join(".config")).unwrap();
     std::fs::create_dir_all(home.join(".state")).unwrap();
     std::fs::create_dir_all(root.path().join("run")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("doctor")
         .env_clear()
@@ -242,7 +254,15 @@ fn finish_world() -> (tempfile::TempDir, Command) {
     std::fs::create_dir_all(home.join(".state")).unwrap();
     std::fs::create_dir_all(home.join("run")).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         project.join("issues.org"),
         "\
@@ -269,6 +289,10 @@ fn finish_world() -> (tempfile::TempDir, Command) {
     );
     write_exec(&bin.join("deedar"), "#!/bin/sh\necho '{}'\nexit 0\n");
     write_exec(&bin.join("packset"), "#!/bin/sh\nexit 1\n");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(["finish", "demo-uqy6"])
         .env_clear()
@@ -364,6 +388,10 @@ fn doctor_only_leaves_overwide_command_lines_on_narrow_tty() {
     std::fs::create_dir_all(home.join(".config")).unwrap();
     std::fs::create_dir_all(home.join(".state")).unwrap();
     std::fs::create_dir_all(root.path().join("run")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("doctor")
         .env_clear()

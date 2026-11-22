@@ -43,8 +43,6 @@
 //! Booking writes one `note:` line to the book log; it cites no deed and
 //! takes no claim. An amend or a rebase notes the new sha.
 
-#![deny(clippy::disallowed_methods)]
-
 use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1845,7 +1843,7 @@ mod tests {
         crate::install_executable_mode(&hooks.join("pre-push"), pre_push, 0o750).unwrap();
         let target = dir.path().join("shared-hook");
         hook_at(&target, text, mode);
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "the symlinked hook these tests install and uninstall around; hook_at published its target"
         )]

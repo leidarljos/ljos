@@ -163,6 +163,10 @@ fn ljos_paths_in(text: &str) -> Vec<PathBuf> {
 }
 
 fn version_of(path: &Path) -> Option<String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = std::process::Command::new(path);
     cmd.arg("--version");
     cmd.env_remove("LJOS_BIN");

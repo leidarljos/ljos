@@ -32,10 +32,12 @@ vissue-core = "0.24.1"
 ljos = { path = "crates/ljos-cli", version = "0.45.4" }
 # [[[end]]]
 
-# `clippy.toml` lists the calls that put a file at a path. Code that
-# names a git hook denies them; everywhere else they are allowed.
+# `clippy.toml` lists the calls that put a file at a path or start a
+# program. Every crate denies them; a call that is not a git hook write
+# carries `#[expect(clippy::disallowed_methods, reason = "..")]` on the
+# statement around it.
 [workspace.lints.clippy]
-disallowed_methods = "allow"
+disallowed_methods = "deny"
 
 # argon2id at the person-key cost (64 MiB, three passes, four lanes) runs
 # seconds per hash unoptimised. Debug and test builds optimise the hash

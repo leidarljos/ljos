@@ -30,6 +30,10 @@ struct Place {
 }
 
 fn git(dir: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -83,8 +87,16 @@ impl Place {
         for dir in [&product, &tracker, &bin, &home, &run] {
             std::fs::create_dir_all(dir).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ljos"), bin.join("ljos")).unwrap();
         git(&product, &["init", "-q", "-b", "main"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(product.join("README"), "a product\n").unwrap();
         git(&product, &["add", "README"]);
         git(&product, &["commit", "-q", "-m", "product"]);
@@ -114,6 +126,10 @@ impl Place {
     }
 
     fn command(&self, program: &str) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(program);
         cmd.current_dir(&self.product)
             .env_clear()
@@ -160,6 +176,10 @@ impl Place {
         let pid = child.id();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(40));
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new("kill").arg(pid.to_string()).status();
         });
         let mut stdin = child.stdin.take().unwrap();

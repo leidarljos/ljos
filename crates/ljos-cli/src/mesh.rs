@@ -255,6 +255,10 @@ fn started(pid: u32) -> Option<String> {
 /// so that needs the pids to wrap within that second.
 #[cfg(not(target_os = "linux"))]
 fn started(pid: u32) -> Option<String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("ps")
         .args(["-o", "lstart=", "-p", &pid.to_string()])
         .stdin(Stdio::null())
@@ -387,6 +391,10 @@ fn bring_up(args: &UpArgs) -> Result<String, Fail> {
         .as_ref()
         .is_some_and(|status| running_as(status, &hostname))
     {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let _ = std::fs::write(dir.join(JOINED), format!("{hostname}\n"));
         let mut notes = Vec::new();
         if let Some(note) = old_format(
@@ -410,6 +418,10 @@ fn bring_up(args: &UpArgs) -> Result<String, Fail> {
     }
     // Detach. Dropping `Child` does not stop the daemon.
     drop(started);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let _ = std::fs::write(dir.join(JOINED), format!("{hostname}\n"));
     let mut notes = Vec::new();
     if let Some(note) = stale {
@@ -634,6 +646,10 @@ fn cap_net_admin() -> bool {
 }
 
 fn tun_usable() -> bool {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let opened = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -726,6 +742,10 @@ fn download(dest: &Path) -> Result<()> {
     let url = format!("https://pkgs.tailscale.com/stable/{}", tarball_name());
     let agent = ureq::AgentBuilder::new().timeout(call_timeout()).build();
     let resp = agent.get(&url).call().with_context(|| url.to_string())?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let mut file =
         std::fs::File::create(dest).with_context(|| format!("write {}", dest.display()))?;
     let mut reader = resp.into_reader().take(TARBALL_MAX_BYTES);
@@ -746,6 +766,10 @@ fn unpack(tarball: &Path, dir: &Path) -> Result<()> {
     let _ = std::fs::remove_dir_all(&tree);
     std::fs::create_dir_all(&tree)?;
     let prefix = format!("tailscale_{TAILSCALE_VERSION}_{TAILSCALE_ARCH}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new("tar");
     cmd.arg("-xzf")
         .arg(tarball)
@@ -761,6 +785,10 @@ fn unpack(tarball: &Path, dir: &Path) -> Result<()> {
         place_bin(&tree.join(&prefix).join(name), &dir.join(name))?;
     }
     let _ = std::fs::remove_dir_all(&tree);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.join(RELEASE), format!("{TAILSCALE_VERSION}\n"))?;
     Ok(())
 }
@@ -773,12 +801,24 @@ fn place_bin(src: &Path, dest: &Path) -> Result<()> {
         bail!("{} is not a regular file", src.display());
     }
     let _ = std::fs::remove_file(dest);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     std::fs::rename(src, dest).with_context(|| format!("install {}", dest.display()))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 
 fn tailscale_cmd(tailscale: &Path, socket: &Path) -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(tailscale);
     cmd.arg(format!("--socket={}", socket.display()));
     // The key file path is not a secret. The bytes stay in the file, so
@@ -837,7 +877,15 @@ fn status_json(tailscale: &Path, socket: &Path) -> Result<Option<Value>> {
 /// state and logs stay in `dir`, and no log leaves for a log server.
 fn start_daemon(tailscaled: &Path, dir: &Path, kernel: bool) -> Result<Child> {
     use std::os::unix::process::CommandExt as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let log = std::fs::File::create(dir.join(LOG))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(tailscaled);
     cmd.arg("--state=mem:")
         .arg(format!("--statedir={}", dir.display()))
@@ -863,6 +911,10 @@ fn start_daemon(tailscaled: &Path, dir: &Path, kernel: bool) -> Result<Child> {
 /// the daemon runs on unlabelled: `down` cannot tell it from a reused pid.
 fn record(dir: &Path, pid: u32, at: Option<String>) -> Result<()> {
     let at = at.map(|at| format!("{at}\n")).unwrap_or_default();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.join(PID), format!("{pid}\n{at}"))?;
     Ok(())
 }
@@ -1208,6 +1260,10 @@ mod tests {
         use std::os::unix::process::CommandExt as _;
         let dir = tempfile::tempdir().unwrap();
         // `cat` on a pipe this test holds runs until it is killed.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = Command::new("cat")
             .stdin(Stdio::piped())
             .process_group(0)

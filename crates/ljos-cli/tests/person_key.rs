@@ -35,6 +35,10 @@ fn a_runner_in_the_tree_may_not_set_or_clear_the_key() {
     let claude = installed.path().join("claude");
     runner::runner_at(&claude);
     for verb in ["set", "clear"] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = ljos(
             Command::new(&claude).args([
                 "-c",
@@ -67,6 +71,10 @@ fn a_mark_on_a_terminal_may_not_set_or_clear_the_key() {
     let home = tempfile::tempdir().unwrap();
     for verb in ["set", "clear"] {
         let term = pty::Pty::open();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(["person-key", verb]);
         ljos(&mut cmd, home.path())
@@ -99,6 +107,10 @@ fn a_mark_on_a_terminal_may_not_set_or_clear_the_key() {
 #[test]
 fn only_a_test_build_has_the_hook_that_moves_the_key() {
     let features = |edges: &str| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO"))
             .args(["tree", "--locked", "--offline", "-p", "ljos", "-i", "ljos"])
             .args(["-e", edges])
@@ -121,6 +133,10 @@ fn only_a_test_build_has_the_hook_that_moves_the_key() {
 #[test]
 fn status_never_prints_the_hash() {
     let home = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = ljos(
         Command::new(env!("CARGO_BIN_EXE_ljos")).args(["person-key", "status"]),
         home.path(),

@@ -15,6 +15,10 @@ use std::process::{Command, Stdio};
 const COLS: usize = 20;
 
 fn hermetic(bin: &str, home: &Path) -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(bin);
     cmd.env_clear()
         .env("PATH", "/usr/bin:/bin")

@@ -39,7 +39,15 @@ fn kept_row(id: &str, text: &str, seat: &str) -> String {
 fn put(dir: &Path, name: &str, body: &str, mode: u32) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join(name);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, body).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
     path
 }
@@ -60,6 +68,10 @@ fn ljos(root: &Path, seat: &str, args: &[&str]) -> String {
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://127.0.0.1:{}", closed.local_addr().unwrap().port());
     drop(closed);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .current_dir(root)
@@ -213,6 +225,10 @@ fn a_kept_file_that_is_a_link_is_not_read() {
         0o600,
     );
     std::fs::create_dir_all(&kept).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     symlink(&outside, kept.join("l.json")).unwrap();
     let said = search(root.path(), "bob");
     assert!(!said.contains("LINKED-KEPT"), "{said}");
@@ -229,6 +245,10 @@ fn a_kept_file_that_is_a_pipe_or_a_device_does_not_stop_the_search() {
         0o644,
     );
     fifo(&kept.join("p.json"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     symlink("/dev/zero", kept.join("z.json")).unwrap();
     let said = search(root.path(), "bob");
     assert!(!said.contains("TIMED OUT"), "{said}");
@@ -249,6 +269,10 @@ fn an_import_index_that_is_a_link_or_a_pipe_is_not_read() {
         0o600,
     );
     std::fs::create_dir_all(imports.join("one")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     symlink(&outside, imports.join("one").join("index.jsonl")).unwrap();
     std::fs::create_dir_all(imports.join("two")).unwrap();
     fifo(&imports.join("two").join("index.jsonl"));
@@ -307,6 +331,10 @@ fn forget_does_not_parse_an_index_that_is_a_link() {
         kept_row("imp:1", "LINKED-INDEX kiln schedule", "bob")
     );
     let outside = put(root.path(), "outside.jsonl", &body, 0o600);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     symlink(&outside, slot.join("index.jsonl")).unwrap();
     let said = ljos(root.path(), "bob", &["forget", "imp:1"]);
     assert!(
@@ -326,6 +354,10 @@ fn forget_does_not_parse_an_index_with_another_name() {
         kept_row("imp:1", "LINKED-INDEX kiln schedule", "bob")
     );
     let outside = put(root.path(), "outside.jsonl", &body, 0o600);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::fs::hard_link(&outside, slot.join("index.jsonl")).unwrap();
     let said = ljos(root.path(), "bob", &["forget", "imp:1"]);
     assert!(!said.contains("TIMED OUT"), "{said}");
@@ -354,6 +386,10 @@ fn forget_retires_a_row_in_a_slot_its_group_can_write() {
         &home.join("imports/bob"),
         &slot,
     ] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o775)).unwrap();
     }
     let said = ljos(root.path(), "bob", &["forget", "imp:1"]);
@@ -414,6 +450,10 @@ fn an_import_index_or_kept_row_with_another_name_is_not_found() {
     let outside = put(root.path(), "outside.jsonl", &body, 0o644);
     let one = home.join("imports").join("bob").join("one");
     std::fs::create_dir_all(&one).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::fs::hard_link(&outside, one.join("index.jsonl")).unwrap();
     let kept = home.join("kept");
     let draft = put(
@@ -423,6 +463,10 @@ fn an_import_index_or_kept_row_with_another_name_is_not_found() {
         0o644,
     );
     std::fs::create_dir_all(&kept).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::fs::hard_link(&draft, kept.join("k.json")).unwrap();
     let said = search(root.path(), "bob");
     assert!(!said.contains("LINKED-INDEX"), "{said}");
@@ -443,6 +487,10 @@ fn forget_does_not_follow_a_link_above_the_slot() {
     let index = put(&elsewhere.join("imp1"), "index.jsonl", &body, 0o644);
     manifest(&elsewhere.join("imp1"));
     std::fs::create_dir_all(home.join("imports")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     symlink(&elsewhere, home.join("imports").join("bob")).unwrap();
     let said = ljos(root.path(), "bob", &["forget", "imp:1"]);
     assert!(!said.contains("TIMED OUT"), "{said}");

@@ -62,6 +62,10 @@ fn an_empty_queue_does_not_call_a_slow_pack() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["proposals"])
         .env_clear()

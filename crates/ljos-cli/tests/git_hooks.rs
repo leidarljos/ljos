@@ -63,6 +63,10 @@ impl Hab {
             git_bare(dir, &["config", "user.email", "rgoswami@ieee.org"]);
             git_bare(dir, &["config", "commit.gpgsign", "false"]);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(hab.repo.join("README.md"), "seed\n").unwrap();
         git_bare(&hab.repo, &["add", "README.md"]);
         git_bare(&hab.repo, &["commit", "-q", "-m", "seed"]);
@@ -80,6 +84,10 @@ impl Hab {
         stdin: Option<&str>,
         extra: &[(&str, &str)],
     ) -> Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(cwd)
@@ -118,6 +126,10 @@ impl Hab {
     }
 
     fn git(&self, dir: &Path, args: &[&str]) -> Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("/usr/bin/git")
             .arg("-C")
             .arg(dir)
@@ -180,6 +192,10 @@ impl Drop for Hab {
 }
 
 fn git_bare(dir: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("/usr/bin/git")
         .arg("-C")
         .arg(dir)
@@ -353,8 +369,16 @@ else:
 "#,
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(dir.join("ljos"), "").unwrap();
     fs::remove_file(dir.join("ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ljos"), dir.join("ljos")).unwrap();
 }
 
@@ -364,6 +388,10 @@ fn head(hab: &Hab, dir: &Path) -> String {
 }
 
 fn commit_file(hab: &Hab, name: &str, message: &str) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(hab.repo.join(name), "x\n").unwrap();
     hab.git(&hab.repo, &["add", name]);
     hab.git(&hab.repo, &["commit", "-q", "-m", message]);
@@ -398,6 +426,10 @@ fn sit(hab: &Hab, id: &str, holder: &str, seat: &str) {
     text.push_str(&format!(
         "* STARTED [#C] held work\n:PROPERTIES:\n:ID:         {id}\n:CLAIMED_BY: {holder}\n:END:\n"
     ));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&issues, text).unwrap();
     let comm = fs::read_to_string("/proc/self/comm").unwrap();
     let node_id = ljos_cli::work_id(id);
@@ -412,9 +444,17 @@ fn sit(hab: &Hab, id: &str, holder: &str, seat: &str) {
         .unwrap()
         .push(node_id.clone().into());
     state["claims"][&node_id] = actor.clone().into();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&state_path, state.to_string()).unwrap();
     fs::create_dir_all(hab.run.join("ljos")).unwrap();
     for key in [id, actor.as_str()] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(
             hab.run.join("ljos").join(format!("hold-{key}")),
             format!(
@@ -444,7 +484,6 @@ fn a_note_with_the_pack_off_leaves_nothing_waiting() {
 }
 
 #[test]
-#[deny(clippy::disallowed_methods)]
 fn uninstall_restores_a_hooks_path_ljos_already_owns() {
     let hab = Hab::new("repo");
     let saved = hab.root.join("saved-hooks");
@@ -513,6 +552,10 @@ fn ljos_seat_ignores_a_seats_file_and_a_raw_conversation_id() {
     let id = "bc-1234abcd-rest";
     let dir = hab.config.join("ljos");
     fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(dir.join("seats.toml"), format!("{id:?} = \"rgoswami\"\n")).unwrap();
     let known = hab.ljos_in(
         &hab.repo,
@@ -549,6 +592,10 @@ fn ljos_seat_and_doctor_keep_an_exported_seat() {
     assert!(said.contains("ljosbot"), "{said}");
     assert!(said.contains("LJOS_SEAT"), "{said}");
     assert!(!said.contains("example-host-sand-sub"), "{said}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let doctor = Command::new("timeout")
         .args(["90", env!("CARGO_BIN_EXE_ljos"), "doctor", "--all"])
         .current_dir(&hab.repo)
@@ -588,6 +635,10 @@ fn seed_issue(hab: &Hab, id: &str, state: &str) {
     org.push_str(&format!(
         "* {state} [#C] seeded {id}\n:PROPERTIES:\n:ID:         {id}\n:END:\n"
     ));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&file, org).unwrap();
 }
 
@@ -598,6 +649,10 @@ fn shellish(path: &Path) -> String {
 fn exec_daemon(dir: &Path) -> PathBuf {
     let src = dir.join("exec-daemon.c");
     let bin = dir.join("exec-daemon");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         &src,
         "#include <unistd.h>\n\
@@ -608,6 +663,10 @@ fn exec_daemon(dir: &Path) -> PathBuf {
          }\n",
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("/usr/bin/cc")
         .args(["-O2", "-o"])
         .arg(&bin)
@@ -632,6 +691,10 @@ fn env_without_seat(hab: &Hab) -> Vec<(String, String)> {
 
 fn under_exec_daemon(hab: &Hab, extra: &[(&str, &str)]) -> Output {
     let daemon = exec_daemon(&hab.bin);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(&daemon);
     cmd.arg(env!("CARGO_BIN_EXE_ljos"))
         .args(["hook", "--git-commit"])
@@ -652,6 +715,10 @@ fn a_git_hook_ignores_a_seats_file_and_the_process_tree() {
     let id = "bc-1234abcd-rest";
     let dir = hab.config.join("ljos");
     fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(dir.join("seats.toml"), format!("{id:?} = \"rgoswami\"\n")).unwrap();
     let out = under_exec_daemon(&hab, &[("CURSOR_CONVERSATION_ID", id)]);
     let err = String::from_utf8_lossy(&out.stderr);
@@ -707,6 +774,10 @@ fn a_subagent_commit_is_not_booked_and_says_why() {
     assert!(said.contains("not booked"), "{said}\n{err}");
     assert!(said.contains("LJOS_SEAT"), "{said}");
     // `ljos_in` asserts success, so the refusal runs the binary directly.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let seat = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("seat")
         .current_dir(&hab.repo)
@@ -751,6 +822,10 @@ fn repeated_subagent_claim_on_parent_is_idempotent() {
 
     // Same subagent retries parent claim three times.
     for _ in 0..3 {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["claim", id])
             .current_dir(&hab.repo)
@@ -800,7 +875,11 @@ fn write_hook(path: &Path, body: &str) {
 }
 
 fn git_status(hab: &Hab, args: &[&str]) -> Output {
-    Command::new("/usr/bin/git")
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new("/usr/bin/git")
         .arg("-C")
         .arg(&hab.repo)
         .args(args)
@@ -808,13 +887,12 @@ fn git_status(hab: &Hab, args: &[&str]) -> Output {
         .env_clear()
         .envs(hab.base_env())
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 /// A repository `pre-commit` that exits 1 still blocks the commit. `commit-msg`
 /// and `pre-push` still run, with the push's stdin.
 #[test]
-#[deny(clippy::disallowed_methods)]
 fn a_repo_pre_commit_still_blocks_and_later_hooks_still_run() {
     let hab = Hab::new("repo");
     install(&hab);
@@ -886,6 +964,10 @@ fn a_skip_list_books_nothing_and_reinstall_keeps_the_config() {
     let path = cfg.join("ljos.toml");
     let repo = hab.repo.canonicalize().unwrap();
     let text = format!("[git_hooks]\nskip = [{:?}]\n", repo.display().to_string());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&path, &text).unwrap();
     install(&hab);
     commit_file(&hab, "skipped.txt", "do not book");
@@ -924,9 +1006,17 @@ fn commit_with(
     extra: &[(&str, &str)],
     drop_seat: bool,
 ) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(hab.repo.join(name), "x\n").unwrap();
     let env = commit_env(hab, extra, drop_seat);
     let run = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("/usr/bin/git")
             .arg("-C")
             .arg(&hab.repo)
@@ -982,6 +1072,10 @@ fn note_lines(log: &str) -> Vec<&str> {
 fn only_post_commit_writes_the_commit_note() {
     let hab = Hab::new("repo");
     install(&hab);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(hab.repo.join("one.txt"), "x\n").unwrap();
     hab.git(&hab.repo, &["add", "one.txt"]);
     hab.git(&hab.repo, &["commit", "-q", "-m", "noted once"]);
@@ -1017,14 +1111,26 @@ fn only_post_commit_writes_the_commit_note() {
 fn a_tracker_commit_is_checked_as_a_tracker_write() {
     let hab = Hab::new("repo");
     install(&hab);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(hab.tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let commit = |name: &str, seat: Option<&str>| -> String {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(hab.tracker.join(name), "x\n").unwrap();
         let env: Vec<(String, String)> = env_without_seat(&hab)
             .into_iter()
             .chain(seat.map(|s| ("LJOS_SEAT".to_string(), s.to_string())))
             .collect();
         let run = |args: &[&str]| {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let out = Command::new("/usr/bin/git")
                 .arg("-C")
                 .arg(&hab.tracker)
@@ -1069,6 +1175,10 @@ fn an_ljos_tracker_commit_is_checked_as_the_seat_that_wrote() {
     seed_issue(&hab, "probe-32fx", "TODO");
     install(&hab);
     fs::create_dir_all(hab.config.join("ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(hab.config.join("ljos/seats.toml"), "seats = [\"saddle\"]\n").unwrap();
     let filed = hab.ljos_in(
         &hab.repo,
@@ -1086,7 +1196,6 @@ fn an_ljos_tracker_commit_is_checked_as_the_seat_that_wrote() {
 /// A `core.hooksPath` the user already set stays put. Install chains the
 /// user's `post-commit`, and uninstall puts that file back.
 #[test]
-#[deny(clippy::disallowed_methods)]
 fn git_hooks_keep_a_user_hooks_path_and_chain_post_commit() {
     let hab = Hab::new("repo");
     let saved = hab.root.join("saved-hooks");
@@ -1172,7 +1281,6 @@ fn git_hooks_keep_a_user_hooks_path_and_chain_post_commit() {
 /// An owned `post-rewrite` keeps stdin and hands that copy to the
 /// repository hook.
 #[test]
-#[deny(clippy::disallowed_methods)]
 fn owned_hooks_pass_post_rewrite_stdin_to_the_repo_hook() {
     let hab = Hab::new("repo");
     install(&hab);
@@ -1201,7 +1309,6 @@ fn owned_hooks_pass_post_rewrite_stdin_to_the_repo_hook() {
 /// `ljos git-hooks status`. The push goes out. Reinstall replaces the
 /// stub. The sitting gate is a label and the push still goes out.
 #[test]
-#[deny(clippy::disallowed_methods)]
 fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
     let hab = Hab::new("repo");
     install(&hab);
@@ -1390,10 +1497,22 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
 fn a_git_hook_notes_only_a_seat_vissue_toml_lists() {
     let hab = Hab::new("repo");
     install(&hab);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(hab.tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let said = |name: &str, message: &str, extra: &[(&str, &str)], drop_seat: bool| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(hab.repo.join(name), "x\n").unwrap();
         let env = commit_env(&hab, extra, drop_seat);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let run = |args: &[&str]| {
             Command::new("/usr/bin/git")
                 .arg("-C")
@@ -1460,6 +1579,10 @@ fn doctor_all_formats_unset_git_hooks_with_backticks_and_so_run() {
     let home = dir.path().join("home");
     std::fs::create_dir_all(home.join(".config/ljos")).unwrap();
     std::fs::create_dir_all(home.join(".local/state/ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["doctor", "--all"])
         .current_dir(&home)

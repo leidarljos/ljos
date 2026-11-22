@@ -46,13 +46,17 @@ impl Drop for Guard {
 }
 
 fn sh_at(dir: &Path, script: &str) -> std::process::Output {
-    Command::new("sh")
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new("sh")
         .current_dir(dir)
         .arg("-c")
         .arg(script)
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
-        .unwrap_or_else(|e| panic!("sh -c in {}: {e}", dir.display()))
+        .unwrap_or_else(|e| panic!("sh -c in {}: {e}", dir.display()));
 }
 
 fn text_of(out: &std::process::Output) -> String {
@@ -75,6 +79,10 @@ fn sh_ok(dir: &Path, script: &str) -> String {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -93,6 +101,10 @@ fn git(dir: &Path, args: &[&str]) -> String {
 
 fn isolate_git(root: &Path) {
     let cfg = root.join("gitconfig");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&cfg, b"").unwrap();
     std::env::set_var("GIT_CONFIG_GLOBAL", &cfg);
     std::env::set_var("GIT_CONFIG_SYSTEM", &cfg);
@@ -116,6 +128,10 @@ fn seat_env(root: &Path) -> (PathBuf, PathBuf) {
     }
     let mut sums = String::new();
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("sha256sum")
             .arg(rel.join(name))
             .output()
@@ -132,6 +148,10 @@ fn seat_env(root: &Path) -> (PathBuf, PathBuf) {
         sums.push_str(name);
         sums.push('\n');
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join("SHA256SUMS"), sums).unwrap();
     isolate_git(root);
     std::env::set_var("HOME", &home);
@@ -228,6 +248,10 @@ fn bare_repo(root: &Path, name: &str) -> (PathBuf, PathBuf) {
 }
 
 fn has_ref(origin: &Path, name: &str) -> bool {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(origin)
@@ -242,6 +266,10 @@ fn has_ref(origin: &Path, name: &str) -> bool {
 /// Every `core.hooksPath` git reads in `dir`, one `origin<TAB>value` line
 /// each. `scope` is `--system`, `--global` or `--local`, or `None` for all.
 fn hooks_paths(dir: &Path, scope: Option<&str>) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -300,7 +328,6 @@ fn warned(line: &str, cwd: &Path) {
 /// no hooks directory. A later run leaves the global and local values a
 /// person already had, byte for byte.
 #[test]
-#[deny(clippy::disallowed_methods)]
 fn cloud_up_sets_no_hooks_path() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -358,7 +385,6 @@ const OLD_SCRIPT: &str =
 
 /// The stub an older `cloud up` wrote over a booked pre-push after moving
 /// that hook to `pre-push.ljos-previous`.
-#[deny(clippy::disallowed_methods)]
 fn chain_stub(booked: &Path, ours: &Path) -> String {
     let canon = ours.join("pre-push");
     format!(
@@ -381,7 +407,6 @@ fn chain_stub(booked: &Path, ours: &Path) -> String {
 /// the script in its local directory. A third run finds the person's own
 /// values at both levels and changes nothing.
 #[test]
-#[deny(clippy::disallowed_methods)]
 fn cloud_up_takes_back_the_hooks_an_earlier_cloud_up_set() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -534,7 +559,6 @@ fn cloud_up_takes_back_the_hooks_an_earlier_cloud_up_set() {
 /// reads, runs with one warning. A push outside the allowlist is still
 /// refused by the same rule name.
 #[test]
-#[deny(clippy::disallowed_methods)]
 fn shell_guard_warns_when_a_line_changes_the_hooks() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -648,6 +672,10 @@ fn the_hook_allows_a_hooks_change_and_prints_the_warning() {
         "tool_input": { "command": "git config --global core.hooksPath /tmp/x" },
         "cwd": repo,
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .current_dir(&repo)
         .arg("hook")
@@ -686,7 +714,6 @@ fn the_hook_allows_a_hooks_change_and_prints_the_warning() {
 /// nothing. The directory follows `XDG_DATA_HOME`, `LJOS_GIT_HOOKS`, and
 /// a global `core.hooksPath` that names `ljos/git-hooks`.
 #[test]
-#[deny(clippy::disallowed_methods)]
 fn a_write_to_the_git_hooks_directory_runs_named_like_a_runner_hook() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -889,7 +916,6 @@ fn send_pack_checks_the_destination_repository() {
     allowed("git push other develop", here);
 }
 
-#[deny(clippy::disallowed_methods)]
 fn hook_push(repo: &Path, local: &str, remote: &str) -> std::process::Output {
     let refs = format!("refs/heads/develop {local} refs/heads/develop {remote}\n");
     let mut child = ljos_cli::program(env!("CARGO_BIN_EXE_ljos"))
@@ -914,7 +940,6 @@ fn hook_push(repo: &Path, local: &str, remote: &str) -> std::process::Output {
 /// tree rebuilt with commit-tree, and a Tests paragraph, are allowed.
 /// A by-line with no blank line before it is refused too.
 #[test]
-#[deny(clippy::disallowed_methods)]
 fn a_commit_message_hook_is_refused_on_push() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -1047,7 +1072,6 @@ fn a_new_branch_omits_a_commit_already_on_a_remote() {
 
 /// A pre-push stdin line that is not a ref update is refused.
 #[test]
-#[deny(clippy::disallowed_methods)]
 fn a_pre_push_line_that_is_not_a_ref_is_refused() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();

@@ -285,6 +285,10 @@ impl Drop for ShutdownFinish {
 pub fn log_line(line: &str) {
     let dir = super::runtime_dir();
     let _ = std::fs::create_dir_all(&dir);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -582,6 +586,10 @@ pub(crate) fn replace_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let mut out = options.open(&tmp)?;
         out.write_all(bytes)?;
         out.sync_all()?;
@@ -589,8 +597,16 @@ pub(crate) fn replace_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     if let Err(err) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(err);
@@ -629,6 +645,10 @@ mod temp_path_tests {
         let real = root.path().join("private/tmp");
         std::fs::create_dir_all(&real).unwrap();
         let link = root.path().join("tmp");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let canon = std::fs::canonicalize(&link).unwrap();
         TEST_TEMP_ROOTS.with(|roots| roots.replace(Some(vec![canon.clone()])));

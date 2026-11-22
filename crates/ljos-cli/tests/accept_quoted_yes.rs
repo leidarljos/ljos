@@ -94,6 +94,10 @@ impl Seat {
         std::fs::create_dir_all(self.state()).unwrap();
         let mut line = serde_json::to_string(&row).unwrap();
         line.push('\n');
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(self.proposals(), line).unwrap();
     }
 
@@ -106,7 +110,11 @@ impl Seat {
 
     fn accept(&self, args: &[&str]) -> Output {
         let home = self.dir.path().join("home");
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .arg("accept")
             .arg(ID)
             .args(args)
@@ -124,7 +132,7 @@ impl Seat {
             // the one an agent accepting its own proposal meets.
             .env("ACMEAGENT_CONVERSATION_ID", "0199a1b2-c3d4-e5f6")
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 

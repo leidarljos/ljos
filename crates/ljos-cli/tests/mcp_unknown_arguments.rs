@@ -19,6 +19,10 @@ fn call_tool_with_env(
     extra_env: &[(&str, &str)],
 ) -> serde_json::Value {
     let home = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -145,6 +149,10 @@ fn issue_and_id_alias_match_on_missing_tracker_refusals() {
 #[test]
 fn issue_and_id_alias_match_on_missing_seat_refusals() {
     let tracker = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.path().join("vissue.toml"), "seats = [\"ada\"]\n").unwrap();
     let root = tracker.path().to_str().unwrap().to_string();
     let issue = call_tool_with_env(
@@ -213,6 +221,10 @@ fn kind_and_issue_kind_together_are_refused_on_ljos_file() {
 }
 
 fn git(root: &Path, config: &Path, args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -249,8 +261,16 @@ fn a_refused_write_leaves_the_tracker_head() {
     let tracker = root.path().join("tracker");
     std::fs::create_dir_all(home.join(".config")).unwrap();
     std::fs::create_dir_all(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"ada\"]\n").unwrap();
     let gitconfig = root.path().join("gitconfig");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&gitconfig, "[core]\n\thooksPath = /dev/null\n").unwrap();
     git(&tracker, &gitconfig, &["init", "-q"]);
     git(
@@ -280,6 +300,10 @@ fn a_refused_write_leaves_the_tracker_head() {
     let vissue = tool_dir("vissue");
     let path = format!("{ljos}:{}:/usr/bin:/bin", vissue.display());
     let call = |arguments: serde_json::Value| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.env_clear()
             .env("PATH", &path)

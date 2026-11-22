@@ -40,6 +40,10 @@ impl Home {
     /// when it was still running at [`DEADLINE`] and had to be killed.
     fn doctor(&self, args: &[&str]) -> Option<(i32, String)> {
         let root = self.root();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .arg("doctor")
             .args(args)
@@ -92,6 +96,10 @@ impl Home {
 }
 
 fn set_mtime(path: &Path, at: SystemTime) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     std::fs::File::options()
         .write(true)
         .open(path)
@@ -177,7 +185,15 @@ fn doctor_leaves_a_fifo_or_a_symlink_at_either_log_as_it_found_it() {
                 mkfifo(&log);
             } else {
                 let target = home.root().join("outside/named.jsonl");
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "writes a file that is not a git hook"
+                )]
                 std::fs::write(&target, row_bytes).expect("target");
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "links a path that is not a git hook"
+                )]
                 std::os::unix::fs::symlink(&target, &log).expect("symlink");
             }
             let before = home.tree();
@@ -208,6 +224,10 @@ fn doctor_warns_about_an_aged_torn_bypass_log() {
     let home = Home::new();
     let mut torn = BYPASS_ROW.to_vec();
     torn.extend_from_slice(br#"{"kind":"switch","command":"torn"#);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(home.bypass(), &torn).expect("bypass log");
     set_mtime(
         &home.bypass(),
@@ -248,6 +268,10 @@ fn doctor_keeps_every_byte_of_the_note_queue() {
         ("ahead", ahead(), "no"),
     ] {
         let home = Home::new();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(home.queue(), KEPT_THEN_UNFINISHED).expect("queue");
         set_mtime(&home.queue(), at);
         let before = home.tree();
@@ -276,6 +300,10 @@ fn doctor_names_a_cut_row_with_its_newline_damaged() {
             };
             let mut bytes = first.to_vec();
             bytes.extend_from_slice(b"{\"issue\":\"ljos-new\",\"te\n");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&log, &bytes).expect("log");
             let before = home.tree();
             let (_, out) = home.doctor(&[]).expect("doctor hung");
@@ -302,6 +330,10 @@ fn doctor_does_not_read_a_log_past_its_limit() {
         } else {
             home.queue()
         };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::File::create(&log)
             .and_then(|file| file.set_len(limit + 1))
             .expect("sparse log");
@@ -324,10 +356,18 @@ fn doctor_does_not_read_a_log_past_its_limit() {
 #[test]
 fn doctor_names_queue_bytes_a_send_set_aside() {
     let home = Home::new();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(home.queue(), QUEUE_ROW).expect("queue");
     let aside = home
         .root()
         .join("state/ljos/note-queue.jsonl.2026-10-22.damaged");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&aside, b"{\"issue\":\"ljos-new\",\"te\n").expect("set aside");
     let before = home.tree();
     let (_, out) = home.doctor(&[]).expect("doctor hung");
@@ -352,8 +392,16 @@ fn doctor_says_busy_while_the_note_queue_lock_is_held() {
         ("ahead", ahead(), "no\tnote queue\t"),
     ] {
         let home = Home::new();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(home.queue(), KEPT_THEN_UNFINISHED).expect("queue");
         set_mtime(&home.queue(), at);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let lock = std::fs::File::create(home.root().join("state/ljos/note-queue.lock"))
             .expect("lock file");
         // SAFETY: flock on a descriptor this test keeps open to the end.

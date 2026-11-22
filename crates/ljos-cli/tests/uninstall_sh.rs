@@ -7,6 +7,10 @@ use std::process::{Command, Output};
 
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, text).unwrap();
 }
 
@@ -33,7 +37,6 @@ fn read(path: &Path) -> String {
 /// A home as a seat leaves it: the editor harness and the terminal harness hooks beside other
 /// hooks, MCP entries, a skill, the git hooks, and a bin dir where the
 /// `ljos` binary is gone and `ljos-mcp` remains.
-#[deny(clippy::disallowed_methods)]
 fn hand_deleted_home() -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
@@ -92,7 +95,11 @@ fn hand_deleted_home() -> tempfile::TempDir {
 }
 
 fn uninstall(home: &Path, args: &[&str]) -> Output {
-    Command::new("sh")
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new("sh")
         .arg(script())
         .args(args)
         .env_clear()
@@ -102,10 +109,14 @@ fn uninstall(home: &Path, args: &[&str]) -> Output {
         .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 fn hooks_path(home: &Path) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .args(["config", "--global", "--get", "core.hooksPath"])
         .env_clear()
@@ -198,6 +209,10 @@ fn the_script_cleans_a_home_whose_ljos_is_gone() {
         stub.contains("ljos was uninstalled"),
         "the path the hooks named gets the stub: {stub}"
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let answer = Command::new("sh")
         .arg(bin.join("ljos"))
         .arg("hook")
@@ -270,6 +285,10 @@ fn the_script_hands_over_to_a_ljos_that_knows_uninstall() {
     let bin = home.join(".local/bin");
     std::fs::create_dir_all(&bin).unwrap();
     ljos_cli::copy_executable(Path::new(env!("CARGO_BIN_EXE_ljos")), &bin.join("ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(script())
         .arg("--dry-run")

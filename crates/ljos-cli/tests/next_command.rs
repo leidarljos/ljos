@@ -118,6 +118,10 @@ fn seat(url: &str) -> Seat {
 
 fn run(seat: &Seat, args: &[&str]) -> (i32, String, String) {
     let home = seat.home.path();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()

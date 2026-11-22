@@ -37,6 +37,10 @@ fn sit(shape: &str) -> std::process::Output {
     for d in [&home, &tracker.join("Software"), &bin, &run] {
         std::fs::create_dir_all(d).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.join(".gitconfig"),
         "[user]\n\tname = Your Name\n\temail = you@example.com\n",
@@ -63,6 +67,10 @@ fn sit(shape: &str) -> std::process::Output {
         "write the note",
     ];
     let shaped = terminal::shape(shape, env!("CARGO_BIN_EXE_ljos"), &args);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(if shape == "terminal" {
         terminal::PYTHON
     } else {

@@ -51,6 +51,10 @@ impl Seat {
 
     fn ljos(&self, args: &[&str]) -> String {
         let home = self.root.path().join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
@@ -96,6 +100,10 @@ impl Seat {
         if let Some(seat) = seat {
             row["seat"] = serde_json::Value::String(seat.to_string());
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)

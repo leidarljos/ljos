@@ -79,7 +79,6 @@ impl OwnedPlace {
 }
 
 impl Journal {
-    #[deny(clippy::disallowed_methods)]
     pub(crate) fn begin(
         file: &Path,
         runner: &str,
@@ -108,7 +107,6 @@ impl Journal {
         })
     }
 
-    #[deny(clippy::disallowed_methods)]
     pub(crate) fn finish(mut self) -> Result<()> {
         for path in candidate_paths(
             &self.file,
@@ -194,7 +192,15 @@ fn write_manifest(manifest: &Manifest) -> Result<()> {
     let mut text = serde_json::to_string_pretty(manifest)?;
     text.push('\n');
     let temporary = path.with_extension("json.tmp");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&temporary, text)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     fs::rename(temporary, path)?;
     Ok(())
 }
@@ -204,6 +210,10 @@ fn store_backup(bytes: &[u8]) -> Result<String> {
     let path = backup_dir().join(&name);
     if !path.is_file() {
         fs::create_dir_all(backup_dir())?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(&path, bytes)?;
     }
     Ok(name)
@@ -276,7 +286,6 @@ fn add_tree_files(paths: &mut BTreeSet<PathBuf>, dir: &Path, predicate: impl Fn(
     }
 }
 
-#[deny(clippy::disallowed_methods)]
 fn candidate_paths(
     file: &Path,
     runner: &str,
@@ -682,6 +691,10 @@ fn clean_shipped_shape(path: &Path, runner: &str, dry: bool, steps: &mut Vec<Ste
         fs::remove_file(path)?;
         remove_empty_parents(path.parent(), home_path().as_deref());
     } else {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(path, out)?;
     }
     steps.push(removed(runner, path));
@@ -889,6 +902,10 @@ fn clean_json_pointer(
         } else {
             let mut out = serde_json::to_string_pretty(&root)?;
             out.push('\n');
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             fs::write(path, out)?;
         }
         steps.push(removed(runner, path));
@@ -961,6 +978,10 @@ fn clean_config_marker(
             fs::remove_file(path)?;
             remove_empty_parents(path.parent(), home_path().as_deref());
         } else {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             fs::write(path, out)?;
         }
         steps.push(removed(runner, path));
@@ -1002,6 +1023,10 @@ fn clean_hooks(path: &Path, harness: &Harness, dry: bool, steps: &mut Vec<Step>)
     } else {
         let mut out = serde_json::to_string_pretty(&root)?;
         out.push('\n');
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(path, out)?;
         steps.push(removed(&harness.name, path));
     }
@@ -1114,6 +1139,10 @@ fn clean_env(path: &Path, harness: &Harness, dry: bool, steps: &mut Vec<Step>) -
     if kept.iter().all(|line| line.trim().is_empty()) {
         let _ = fs::remove_file(path);
     } else {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(path, kept.join("\n") + "\n")?;
     }
     let _ = fs::remove_file(mark);
@@ -1145,6 +1174,10 @@ fn legacy_aider(dry: bool, steps: &mut Vec<Step>) -> Result<()> {
             remove_empty_parents(config.parent(), home_path().as_deref());
             steps.push(removed("aider", &config));
         } else {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             fs::write(&config, out)?;
             steps.push(removed("aider", &config));
         }
@@ -1251,8 +1284,9 @@ mod tests {
     #[test]
     fn restoring_a_non_executable_hook_over_a_symlink_leaves_the_target() {
         use std::os::unix::fs::PermissionsExt;
-        let mode_of =
-            |path: &Path| fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777;
+        let mode_of = |path: &Path| {
+            fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+        };
         let dir = tempfile::tempdir().unwrap();
         let victim = dir.path().join("victim");
         crate::install_executable_mode(&victim, "SECRET\n", 0o700).unwrap();

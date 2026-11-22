@@ -17,6 +17,10 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(root: &Path, config: &Path, args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -46,6 +50,10 @@ fn two_seats_keep_their_notes_and_a_seatless_write_is_refused() {
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&run).unwrap();
     let issues = tracker.join("Software/probe/issues.org");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         &issues,
         "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
@@ -58,8 +66,16 @@ fn two_seats_keep_their_notes_and_a_seatless_write_is_refused() {
         &format!("#!/bin/sh\nif [ \"$1\" = note ]; then printf '%s\\n' \"- $3\" >> '{board}'; fi\nexit 0\n"),
     );
     script(&bin, "claimdag", "#!/bin/sh\nexit 1\n");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ljos"), bin.join("ljos")).unwrap();
     let gitconfig = root.path().join("gitconfig");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&gitconfig, "[core]\n\thooksPath = /dev/null\n").unwrap();
     git(&tracker, &gitconfig, &["init", "-q"]);
     git(
@@ -78,6 +94,10 @@ fn two_seats_keep_their_notes_and_a_seatless_write_is_refused() {
         &["config", "core.hooksPath", "/dev/null"],
     );
     git(&tracker, &gitconfig, &["add", "."]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let seeded = Command::new("git")
         .arg("-C")
         .arg(&tracker)
@@ -96,6 +116,10 @@ fn two_seats_keep_their_notes_and_a_seatless_write_is_refused() {
         String::from_utf8_lossy(&seeded.stderr)
     );
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .current_dir(&tracker)
         .env_clear()
@@ -126,6 +150,10 @@ fn two_seats_keep_their_notes_and_a_seatless_write_is_refused() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(60));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let note = |id: u64, seat: Option<&str>, text: &str| {

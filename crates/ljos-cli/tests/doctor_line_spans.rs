@@ -42,6 +42,10 @@ fn no_text_closes_its_code_span_on_the_doctor_name() {
 #[test]
 fn the_help_for_search_and_remember_has_whole_code_spans() {
     for command in ["search", "remember"] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args([command, "--help"])
             .env_clear()

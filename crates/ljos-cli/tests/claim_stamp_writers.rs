@@ -51,6 +51,10 @@ impl Board {
 - Claimed by fortran [2026-11-17 Tue 18:14]\n\
 :END:\n"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("Software/probe/issues.org"), tracker).unwrap();
         Self {
             _dir: dir,
@@ -64,7 +68,11 @@ impl Board {
 
     fn ljos(&self, args: &[&str]) -> Output {
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.root.parent().unwrap())
             .env_clear()
@@ -82,7 +90,7 @@ impl Board {
             .env("LJOS_ASK_PACK", "off")
             .env("LJOS_USER_RULES_SYNC", "off")
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn board_text(&self) -> String {

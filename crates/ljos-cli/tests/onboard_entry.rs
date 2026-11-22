@@ -69,7 +69,11 @@ impl Seat {
         // temporary home, and the onboard lines here are the memory-off ones.
         // TMPDIR is the temp dir the home was made in, so the home is a
         // temporary one wherever the process TMPDIR is.
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(home)
             .env_clear()
@@ -88,7 +92,7 @@ impl Seat {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 

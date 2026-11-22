@@ -69,6 +69,10 @@ pub fn run(opts: HudLaunch) -> i32 {
         say!("{}", missing_bin_message());
         return 127;
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = std::process::Command::new(&bin);
     if opts.foreground {
         cmd.arg("--foreground");

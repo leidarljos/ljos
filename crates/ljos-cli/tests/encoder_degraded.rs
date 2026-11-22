@@ -100,7 +100,11 @@ fn executable(path: &Path, text: &str) {
 }
 
 fn run(home: &Path, path: &str, port: &str, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
         .env("HOME", home)
@@ -114,7 +118,7 @@ fn run(home: &Path, path: &str, port: &str, args: &[&str]) -> std::process::Outp
         .env("PACKSET_TIMEOUT_MS", "2000")
         .env("LJOS_NO_AUTOSTART", "1")
         .output()
-        .expect("ljos")
+        .expect("ljos");
 }
 
 #[test]

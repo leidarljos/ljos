@@ -315,6 +315,10 @@ fn key_by_command(judge: &str, argv: &[String]) -> Option<String> {
         return Some(key);
     }
     let (prog, args) = argv.split_first()?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = std::process::Command::new(prog);
     cmd.args(args);
     let out = crate::output_within(cmd, None, std::time::Duration::from_secs(3)).ok()?;
@@ -322,6 +326,10 @@ fn key_by_command(judge: &str, argv: &[String]) -> Option<String> {
         return None;
     }
     let key = key_from(&String::from_utf8_lossy(&out.stdout))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     if let Some(path) = cache {
         let _ = std::fs::create_dir_all(path.parent()?);
         if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -1102,6 +1110,10 @@ fn command_post(cfg: &Judge, body: &Value) -> Option<Value> {
     let argv = cfg.command.as_deref()?;
     let (prog, args) = argv.split_first()?;
     let secs = (cfg.budget_ms.div_ceil(1000)).max(1);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = std::process::Command::new(prog);
     cmd.args(args).env("LJOS_JUDGE", "1");
     let text = body.to_string();
@@ -1404,6 +1416,10 @@ fn ensure_cache_dir(dir: &Path) -> Option<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
     }
     Some(())
@@ -1451,6 +1467,10 @@ fn keep_in(cache: Option<&Path>, request: &str, reply: &Value) {
     }
     let path = dir.join(&hash);
     let entry = serde_json::json!({"hash": hash, "reply": reply});
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -1464,11 +1484,19 @@ fn keep_in(cache: Option<&Path>, request: &str, reply: &Value) {
         {
             let _ = f.write_all(entry.to_string().as_bytes());
             use std::os::unix::fs::PermissionsExt;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "sets the mode of a path that is not a git hook"
+            )]
             let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         }
     }
     #[cfg(not(unix))]
     {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let _ = std::fs::write(path, entry.to_string());
     }
 }
@@ -1765,6 +1793,10 @@ fn update_cost_in(state: Option<&Path>, mutate: impl FnOnce(&mut BTreeMap<String
     let _lock = {
         use std::os::unix::fs::OpenOptionsExt as _;
         use std::os::unix::io::AsRawFd as _;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let Ok(file) = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -1802,16 +1834,28 @@ fn update_cost_in(state: Option<&Path>, mutate: impl FnOnce(&mut BTreeMap<String
     #[cfg(unix)]
     let wrote = {
         use std::os::unix::fs::OpenOptionsExt as _;
-        std::fs::OpenOptions::new()
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
+        let opened = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&tmp)
-            .and_then(|mut f| f.write_all(text.as_bytes()))
-            .is_ok()
+            .and_then(|mut f| f.write_all(text.as_bytes()));
+        opened.is_ok()
     };
     #[cfg(not(unix))]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let wrote = std::fs::write(&tmp, text.as_bytes()).is_ok();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     if !wrote || std::fs::rename(&tmp, &path).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -1983,13 +2027,25 @@ mod tests {
         assert!(config().is_none(), "no file, no call");
         std::fs::create_dir_all(dir.path().join("ljos")).unwrap();
         let key = dir.path().join("key");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&key, "sk-or-test\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.path().join("ljos/jev.toml"),
             format!("enabled = false\nkey_file = \"{}\"\n", key.display()),
         )
         .unwrap();
         assert!(config().is_none(), "a file that says off is off");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.path().join("ljos/jev.toml"),
             format!("enabled = true\nkey_file = \"{}\"\n", key.display()),
@@ -2402,6 +2458,10 @@ mod tests {
             std::env::set_var("XDG_CACHE_HOME", cache.path());
         }
         std::fs::create_dir_all(cfg_dir.path().join("ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             cfg_dir.path().join("ljos/jev.toml"),
             "enabled = true\nbackend = \"command\"\nmodel = \"local-1\"\ncommand = [\"sh\", \"-c\", \
@@ -2424,6 +2484,10 @@ mod tests {
         assert!(log.contains("\"model\":\"local-1\""), "{log}");
         assert!(log.contains("\"status\":\"ok\""), "{log}");
         assert!(log.contains("latency_ms"), "{log}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             cfg_dir.path().join("ljos/jev.toml"),
             "enabled = true\nbackend = \"command\"\ncommand = [\"sh\", \"-c\", \"exit 1\"]\n",
@@ -2451,6 +2515,10 @@ mod tests {
         let mut bytes =
             b"{\"kind\":\"hook\",\"n\":1}\nnot json\n{\"kind\":\"hook\",\"n\":2}\n".to_vec();
         bytes.extend_from_slice(b"{\"kind\":\"hook\",\"prompt\":\"caf\xc3");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("jev-log.jsonl"), bytes).unwrap();
         let rows = read_log();
         assert_eq!(rows.len(), 2, "{rows:?}");
