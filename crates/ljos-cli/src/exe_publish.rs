@@ -457,9 +457,22 @@ mod tests {
     const IN_PROCESS_EXECUTABLES: &[(&str, &str)] = &[];
 
     /// Writes in a function that names a git hook whose file name the hook
-    /// scan cannot see: file under `crates/`, function, target, and why it
-    /// is not a hook.
+    /// scan cannot see, or that put back a hook this process never wrote:
+    /// file under `crates/`, function, target, and why it is not a hook
+    /// publish.
     const NOT_A_HOOK: &[(&str, &str, &str, &str)] = &[
+        (
+            "ljos-cli/src/cloud_hook.rs",
+            "unchain",
+            "&hook",
+            "renames back the user's hook an earlier cloud up moved aside; no descriptor here wrote it",
+        ),
+        (
+            "ljos-cli/src/git_hooks.rs",
+            "chain_through_link",
+            "&hook",
+            "a test symlink to a target hook_at publishes",
+        ),
         (
             "ljos-cli/src/lib.rs",
             "finish",
@@ -655,6 +668,40 @@ fn dir(path: &Path) {
 "#;
         assert!(write_then_exec(fine).is_empty());
         assert!(hook_lines(fine).is_empty());
+    }
+
+    #[test]
+    fn the_site_scan_names_a_hook_put_by_rename_or_link() {
+        let put = r#"
+fn put(dir: &Path, tmp: &Path) {
+    std::fs::rename(tmp, dir.join("pre-push")).unwrap();
+    std::fs::hard_link(tmp, dir.join("pre-commit")).unwrap();
+    std::os::unix::fs::symlink(tmp, dir.join("post-commit")).unwrap();
+    std::fs::rename(tmp, dir.join("notes.txt")).unwrap();
+}
+"#;
+        assert_eq!(hook_lines(put), vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn the_site_scan_names_a_rename_or_link_by_a_used_name() {
+        let aliased = r#"
+use std::fs::{hard_link as link, rename as mv};
+use std::os::unix::fs as unix_fs;
+use std::os::unix::fs::symlink;
+use std::fs as files;
+fn put(dir: &Path, tmp: &Path) {
+    mv(tmp, dir.join("pre-push")).unwrap();
+    link(tmp, dir.join("pre-commit")).unwrap();
+    symlink(tmp, dir.join("post-commit")).unwrap();
+    unix_fs::symlink(tmp, dir.join("pre-push")).unwrap();
+    files::rename(tmp, dir.join("pre-commit")).unwrap();
+    rename(tmp, dir.join("post-commit")).unwrap();
+    mv(dir.join("pre-push"), dir.join("notes.txt")).unwrap();
+    let _ = std::fs::symlink_metadata(dir.join("pre-push"));
+}
+"#;
+        assert_eq!(hook_lines(aliased), vec![7, 8, 9, 10, 11, 12]);
     }
 
     #[test]
@@ -963,14 +1010,99 @@ fn put(dir: &Path) {
         lines
     }
 
-    /// Calls that open a path for writing in this process, with the
-    /// argument that names the path.
+    /// Calls that open a path for writing in this process, or put a file
+    /// at a path by rename or link, with the argument that names the path.
+    /// Each also matches its `std::`-qualified form.
     const RAW_WRITES: &[(&str, usize)] = &[
         ("fs::write(", 0),
         ("fs::copy(", 1),
+        ("fs::rename(", 1),
+        ("fs::hard_link(", 1),
+        ("fs::soft_link(", 1),
+        ("fs::symlink(", 1),
+        ("fs::symlink_file(", 1),
+        ("fs::symlink_dir(", 1),
         ("File::create(", 0),
         ("File::create_new(", 0),
     ];
+
+    /// The `fs::` calls of `RAW_WRITES` by their bare name, as a `use`
+    /// brings them in.
+    const BARE_WRITES: &[(&str, usize)] = &[
+        ("write", 0),
+        ("copy", 1),
+        ("rename", 1),
+        ("hard_link", 1),
+        ("soft_link", 1),
+        ("symlink", 1),
+        ("symlink_file", 1),
+        ("symlink_dir", 1),
+    ];
+
+    /// The write calls `code` can make, each with the argument that names
+    /// the path and whether it is a bare name: `RAW_WRITES`, `BARE_WRITES`,
+    /// and any of those, or `fs` or `File`, renamed by `use .. as ..`.
+    fn write_apis(code: &str) -> Vec<(String, usize, bool)> {
+        let mut out: Vec<_> = RAW_WRITES
+            .iter()
+            .map(|&(api, n)| (api.to_string(), n, false))
+            .chain(
+                BARE_WRITES
+                    .iter()
+                    .map(|&(name, n)| (format!("{name}("), n, true)),
+            )
+            .collect();
+        for at in word_uses(code, "use") {
+            let Some(end) = statement_end(code, at) else {
+                continue;
+            };
+            let mut prefixes = vec![String::new()];
+            let mut part = String::new();
+            let mut items = Vec::new();
+            for c in code[at + "use".len()..end].chars().chain([',']) {
+                let prefix = prefixes.last().cloned().unwrap_or_default();
+                match c {
+                    '{' => {
+                        prefixes.push(format!("{prefix}{}", part.trim()));
+                        part.clear();
+                    }
+                    ',' | '}' => {
+                        items.push((prefix, std::mem::take(&mut part)));
+                        if c == '}' && prefixes.len() > 1 {
+                            prefixes.pop();
+                        }
+                    }
+                    _ => part.push(c),
+                }
+            }
+            for (prefix, item) in items {
+                let words: Vec<&str> = item.split_whitespace().collect();
+                let Some(pos) = words.iter().position(|w| *w == "as") else {
+                    continue;
+                };
+                let Some(&alias) = words.get(pos + 1) else {
+                    continue;
+                };
+                if alias == "_" || !alias.chars().all(is_ident) {
+                    continue;
+                }
+                let path = format!("{prefix}{}", words[..pos].concat());
+                let last = path.rsplit("::").next().unwrap_or("");
+                if path.contains("fs::") {
+                    if let Some(&(_, n)) = BARE_WRITES.iter().find(|(name, _)| *name == last) {
+                        out.push((format!("{alias}("), n, true));
+                    }
+                }
+                for &(api, n) in RAW_WRITES {
+                    let (module, call) = api.split_once("::").unwrap_or((api, ""));
+                    if module == last {
+                        out.push((format!("{alias}::{call}"), n, false));
+                    }
+                }
+            }
+        }
+        out
+    }
 
     struct Source<'a> {
         path: &'a str,
@@ -979,6 +1111,8 @@ fn put(dir: &Path) {
         code: String,
         literals: Vec<(usize, usize)>,
         lines: Vec<usize>,
+        /// `write_apis` of `code`.
+        writes: Vec<(String, usize, bool)>,
     }
 
     struct Func {
@@ -1038,12 +1172,14 @@ fn put(dir: &Path) {
                 let lines = std::iter::once(0)
                     .chain(text.match_indices('\n').map(|(at, _)| at + 1))
                     .collect();
+                let writes = write_apis(&code);
                 Source {
                     path,
                     text,
                     code,
                     literals,
                     lines,
+                    writes,
                 }
             })
             .collect();
@@ -1712,19 +1848,15 @@ fn put(dir: &Path) {
                 out.push((span, line_of(src, open)));
             }
         };
-        for (api, n) in RAW_WRITES {
-            for (at, _) in body.match_indices(api) {
-                take(f.body.0 + at + api.len() - 1, *n);
-            }
-        }
-        for (api, n) in [("write(", 0), ("copy(", 1)] {
-            for (at, _) in body.match_indices(api) {
+        for (api, n, bare) in &src.writes {
+            for (at, _) in body.match_indices(api.as_str()) {
                 let before = &body[..at];
                 let lead = before.chars().next_back();
-                if !lead.is_some_and(|c| is_ident(c) || matches!(c, '.' | ':'))
-                    && !ends_with_word(before.trim_end(), "fn")
+                if !bare
+                    || (!lead.is_some_and(|c| is_ident(c) || matches!(c, '.' | ':'))
+                        && !ends_with_word(before.trim_end(), "fn"))
                 {
-                    take(f.body.0 + at + api.len() - 1, n);
+                    take(f.body.0 + at + api.len() - 1, *n);
                 }
             }
         }
