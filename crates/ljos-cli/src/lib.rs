@@ -49480,6 +49480,39 @@ pub(crate) fn with_wall_bounded_issues_lock<R>(
     write()
 }
 
+/// [`with_wall_bounded_issues_lock`] for several files at once, locked in
+/// sorted order and each file once, as `vissue_core::store::with_issues_locks`
+/// takes them.
+pub(crate) fn with_wall_bounded_issues_locks<R>(
+    paths: &[&Path],
+    write: impl FnOnce() -> vissue_core::Result<R>,
+) -> vissue_core::Result<R> {
+    let Some(deadline) = wall_deadline() else {
+        return vissue_core::store::with_issues_locks(paths, write);
+    };
+    let mut ordered: Vec<&Path> = paths.to_vec();
+    ordered.sort();
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut held = Vec::with_capacity(ordered.len());
+    for path in ordered {
+        let identity = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if seen.contains(&identity) {
+            continue;
+        }
+        seen.push(identity);
+        let lock_path = issues_lock_path(path);
+        let Some(lock) = CommitLock::acquire_by(&lock_path, deadline) else {
+            return Err(anyhow::anyhow!(
+                "another tracker writer held {} past the active wall budget",
+                lock_path.display()
+            )
+            .into());
+        };
+        held.push(lock);
+    }
+    write()
+}
+
 /// `git log` subjects on the tracker that name a seat, optionally one seat.
 ///
 /// # Errors
@@ -49743,7 +49776,7 @@ pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
 }
 
 fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
-    let git = |head: &[&str]| {
+    let git_on = |head: &[&str], paths: &[&str]| {
         let mut cmd = git_cmd();
         cmd.arg("-C")
             .arg(dir)
@@ -49761,14 +49794,39 @@ fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         seat_git_child(&mut cmd);
         bounded_output(&mut cmd)
     };
+    let git = |head: &[&str]| git_on(head, paths);
     // `Err` is a busy index, with what git said.
     let attempt = || -> Result<PathCommit, String> {
-        let added = match git(&["add"]) {
-            Ok(out) => out,
-            Err(e) => return Ok(PathCommit::Refused(format!("git: {e}"))),
+        // A plain add exits 1 for a tracked file whose directory an ignore
+        // rule names, after staging it. `add -u` stages tracked files and
+        // reads no ignore rule.
+        let tracked: Vec<String> = match git(&["ls-files", "-z"]) {
+            Ok(out) if out.status.success() => out
+                .stdout
+                .split(|&b| b == 0)
+                .filter(|name| !name.is_empty())
+                .map(|name| String::from_utf8_lossy(name).into_owned())
+                .collect(),
+            _ => Vec::new(),
         };
-        if !added.status.success() {
-            return refused_or_busy(dir, &added);
+        let (known, new): (Vec<&str>, Vec<&str>) = paths
+            .iter()
+            .partition(|path| tracked.iter().any(|name| name == *path));
+        let mut adds: Vec<(&[&str], &[&str])> = Vec::new();
+        if !known.is_empty() {
+            adds.push((&["add", "-u"], &known));
+        }
+        if !new.is_empty() || known.is_empty() {
+            adds.push((&["add"], &new));
+        }
+        for (head, part) in adds {
+            let added = match git_on(head, part) {
+                Ok(out) => out,
+                Err(e) => return Ok(PathCommit::Refused(format!("git: {e}"))),
+            };
+            if !added.status.success() {
+                return refused_or_busy(dir, &added);
+            }
         }
         if git(&["diff", "--cached", "--quiet"]).is_ok_and(|o| o.status.success()) {
             return Ok(PathCommit::AlreadyIn);
@@ -50578,9 +50636,11 @@ pub fn persist_tracker_many(ids: &[String], verb: &str) -> String {
 }
 
 /// [`persist_tracker_paths`] for several writes to the one file at
-/// `path`, in one commit. `others` are files among `also` whose writes
-/// are stamped with `path`'s: after the checkout lock is held and before
-/// any issues lock, and only once nothing refuses the commit.
+/// `path`, in one commit. `others` are the first files of `also`, in the
+/// same order, whose writes get their logbook lines with `path`'s: while
+/// the checkout lock is held, each line under its file's issues lock taken
+/// inside it, and only once nothing refuses the commit. A file the
+/// checkout ignores, `path` included, is not committed, so it gets no line.
 fn persist_tracker_writes(
     path: &Path,
     writes: &[(String, String)],
@@ -50645,67 +50705,61 @@ fn persist_tracker_writes(
         note_deferred_paths(dir, &refs);
         return tracker_lock_busy(dir, lock_wait);
     };
+    // The commit takes exactly the files `git add` takes: a tracked file,
+    // even under an ignored directory, and an untracked one no rule
+    // ignores once `!` negations are read. `check-ignore -q` without `-v`
+    // is that answer; `-v` exits 0 on a matching negation too.
     let mut live: Vec<&str> = Vec::new();
     let mut ignored_note = String::new();
-    if also.is_empty() {
-        live.push(specs[0].as_str());
-    } else {
-        for spec in &specs {
-            match git(&["check-ignore", "-v", "--", spec]) {
-                Ok(ignored) if ignored.status.success() => {
-                    ignored_note.push_str(&format!(
-                        "tracker git: {spec} is ignored ({}), so the write stays in this worktree\n",
-                        first_line(&ignored.stdout)
-                    ));
-                }
-                _ => live.push(spec.as_str()),
+    for spec in &specs {
+        match git(&["check-ignore", "-q", "--", spec]) {
+            Ok(ignored) if ignored.status.success() => {
+                let rule = git(&["check-ignore", "-v", "--", spec])
+                    .map(|why| first_line(&why.stdout))
+                    .unwrap_or_default();
+                let name = if also.is_empty() {
+                    path.display().to_string()
+                } else {
+                    spec.clone()
+                };
+                ignored_note.push_str(&format!(
+                    "tracker git: {name} is ignored ({rule}), so the write stays in this worktree\n"
+                ));
             }
+            _ => live.push(spec.as_str()),
         }
-        if live.is_empty() {
-            return if ignored_note.is_empty() {
-                "tracker git: nothing to commit\n".into()
-            } else {
-                ignored_note
-            };
+    }
+    let nothing = |note: String| {
+        if note.is_empty() {
+            "tracker git: nothing to commit\n".to_string()
+        } else {
+            note
         }
+    };
+    if live.is_empty() {
+        return nothing(ignored_note);
     }
     let mut status_args = vec!["status", "--porcelain", "--"];
     status_args.extend(live.iter().copied());
     match git(&status_args) {
-        Ok(o) if o.status.success() && o.stdout.is_empty() => {
-            // An ignored file has an empty status, the same shape as a
-            // clean tracked file. The ignore rule is what keeps the write
-            // on this machine. A clean file does not take another seat's
-            // deferred paths with it; those wait for the write that named
-            // them, or for a flush that names no path.
-            if also.is_empty() {
-                match git(&["check-ignore", "-v", "--", live[0]]) {
-                    Ok(ignored) if ignored.status.success() => {
-                        return format!(
-                            "tracker git: {} is ignored ({}), so the write stays in this worktree\n",
-                            path.display(),
-                            first_line(&ignored.stdout)
-                        );
-                    }
-                    _ => return "tracker git: nothing to commit\n".into(),
-                }
-            } else if ignored_note.is_empty() {
-                return "tracker git: nothing to commit\n".into();
-            } else {
-                return ignored_note;
-            }
-        }
+        // A clean file does not take another seat's deferred paths with
+        // it; those wait for the write that named them, or for a flush
+        // that names no path.
+        Ok(o) if o.status.success() && o.stdout.is_empty() => return nothing(ignored_note),
         Ok(o) if o.status.success() => {}
         Ok(o) => return format!("tracker git: {}\n", tracker_git_said(dir, &o)),
         Err(e) => return format!("tracker git: {e}\n"),
     }
     let seat = tracker_seat();
-    for (issue, verb) in writes {
-        stamp_seat_logbook(path, issue, verb, &seat);
-    }
-    for (other, list) in others {
+    let rest = others
+        .iter()
+        .map(|(other, list)| (other.as_path(), list.as_slice()));
+    for ((file, list), spec) in std::iter::once((path, writes)).chain(rest).zip(&specs) {
+        if !live.contains(&spec.as_str()) {
+            continue;
+        }
         for (issue, verb) in list {
-            stamp_seat_logbook(other, issue, verb, &seat);
+            stamp_seat_logbook(file, issue, verb, &seat);
         }
     }
     let named: Vec<String> = writes

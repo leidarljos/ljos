@@ -136,6 +136,30 @@ fn a_bad_row_leaves_the_tracker_unchanged() {
 }
 
 #[test]
+fn a_refused_first_row_says_nothing_was_written_and_logs_no_write() {
+    let world = World::new();
+    let events = world.tracker().join("Software/.vault-events.jsonl");
+    let log = || std::fs::read(&events).unwrap_or_default();
+    let before = log();
+    let files = tracked(&world);
+    let file = world.write(
+        "bad-first.jsonl",
+        "{\"title\": \"Row 1\", \"parent\": \"demo-0000\"}\n{\"title\": \"Row 2\"}\n",
+    );
+    let filed = world.ljos(&["file", "--from", &file, "-p", "demo"]);
+    assert_eq!(filed.status.code(), Some(1), "{}", said(&filed));
+    assert!(
+        stderr(&filed).contains("row 1: --parent demo-0000")
+            && stderr(&filed).contains("; nothing was written"),
+        "{}",
+        said(&filed)
+    );
+    assert!(!stderr(&filed).contains("0 tickets"), "{}", said(&filed));
+    assert_eq!(log(), before, "{}", String::from_utf8_lossy(&log()));
+    assert_eq!(tracked(&world), files);
+}
+
+#[test]
 fn the_mcp_tool_files_rows_in_one_commit() {
     let world = World::new();
     let before = world.commits();
@@ -270,6 +294,37 @@ fn a_taken_back_batch_leaves_the_issues_lock_file() {
 }
 
 #[test]
+fn a_row_whose_id_scan_fails_takes_back_the_rows_before_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let world = World::new();
+    let before = world.commits();
+    let files = tracked(&world);
+    let notes = world.tracker().join("Software/demo/notes.org");
+    std::fs::write(&notes, "* Notes\n").unwrap();
+    let mode = |bits| std::fs::set_permissions(&notes, std::fs::Permissions::from_mode(bits));
+    mode(0o000).unwrap();
+    let file = world.write(
+        "rows.jsonl",
+        format!(
+            "{{\"title\": \"First\"}}\n{{\"title\": \"Second\", \"body\": \"see [[id:{ISSUE}]]\"}}\n"
+        ),
+    );
+    let filed = world.ljos(&["file", "--from", &file, "-p", "demo"]);
+    mode(0o644).unwrap();
+    std::fs::remove_file(&notes).unwrap();
+    assert_eq!(filed.status.code(), Some(1), "{}", said(&filed));
+    assert!(
+        stderr(&filed).contains("row 2: ")
+            && stderr(&filed)
+                .contains("nothing was filed: the 1 tickets written before it were taken back"),
+        "{}",
+        said(&filed)
+    );
+    assert_eq!(tracked(&world), files, "{}", said(&filed));
+    assert_eq!(world.commits(), before);
+}
+
+#[test]
 fn a_commit_another_writer_holds_off_stamps_no_project() {
     use std::os::unix::io::AsRawFd as _;
     let world = World::new();
@@ -314,6 +369,160 @@ fn a_commit_another_writer_holds_off_stamps_no_project() {
         assert!(!org.contains("Filed by"), "{project} was stamped: {org}");
     }
     drop(held);
+}
+
+const UNDER_DEMO: &str = "Under demo";
+const UNDER_OTHER: &str = "Under other";
+
+/// Makes the checkout ignore a new `Software/other` project, and returns
+/// the path of its `issues.org`.
+fn ignored_other(world: &World) -> std::path::PathBuf {
+    untracked_other(world, "Software/other/\n")
+}
+
+/// Commits `rules` as the checkout's `.gitignore`, then writes a new,
+/// untracked `Software/other` project and returns its `issues.org`.
+fn untracked_other(world: &World, rules: &str) -> std::path::PathBuf {
+    std::fs::write(world.tracker().join(".gitignore"), rules).unwrap();
+    world.git(&["add", ".gitignore"]);
+    world.git(&["commit", "-q", "-m", "ignore other"]);
+    let dir = world.tracker().join("Software/other");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("issues.org"),
+        "* TODO [#B] Other plan\n:PROPERTIES:\n:ID:         other-c3d4\n:END:\n",
+    )
+    .unwrap();
+    dir.join("issues.org")
+}
+
+fn row(title: &str) -> String {
+    let parent = if title == UNDER_DEMO {
+        ISSUE
+    } else {
+        "other-c3d4"
+    };
+    format!("{{\"title\": \"{title}\", \"parent\": \"{parent}\"}}\n")
+}
+
+fn an_ignored_project_gets_no_filed_by_line(order: [&str; 2]) {
+    let world = World::new();
+    let other = ignored_other(&world);
+    let before = world.commits();
+    let file = world.write("rows.jsonl", order.map(row).concat());
+    let filed = world.ljos(&["file", "--from", &file]);
+    assert!(filed.status.success(), "{}", said(&filed));
+    assert!(stderr(&filed).contains("is ignored"), "{}", said(&filed));
+    assert_eq!(world.commits(), before + 1, "{}", said(&filed));
+    let other = std::fs::read_to_string(other).unwrap();
+    assert!(other.contains(UNDER_OTHER), "{other}");
+    assert!(!other.contains("Filed by"), "{other}");
+    let demo = std::fs::read_to_string(world.tracker().join("Software/demo/issues.org")).unwrap();
+    assert!(demo.contains("Filed by"), "{demo}");
+}
+
+#[test]
+fn an_ignored_project_on_the_first_row_gets_no_filed_by_line() {
+    an_ignored_project_gets_no_filed_by_line([UNDER_OTHER, UNDER_DEMO]);
+}
+
+#[test]
+fn an_ignored_project_on_the_second_row_gets_no_filed_by_line() {
+    an_ignored_project_gets_no_filed_by_line([UNDER_DEMO, UNDER_OTHER]);
+}
+
+#[test]
+fn a_batch_in_only_ignored_projects_writes_no_filed_by_line() {
+    let world = World::new();
+    let other = ignored_other(&world);
+    let demo = world.tracker().join("Software/demo/issues.org");
+    std::fs::write(world.tracker().join(".gitignore"), "Software/\n").unwrap();
+    world.git(&["rm", "-q", "--cached", "Software/demo/issues.org"]);
+    world.git(&["add", ".gitignore"]);
+    world.git(&["commit", "-q", "-m", "ignore every project"]);
+    let before = world.commits();
+    let file = world.write("rows.jsonl", [UNDER_OTHER, UNDER_DEMO].map(row).concat());
+    let filed = world.ljos(&["file", "--from", &file]);
+    assert!(filed.status.success(), "{}", said(&filed));
+    assert!(stderr(&filed).contains("is ignored"), "{}", said(&filed));
+    assert_eq!(world.commits(), before, "{}", said(&filed));
+    for (path, title) in [(other, UNDER_OTHER), (demo, UNDER_DEMO)] {
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains(title), "{text}");
+        assert!(!text.contains("Filed by"), "{text}");
+    }
+}
+
+/// Files `titles` and checks that `Software/other/issues.org`, which git
+/// takes, is stamped and in the one new commit, with nothing left over.
+fn other_is_filed_and_committed(world: &World, titles: &[&str]) {
+    let before = world.commits();
+    let rows: String = titles.iter().map(|title| row(title)).collect();
+    let file = world.write("rows.jsonl", rows);
+    let filed = world.ljos(&["file", "--from", &file]);
+    assert!(filed.status.success(), "{}", said(&filed));
+    assert!(!stderr(&filed).contains("is ignored"), "{}", said(&filed));
+    assert!(!stderr(&filed).contains("refused"), "{}", said(&filed));
+    assert_eq!(world.commits(), before + 1, "{}", said(&filed));
+    let other = std::fs::read_to_string(world.tracker().join("Software/other/issues.org")).unwrap();
+    assert!(other.contains(UNDER_OTHER), "{other}");
+    assert!(other.contains("Filed by"), "{other}");
+    let changed = world.git(&["show", "--name-only", "--format=", "HEAD"]);
+    assert!(changed.contains("Software/other/issues.org"), "{changed}");
+    if titles.contains(&UNDER_DEMO) {
+        assert!(changed.contains("Software/demo/issues.org"), "{changed}");
+    }
+    let left = world.git(&[
+        "status",
+        "--porcelain",
+        "--",
+        "Software/other/issues.org",
+        "Software/demo/issues.org",
+    ]);
+    assert_eq!(left, "", "{}", said(&filed));
+}
+
+/// Commits `Software/other`, then has `exclude` name its directory: the
+/// committed `.gitignore`, or `.git/info/exclude`.
+fn tracked_other_under_an_ignored_dir(world: &World, exclude: &str) {
+    other_project(world);
+    let rules = world.tracker().join(exclude);
+    std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
+    std::fs::write(rules, "Software/other/\n").unwrap();
+    if exclude == ".gitignore" {
+        world.git(&["add", ".gitignore"]);
+        world.git(&["commit", "-q", "-m", "ignore other"]);
+    }
+}
+
+#[test]
+fn a_tracked_project_under_an_ignored_dir_is_stamped_and_committed() {
+    let world = World::new();
+    tracked_other_under_an_ignored_dir(&world, ".gitignore");
+    other_is_filed_and_committed(&world, &[UNDER_OTHER]);
+}
+
+#[test]
+fn a_batch_with_a_tracked_project_under_an_ignored_dir_commits_it() {
+    let world = World::new();
+    tracked_other_under_an_ignored_dir(&world, ".git/info/exclude");
+    other_is_filed_and_committed(&world, &[UNDER_OTHER, UNDER_DEMO]);
+}
+
+const RE_INCLUDE_OTHER: &str = "Software/*\n!Software/other/\n!Software/other/**\n";
+
+#[test]
+fn a_project_a_negation_re_includes_is_stamped_and_committed() {
+    let world = World::new();
+    untracked_other(&world, RE_INCLUDE_OTHER);
+    other_is_filed_and_committed(&world, &[UNDER_OTHER]);
+}
+
+#[test]
+fn a_batch_with_a_project_a_negation_re_includes_commits_it() {
+    let world = World::new();
+    untracked_other(&world, RE_INCLUDE_OTHER);
+    other_is_filed_and_committed(&world, &[UNDER_DEMO, UNDER_OTHER]);
 }
 
 #[test]
