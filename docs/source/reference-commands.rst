@@ -104,7 +104,20 @@ A word that is not a command names the verb it was reaching for as a line that r
 ``file --from FILE [-p PROJECT] [--parent ID|--top] [-t TYPE] [--tags T] [--priority P] [--verbose]``
    Stores: tracker. File one ticket per row of a JSONL or CSV file (``-`` reads stdin) with the columns title, body, tags, parent, priority and type (a CSV header that names one twice, even with spaces around one, is refused), in one tracker commit, and print the new ids one per line. The flags fill a column a row leaves empty. Each row goes where ``ljos file`` would put it: a row with a parent in that parent's project, whatever ``-p`` names, so one batch can file in several projects; a row without one under the held issue, unless ``-p`` or the checkout names another project, else in ``-p``, the checkout's project or ``LJOS_PROJECT``; ``--top`` files it at the top instead. A row that cannot be filed files none of them: the error names the row and the tickets written before it are taken back. If another writer changes the project file during the batch, the batch stops and leaves the tickets it filed uncommitted rather than writing over that change.
 ``ready [-p PROJECT] [-n N | --limit N | --all] [--json] [--mine]``
-   Stores: tracker. Tickets that are open and not waiting on an open ticket. This seat's claims come first. Unclaimed tickets follow by priority, then by the newest note, claim or filing. Another seat's claims follow, with claims untouched for ``LJOS_STALE_DAYS`` (7 when unset) last. The id breaks the last tie, so the order is deterministic. The page prints the first 20, headed ``ready  shown X of Y``. ``-n N`` and ``--limit N`` print N. ``--all`` prints every ticket. A short page ends with one line naming ``--limit``, ``--all``, ``-p`` and ``--mine``. ``--json`` prints ``shown``, ``total`` and ``rows`` for that same page and order. ``--mine`` keeps its separate meaning: it names the next unfinished item of each of this seat's plans. When the open sitting's ticket is not a plan, the line names that ticket and says it has no plan items. ``-p`` limits the list to tickets in one project.
+   Stores: tracker.
+   Tickets that are open and not waiting on an open ticket.
+   This seat's claims come first.
+   Unclaimed tickets follow by priority, then by the newest note, claim or filing.
+   Another seat's claims follow, with claims untouched for ``LJOS_STALE_DAYS`` (7 when unset) last.
+   The id breaks the last tie, so the order is deterministic.
+   The page prints the first 20, headed ``ready  shown X of Y``.
+   ``-n N`` and ``--limit N`` print N.
+   ``--all`` prints every ticket.
+   A limited page ends with one line naming ``--limit``, ``--all``, ``-p`` and ``--mine``, even when every ticket fits.
+   ``--json`` prints ``shown``, ``total`` and ``rows`` for that same page and order.
+   ``--mine`` keeps its separate meaning: it names the next unfinished item of each of this seat's plans.
+   When the open sitting's ticket is not a plan, the line names that ticket and says it has no plan items.
+   ``-p`` limits the list to tickets in one project.
 ``list [-p PROJECT] [-n N | --limit N | --all] [--json] [--mine]``
    Stores: tracker. The same command as ``ready``, with the same flags, the same order and the same page, headed ``ready  shown X of Y``. ``ls`` is the short spelling. ``-n N`` prints N tickets, ``--limit N`` is the same flag, and ``--all`` prints every ticket. ``-p PROJECT`` limits the list to tickets in one project. ``--json`` prints ``shown``, ``total`` and ``rows``. ``--mine`` names the next unfinished item of each of this seat's plans. When the open sitting's ticket is not a plan, the line names that ticket and says it has no plan items. The command exists so a new seat that types ``ljos list`` gets the open tickets. ``ljos issues``, ``ljos tickets`` and ``ljos todo`` are not commands, and each names ``ljos ready``.
 ``show ID [--json] [--all | --verbose]``
@@ -194,7 +207,17 @@ A word that is not a command names the verb it was reaching for as a line that r
 ``protocol [--full]``
    Stores: none. Print how work on one ticket is meant to run. ``--full`` prints every store and refusal.
 ``onboard [--harness NAME] [--skills DIR] [--dry-run] [--example]``
-   Stores: runner. With no ``--harness``, ljos onboards every runner it finds, at a terminal or in a pipe. A pipe prints the one ``mcpServers`` entry on stdout and the setup lines on stderr. The tracker, the memory writer and the deed store are set up either way. The Model Context Protocol (MCP) is the tool server the runner starts. Onboard in json form prints that entry at a terminal too. With a runner named in ``~/.config/ljos/harnesses.toml``, register ``ljos-mcp`` with it, install the protocol as its skill, and write the personas into its ``agents`` directory; a shell runner (``shell = true``, ``example-host``, or ``shell``) writes the skill and an env file and registers no server and no hook; changed runner files and their previous bytes are recorded for ``offboard``. A step that does not land exits 1. Example: ``ljos onboard``.
+   Stores: runner.
+   With no ``--harness``, ljos onboards every runner it finds, at a terminal or in a pipe.
+   A pipe prints the one ``mcpServers`` entry on stdout and the setup lines on stderr.
+   The tracker and deed store are set up either way.
+   Outside a temporary home, the memory writer is set up too.
+   Under a temporary home, memory is off unless ``PACKSET_URL`` names a pack.
+   The Model Context Protocol (MCP) is the tool server the runner starts.
+   Onboard in json form prints that entry at a terminal too.
+   With a runner named in ``~/.config/ljos/harnesses.toml``, register ``ljos-mcp`` with it, install the protocol as its skill, and write the personas into its ``agents`` directory; a shell runner (``shell = true``, ``example-host``, or ``shell``) writes the skill and an env file and registers no server and no hook; changed runner files and their previous bytes are recorded for ``offboard``.
+   A step that does not land exits 1.
+   Example: ``ljos onboard``.
 ``offboard [--runner NAME] [--dry-run]``
    Stores: runner. Restore runner files changed by ``onboard`` and remove files created only for ljos; ``--runner`` (alias ``--harness``, the same name ``ljos onboard`` uses) limits removal to one runner; ``--dry-run`` reports without writing; later edits are preserved; an older installation without a manifest is removed by its ljos markers. A file edited after onboarding, when the ljos entry cannot be taken out, is left in place. The line names the file and says to delete the ljos entry and run ``ljos offboard`` again. A step that does not land exits 1.
 ``uninstall [--dry-run] [--keep-programs] [--all] [--purge] [--no-stub] [--bin-dir DIR]``

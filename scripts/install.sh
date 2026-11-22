@@ -2,11 +2,12 @@
 # Install ljos from its release tarballs, check each tarball against the
 # SHA-256 published beside it and its GitHub build attestation, and run
 # `ljos onboard` for every coding runner found on this machine. With none
-# found, the tracker, the memory writer and the deed store are still set up.
+# found, the tracker and deed store are still set up. Outside a temporary
+# home, the memory writer is set up too. Under a temporary home, memory is off unless PACKSET_URL names a pack.
 #
 # One command for a new machine. It fetches the release assets, checks
 # each SHA-256, installs the encoder and its model, and sets up the tracker
-# and memory:
+# and deed store, plus memory outside a temporary home:
 #
 #   curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
 #
@@ -114,7 +115,13 @@
 # for this platform is built from that version's crate.
 set -eu
 
-BIN_DIR=${LJOS_BIN_DIR:-$HOME/.local/bin}
+if [ -n "${LJOS_BIN_DIR:-}" ]; then
+  BIN_DIR=$LJOS_BIN_DIR
+  BIN_DIR_FROM_HOME=0
+else
+  BIN_DIR=$HOME/.local/bin
+  BIN_DIR_FROM_HOME=1
+fi
 WITH_EMBED=1
 FROM_DIR=
 FROM_CHECKOUT=0
@@ -134,6 +141,30 @@ SOURCE_ONLY=0
 SHADOW=0
 
 say() { printf '%s\n' "$*"; }
+
+posix_word() {
+  escaped=$(printf '%s' "$1" | sed "s/'/'\\\\''/g")
+  printf "'%s'" "$escaped"
+}
+
+fish_word() {
+  escaped=$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")
+  printf "'%s'" "$escaped"
+}
+
+validate_path_entry() {
+  label=$1
+  case $2 in
+    '') die "$label is empty" ;;
+    *[![:space:]]*) ;;
+    *) die "$label is blank" ;;
+  esac
+  case $2 in
+    *'
+'*) die "$label contains a newline" ;;
+    *:*) die "$label contains ':'${3:-}" ;;
+  esac
+}
 
 # Put a program in place by rename. A copy over a program that is running
 # fails with "Text file busy"; a rename replaces the directory entry and
@@ -195,7 +226,7 @@ die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
   case $1 in
-    --bin-dir) BIN_DIR=$2; shift 2 ;;
+    --bin-dir) BIN_DIR=$2; BIN_DIR_FROM_HOME=0; shift 2 ;;
     --with-embed) WITH_EMBED=1; shift ;;
     --no-embed) WITH_EMBED=0; shift ;;
     --from-dir) FROM_DIR=$2; shift 2 ;;
@@ -226,6 +257,14 @@ fi
 if [ "$FROM_CHECKOUT" = 1 ] && [ "$CLOUD" = 1 ]; then
   die "pass --from-checkout or --cloud, not both"
 fi
+if [ "$BIN_DIR_FROM_HOME" = 1 ]; then
+  validate_path_entry "HOME" "$HOME" ". Pass --bin-dir DIR to install outside HOME."
+fi
+validate_path_entry "bin directory" "$BIN_DIR"
+case $BIN_DIR in
+  /*) ;;
+  *) here=$(pwd -P); BIN_DIR=${here%/}/$BIN_DIR ;;
+esac
 
 # The version REPO is pinned to, or nothing for the latest release.
 pinned() {
@@ -516,10 +555,36 @@ fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ljos-install.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT INT TERM
+if ! mkdir -p "$HOME" 2>"$TMP/home.err"; then
+  die "could not create HOME $HOME. Check that its parent is writable and run \`sh install.sh\` again."
+fi
+home_real=$(CDPATH='' cd -- "$HOME" 2>/dev/null && pwd -P) ||
+  die "could not resolve HOME $HOME. Create it and run \`sh install.sh\` again."
+state_root=${XDG_STATE_HOME:-$HOME/.local/state}
+if ! mkdir -p "$state_root/ljos"; then
+  die "could not create state directory $state_root. Check that its parent is writable and run \`sh install.sh\` again."
+fi
+chmod 700 "$state_root/ljos" 2>/dev/null || true
+tmp_root=${TMPDIR:-/nonexistent}
+if [ -d "$tmp_root" ]; then
+  tmp_root=$(CDPATH='' cd -- "$tmp_root" 2>/dev/null && pwd -P) ||
+    die "could not resolve TMPDIR $TMPDIR. Create it and run \`sh install.sh\` again."
+fi
+temporary_root=
+case "${home_real}/" in
+  /tmp/*) temporary_root=/tmp ;;
+  /var/tmp/*) temporary_root=/var/tmp ;;
+  /private/tmp/*) temporary_root=/private/tmp ;;
+  /dev/shm/*) temporary_root=/dev/shm ;;
+  "${tmp_root%/}"/*) temporary_root=${tmp_root%/} ;;
+esac
 if ! mkdir -p "$BIN_DIR" 2>"$TMP/mkdir.err"; then
   why=$(head -n 1 "$TMP/mkdir.err" 2>/dev/null | tr -d '\r' || true)
   die "$BIN_DIR is not writable${why:+: $why}. Run \`sh install.sh --bin-dir DIR\` with a directory you can write."
 fi
+BIN_DIR=$(CDPATH='' cd -- "$BIN_DIR" 2>/dev/null && pwd -P) ||
+  die "could not resolve bin directory $BIN_DIR. Run \`sh install.sh --bin-dir DIR\` with a directory you can write."
+validate_path_entry "bin directory" "$BIN_DIR"
 # A directory can exist and still refuse a new file. The probe is a
 # builtin inside a subshell, so a minimal PATH needs no touch, and
 # `set -e` does not stop the script before the message below.
@@ -1137,11 +1202,10 @@ fi
 # the line once, under a marker a later install looks for. `cloud up`
 # writes its own line, so --cloud leaves the profiles to it.
 PROFILE_MARK='# Added by the ljos installer: its programs on PATH.'
-case $BIN_DIR in
-  "$HOME"/*) shown_dir="\$HOME/${BIN_DIR#"$HOME"/}" ;;
-  *) shown_dir=$BIN_DIR ;;
-esac
-PATH_LINE="export PATH=\"$shown_dir:\$PATH\""
+posix_dir=$(posix_word "$BIN_DIR")
+fish_dir=$(fish_word "$BIN_DIR")
+PATH_LINE="export PATH=$posix_dir:\$PATH"
+FISH_PATH_LINE="fish_add_path --path $fish_dir"
 add_to_profiles() {
   added=
   for rc in .profile .bashrc .zshrc; do
@@ -1197,25 +1261,44 @@ shell_profiles() {
   say "$BIN_DIR is not on PATH. Add one line to the shell profile named here. This script does not edit that file."
   say "  bash (~/.bashrc): $PATH_LINE"
   say "  zsh (~/.zshrc): $PATH_LINE"
-  say "  fish (~/.config/fish/config.fish): fish_add_path $shown_dir"
+  say "  dash (~/.profile): $PATH_LINE"
+  say "  fish (~/.config/fish/config.fish): $FISH_PATH_LINE"
+}
+shell_path_lines() {
+  say "$1:"
+  say "  bash, zsh, dash: $PATH_LINE"
+  say "  fish: $FISH_PATH_LINE"
+}
+shell_next_lines() {
+  say "Next:"
+  say "  bash, zsh, dash: $PATH_LINE && $1"
+  say "  fish: $FISH_PATH_LINE; and $1"
+}
+shell_command_lines() {
+  command_posix=$(posix_word "$BIN_DIR/ljos")
+  command_fish=$(fish_word "$BIN_DIR/ljos")
+  say "$1:"
+  say "  bash, zsh, dash: $command_posix $2"
+  if [ "$command_fish" != "$command_posix" ]; then
+    say "  fish: $command_fish $2"
+  fi
 }
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) if [ "$MODIFY_PATH" = 1 ] && [ "$CLOUD" = 0 ]; then
        added=$(add_to_profiles)
        if [ -n "$added" ]; then
-         say "Added $BIN_DIR to PATH in$added; a new shell finds ljos. In this one, run:"
+         say "Added $BIN_DIR to PATH in$added; a new shell finds ljos."
        else
-         say "Your shell profiles already add $BIN_DIR to PATH. In this shell, run:"
+         say "Your shell profiles already add $BIN_DIR to PATH."
        fi
      else
        shell_profiles
-       say "In this shell, run:"
      fi
-     say "  $PATH_LINE"
      if [ "$MODIFY_PATH" = 1 ] && [ "$CLOUD" = 0 ]; then
-       say "  fish (~/.config/fish/config.fish): fish_add_path $shown_dir"
+       say "  fish (~/.config/fish/config.fish): $FISH_PATH_LINE"
      fi
+     shell_path_lines "In this shell, run the line for your shell"
      PATH="$BIN_DIR:$PATH"; export PATH ;;
 esac
 if [ -n "$AHEAD" ] && [ -x "$BIN_DIR/ljos" ] && ! same_bin "$AHEAD" "$BIN_DIR/ljos"; then
@@ -1224,7 +1307,8 @@ if [ -n "$AHEAD" ] && [ -x "$BIN_DIR/ljos" ] && ! same_bin "$AHEAD" "$BIN_DIR/lj
   say "PATH finds $AHEAD${old:+ ($old)} before $BIN_DIR/ljos${new:+ ($new)}."
   if [ "$PATH_HAD_BIN" = 1 ]; then
     say "  This shell would run the older one. Put the new install first:"
-    say "  $PATH_LINE"
+    say "  bash, zsh, dash: $PATH_LINE"
+    say "  fish: $FISH_PATH_LINE"
   else
     say "  The line above puts $BIN_DIR first, ahead of $AHEAD."
   fi
@@ -1252,6 +1336,17 @@ antigravity cmd:agy
 windsurf dir:.codeium/windsurf
 cline dir:Documents/Cline"
 
+# A temporary HOME is a test sandbox to ljos: memory stays off there, and
+# this install does not leave a writer running.
+root=$temporary_root
+memory_off=0
+case ${PACKSET_URL:-} in
+  *[![:space:]]*) root= ;;
+esac
+if [ "${PACKSET_URL:-}" = off ]; then
+  memory_off=1
+fi
+
 found_any=0
 if [ "$ONBOARD" = 1 ]; then
   say "Connecting the coding runners found here:"
@@ -1275,19 +1370,19 @@ if [ "$ONBOARD" = 1 ]; then
   done < "$TMP/runners"
   if [ "$found_any" = 0 ]; then
     say "  No coding tool is installed."
-    say "  Setting up the ticket tracker, memory writer, and deed store."
+    if [ "$memory_off" = 1 ]; then
+      say "  Setting up the ticket tracker and deed store; memory is off because PACKSET_URL is off."
+    elif [ -n "$root" ]; then
+      say "  Setting up the ticket tracker and deed store; memory is off in this temporary home."
+    else
+      say "  Setting up the ticket tracker, memory writer, and deed store."
+    fi
     if ! ljos onboard --harness all > "$TMP/onboard-seat" 2>&1; then
       say "  seat setup reported a problem:"
       sed 's/^/    /' "$TMP/onboard-seat"
     fi
   fi
 fi
-
-# The first doctor looks for this directory. Create it here so that
-# row does not warn on a machine that just installed.
-state_root=${XDG_STATE_HOME:-$HOME/.local/state}
-mkdir -p "$state_root/ljos"
-chmod 700 "$state_root/ljos" 2>/dev/null || true
 
 # The encoder fetches its model on first use. Fetch it now, while the
 # network is known to work, so the first search is not lexical.
@@ -1300,23 +1395,14 @@ if [ -x "$BIN_DIR/packset-embed" ]; then
   fi
 fi
 
-# A temporary HOME is a test sandbox to ljos: memory stays off there, and
-# this install does not leave a writer running. Say so in one line.
-tmp_root=${TMPDIR:-/nonexistent}
-home_real=$(cd "$HOME" && pwd -P)
-root=
-case "${home_real}/" in
-  /tmp/*) root=/tmp ;;
-  /var/tmp/*) root=/var/tmp ;;
-  /private/tmp/*) root=/private/tmp ;;
-  /dev/shm/*) root=/dev/shm ;;
-  "${tmp_root%/}"/*) root=${tmp_root%/} ;;
-esac
+# Say why the writer or command guard was not started.
 if [ -n "$root" ]; then
   say "memory and the command guard are off because the home is under ${root} (${home_real}); set HOME to a directory outside ${root}"
+elif [ -n "$temporary_root" ]; then
+  say "the command guard is off because the home is under ${temporary_root} (${home_real}); set HOME to a directory outside ${temporary_root}"
 fi
 if [ "$ONBOARD" = 1 ]; then
-  say "Command guard: run \`$BIN_DIR/ljos policy --help\`."
+  shell_command_lines "Command guard" "policy --help"
 fi
 if [ "$CLOUD" = 1 ]; then
   if "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
@@ -1365,14 +1451,14 @@ fi
 if [ "$ONBOARD" = 1 ] && [ "$found_any" = 0 ] \
   && { [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; }; then
   say "Done in $secs s. This shell does not run the ljos just installed until PATH is set."
-  say "Next: $PATH_LINE"
+  shell_path_lines "Next"
   say "Then install Claude Code, Cursor or Codex, and run \`ljos onboard\`."
 elif [ "$ONBOARD" = 1 ] && [ "$found_any" = 0 ]; then
   say "Done in $secs s. Next: install Claude Code, Cursor or Codex, then run \`ljos onboard\`."
 elif [ "$PATH_HAD_BIN" = 0 ] || [ "$SHADOW" = 1 ]; then
   say "Done in $secs s. This shell does not run the ljos just installed until PATH is set."
-  say "Next: $PATH_LINE && $next_cmd"
+  shell_next_lines "$next_cmd"
 else
   say "Done in $secs s. Next: \`$next_cmd\`."
 fi
-say "Shell completion: run \`$BIN_DIR/ljos completions --help\`."
+shell_command_lines "Shell completion" "completions --help"

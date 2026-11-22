@@ -1551,7 +1551,7 @@ enum Cmd {
     /// The id breaks the last tie.
     /// The page prints the first 20, headed `ready  shown X of Y`.
     /// `-n N` prints N tickets. `--limit N` is the same flag. `--all` prints every ticket.
-    /// A page that leaves tickets off ends with one line naming `--limit`, `--all`, `-p` and `--mine`.
+    /// A limited page ends with one line naming `--limit`, `--all`, `-p` and `--mine`.
     /// `--json` prints `shown`, `total` and `rows` for that same page and that same order.
     /// `--mine` names the next unfinished item of each plan this seat holds.
     /// When the open sitting's ticket is not a plan, the line names that ticket and says it has no plan items.
@@ -4318,8 +4318,7 @@ fn seat_kind(cmd: &Cmd) -> ljos_cli::seat_resolve::Kind {
         | Cmd::Mesh {
             cmd: MeshCmd::Status,
         } => Kind::Read,
-        Cmd::Remember { .. }
-        | Cmd::Note { .. }
+        Cmd::Note { .. }
         | Cmd::File { .. }
         | Cmd::Parent { .. }
         | Cmd::Sitting { .. }
@@ -5252,6 +5251,11 @@ fn run_command() -> Result<()> {
                 eprintln!("{err}");
                 std::process::exit(USAGE_STATUS);
             }
+            if let Some(line) = ljos_cli::sandbox_memory_off() {
+                eprintln!("{line}");
+                std::process::exit(1);
+            }
+            ljos_cli::seat_resolve::mark_write();
             // A paragraph or a session is several claims: each goes in on
             // its own, where the whole was refused at the pack's cap.
             // Two sentences stay one row. A longer text is split, and

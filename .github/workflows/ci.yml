@@ -156,10 +156,11 @@ jobs:
       # Mail reader tests build a notmuch database. Detach tests need tmux.
       # The identity gate tests start a one-shot runner under zsh -c.
       # The hook queue test reads each call's peak RSS from GNU time.
+      # Installer tests run the printed fish lines, including quotes and backslashes.
       - name: Use a reachable Ubuntu mirror
         run: sudo timeout -k 5 90 bash .github/scripts/apt-mirror.sh
       - name: Install age, tmux, notmuch and time
-        run: sudo apt-get install -y --no-install-recommends age tmux notmuch time zsh shellcheck
+        run: sudo apt-get install -y --no-install-recommends age tmux notmuch time zsh shellcheck fish
       # vissue, claimdag and deedar are named in .github/sibling-pin.
       # packset, phronesis and ljos-policyd are named in
       # scripts/sibling-tools.sh. The script builds each pin, checks the
@@ -274,11 +275,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # The sync, rules and push tests seal with age, as on the Linux job.
+      # Installer tests run the printed fish lines, including quotes and backslashes.
       - name: age
         run: |
           set -eu
-          brew install age
+          brew install age fish
           command -v age-keygen
+          command -v fish
       - name: Unit tests
         run: cargo test --locked --workspace --lib --no-fail-fast
 
