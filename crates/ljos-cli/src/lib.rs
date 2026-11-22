@@ -51349,13 +51349,11 @@ fn split_board(
             return held(lock, could_not(&e), false);
         }
     }
-    // An issues directory goes on the pending list only once its marker
-    // is written. A writer killed mid-migrate leaves issue files and no
-    // marker, and a push that committed them would land half a split.
-    let all: Vec<String> = boards.iter().map(|(_, b, _)| b.clone()).collect();
-    if let Err(e) = pending_add(top, &all) {
-        return held(lock, could_not(&format!("the pending list: {e}")), false);
-    }
+    // Only what the migrate split goes on the pending list, and an issues
+    // directory only once its marker is written. A writer killed
+    // mid-migrate leaves issue files and no marker, and a push that
+    // committed them would land half a split. A sibling board the
+    // migrate left alone is not this write's to commit.
     let layout = vissue_core::Layout::new(root, prefix.to_string_lossy());
     split_step("migrate");
     let migrated = vissue_core::ledger::migrate(&layout, false);
@@ -51420,11 +51418,11 @@ fn split_board(
         PathCommit::Refused(why) | PathCommit::Deferred(why) => why,
     };
     let mut kept = false;
-    for ((candidate, _, issues), made) in split.iter().zip(&made) {
+    for ((candidate, kept_rel, issues), made) in split.iter().zip(&made) {
         if roll_back_split(candidate, made) {
             pending_remove(top, std::slice::from_ref(issues));
         } else {
-            let _ = pending_add(top, std::slice::from_ref(issues));
+            let _ = pending_add(top, &[kept_rel.clone(), issues.clone()]);
             if candidate.as_path() == board {
                 kept = true;
             }
@@ -61779,6 +61777,40 @@ mod tests {
         super::tracker_push::land_deferred(&root);
         let tracked = git_text(&root, &["ls-files", "Software/probe/issues"]);
         assert!(tracked.is_empty(), "{tracked}");
+        clear_probe_env();
+    }
+
+    /// A sibling board the migrate could not split is not left on the
+    /// pending list: the split did not change it.
+    #[test]
+    fn a_sibling_board_the_split_did_not_change_is_not_left_pending() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let issues = big_board(&root, 300);
+        std::fs::create_dir_all(root.join("Software/zzz")).unwrap();
+        std::fs::write(
+            root.join("Software/zzz/issues.org"),
+            "* TODO [#C] Odd\n:PROPERTIES:\n:ID:         zzz-d001\n:END:\n#+VISSUE_LEDGER_LOG:\n",
+        )
+        .unwrap();
+        git_text(&root, &["add", "."]);
+        git_text(&root, &["commit", "-q", "-m", "odd board"]);
+        probe_env(&root);
+        let layout = vissue_core::Layout::new(&root, "Software");
+        vissue_core::ops::note(&layout, "probe-b007", "first look").unwrap();
+        let said = persist_tracker("probe-b007", "noted");
+        assert!(said.contains("committed the split"), "{said}");
+        assert!(vissue_core::ledger::is_ledger(&issues));
+        assert!(!vissue_core::ledger::is_ledger(
+            &root.join("Software/zzz/issues.org")
+        ));
+        let pending =
+            std::fs::read_to_string(root.join(super::TRACKER_PENDING)).unwrap_or_default();
+        assert!(
+            !pending.lines().any(|l| l.starts_with("Software/zzz/")),
+            "{pending}"
+        );
         clear_probe_env();
     }
 
