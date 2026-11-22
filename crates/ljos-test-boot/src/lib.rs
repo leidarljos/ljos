@@ -12,8 +12,8 @@ mod scratch;
 
 pub use packsetd::{reap_listener, Builder, Packsetd};
 pub use scratch::{
-    checkout, checkout_seats, fresh_dir, git, git_at, git_ceiling, home_seats, no_login_git_config,
-    GIT_CEILING,
+    build_target, checkout, checkout_seats, fresh_dir, git, git_at, git_ceiling, home_seats,
+    no_login_git_config, GIT_CEILING,
 };
 
 use std::ffi::c_char;
@@ -296,6 +296,18 @@ mod tests {
         let set: Vec<_> = cmd.get_envs().map(|(k, _)| k.to_owned()).collect();
         assert!(!set.iter().any(|k| k == "GIT_CONFIG_GLOBAL"), "{set:?}");
         assert!(!set.iter().any(|k| k == "GIT_CONFIG_NOSYSTEM"), "{set:?}");
+    }
+
+    /// The target directory this binary runs from is a ceiling, wherever
+    /// `CARGO_TARGET_DIR` put it.
+    #[test]
+    fn the_build_target_of_this_binary_is_a_ceiling() {
+        let exe = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let target = crate::build_target().expect("a test binary runs from a target directory");
+        assert!(exe.starts_with(&target), "{}", target.display());
+        assert!(target.join("CACHEDIR.TAG").is_file() || target.join(".rustc_info.json").is_file());
+        let ceilings: Vec<_> = std::env::split_paths(&crate::git_ceiling()).collect();
+        assert!(ceilings.contains(&target), "{ceilings:?}");
     }
 
     fn tempfile_dir(prefix: &str) -> std::path::PathBuf {

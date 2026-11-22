@@ -1,0 +1,1 @@
+The build tree ceiling ljos and the test git helpers add is now the cargo target directory the binary was built into, found from `CARGO_TARGET_DIR` or the `CACHEDIR.TAG` cargo writes there, so a target directory with another name is still a ceiling and a directory merely named `target` is not.

@@ -29,6 +29,33 @@ pub fn home_seats() -> Option<PathBuf> {
     crate::boot_home().map(|home| home.join(".cache/ljos-test-seats"))
 }
 
+/// The cargo target directory this test binary was built into:
+/// `CARGO_TARGET_DIR` when the binary sits under it, else the nearest
+/// ancestor of the binary that cargo marked with `CACHEDIR.TAG` or
+/// `.rustc_info.json`. `None` for a binary outside any target directory.
+#[must_use]
+pub fn build_target() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    target_above(
+        &exe,
+        std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from),
+    )
+}
+
+fn target_above(exe: &Path, named: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(named) = named.filter(|dir| dir.is_absolute()) {
+        let named = std::fs::canonicalize(&named).unwrap_or(named);
+        if exe.starts_with(&named) {
+            return Some(named);
+        }
+    }
+    exe.ancestors()
+        .skip(1)
+        .find(|dir| dir.join("CACHEDIR.TAG").is_file() || dir.join(".rustc_info.json").is_file())
+        .map(Path::to_path_buf)
+}
+
 /// The checkout's `crates/target`. No seat goes here; it stays a git
 /// ceiling for scratch trees older runs left in it.
 #[must_use]
@@ -54,6 +81,7 @@ pub fn git_ceiling() -> OsString {
         home_seats(),
         Some(checkout.join("crates/target")),
         Some(checkout.join("target")),
+        build_target(),
     ];
     for root in found.into_iter().flatten() {
         // git drops a relative ceiling, and a spelling with a symlink in it

@@ -56130,10 +56130,11 @@ pub(crate) fn fence_git(cmd: &mut std::process::Command) {
 }
 
 /// The ceilings this process inherited, plus the build tree ljos runs
-/// from: the `target` directory above the executable and the
-/// `crates/target` beside it. A directory there whose `.git` is missing
-/// is not a repository, so git does not walk up into the checkout that
-/// built ljos. An installed ljos has no `target` above it and adds none.
+/// from: the cargo target directory above the executable, as
+/// [`build_target`] finds it, and the `crates/target` beside it. A
+/// directory there whose `.git` is missing is not a repository, so git
+/// does not walk up into the checkout that built ljos. An installed ljos
+/// has no target directory above it and adds none.
 pub(crate) fn git_ceilings() -> std::ffi::OsString {
     static BUILD: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
     let build = BUILD.get_or_init(|| {
@@ -56143,13 +56144,11 @@ pub(crate) fn git_ceilings() -> std::ffi::OsString {
         else {
             return Vec::new();
         };
-        let Some(target) = exe
-            .ancestors()
-            .find(|dir| dir.file_name().is_some_and(|name| name == "target"))
-        else {
+        let named = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
+        let Some(target) = build_target(&exe, named) else {
             return Vec::new();
         };
-        let mut found = vec![target.to_path_buf()];
+        let mut found = vec![target.clone()];
         if let Some(checkout) = target.parent() {
             let crates = checkout.join("crates/target");
             found.push(std::fs::canonicalize(&crates).unwrap_or(crates));
@@ -56165,6 +56164,24 @@ pub(crate) fn git_ceilings() -> std::ffi::OsString {
         }
     }
     std::env::join_paths(&roots).unwrap_or_default()
+}
+
+/// The cargo target directory `exe` was built into: `named` (the
+/// `CARGO_TARGET_DIR` cargo was given) when `exe` sits under it, else the
+/// nearest ancestor cargo marked with `CACHEDIR.TAG` or
+/// `.rustc_info.json`. A target directory may have any name, so the name
+/// `target` alone proves nothing. `None` outside any target directory.
+pub(crate) fn build_target(exe: &Path, named: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(named) = named.filter(|dir| dir.is_absolute()) {
+        let named = std::fs::canonicalize(&named).unwrap_or(named);
+        if exe.starts_with(&named) {
+            return Some(named);
+        }
+    }
+    exe.ancestors()
+        .skip(1)
+        .find(|dir| dir.join("CACHEDIR.TAG").is_file() || dir.join(".rustc_info.json").is_file())
+        .map(Path::to_path_buf)
 }
 
 /// No terminal prompt and no askpass program for the git `cmd` runs. A
@@ -56776,6 +56793,47 @@ mod tests {
             probe.display()
         );
         assert!(!out.status.success(), "{out:?}");
+    }
+
+    /// The build tree's ceiling is the directory cargo marked as its
+    /// target, whatever it is called, and a directory named `target`
+    /// that cargo did not mark is not one.
+    #[test]
+    fn the_build_target_is_the_directory_cargo_marked_not_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let exe_at = |rel: &str| {
+            let exe = root.join(rel);
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            std::fs::write(&exe, "").unwrap();
+            exe
+        };
+        let out = root.join("out");
+        let deps = exe_at("out/debug/deps/ljos-0123");
+        let nested = exe_at("out/debug/build/target/ljos");
+        std::fs::write(
+            out.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        assert_eq!(crate::build_target(&deps, None), Some(out.clone()));
+        assert_eq!(crate::build_target(&nested, None), Some(out.clone()));
+        let named = root.join("named");
+        let release = exe_at("named/release/ljos");
+        assert_eq!(
+            crate::build_target(&release, Some(named.clone())),
+            Some(named)
+        );
+        // A temp root may itself sit in a marked build tree; nothing under
+        // `root` is a target directory here.
+        let inside = |exe: &Path| crate::build_target(exe, None).filter(|t| t.starts_with(&root));
+        assert_eq!(inside(&release), None);
+        assert_eq!(
+            crate::build_target(&deps, Some(root.join("named"))),
+            Some(out)
+        );
+        let unmarked = exe_at("target/bin/ljos");
+        assert_eq!(inside(&unmarked), None);
     }
 
     /// A temp home or LJOS_OFF runs the real binary. A temp working
