@@ -59030,6 +59030,100 @@ mod tests {
         std::env::remove_var("LJOS_TRACKER_LOCK_WAIT");
     }
 
+    /// A tracker write inside an MCP tool call, with no wall budget, stops
+    /// at the tool budget and names it.
+    #[test]
+    fn a_lock_wait_cut_short_by_the_tool_budget_names_the_tool_budget() {
+        let _env = env_guard();
+        disarm_wall();
+        tool_bound::disarm();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let held = tracker_commit_lock(dir.path());
+        assert!(held.0.is_some(), "the other writer took the lock");
+        let body = "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+        std::fs::write(&issues, body).unwrap();
+        let started = std::time::Instant::now();
+        let said = {
+            let _tool = tool_bound::arm(std::time::Duration::from_secs(1));
+            persist_tracker_file(&issues, "probe-a1b2", "claimed")
+        };
+        let took = started.elapsed();
+        drop(held);
+        for var in ["LJOS_TRACKER_LOCK_WAIT", "LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+        assert!(took < std::time::Duration::from_secs(10), "waited {took:?}");
+        assert!(said.contains("another writer held"), "{said}");
+        assert!(said.contains("of the tool budget"), "{said}");
+        assert!(!said.contains("wall budget"), "{said}");
+        assert!(
+            said.contains("short of the 60s LJOS_TRACKER_LOCK_WAIT"),
+            "{said}"
+        );
+    }
+
+    /// A tool budget that ends before the wall budget cuts the lock wait
+    /// and is the one the line names.
+    #[test]
+    fn a_tool_budget_shorter_than_the_wall_budget_names_the_tool_budget() {
+        let _env = env_guard();
+        disarm_wall();
+        tool_bound::disarm();
+        let dir = tempfile::tempdir().unwrap();
+        let issues = seeded_tracker(dir.path());
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        let held = tracker_commit_lock(dir.path());
+        assert!(held.0.is_some(), "the other writer took the lock");
+        let body = "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n";
+        std::fs::write(&issues, body).unwrap();
+        let said = {
+            let _wall =
+                arm_wall_budget_for(std::time::Duration::from_secs(30), "finish wall budget");
+            let _tool = tool_bound::arm(std::time::Duration::from_secs(1));
+            persist_tracker_file(&issues, "probe-a1b2", "claimed")
+        };
+        drop(held);
+        for var in ["LJOS_TRACKER_LOCK_WAIT", "LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
+        assert!(said.contains("another writer held"), "{said}");
+        assert!(said.contains("of the tool budget"), "{said}");
+        assert!(!said.contains("finish wall budget"), "{said}");
+        let waited: f64 = said
+            .split(" for ")
+            .nth(1)
+            .and_then(|rest| rest.split('s').next())
+            .and_then(|secs| secs.parse().ok())
+            .unwrap_or_else(|| panic!("no wait in {said}"));
+        assert!(waited <= 1.0, "named a {waited}s wait: {said}");
+    }
+
+    /// A wall budget that ends before the tool budget is the one named.
+    #[test]
+    fn a_wall_budget_shorter_than_the_tool_budget_names_the_wall_budget() {
+        let _env = env_guard();
+        disarm_wall();
+        tool_bound::disarm();
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        let waited = {
+            let _tool = tool_bound::arm(std::time::Duration::from_secs(30));
+            let _wall = arm_wall_budget_for(std::time::Duration::from_secs(2), "claim wall budget");
+            tracker_lock_budget()
+        };
+        std::env::remove_var("LJOS_TRACKER_LOCK_WAIT");
+        assert_eq!(waited.cut_by, Some("claim wall budget"));
+        assert!(
+            waited.wait <= std::time::Duration::from_secs(2),
+            "{waited:?}"
+        );
+    }
+
     /// A sitting arms its own claim budget, not a hook's. A tracker write
     /// that budget cuts short names the sitting budget.
     #[test]
