@@ -945,9 +945,13 @@ pub(crate) fn merge_atoms_driver(current: &Path, rel: &str) -> Result<(), String
 
 /// One org file, after a union. Two headings that share a `:ID:` become
 /// one heading that keeps both bodies. Text with no duplicate id is
-/// returned unchanged.
+/// returned unchanged. So is a per-issue file of a split board: its
+/// records repeat the heading's `:ID:` and are not headings to merge.
 #[must_use]
 pub(crate) fn fold_org_text(text: &str) -> String {
+    if vissue_core::ledger::is_ledger_text(text) {
+        return text.to_string();
+    }
     let (_, headings) = parse_org(text);
     let mut seen = BTreeSet::new();
     let mut duplicated = false;
@@ -1748,6 +1752,19 @@ body b
         assert!(folded.contains("body b"), "{folded}");
         let plain = "* TODO [#C] Only\n:PROPERTIES:\n:ID:         only\n:END:\n";
         assert_eq!(fold_org_text(plain), plain);
+    }
+
+    /// A per-issue file of a split board is a heading and records. A
+    /// replace record renders the heading again, `:ID:` and all, and a
+    /// fold would merge the two and break the record framing.
+    #[test]
+    fn a_ledger_file_with_a_replace_record_is_not_folded() {
+        let heading = "* TODO [#C] One\n:PROPERTIES:\n:ID:         same\n:END:\nbody b\n";
+        let text = format!(
+            "#+VISSUE_LEDGER:\n#+VISSUE_LINES: 3 7\n* TODO [#C] One\n:PROPERTIES:\n:ID:         same\n:END:\nbody a\n#+VISSUE_LEDGER_LOG:\n%% replace {}\n{heading}\n",
+            heading.len()
+        );
+        assert_eq!(fold_org_text(&text), text);
     }
 
     #[test]
