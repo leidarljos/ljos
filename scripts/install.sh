@@ -619,11 +619,22 @@ case "${home_real}/" in
     case ${TMPDIR-} in
       /*)
         t=$(resolve_path "$tmp_root")
+        # id, getent and dscl run from their system paths, never from
+        # PATH: a stand-in on PATH could name another passwd home and make
+        # a TMPDIR that holds the real home look like a sandbox.
         # macOS has no getent; its directory service names the home there.
         pw_home=
-        if command -v id >/dev/null 2>&1; then
-          if command -v getent >/dev/null 2>&1; then
-            pw=$(getent passwd "$(id -u)" 2>/dev/null || true)
+        pw_id=
+        for c in /usr/bin/id /bin/id; do
+          if [ -x "$c" ]; then pw_id=$c; break; fi
+        done
+        pw_getent=
+        for c in /usr/bin/getent /bin/getent; do
+          if [ -x "$c" ]; then pw_getent=$c; break; fi
+        done
+        if [ -n "$pw_id" ]; then
+          if [ -n "$pw_getent" ]; then
+            pw=$("$pw_getent" passwd "$("$pw_id" -u)" 2>/dev/null || true)
             rest=$pw
             i=0
             while [ "$i" -lt 5 ]; do
@@ -631,10 +642,10 @@ case "${home_real}/" in
               i=$((i + 1))
             done
             pw_home=${rest%%:*}
-          elif command -v dscl >/dev/null 2>&1; then
-            pw_user=$(id -un 2>/dev/null || true)
+          elif [ -x /usr/bin/dscl ]; then
+            pw_user=$("$pw_id" -un 2>/dev/null || true)
             if [ -n "$pw_user" ]; then
-              pw=$(dscl . -read "/Users/$pw_user" NFSHomeDirectory 2>/dev/null || true)
+              pw=$(/usr/bin/dscl . -read "/Users/$pw_user" NFSHomeDirectory 2>/dev/null || true)
               pw_home=${pw#NFSHomeDirectory:}
               while :; do
                 case $pw_home in

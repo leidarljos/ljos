@@ -7723,11 +7723,23 @@ esac
 # A uid with no passwd entry, as in some containers, is not a reason to
 # refuse rm, git or find. The passwd home wins; $HOME is the fallback.
 # With neither, there is no home to limit the command to, and it runs.
+# id, getent and dscl are run from their system paths, never from PATH: a
+# stand-in on PATH could name another passwd home and make a TMPDIR that
+# holds the real home look like a sandbox. Without an answer from them
+# TMPDIR is not a temp root, so the guard stays on.
 # macOS has no getent; its directory service names the home there.
 pw_home=
-if command -v id >/dev/null 2>&1; then
-  if command -v getent >/dev/null 2>&1; then
-    pw=$(getent passwd "$(id -u)" 2>/dev/null || true)
+pw_id=
+for c in /usr/bin/id /bin/id; do
+  if [ -x "$c" ]; then pw_id=$c; break; fi
+done
+pw_getent=
+for c in /usr/bin/getent /bin/getent; do
+  if [ -x "$c" ]; then pw_getent=$c; break; fi
+done
+if [ -n "$pw_id" ]; then
+  if [ -n "$pw_getent" ]; then
+    pw=$("$pw_getent" passwd "$("$pw_id" -u)" 2>/dev/null || true)
     rest=$pw
     i=0
     while [ "$i" -lt 5 ]; do
@@ -7735,10 +7747,10 @@ if command -v id >/dev/null 2>&1; then
       i=$((i + 1))
     done
     pw_home=${rest%%:*}
-  elif command -v dscl >/dev/null 2>&1; then
-    pw_user=$(id -un 2>/dev/null || true)
+  elif [ -x /usr/bin/dscl ]; then
+    pw_user=$("$pw_id" -un 2>/dev/null || true)
     if [ -n "$pw_user" ]; then
-      pw=$(dscl . -read "/Users/$pw_user" NFSHomeDirectory 2>/dev/null || true)
+      pw=$(/usr/bin/dscl . -read "/Users/$pw_user" NFSHomeDirectory 2>/dev/null || true)
       pw_home=${pw#NFSHomeDirectory:}
       while :; do
         case $pw_home in
@@ -57003,8 +57015,9 @@ mod tests {
             "#!/bin/sh\nprintf '%s\\n' \"$0\" >> '{}'\nexit 0\n",
             marker.display()
         );
+        let no_lookup = shim_without_passwd_lookup();
         for cmd in ["rm", "git", "find"] {
-            publish_exe(&guard.join(cmd), super::GUARD_SHIM);
+            publish_exe(&guard.join(cmd), &no_lookup);
             publish_exe(&fake.join(cmd), &record);
         }
         publish_exe(
@@ -57064,6 +57077,78 @@ mod tests {
             let ran = std::fs::read_to_string(&marker).unwrap_or_default();
             assert!(ran.contains(cmd), "{cmd} was refused: {ran} {err}");
         }
+    }
+
+    /// The guard shim with its passwd lookup programs moved to paths that
+    /// do not exist, as on a box with no `getent` and no `dscl`.
+    fn shim_without_passwd_lookup() -> String {
+        let getent = "for c in /usr/bin/getent /bin/getent; do";
+        let dscl = "[ -x /usr/bin/dscl ]";
+        assert!(super::GUARD_SHIM.contains(getent));
+        assert!(super::GUARD_SHIM.contains(dscl));
+        super::GUARD_SHIM
+            .replace(getent, "for c in /nonexistent/getent; do")
+            .replace(dscl, "[ -x /nonexistent/dscl ]")
+    }
+
+    /// A `getent` and an `id` first on PATH do not name the passwd home.
+    /// With HOME and TMPDIR both the real passwd home, the stand-ins answer
+    /// another home, which would make that TMPDIR a temp root holding HOME.
+    /// The shim reads the passwd entry itself, so the command is judged.
+    #[cfg(unix)]
+    #[test]
+    fn a_getent_on_path_does_not_make_the_passwd_home_a_sandbox() {
+        let _env = env_guard();
+        let Some(pw) = crate::proc_tree::own_home() else {
+            eprintln!("skipping: this uid has no passwd home");
+            return;
+        };
+        let pw = std::fs::canonicalize(&pw).unwrap_or(pw);
+        if pw.components().count() < 3 || crate::bookkeep::path_is_temp(Some(&pw)) {
+            eprintln!(
+                "skipping: passwd home {} is a temp root or too short for one",
+                pw.display()
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let guard = dir.path().join("guard-bin");
+        let fake = dir.path().join("fake");
+        std::fs::create_dir_all(&guard).unwrap();
+        std::fs::create_dir_all(&fake).unwrap();
+        publish_exe(&guard.join("rm"), super::GUARD_SHIM);
+        publish_exe(&fake.join("rm"), "#!/bin/sh\nexit 0\n");
+        publish_exe(
+            &fake.join("ljos-policyd"),
+            "#!/bin/sh\nprintf 'allow\\twarn\\tRULE\\tGUARDED\\n'\n",
+        );
+        publish_exe(
+            &fake.join("getent"),
+            "#!/bin/sh\nprintf 'u:x:4242:4242::/nonexistent/fake-home:/bin/sh\\n'\n",
+        );
+        publish_exe(
+            &fake.join("id"),
+            "#!/bin/sh\ncase \"$1\" in -un) echo u ;; *) echo 4242 ;; esac\n",
+        );
+        let out = std::process::Command::new(guard.join("rm"))
+            .args(["-f", "dummy"])
+            .current_dir(dir.path())
+            .env_clear()
+            .env("HOME", &pw)
+            .env("TMPDIR", &pw)
+            .env(
+                "PATH",
+                format!("{}:{}:/usr/bin:/bin", guard.display(), fake.display()),
+            )
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "shim failed: {err}");
+        assert!(
+            err.contains("GUARDED"),
+            "a getent on PATH made the passwd home a sandbox: {err:?}"
+        );
     }
 
     /// A directory this test creates, outside the temp roots, mode `0o755`.
