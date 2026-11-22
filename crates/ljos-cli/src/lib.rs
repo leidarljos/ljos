@@ -9455,6 +9455,18 @@ fn lexical_path(path: &Path) -> PathBuf {
     out
 }
 
+/// `path` from the top of the checkout at `top`, both as the filesystem
+/// reaches them ([`kept_prompt::resolve`]). git names the top by its real
+/// path, and a checkout reached through a symlink (`/tmp` is
+/// `/private/tmp` on macOS) spells the same files another way, a file not
+/// made yet included. `None` when `path` is outside `top`.
+pub(crate) fn rel_to_top(top: &Path, path: &Path) -> Option<String> {
+    kept_prompt::resolve(path)
+        .strip_prefix(kept_prompt::resolve(top))
+        .ok()
+        .map(|rel| rel.to_string_lossy().into_owned())
+}
+
 /// Directory a tool command is judged in.
 ///
 /// A relative workdir resolves against the session directory, as opencode's
@@ -51260,14 +51272,8 @@ fn prepare_split(path: &Path, writes: &[(String, String)], also: &[String]) -> S
     let Some(top) = git_ok_stdout(dir, &["rev-parse", "--show-toplevel"]) else {
         return SplitStep::WriteOn;
     };
-    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let top = canon(Path::new(top.trim()));
-    let rel = |p: &Path| {
-        canon(p)
-            .strip_prefix(&top)
-            .ok()
-            .map(|r| r.to_string_lossy().into_owned())
-    };
+    let top = kept_prompt::resolve(Path::new(top.trim()));
+    let rel = |p: &Path| rel_to_top(&top, p);
     let lock_wait = tracker_lock_budget();
     let Some(lock) = tracker_commit_lock_by(dir, std::time::Instant::now() + lock_wait.wait) else {
         stamp_write_seats(path, writes);
@@ -61301,6 +61307,56 @@ mod tests {
         );
         let listed = vissue_core::report::show_all(&layout).unwrap();
         assert!(listed.contains("probe-b000") && listed.contains("probe-b299"));
+        for var in [
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_SEAT",
+            "LJOS_TRACKER_SPLIT_BYTES",
+        ] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// A checkout reached through a symlink, as `/tmp` is on macOS, splits
+    /// in one commit that carries the marker. The issues directory does not
+    /// exist when its path is named, so it is only under the checkout once
+    /// its existing part is resolved.
+    #[test]
+    fn a_split_through_a_symlink_commits_the_marker() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        big_board(&real, 300);
+        let root = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &root).unwrap();
+        let issues = root.join("Software/probe/issues.org");
+        std::env::set_var("VISSUE_ROOT", &root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        std::env::set_var("LJOS_TRACKER_SPLIT_BYTES", "20000");
+        let layout = vissue_core::Layout::new(&root, "Software");
+
+        vissue_core::ops::note(&layout, "probe-b007", "first look").unwrap();
+        let said = persist_tracker_file(&issues, "probe-b007", "noted");
+        assert!(vissue_core::ledger::is_ledger(&issues), "{said}");
+        let split = git_text(
+            &real,
+            &[
+                "log",
+                "--format=%H",
+                "--grep=into per-issue files by saddle",
+            ],
+        );
+        let split = split.lines().next().unwrap_or_default();
+        assert!(!split.is_empty(), "no split commit: {said}");
+        let files = git_text(&real, &["show", "--name-only", "--format=", split]);
+        assert!(
+            files.lines().any(|l| l == "Software/probe/issues/.ledger"),
+            "{said}\n{files}"
+        );
         for var in [
             "VISSUE_ROOT",
             "VISSUE_NO_ROUTE",

@@ -918,19 +918,11 @@ pub(crate) fn merge_atoms_driver(current: &Path, rel: &str) -> Result<(), String
     } else {
         current.to_path_buf()
     };
-    // git names the work tree by its real path. `%A` may reach the same
-    // directory through a symlink (`/var` is `/private/var` on macOS), so
-    // compare the real directories when the spelled paths differ.
-    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let real_current = resolved
+    // Only the directory is resolved: `%A` itself is the file written.
+    let rel_current = resolved
         .parent()
         .zip(resolved.file_name())
-        .map(|(dir, name)| real(dir).join(name));
-    let real_root = real(&root);
-    let rel_current = resolved
-        .strip_prefix(&root)
-        .ok()
-        .or_else(|| real_current.as_deref()?.strip_prefix(&real_root).ok())
+        .and_then(|(dir, name)| Some(Path::new(&crate::rel_to_top(&root, dir)?).join(name)))
         .ok_or_else(|| {
             format!(
                 "atoms merge: {} is outside the work tree",
