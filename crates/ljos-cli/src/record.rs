@@ -2526,14 +2526,7 @@ mod tests {
         std::fs::write(&pin_path, "alpha/run-101 deadbeef\n").expect("pin");
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&pin_path).expect("meta").permissions();
-            perms.set_mode(0o000);
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(&pin_path, perms).expect("chmod");
+            crate::change_mode(&pin_path, 0o000).expect("chmod");
         }
         let entry = sign_as(
             ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),

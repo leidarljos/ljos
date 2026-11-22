@@ -1095,10 +1095,9 @@ fn write_beneath_mode(root: &Path, rel: &str, bytes: &[u8], private: bool) -> Re
     };
     let dir = open_dir_beneath_mode(root, parent, true, dir_mode)?
         .with_context(|| format!("sync: {} was not made", root.join(parent).display()))?;
-    // SAFETY: dir is an open directory fd owned here.
-    if private && unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } < 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("sync: {}", root.join(parent).display()));
+    if private {
+        crate::change_mode_of(&dir, 0o700)
+            .with_context(|| format!("sync: {}", root.join(parent).display()))?;
     }
     // The directory fd is what the write uses. A symlink swapped in for a
     // parent after this open is not followed.

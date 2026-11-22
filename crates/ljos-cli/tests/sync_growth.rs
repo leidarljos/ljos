@@ -968,11 +968,7 @@ fn the_kept_plaintexts_are_this_users_alone_and_not_committed() {
     }
     let (w, atoms, _) = sealed_log();
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(w.opened_dir(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::change_mode(w.opened_dir(), 0o755).unwrap();
     w.add(lesson(atoms.len(), LINE));
     let said = w.sync();
     assert!(said.contains("1 changed"), "{said}");

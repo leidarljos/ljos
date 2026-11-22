@@ -2766,6 +2766,7 @@ dependencies = [
  "ljos-test-boot",
  "packset-client",
  "packset-core",
+ "proc-macro2",
  "regex-automata",
  "rmcp",
  "schemars",

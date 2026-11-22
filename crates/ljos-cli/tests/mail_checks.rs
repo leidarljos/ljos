@@ -1,7 +1,6 @@
 //! Identity, term and attribution checks only ever refuse.
 
 ljos_test_boot::harness!();
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use ljos_cli::mailbox::checks::refusals;
@@ -361,11 +360,7 @@ fn a_deny_file_others_could_change_refuses_everything() {
         reason = "writes a file that is not a git hook"
     )]
     std::fs::write(shared.join("deny.txt"), DENY).unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(&shared, PermissionsExt::from_mode(0o775)).unwrap();
+    ljos_cli::change_mode(&shared, 0o775).unwrap();
     for (path, why) in [(link, "symlink"), (shared.join("deny.txt"), "writable")] {
         let config = MailConfig {
             deny_file: Some(path),

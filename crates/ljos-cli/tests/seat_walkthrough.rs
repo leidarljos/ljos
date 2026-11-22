@@ -103,27 +103,13 @@ impl Walk {
         )
         .unwrap();
         {
-            use std::os::unix::fs::PermissionsExt;
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(
-                root.path().join("run"),
-                std::fs::Permissions::from_mode(0o700),
-            )
-            .unwrap();
+            ljos_cli::change_mode(root.path().join("run"), 0o700).unwrap();
         }
         if with_store {
             // An empty directory is a deed store. The first deed writes its layout.
             let store = home.join(".local/share/deedar/store");
             std::fs::create_dir_all(&store).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "sets the mode of a path that is not a git hook"
-            )]
-            std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o700)).unwrap();
+            ljos_cli::change_mode(&store, 0o700).unwrap();
         }
         for name in ["vissue", "claimdag", "deedar", "packset", "packsetd"] {
             let path = which(name).unwrap_or_else(|| panic!("{name} is not on PATH"));

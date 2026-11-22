@@ -58,11 +58,7 @@ pub fn mailbox() -> Mailbox {
         .collect();
     names.sort();
     for (n, path) in names.iter().enumerate() {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "copies a file that is not a git hook"
-        )]
-        std::fs::copy(path, maildir.join("new").join(format!("{n}.fixture:2,"))).unwrap();
+        ljos_cli::copy_file(path, maildir.join("new").join(format!("{n}.fixture:2,"))).unwrap();
     }
     let config = dir.path().join("notmuch-config");
     #[expect(

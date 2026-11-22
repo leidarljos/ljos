@@ -9,7 +9,6 @@ ljos_test_boot::harness!();
 #[path = "common/tools.rs"]
 mod tools;
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -470,17 +469,8 @@ fn a_failed_upgrade_download_names_the_retry() {
 fn a_read_only_store_names_doctor_and_exits_1() {
     let home = Home::new();
     let config = home.root.join("home/.config");
-    let mode = std::fs::Permissions::from_mode(0o555);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(&config, mode).unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(config.join("ljos"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    ljos_cli::change_mode(&config, 0o555).unwrap();
+    ljos_cli::change_mode(config.join("ljos"), 0o555).unwrap();
     let out = home.run(
         &[
             "prefer",
@@ -491,17 +481,10 @@ fn a_read_only_store_names_doctor_and_exits_1() {
         ],
         &[("LJOS_SEAT", "alice")],
     );
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    let _open = std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755));
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    let _open =
-        std::fs::set_permissions(config.join("ljos"), std::fs::Permissions::from_mode(0o755));
+
+    let _open = ljos_cli::change_mode(&config, 0o755);
+
+    let _open = ljos_cli::change_mode(config.join("ljos"), 0o755);
     let said = text(&out);
     let words = os_words(libc::EACCES);
     assert_eq!(out.status.code(), Some(1), "{said}");

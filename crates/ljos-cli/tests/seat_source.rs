@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn exec_daemon(dir: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let src = dir.join("exec-daemon.c");
     let bin = dir.join("exec-daemon");
     #[expect(
@@ -43,11 +42,7 @@ fn exec_daemon(dir: &Path) -> PathBuf {
         "cc: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    let _ = std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755));
+    let _ = ljos_cli::change_mode(&bin, 0o755);
     bin
 }
 

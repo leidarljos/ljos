@@ -209,11 +209,7 @@ fn copy_payload(store: &Path, hex: &str, folder: &Path) -> Result<()> {
     }
     let dir = folder.join("bytes");
     std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "copies a file that is not a git hook"
-    )]
-    std::fs::copy(&src, dir.join(hex)).with_context(|| format!("copying sha256:{hex}"))?;
+    crate::copy_file(&src, dir.join(hex)).with_context(|| format!("copying sha256:{hex}"))?;
     Ok(())
 }
 
@@ -1121,7 +1117,6 @@ mod tests {
 
     #[test]
     fn a_failed_publish_keeps_the_old_bag() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("seat");
         std::fs::create_dir_all(dest.join("kept")).unwrap();
@@ -1150,36 +1145,12 @@ mod tests {
             reason = "writes a file that is not a git hook"
         )]
         std::fs::write(&blocked, b"new").unwrap();
-        let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
-        perms.set_mode(0o000);
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&blocked, perms).unwrap();
-        let mut dir_perms = std::fs::metadata(&parent_dir).unwrap().permissions();
-        dir_perms.set_mode(0o555);
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&parent_dir, dir_perms).unwrap();
+        crate::change_mode(&blocked, 0o000).unwrap();
+        crate::change_mode(&parent_dir, 0o555).unwrap();
         let parent = std::fs::File::open(dir.path()).unwrap();
         let err = publish(&parent, "seat", scratch.path());
-        let mut dir_perms = std::fs::metadata(&parent_dir).unwrap().permissions();
-        dir_perms.set_mode(0o755);
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&parent_dir, dir_perms).unwrap();
-        let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
-        perms.set_mode(0o644);
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&blocked, perms).unwrap();
+        crate::change_mode(&parent_dir, 0o755).unwrap();
+        crate::change_mode(&blocked, 0o644).unwrap();
         let err = err.expect_err("publish of an unreadable tree succeeded");
         let text = format!("{err:#}");
         assert_eq!(

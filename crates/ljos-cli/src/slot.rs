@@ -447,7 +447,6 @@ fn tip_of(root: &Path) -> Option<Tip> {
 fn slot_index_paths(root: &Path) -> Option<(PathBuf, PathBuf)> {
     use sha2::Digest;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
     let canon = std::fs::canonicalize(root).ok()?;
     let mut hasher = sha2::Sha256::new();
     hasher.update(canon.as_os_str().as_bytes());
@@ -456,11 +455,7 @@ fn slot_index_paths(root: &Path) -> Option<(PathBuf, PathBuf)> {
     std::fs::create_dir_all(&dir).ok()?;
     // The directory is one this process made. 0700 matches the files under
     // it, which are opened with O_NOFOLLOW and written mode 0600.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    let _ = crate::change_mode(&dir, 0o700);
     Some((dir.join(format!("{key}.lock")), dir.join(key)))
 }
 

@@ -484,14 +484,18 @@ fn real_dir(path: &Path) -> bool {
 }
 
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
     }
-    builder.create(path)
+    #[cfg(not(unix))]
+    {
+        std::fs::DirBuilder::new().recursive(true).create(path)
+    }
 }
 
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {

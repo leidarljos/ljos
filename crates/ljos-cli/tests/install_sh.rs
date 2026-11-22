@@ -2309,14 +2309,7 @@ fn a_bin_dir_that_is_not_writable_names_bin_dir() {
     let home = dir.path().join("home");
     let locked = dir.path().join("locked");
     std::fs::create_dir_all(&locked).unwrap();
-    let mut perms = std::fs::metadata(&locked).unwrap().permissions();
-    use std::os::unix::fs::PermissionsExt;
-    perms.set_mode(0o555);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(&locked, perms).unwrap();
+    ljos_cli::change_mode(&locked, 0o555).unwrap();
     let out = run_install(
         &home,
         "/usr/bin:/bin",

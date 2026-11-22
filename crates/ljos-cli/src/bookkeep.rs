@@ -596,12 +596,7 @@ pub(crate) fn replace_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "sets the mode of a path that is not a git hook"
-        )]
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+        crate::change_mode(&tmp, mode & 0o666)?;
     }
     #[expect(
         clippy::disallowed_methods,

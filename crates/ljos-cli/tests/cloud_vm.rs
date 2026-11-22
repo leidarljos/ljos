@@ -815,23 +815,13 @@ fn replace_archive(rel: &Path, base: &str, top: &str, files: &[(&str, &[u8])]) {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn lock_bin_dir(home: &Path) -> PathBuf {
     let bin_dir = home.join(".local/bin");
-    use std::os::unix::fs::PermissionsExt;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    fs::set_permissions(&bin_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    ljos_cli::change_mode(&bin_dir, 0o555).unwrap();
     bin_dir
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn unlock_bin_dir(bin_dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    let _ = fs::set_permissions(bin_dir, fs::Permissions::from_mode(0o755));
+    let _ = ljos_cli::change_mode(bin_dir, 0o755);
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -945,12 +935,7 @@ fn an_encoder_directory_is_not_already_installed() {
     }
     let encoder = bin_dir.join("packset-embed");
     fs::create_dir(&encoder).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    fs::set_permissions(&encoder, fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::change_mode(&encoder, 0o755).unwrap();
     let soname = home.join(".local/lib/onnxruntime/libonnxruntime.so.1");
     fs::create_dir_all(soname.parent().unwrap()).unwrap();
     #[expect(

@@ -233,7 +233,7 @@ fn release_dir() -> Option<PathBuf> {
 fn obtain(name: &str, to: &Path, url: &str) -> Result<()> {
     if let Some(dir) = release_dir() {
         let src = dir.join(name);
-        #[expect(clippy::disallowed_methods, reason = "copies a file that is not a git hook")] std::fs::copy(&src, to).with_context(|| {
+        crate::copy_file(&src, to).with_context(|| {
             format!(
                 "upgrade: could not read {} from the release directory, and the archive must be there or LJOS_RELEASE_DIR must be unset, so run `ljos upgrade`.",
                 src.display()

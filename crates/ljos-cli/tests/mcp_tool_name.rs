@@ -43,12 +43,7 @@ fn hab(name: &str) -> Hab {
     for dir in [&hab.home, &hab.run, &hab.repo] {
         std::fs::create_dir_all(dir).unwrap();
     }
-    use std::os::unix::fs::PermissionsExt;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(&hab.run, std::fs::Permissions::from_mode(0o700)).unwrap();
+    ljos_cli::change_mode(&hab.run, 0o700).unwrap();
     #[expect(
         clippy::disallowed_methods,
         reason = "starts a program outside git hook code"
