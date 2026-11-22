@@ -50611,9 +50611,11 @@ pub fn persist_tracker_many(ids: &[String], verb: &str) -> String {
 }
 
 /// [`persist_tracker_paths`] for several writes to the one file at
-/// `path`, in one commit. `others` are files among `also` whose writes
-/// are stamped with `path`'s: after the checkout lock is held and before
-/// any issues lock, and only once nothing refuses the commit.
+/// `path`, in one commit. `others` are the first files of `also`, in the
+/// same order, whose writes get their logbook lines with `path`'s: while
+/// the checkout lock is held, each line under its file's issues lock taken
+/// inside it, and only once nothing refuses the commit. A file the
+/// checkout ignores, `path` included, is not committed, so it gets no line.
 fn persist_tracker_writes(
     path: &Path,
     writes: &[(String, String)],
@@ -50733,12 +50735,15 @@ fn persist_tracker_writes(
         Err(e) => return format!("tracker git: {e}\n"),
     }
     let seat = tracker_seat();
-    for (issue, verb) in writes {
-        stamp_seat_logbook(path, issue, verb, &seat);
-    }
-    for (other, list) in others {
+    let rest = others
+        .iter()
+        .map(|(other, list)| (other.as_path(), list.as_slice()));
+    for ((file, list), spec) in std::iter::once((path, writes)).chain(rest).zip(&specs) {
+        if !live.contains(&spec.as_str()) {
+            continue;
+        }
         for (issue, verb) in list {
-            stamp_seat_logbook(other, issue, verb, &seat);
+            stamp_seat_logbook(file, issue, verb, &seat);
         }
     }
     let named: Vec<String> = writes

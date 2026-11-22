@@ -340,6 +340,82 @@ fn a_commit_another_writer_holds_off_stamps_no_project() {
     drop(held);
 }
 
+const UNDER_DEMO: &str = "Under demo";
+const UNDER_OTHER: &str = "Under other";
+
+/// Makes the checkout ignore a new `Software/other` project, and returns
+/// the path of its `issues.org`.
+fn ignored_other(world: &World) -> std::path::PathBuf {
+    std::fs::write(world.tracker().join(".gitignore"), "Software/other/\n").unwrap();
+    world.git(&["add", ".gitignore"]);
+    world.git(&["commit", "-q", "-m", "ignore other"]);
+    let dir = world.tracker().join("Software/other");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("issues.org"),
+        "* TODO [#B] Other plan\n:PROPERTIES:\n:ID:         other-c3d4\n:END:\n",
+    )
+    .unwrap();
+    dir.join("issues.org")
+}
+
+fn row(title: &str) -> String {
+    let parent = if title == UNDER_DEMO {
+        ISSUE
+    } else {
+        "other-c3d4"
+    };
+    format!("{{\"title\": \"{title}\", \"parent\": \"{parent}\"}}\n")
+}
+
+fn an_ignored_project_gets_no_filed_by_line(order: [&str; 2]) {
+    let world = World::new();
+    let other = ignored_other(&world);
+    let before = world.commits();
+    let file = world.write("rows.jsonl", order.map(row).concat());
+    let filed = world.ljos(&["file", "--from", &file]);
+    assert!(filed.status.success(), "{}", said(&filed));
+    assert!(stderr(&filed).contains("is ignored"), "{}", said(&filed));
+    assert_eq!(world.commits(), before + 1, "{}", said(&filed));
+    let other = std::fs::read_to_string(other).unwrap();
+    assert!(other.contains(UNDER_OTHER), "{other}");
+    assert!(!other.contains("Filed by"), "{other}");
+    let demo = std::fs::read_to_string(world.tracker().join("Software/demo/issues.org")).unwrap();
+    assert!(demo.contains("Filed by"), "{demo}");
+}
+
+#[test]
+fn an_ignored_project_on_the_first_row_gets_no_filed_by_line() {
+    an_ignored_project_gets_no_filed_by_line([UNDER_OTHER, UNDER_DEMO]);
+}
+
+#[test]
+fn an_ignored_project_on_the_second_row_gets_no_filed_by_line() {
+    an_ignored_project_gets_no_filed_by_line([UNDER_DEMO, UNDER_OTHER]);
+}
+
+#[test]
+fn a_batch_in_only_ignored_projects_writes_no_filed_by_line() {
+    let world = World::new();
+    let other = ignored_other(&world);
+    let demo = world.tracker().join("Software/demo/issues.org");
+    std::fs::write(world.tracker().join(".gitignore"), "Software/\n").unwrap();
+    world.git(&["rm", "-q", "--cached", "Software/demo/issues.org"]);
+    world.git(&["add", ".gitignore"]);
+    world.git(&["commit", "-q", "-m", "ignore every project"]);
+    let before = world.commits();
+    let file = world.write("rows.jsonl", [UNDER_OTHER, UNDER_DEMO].map(row).concat());
+    let filed = world.ljos(&["file", "--from", &file]);
+    assert!(filed.status.success(), "{}", said(&filed));
+    assert!(stderr(&filed).contains("is ignored"), "{}", said(&filed));
+    assert_eq!(world.commits(), before, "{}", said(&filed));
+    for (path, title) in [(other, UNDER_OTHER), (demo, UNDER_DEMO)] {
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains(title), "{text}");
+        assert!(!text.contains("Filed by"), "{text}");
+    }
+}
+
 #[test]
 fn a_csv_header_named_twice_is_refused_and_nothing_is_filed() {
     let world = World::new();
