@@ -232,50 +232,117 @@ fn is_lock(path: &Path) -> bool {
     path.extension().is_some_and(|ext| ext == "lock")
 }
 
-/// Files by path, with their bytes.
-type Files = BTreeMap<PathBuf, Vec<u8>>;
+/// What a snapshot saw at a path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Entry {
+    /// A regular file, with its bytes.
+    File(Vec<u8>),
+    /// A symbolic link, with its target. It is never followed, removed or
+    /// written.
+    Link(PathBuf),
+}
 
-/// The files of the project directory `dir` that a create writes, with
-/// their bytes: `issues.org` and each regular file in `issues/` but the
-/// lock files. Nothing else there is read.
+/// Paths, with what was there.
+type Files = BTreeMap<PathBuf, Entry>;
+
+/// What is at `path` without following a link: `None` when there is
+/// nothing, or something that is neither a file nor a link.
+fn entry(path: &Path) -> Result<Option<Entry>> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let read = || format!("reading {}", path.display());
+    Ok(if meta.file_type().is_symlink() {
+        Some(Entry::Link(std::fs::read_link(path).with_context(read)?))
+    } else if meta.is_file() {
+        Some(Entry::File(std::fs::read(path).with_context(read)?))
+    } else {
+        None
+    })
+}
+
+/// Whether `path` is a regular file and not a link to one.
+fn is_plain_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
+}
+
+/// The files of the project directory `dir` that a create writes:
+/// `issues.org` and each entry of `issues/` but the lock files. A link is
+/// recorded with its target and not followed, the project directory and
+/// `issues/` included. Nothing else there is read.
 fn snapshot(dir: &Path) -> Result<Files> {
     let mut out = BTreeMap::new();
+    if let Some(link @ Entry::Link(_)) = entry(dir)? {
+        out.insert(dir.to_path_buf(), link);
+    }
     let board = dir.join("issues.org");
-    if std::fs::symlink_metadata(&board).is_ok_and(|meta| meta.is_file()) {
-        out.insert(
-            board.clone(),
-            std::fs::read(&board).with_context(|| format!("reading {}", board.display()))?,
-        );
+    if let Some(found) = entry(&board)? {
+        out.insert(board, found);
     }
     let ledger = dir.join("issues");
+    if let Some(link @ Entry::Link(_)) = entry(&ledger)? {
+        out.insert(ledger, link);
+        return Ok(out);
+    }
     if !ledger.is_dir() {
         return Ok(out);
     }
-    for entry in
+    for item in
         std::fs::read_dir(&ledger).with_context(|| format!("reading {}", ledger.display()))?
     {
-        let entry = entry?;
-        if entry.file_type()?.is_file() && !is_lock(&entry.path()) {
-            out.insert(entry.path(), std::fs::read(entry.path())?);
+        let path = item?.path();
+        if is_lock(&path) {
+            continue;
+        }
+        if let Some(found) = entry(&path)? {
+            out.insert(path, found);
         }
     }
     Ok(out)
 }
 
+/// A batch writes a board only through `issues.org` and `issues/` that are
+/// not links: a create replaces a linked `issues.org` with a plain file,
+/// and a link under either name points the batch at files it never read.
+fn refuse_links(issues: &Path) -> Result<()> {
+    let ledger = issues.with_file_name("issues");
+    for path in [issues, ledger.as_path()] {
+        if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            bail!(
+                "file --from: {} is a symbolic link, so the batch writes nothing; file its tickets with `ljos file` one at a time",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Put `dir` back to `before`: files written since are restored, files
-/// made since are removed. Lock files are left as they are. The caller
-/// holds the project's issues lock.
+/// made since are removed. Lock files and links are left as they are. The
+/// caller holds the project's issues lock.
 fn restore(dir: &Path, before: &Files) -> Result<()> {
-    for (path, _) in snapshot(dir)? {
-        if !before.contains_key(&path) {
+    for (path, found) in snapshot(dir)? {
+        if !before.contains_key(&path) && matches!(found, Entry::File(_)) && is_plain_file(&path) {
             std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         }
     }
-    for (path, bytes) in before {
-        if std::fs::read(path).ok().as_deref() != Some(bytes.as_slice()) {
-            vissue_core::store::replace_file_atomically(path, &String::from_utf8_lossy(bytes))
-                .with_context(|| format!("restoring {}", path.display()))?;
+    for (path, was) in before {
+        let Entry::File(bytes) = was else {
+            continue;
+        };
+        if entry(path)?.as_ref() == Some(was) {
+            continue;
         }
+        if std::fs::symlink_metadata(path).is_ok_and(|meta| !meta.is_file()) {
+            bail!(
+                "{} is no longer a plain file, so it is not put back",
+                path.display()
+            );
+        }
+        vissue_core::store::replace_file_atomically(path, &String::from_utf8_lossy(bytes))
+            .with_context(|| format!("restoring {}", path.display()))?;
     }
     Ok(())
 }
@@ -550,9 +617,12 @@ impl Board {
         let (Some(changed), None) = (changed.next(), changed.next()) else {
             return Ok(None);
         };
-        let Some(text) = now.get(changed).map(|bytes| String::from_utf8_lossy(bytes)) else {
+        let Some(Entry::File(text)) = now.get(changed) else {
             return Ok(None);
         };
+        if matches!(self.ours.get(changed), Some(Entry::Link(_))) {
+            return Ok(None);
+        }
         let mut doc = parsed(&self.project, &self.issues)?;
         let Some(found) = doc.headings.iter().find(|h| h.id == want.id) else {
             return Ok(None);
@@ -571,11 +641,11 @@ impl Board {
         let clean = if vissue_core::ledger::is_ledger(&self.issues) {
             changed == doc.heading_path(want.id)
                 && !self.ours.contains_key(changed)
-                && text == ledger_header(&doc.preamble, &heading)
+                && *text == ledger_header(&doc.preamble, &heading).into_bytes()
         } else {
             let mut whole = doc.clone();
             whole.refresh_statistics();
-            *changed == self.issues && whole.render_string() == text
+            *changed == self.issues && *text == whole.render_string().into_bytes()
         };
         if !clean || heading != found.render() {
             return Ok(None);
@@ -658,6 +728,7 @@ pub fn file_rows(placed: &[Placed], defaults: &Defaults) -> Result<Filed> {
             .parent()
             .map(Path::to_path_buf)
             .context("file --from: the project file has no directory")?;
+        refuse_links(&issues)?;
         let (before, board) = locked(&issues, || {
             Ok((snapshot(&dir)?, rendered(&project, &issues)?))
         })?;
@@ -825,6 +896,54 @@ mod tests {
         assert_eq!(roll_back(boards).unwrap(), None);
         assert_eq!(read(), "before\n");
         assert!(dir.join("issues.org.lock").is_file());
+    }
+
+    #[test]
+    fn a_symlinked_board_is_never_taken_as_the_batch_s_and_never_removed() {
+        let (root, layout, mut board) = demo(false);
+        let real = root.path().join("real.org");
+        std::fs::rename(&board.issues, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &board.issues).unwrap();
+        board.before = snapshot(&board.dir).unwrap();
+        board.ours = board.before.clone();
+        let id = file(&layout, "new");
+        assert_eq!(refuse_next(&mut board, &want(&layout, &id)), None);
+        assert!(board.issues.is_file());
+        assert!(real.is_file());
+    }
+
+    #[test]
+    fn a_batch_refuses_a_linked_board_or_ledger_directory_before_it_writes() {
+        for name in ["issues.org", "issues"] {
+            let (root, _layout, board) = demo(false);
+            assert!(refuse_links(&board.issues).is_ok());
+            let at = board.dir.join(name);
+            let real = root.path().join(format!("real-{name}"));
+            std::fs::rename(&at, &real).unwrap();
+            std::os::unix::fs::symlink(&real, &at).unwrap();
+            let e = refuse_links(&board.issues).unwrap_err().to_string();
+            assert!(e.contains("is a symbolic link"), "{e}");
+            assert!(std::fs::symlink_metadata(&at)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+    }
+
+    #[test]
+    fn a_symlink_another_writer_put_in_issues_stops_the_batch() {
+        for ledger in [false, true] {
+            let (root, layout, mut board) = demo(ledger);
+            let id = file(&layout, "new");
+            let link = board.dir.join("issues/theirs.org");
+            std::os::unix::fs::symlink(root.path(), &link).unwrap();
+            assert_eq!(
+                refuse_next(&mut board, &want(&layout, &id)),
+                None,
+                "ledger {ledger}"
+            );
+            assert!(std::fs::symlink_metadata(&link).is_ok());
+        }
     }
 
     #[test]
