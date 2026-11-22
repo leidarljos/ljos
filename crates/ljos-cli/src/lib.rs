@@ -51185,12 +51185,16 @@ fn split_as_migrated(board: &Path) -> Option<Vec<PathBuf>> {
 /// what the refused commit's add left staged. The check and the removal
 /// run under the board's lock. A split that is no longer what migrate
 /// wrote ([`split_as_migrated`]) holds a write that went to it, and is
-/// kept. Returns whether it went.
+/// kept. So is one whose issue files stay staged: with the marker gone,
+/// the next plain commit would carry them. Returns whether it went.
 fn roll_back_split(board: &Path) -> bool {
     with_wall_bounded_issues_lock(board, || {
         let Some(files) = split_as_migrated(board) else {
             return Ok(false);
         };
+        if !board.parent().is_some_and(unstage_issues) {
+            return Ok(false);
+        }
         let marker = board_issues_dir(board).join(".ledger");
         std::fs::remove_file(&marker)
             .map_err(|e| anyhow::anyhow!("remove {}: {e}", marker.display()))?;
@@ -51198,12 +51202,33 @@ fn roll_back_split(board: &Path) -> bool {
             let _ = std::fs::remove_file(file);
         }
         let _ = std::fs::remove_dir(board_issues_dir(board));
-        if let Some(dir) = board.parent() {
-            let _ = git_ok_stdout(dir, &["reset", "-q", "--", "issues"]);
-        }
         Ok(true)
     })
     .unwrap_or(false)
+}
+
+/// Put `issues` under `dir` in the index back to HEAD. With no HEAD yet
+/// there is nothing to reset to, so its entries leave the index. Returns
+/// whether nothing under `issues` is staged after.
+fn unstage_issues(dir: &Path) -> bool {
+    if git_ok_stdout(dir, &["reset", "-q", "--", "issues"]).is_none()
+        && git_ok_stdout(dir, &["rev-parse", "-q", "--verify", "HEAD"]).is_none()
+    {
+        let _ = git_ok_stdout(
+            dir,
+            &[
+                "rm",
+                "-r",
+                "-q",
+                "--cached",
+                "--ignore-unmatch",
+                "--",
+                "issues",
+            ],
+        );
+    }
+    git_ok_stdout(dir, &["diff", "--cached", "--name-only", "--", "issues"])
+        .is_some_and(|out| out.trim().is_empty())
 }
 
 /// Split the board at `path` when it is due, or land a split of it that is
@@ -61846,6 +61871,90 @@ mod tests {
             }
             clear_probe_env();
         }
+    }
+
+    /// A refused split whose staged issue files cannot be unstaged is kept,
+    /// not rolled back with its marker gone and those files still in the
+    /// index for the next plain commit.
+    #[test]
+    fn a_split_that_cannot_be_unstaged_is_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let issues = big_board(&root, 300);
+        refuse_split_commits(&root);
+        probe_env(&root);
+        let layout = vissue_core::Layout::new(&root, "Software");
+        vissue_core::ops::note(&layout, "probe-b007", "first look").unwrap();
+        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("git"))
+            .find(|git| git.is_file())
+            .expect("git on PATH");
+        let shim = tempfile::tempdir().unwrap();
+        let git = shim.path().join("git");
+        std::fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    reset|rm) echo \"fatal: no $arg here\" >&2; exit 128 ;;\n  esac\ndone\nexec '{}' \"$@\"\n",
+                real.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let said = {
+            let _bins = super::prepend_path(shim.path());
+            persist_tracker("probe-b007", "noted")
+        };
+        let staged = git_text(
+            &root,
+            &[
+                "diff",
+                "--cached",
+                "--name-only",
+                "--",
+                "Software/probe/issues",
+            ],
+        );
+        assert!(said.contains("is not in a commit"), "{said}\n{staged}");
+        assert!(vissue_core::ledger::is_ledger(&issues), "{said}");
+        clear_probe_env();
+    }
+
+    /// With no HEAD and a reset that fails, the staged issue files leave
+    /// the index through `git rm --cached`.
+    #[test]
+    fn unstaging_on_an_unborn_head_falls_back_to_rm_cached() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        git_text(&root, &["init", "-q"]);
+        std::fs::create_dir_all(root.join("issues")).unwrap();
+        std::fs::write(root.join("issues/a.org"), "a\n").unwrap();
+        git_text(&root, &["add", "issues"]);
+        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("git"))
+            .find(|git| git.is_file())
+            .expect("git on PATH");
+        let shim = tempfile::tempdir().unwrap();
+        let git = shim.path().join("git");
+        std::fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do\n  [ \"$arg\" = reset ] && exit 128\ndone\nexec '{}' \"$@\"\n",
+                real.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let unstaged = {
+            let _bins = super::prepend_path(shim.path());
+            super::unstage_issues(&root)
+        };
+        assert!(unstaged);
+        assert!(git_text(&root, &["ls-files", "issues"]).is_empty());
+        assert!(root.join("issues/a.org").is_file());
     }
 
     /// A sibling board the migrate could not split is not left on the
