@@ -98,6 +98,7 @@ pub fn copy_executable(src: &Path, dest: &Path) -> Result<(), Error> {
         let tmp = temp_name(dest)?;
         let _ = std::fs::remove_file(&tmp);
         let out = Command::new("/bin/cp")
+            .arg("--")
             .arg(src)
             .arg(&tmp)
             .stdout(Stdio::null())
@@ -221,6 +222,29 @@ mod tests {
         let out = Command::new(&dest).output().unwrap();
         assert!(out.status.success(), "{out:?}");
         assert_eq!(out.stdout, b"copied\n");
+    }
+
+    /// A relative source can start with a dash. `cp` has to read it as a
+    /// file, not an option. The working directory is the crate's.
+    #[test]
+    fn a_source_named_like_an_option_is_copied() {
+        struct Gone(PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let src = Gone(PathBuf::from(format!(
+            "--ljos-copy-src-{}",
+            std::process::id()
+        )));
+        install_executable(&src.0, b"#!/bin/sh\necho dashed\n").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        copy_executable(&src.0, &dest).unwrap();
+        let out = Command::new(&dest).output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(out.stdout, b"dashed\n");
     }
 
     /// The temporary file is flushed before the rename and the directory
