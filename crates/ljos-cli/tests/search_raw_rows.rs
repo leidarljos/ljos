@@ -101,23 +101,21 @@ fn world_with(encoder: bool) -> Option<World> {
     }
     std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
     let pack_home = root.join("home/.local/share/packset");
-    let embed = if encoder {
-        let stub = root.join("packset-embed");
-        write_embed_stub(&stub);
-        stub
-    } else {
-        root.join("missing-packset-embed")
-    };
     let mut started = ljos_test_boot::Packsetd::build();
     started.bin(packsetd.join("packsetd"));
     started.pack_at(&pack_home);
     started
         .command()
         .env("PACKSET_AUTH", "off")
-        .env("PACKSET_EMBED", &embed)
         .env("HOME", root.join("home"))
         .env("PATH", &path)
         .env("TMPDIR", root.join("tmp"));
+    // The harness turns off an encoder this command does not name.
+    if encoder {
+        let stub = root.join("packset-embed");
+        write_embed_stub(&stub);
+        started.command().env("PACKSET_EMBED", &stub);
+    }
     let daemon = started.spawn();
     let world = World {
         port: daemon.port(),

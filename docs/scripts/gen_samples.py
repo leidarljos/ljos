@@ -403,6 +403,9 @@ def _agent_env(home: Path, ljos: Path, extra: dict[str, str] | None = None) -> d
             "GIT_TERMINAL_PROMPT": "0",
             "COLUMNS": "80",
             "TERM": "dumb",
+            # packsetd finds an encoder beside its own binary or on PATH.
+            # The samples are the pages of a seat without one.
+            "INSIDE_EMBED": "off",
             # A distinct runtime directory, so a parent process's session
             # id is not read as this process's.
             "XDG_RUNTIME_DIR": str(home / "run"),
@@ -940,7 +943,7 @@ def as_terminal(text: str) -> str:
 def tutorial_search(ljos: Path) -> dict[str, str]:
     """Remember, search and prefer as a terminal would print them.
 
-    The encoder stays off PATH, so the ranking line is the lexical one.
+    The writer's encoder is off, so the ranking line is the lexical one.
     The writer listens on a free port and is stopped before return.
     """
     for name in ("packset", "packsetd"):

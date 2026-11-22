@@ -37,6 +37,39 @@ fn spawn_ready(cmd: &mut Command, program: &Path) -> Child {
     panic!("spawn {}: {last}", program.display())
 }
 
+/// packsetd runs an encoder it finds beside itself or on `PATH`, and a
+/// `PACKSET_EMBED` that names no program falls through to that search.
+/// So the writer's encoder is off unless the test names one that runs,
+/// and a host that installed `packset-embed` prints the same page as one
+/// that did not. A test that sets `INSIDE_EMBED` keeps its own value.
+fn encoder_only_if_named(cmd: &mut Command) {
+    let set = |name: &str| {
+        cmd.get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new(name))
+            .map(|(_, value)| value.map(PathBuf::from))
+    };
+    if set("INSIDE_EMBED").is_some() {
+        return;
+    }
+    let named = set("PACKSET_EMBED")
+        .flatten()
+        .is_some_and(|path| runs(&path));
+    cmd.env("INSIDE_EMBED", if named { "on" } else { "off" });
+}
+
+fn runs(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
 /// Pause between listens checks. The socket shows up when the writer
 /// binds; 50ms is the pause the old starts used, short of a spin and
 /// well inside [`READY`].
@@ -270,7 +303,8 @@ impl Builder {
     }
 
     /// The command, for env and arguments. The spawn still sets `HOME`,
-    /// `PACKSET_HOME`, `--port 0`, and `--home`.
+    /// `PACKSET_HOME`, `--port 0`, and `--home`, and sets `INSIDE_EMBED`
+    /// when the command does not.
     pub fn command(&mut self) -> &mut Command {
         if self.cmd.is_none() {
             let program = self.program.clone().unwrap_or_else(locate_or_panic);
@@ -301,6 +335,7 @@ impl Builder {
         // into that seat's real files.
         cmd.env("HOME", &home);
         cmd.env("PACKSET_HOME", &pack);
+        encoder_only_if_named(&mut cmd);
         // Port 0 is bind's request for an unused port. The pinned writer
         // binds that port itself; it has no flag that takes a listener.
         // The port is read back from this process.
