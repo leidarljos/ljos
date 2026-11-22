@@ -346,7 +346,13 @@ const UNDER_OTHER: &str = "Under other";
 /// Makes the checkout ignore a new `Software/other` project, and returns
 /// the path of its `issues.org`.
 fn ignored_other(world: &World) -> std::path::PathBuf {
-    std::fs::write(world.tracker().join(".gitignore"), "Software/other/\n").unwrap();
+    untracked_other(world, "Software/other/\n")
+}
+
+/// Commits `rules` as the checkout's `.gitignore`, then writes a new,
+/// untracked `Software/other` project and returns its `issues.org`.
+fn untracked_other(world: &World, rules: &str) -> std::path::PathBuf {
+    std::fs::write(world.tracker().join(".gitignore"), rules).unwrap();
     world.git(&["add", ".gitignore"]);
     world.git(&["commit", "-q", "-m", "ignore other"]);
     let dir = world.tracker().join("Software/other");
@@ -470,6 +476,22 @@ fn a_batch_with_a_tracked_project_under_an_ignored_dir_commits_it() {
     let world = World::new();
     tracked_other_under_an_ignored_dir(&world, ".git/info/exclude");
     other_is_filed_and_committed(&world, &[UNDER_OTHER, UNDER_DEMO]);
+}
+
+const RE_INCLUDE_OTHER: &str = "Software/*\n!Software/other/\n!Software/other/**\n";
+
+#[test]
+fn a_project_a_negation_re_includes_is_stamped_and_committed() {
+    let world = World::new();
+    untracked_other(&world, RE_INCLUDE_OTHER);
+    other_is_filed_and_committed(&world, &[UNDER_OTHER]);
+}
+
+#[test]
+fn a_batch_with_a_project_a_negation_re_includes_commits_it() {
+    let world = World::new();
+    untracked_other(&world, RE_INCLUDE_OTHER);
+    other_is_filed_and_committed(&world, &[UNDER_DEMO, UNDER_OTHER]);
 }
 
 #[test]

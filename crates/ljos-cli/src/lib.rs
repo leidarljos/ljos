@@ -50705,56 +50705,47 @@ fn persist_tracker_writes(
         note_deferred_paths(dir, &refs);
         return tracker_lock_busy(dir, lock_wait);
     };
+    // The commit takes exactly the files `git add` takes: a tracked file,
+    // even under an ignored directory, and an untracked one no rule
+    // ignores once `!` negations are read. `check-ignore -q` without `-v`
+    // is that answer; `-v` exits 0 on a matching negation too.
     let mut live: Vec<&str> = Vec::new();
     let mut ignored_note = String::new();
-    if also.is_empty() {
-        live.push(specs[0].as_str());
-    } else {
-        for spec in &specs {
-            match git(&["check-ignore", "-v", "--", spec]) {
-                Ok(ignored) if ignored.status.success() => {
-                    ignored_note.push_str(&format!(
-                        "tracker git: {spec} is ignored ({}), so the write stays in this worktree\n",
-                        first_line(&ignored.stdout)
-                    ));
-                }
-                _ => live.push(spec.as_str()),
+    for spec in &specs {
+        match git(&["check-ignore", "-q", "--", spec]) {
+            Ok(ignored) if ignored.status.success() => {
+                let rule = git(&["check-ignore", "-v", "--", spec])
+                    .map(|why| first_line(&why.stdout))
+                    .unwrap_or_default();
+                let name = if also.is_empty() {
+                    path.display().to_string()
+                } else {
+                    spec.clone()
+                };
+                ignored_note.push_str(&format!(
+                    "tracker git: {name} is ignored ({rule}), so the write stays in this worktree\n"
+                ));
             }
+            _ => live.push(spec.as_str()),
         }
-        if live.is_empty() {
-            return if ignored_note.is_empty() {
-                "tracker git: nothing to commit\n".into()
-            } else {
-                ignored_note
-            };
+    }
+    let nothing = |note: String| {
+        if note.is_empty() {
+            "tracker git: nothing to commit\n".to_string()
+        } else {
+            note
         }
+    };
+    if live.is_empty() {
+        return nothing(ignored_note);
     }
     let mut status_args = vec!["status", "--porcelain", "--"];
     status_args.extend(live.iter().copied());
     match git(&status_args) {
-        Ok(o) if o.status.success() && o.stdout.is_empty() => {
-            // An ignored file has an empty status, the same shape as a
-            // clean tracked file. The ignore rule is what keeps the write
-            // on this machine. A clean file does not take another seat's
-            // deferred paths with it; those wait for the write that named
-            // them, or for a flush that names no path.
-            if also.is_empty() {
-                match git(&["check-ignore", "-v", "--", live[0]]) {
-                    Ok(ignored) if ignored.status.success() => {
-                        return format!(
-                            "tracker git: {} is ignored ({}), so the write stays in this worktree\n",
-                            path.display(),
-                            first_line(&ignored.stdout)
-                        );
-                    }
-                    _ => return "tracker git: nothing to commit\n".into(),
-                }
-            } else if ignored_note.is_empty() {
-                return "tracker git: nothing to commit\n".into();
-            } else {
-                return ignored_note;
-            }
-        }
+        // A clean file does not take another seat's deferred paths with
+        // it; those wait for the write that named them, or for a flush
+        // that names no path.
+        Ok(o) if o.status.success() && o.stdout.is_empty() => return nothing(ignored_note),
         Ok(o) if o.status.success() => {}
         Ok(o) => return format!("tracker git: {}\n", tracker_git_said(dir, &o)),
         Err(e) => return format!("tracker git: {e}\n"),
