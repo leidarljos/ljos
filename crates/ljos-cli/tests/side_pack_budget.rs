@@ -27,15 +27,7 @@ impl Drop for Hab {
 }
 
 fn hab(name: &str) -> Hab {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let root = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp).join(format!(
-        "m5p-{name}-{}-{}",
-        std::process::id(),
-        nanos % 1_000_000_000
-    ));
+    let root = seat_root::seat_dir(ljos_cli::bookkeep::path_is_temp, &format!("m5p-{name}"));
     let hab = Hab {
         home: root.join("home"),
         run: root.join("run"),
@@ -142,6 +134,7 @@ fn session(url: &str, hab: &Hab) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &hab.home)
         .env("XDG_CONFIG_HOME", hab.home.join(".config"))

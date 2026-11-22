@@ -66,6 +66,7 @@ fn recall_of_ufuv_kiln_lists_ten_own_memories_and_says_how_many_remain() {
         .arg("recall")
         .arg("ufuv-kiln")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", daemon.pack_home())
         .env("PACKSET_HOME", daemon.pack_home())
         .env("PACKSET_URL", daemon.url())

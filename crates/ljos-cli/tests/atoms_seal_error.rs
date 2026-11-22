@@ -7,6 +7,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -33,11 +36,10 @@ fn keygen(path: &Path) -> String {
 }
 
 fn git(cwd: &Path, args: &[&str]) {
-    let status = Command::new("git")
+    let status = isolated_git::command()
         .arg("-C")
         .arg(cwd)
         .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .status()
         .unwrap();
     assert!(status.success(), "git {args:?}");
@@ -127,6 +129,7 @@ fn a_recipient_age_refuses_is_named_on_a_large_log() {
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("sync")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env(
             "PATH",
             std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),

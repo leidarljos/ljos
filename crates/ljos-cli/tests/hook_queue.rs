@@ -5,6 +5,9 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
@@ -89,12 +92,11 @@ impl Drop for Hab {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("/usr/bin/git")
+    let out = isolated_git::command_at("/usr/bin/git")
         .arg("-C")
         .arg(dir)
         .args(args)
         .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("HOME", dir)
         .output()
         .unwrap();
@@ -106,17 +108,9 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn hab(name: &str) -> Hab {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
     // Short: the server's socket lives under this root, and a socket path
     // has at most 103 bytes.
-    let root = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp).join(format!(
-        "hq-{name}-{}-{}",
-        std::process::id(),
-        nanos % 1_000_000_000
-    ));
+    let root = seat_root::seat_dir(ljos_cli::bookkeep::path_is_temp, &format!("hq-{name}"));
     let hab = Hab {
         tracker: root.join("tracker"),
         repo: root.join("repo"),
@@ -171,6 +165,7 @@ fn ljos_under(hab: &Hab, wrapper: Option<&[&str]>, args: &[&str]) -> Command {
     };
     cmd.args(args)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", format!("{}:/usr/bin:/bin", hab.bin.display()))
         .env("HOME", &hab.home)
         .env("XDG_CONFIG_HOME", hab.home.join(".config"))
@@ -853,6 +848,7 @@ fn a_large_cursor_read_does_not_break_the_writer_pipe() {
         .arg("-lc")
         .arg(shell)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &hab.home)
         .env("XDG_CONFIG_HOME", hab.home.join(".config"))

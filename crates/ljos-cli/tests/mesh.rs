@@ -2,6 +2,9 @@
 //! `tailscale` and `tailscaled` on PATH. No network and no real daemon.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -141,6 +144,7 @@ impl World {
         cmd.args(args)
             .current_dir(self.path("home"))
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self.path("bin").display()),
@@ -803,13 +807,11 @@ fn git_config_is_byte_identical_after_up_and_down() {
     )
     .unwrap();
     let git = |args: &[&str]| {
-        let out = Command::new("git")
+        let out = isolated_git::command()
             .args(args)
             .current_dir(&repo)
-            .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", world.path("home"))
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
         assert!(out.status.success(), "git {args:?}\n{}", text_of(&out));

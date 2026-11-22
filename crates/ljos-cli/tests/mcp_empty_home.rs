@@ -123,6 +123,7 @@ fn tools_list_answers_with_an_empty_home_and_no_tracker() {
     let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
         .env("LJOS_MCP_TOOLS", "all")
@@ -236,6 +237,7 @@ fn a_missing_pack_names_the_next_step_and_the_client_is_not_the_seat() {
     let held = refused_port::RefusedPort::reserve();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
         .env("USER", "walk")
@@ -368,6 +370,7 @@ fn a_missing_pack_token_names_the_next_step_in_the_search_result() {
     });
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
         .env("USER", "walk")
@@ -437,6 +440,7 @@ fn a_missing_habitat_binary_names_doctor() {
     .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
         .env("GIT_CONFIG_GLOBAL", home.path().join(".config/gitconfig"))
@@ -495,6 +499,7 @@ fn tools_list_is_the_full_set_with_an_empty_home_and_no_box_env() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["mcp"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
         .env("USER", "walk")
@@ -607,6 +612,7 @@ fn a_silent_writer_is_a_tool_error_and_the_list_stays() {
     });
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
         .env("USER", "walk")
@@ -710,6 +716,7 @@ fn a_refused_token_is_a_tool_error_and_the_list_stays() {
     });
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
         .env("USER", "walk")

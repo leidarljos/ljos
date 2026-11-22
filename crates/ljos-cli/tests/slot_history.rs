@@ -3,6 +3,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -14,7 +17,7 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = isolated_git::command()
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -151,6 +154,7 @@ fn a_vote_on_a_long_tracker_matches_and_does_not_pickaxe() {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", &path)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

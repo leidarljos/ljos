@@ -135,6 +135,7 @@ fn posted_notes(extract: Option<&str>) -> Vec<serde_json::Value> {
     child
         .args(["hook"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
         .env("USER", "person")

@@ -470,7 +470,8 @@ impl Reader {
                 )
             })?;
         let mut cmd = Command::new(&self.bin);
-        cmd.env_clear();
+        cmd.env_clear()
+            .env("GIT_CEILING_DIRECTORIES", crate::git_ceilings());
         for key in ["PATH", "HOME"] {
             if let Some(value) = std::env::var_os(key) {
                 cmd.env(key, value);

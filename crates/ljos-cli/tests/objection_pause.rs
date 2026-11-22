@@ -1,6 +1,9 @@
 //! Past the child cap, and at the descendant limit, every objection is
 //! filed or the reading pauses for a person. Nothing is only printed.
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
@@ -74,7 +77,7 @@ impl Tracker {
                 std::env::remove_var("LJOS_CONFIG");
             }
         }
-        let _ = Command::new("git")
+        let _ = isolated_git::command()
             .arg("-C")
             .arg(&root)
             .args(["init", "-q"])
@@ -86,7 +89,9 @@ impl Tracker {
     }
 
     fn vissue(&self, args: &[&str]) -> String {
-        let out = Command::new("vissue").args(args).output().unwrap();
+        let mut vissue = Command::new("vissue");
+        ljos_test_boot::no_login_git_config(&mut vissue);
+        let out = vissue.args(args).output().unwrap();
         assert!(
             out.status.success(),
             "vissue {args:?}\n{}",
@@ -96,10 +101,9 @@ impl Tracker {
     }
 
     fn show(&self, id: &str) -> serde_json::Value {
-        let out = Command::new("vissue")
-            .args(["show", id, "--json"])
-            .output()
-            .unwrap();
+        let mut vissue = Command::new("vissue");
+        ljos_test_boot::no_login_git_config(&mut vissue);
+        let out = vissue.args(["show", id, "--json"]).output().unwrap();
         serde_json::from_slice(&out.stdout).expect("show json")
     }
 }

@@ -29,6 +29,7 @@ fn rows(home: &Path, cwd: &Path) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("mcp")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", format!("{}:/usr/bin:/bin", stub.display()))
         .env("HOME", home)
         .env("XDG_RUNTIME_DIR", home.join("run"))

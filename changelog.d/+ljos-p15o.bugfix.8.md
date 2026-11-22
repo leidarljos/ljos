@@ -1,0 +1,1 @@
+The book queue's apply process now sets `GIT_CEILING_DIRECTORIES` after the hook call's environment, to the ceilings that call carried plus those of the build tree, so the call's environment no longer drops the build tree's ceilings.

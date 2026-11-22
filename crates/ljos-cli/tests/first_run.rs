@@ -158,7 +158,8 @@ impl Seat {
         let mut cmd = Command::new("bash");
         cmd.arg("-c").arg(line);
         cmd.current_dir(cwd);
-        cmd.env_clear();
+        cmd.env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling());
         cmd.envs(&self.env);
         cmd.stdin(Stdio::null());
         term.attach_output(&mut cmd);
@@ -200,6 +201,7 @@ impl Seat {
             .arg(&script)
             .current_dir(&self.work)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .envs(&self.env)
             .stdin(Stdio::null())
             .output()
@@ -232,6 +234,7 @@ impl Drop for Seat {
         let _ = Command::new("packset")
             .arg("stop")
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .envs(&self.env)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

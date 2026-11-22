@@ -73,6 +73,7 @@ impl Home {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("HOME", home)
             .env("PATH", path)
             .env("PACKSET_PORT", port.to_string())
@@ -451,6 +452,7 @@ fn a_lesson_comes_back_without_a_seat_sitting_or_ticket() {
     {
         let cmd = started.command();
         cmd.env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("HOME", dir.path())
             .env("PATH", &path)
             .env("TMPDIR", dir.path().join("tmp"))
@@ -468,6 +470,7 @@ fn a_lesson_comes_back_without_a_seat_sitting_or_ticket() {
         cmd.args(args)
             .current_dir(dir.path())
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("HOME", dir.path())
             .env("PATH", &path)
             .env("LANG", "C.UTF-8")

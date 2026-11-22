@@ -3,6 +3,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/sibling.rs"]
 mod sibling;
 #[path = "common/tools.rs"]
@@ -12,12 +15,10 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn git(dir: &Path, args: &[&str]) -> Output {
-    let out = Command::new("git")
+    let out = isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -116,6 +117,7 @@ fn tracker_commits_do_not_trigger_git_auto_gc_repack() {
         .args(["note", "probe-autogc", "recorded without auto gc"])
         .current_dir(&tracker)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env(
             "PATH",
             std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
@@ -223,6 +225,7 @@ fn tracker_loose_objects_stay_bounded_over_200_commits() {
             .args(args)
             .current_dir(&tracker)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", &path)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

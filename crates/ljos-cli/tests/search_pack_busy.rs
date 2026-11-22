@@ -121,6 +121,7 @@ fn search(url: &str, home: &Path, args: &[&str]) -> (std::process::Output, Durat
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -392,6 +393,7 @@ fn recall(url: &str, home: &Path, issue: &str) -> (std::process::Output, Duratio
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["recall", issue])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env(
             "PATH",
             format!("{}:/usr/bin:/bin", home.join("bin").display()),
@@ -543,6 +545,7 @@ fn search_fast(url: &str, home: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

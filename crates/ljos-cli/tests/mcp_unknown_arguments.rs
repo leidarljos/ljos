@@ -2,6 +2,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -21,6 +24,7 @@ fn call_tool_with_env(
     let home = tempfile::tempdir().unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
         .env("PACKSET_AUTH", "off")
@@ -213,12 +217,11 @@ fn kind_and_issue_kind_together_are_refused_on_ljos_file() {
 }
 
 fn git(root: &Path, config: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = isolated_git::command()
         .arg("-C")
         .arg(root)
         .args(args)
         .env("GIT_CONFIG_GLOBAL", config)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .unwrap();
@@ -282,6 +285,7 @@ fn a_refused_write_leaves_the_tracker_head() {
     let call = |arguments: serde_json::Value| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", &path)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

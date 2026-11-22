@@ -6,6 +6,9 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -74,7 +77,7 @@ impl Box_ {
                 c = card.display(),
             ),
         );
-        let init = Command::new("git")
+        let init = isolated_git::command()
             .args(["init", "-q"])
             .current_dir(&repo)
             .output()
@@ -96,6 +99,7 @@ impl Box_ {
         let mut cmd = Command::new(program);
         cmd.args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
@@ -1314,6 +1318,7 @@ fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
         let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env(
                 "PATH",
                 format!("{}:{}:/usr/bin:/bin", home.bin.display(), bin_dir.display()),
@@ -2522,6 +2527,7 @@ fn a_bare_mcp_sitting_is_not_bound_to_the_last_shell_that_ran_ljos() {
         let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env(
                 "PATH",
                 format!("{}:{}:/usr/bin:/bin", home.bin.display(), bin_dir.display()),
@@ -2683,6 +2689,7 @@ fn rv_mcp_call(home: &Box_, pack_url: &str, meta: Option<serde_json::Value>) -> 
     let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env(
             "PATH",
             format!("{}:{}:/usr/bin:/bin", home.bin.display(), bin_dir.display()),
@@ -3189,6 +3196,7 @@ fn a_bare_mcp_sitting_answers_the_same_outside_a_cargo_test_runner() {
             Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         };
         cmd.env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env(
                 "PATH",
                 format!("{}:{}:/usr/bin:/bin", home.bin.display(), bin_dir.display()),

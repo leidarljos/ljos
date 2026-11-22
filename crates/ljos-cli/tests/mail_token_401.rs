@@ -57,6 +57,7 @@ fn mail_commands_report_token_refusal_instead_of_silent_pack_on_401() {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(&args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .current_dir(home.path())
             .env("HOME", home.path())
             .env("PATH", "/usr/bin:/bin")

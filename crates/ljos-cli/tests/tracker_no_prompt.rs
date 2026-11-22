@@ -6,6 +6,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -131,12 +134,11 @@ impl Board {
     }
 
     fn git(&self, dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = isolated_git::command()
             .arg("-C")
             .arg(dir)
             .args(args)
             .env("GIT_CONFIG_GLOBAL", &self.gitconfig)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "")
             .stdin(Stdio::null())
@@ -153,6 +155,7 @@ impl Board {
     fn env(&self, cmd: &mut Command, root: &Path) {
         let home = self.root.join("home");
         cmd.env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", &self.path)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -344,12 +347,11 @@ fn saves_and_later_syncs(board: &Board, unreachable: &str) {
     let said = text(&out);
     assert!(out.status.success(), "{said}");
     assert!(said.contains("sync: pushed pending commits"), "{said}");
-    let remote = Command::new("git")
+    let remote = isolated_git::command()
         .arg("--git-dir")
         .arg(&board.reachable)
         .args(["show", "main:Software/probe/issues.org"])
         .env("GIT_CONFIG_GLOBAL", &board.gitconfig)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     let remote = String::from_utf8_lossy(&remote.stdout);

@@ -5,6 +5,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
@@ -22,12 +25,11 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .stdin(Stdio::null())
         .output()
@@ -174,6 +176,7 @@ fn a_sitting_claims_when_the_tracker_remote_cannot_be_reached() {
         .args(["sitting", &issue])
         .current_dir(root.path())
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", path)
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

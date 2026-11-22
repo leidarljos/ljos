@@ -2,6 +2,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -97,6 +100,7 @@ fn uninstall(home: &Path, args: &[&str]) -> Output {
         .arg(script())
         .args(args)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin")
         .env("XDG_RUNTIME_DIR", home.join("run"))
@@ -107,13 +111,11 @@ fn uninstall(home: &Path, args: &[&str]) -> Output {
 }
 
 fn hooks_path(home: &Path) -> String {
-    let out = Command::new("git")
+    let out = isolated_git::command()
         .args(["config", "--global", "--get", "core.hooksPath"])
-        .env_clear()
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin")
         .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -275,6 +277,7 @@ fn the_script_hands_over_to_a_ljos_that_knows_uninstall() {
         .arg(script())
         .arg("--dry-run")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin")
         .env("XDG_RUNTIME_DIR", home.join("run"))

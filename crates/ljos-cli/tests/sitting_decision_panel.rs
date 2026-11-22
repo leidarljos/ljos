@@ -74,6 +74,7 @@ impl Seat {
             .args(args)
             .current_dir(&home)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self.dir.path().join("bin").display()),

@@ -5,6 +5,9 @@
 //! `vissue.toml` there.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -49,12 +52,10 @@ fn a_sitting_on_a_missing_issue_names_it_and_writes_nothing() {
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(root.path().join("run")).unwrap();
     let git = |args: &[&str]| {
-        let out = Command::new("git")
+        let out = isolated_git::command()
             .arg("-C")
             .arg(&product)
             .args(args)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
         assert!(
@@ -94,6 +95,7 @@ fn a_sitting_on_a_missing_issue_names_it_and_writes_nothing() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .current_dir(&product)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -190,12 +192,10 @@ impl Probe {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&run).unwrap();
         let git = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = isolated_git::command()
                 .arg("-C")
                 .arg(&product)
                 .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .output()
                 .unwrap();
             assert!(
@@ -248,6 +248,7 @@ impl Probe {
         let mut cmd = Command::new(program);
         cmd.current_dir(&self.product)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))

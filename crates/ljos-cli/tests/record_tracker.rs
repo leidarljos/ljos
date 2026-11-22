@@ -4,6 +4,9 @@
 //! and every run leaves the checkout and HOME as it found them.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use ed25519_dalek::SigningKey;
 use ljos_cli::ballot_sig;
 use std::path::{Path, PathBuf};
@@ -17,7 +20,7 @@ fn key(seed: u8) -> SigningKey {
 }
 
 fn git(dir: &Path, args: &[&str], date: Option<&str>) -> String {
-    let mut cmd = Command::new("git");
+    let mut cmd = isolated_git::command();
     cmd.arg("-C")
         .arg(dir)
         .args(["-c", "commit.gpgsign=false"])
@@ -139,6 +142,7 @@ impl Tracker {
             .args(["record", "check", "--tracker"])
             .arg(&self.root)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &self.home)
             .env("PACKSET_URL", "off")

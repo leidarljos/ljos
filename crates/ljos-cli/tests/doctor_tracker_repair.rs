@@ -3,12 +3,15 @@
 //! checkout gains no new text.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -26,6 +29,7 @@ fn doctor(path: &str, home: &Path, tracker: &Path, git_log: &Path) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("doctor")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", path)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -184,7 +188,7 @@ fn doctor_names_a_broken_tracker_and_leaves_a_healthy_one_unchanged() {
     std::fs::write(other.join("Software/issues.org"), "* TODO a\n").unwrap();
     git(&other, &["add", "."]);
     git(&other, &["commit", "-q", "-m", "seed"]);
-    let head = Command::new("git")
+    let head = isolated_git::command()
         .arg("-C")
         .arg(&other)
         .args(["symbolic-ref", "HEAD"])

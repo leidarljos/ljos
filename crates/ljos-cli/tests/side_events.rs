@@ -2,6 +2,9 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -25,15 +28,7 @@ impl Drop for Hab {
 }
 
 fn hab(name: &str) -> Hab {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let root = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp).join(format!(
-        "m3-{name}-{}-{}",
-        std::process::id(),
-        nanos % 1_000_000_000
-    ));
+    let root = seat_root::seat_dir(ljos_cli::bookkeep::path_is_temp, &format!("m3-{name}"));
     let hab = Hab {
         home: root.join("home"),
         run: root.join("run"),
@@ -45,7 +40,7 @@ fn hab(name: &str) -> Hab {
     }
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&hab.run, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let git = Command::new("git")
+    let git = isolated_git::command()
         .args(["init", "-q", "-b", "main"])
         .current_dir(&hab.repo)
         .status()
@@ -58,6 +53,7 @@ fn hook(hab: &Hab, pack: Option<u16>) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &hab.home)
         .env("XDG_CONFIG_HOME", hab.home.join(".config"))

@@ -3,6 +3,9 @@
 //! The command refuses unknown parents and cycle edges, and it records a
 //! dated note on the moved ticket.
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -61,6 +64,7 @@ impl Board {
         Command::new(program)
             .args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", path_env())
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
@@ -117,6 +121,7 @@ impl Board {
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["show", issue, "--json"])
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", path_env())
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
@@ -151,6 +156,7 @@ impl Board {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["parent", issue, parent])
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", path_env())
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
@@ -171,14 +177,12 @@ impl Board {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Output {
-    Command::new("git")
+    isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)
-        .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", dir)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "seat")
         .env("GIT_AUTHOR_EMAIL", "seat@example.invalid")
         .env("GIT_COMMITTER_NAME", "seat")

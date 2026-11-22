@@ -1,0 +1,1 @@
+The search start budget, doctor line span, degraded search, listing privacy, slot privacy and MCP search deadline tests now set `GIT_CEILING_DIRECTORIES` after `env_clear`, so the git that ljos and ljos-mcp run for them stops at the scratch roots.

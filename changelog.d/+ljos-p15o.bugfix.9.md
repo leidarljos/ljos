@@ -1,0 +1,2 @@
+The git that `ljos_test_boot::git` and `git_at` build sets `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`, so a `commit.gpgsign` or hook in the login's `~/.gitconfig` no longer breaks a scratch commit.
+The cloud hook, cloud VM and objection pause tests do the same in their shell, `ljos seat` and `vissue` helpers. The shell and `ljos seat` helpers then put back the global and system config the test set on its process.

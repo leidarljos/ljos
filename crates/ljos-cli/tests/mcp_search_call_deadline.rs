@@ -125,6 +125,7 @@ impl Session {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         command
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", path)
             .env("HOME", root)
             .env("XDG_CONFIG_HOME", root.join(".config"))

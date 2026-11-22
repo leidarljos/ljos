@@ -6661,6 +6661,7 @@ mod tests {
         started
             .command()
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", "/usr/bin:/bin")
             .env("PACKSET_AUTH", "off");
         let daemon = started.spawn();
@@ -11727,6 +11728,7 @@ mod tests {
         started
             .command()
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", "/usr/bin:/bin")
             .env("PACKSET_AUTH", "off");
         let _daemon = started.spawn();

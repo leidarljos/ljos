@@ -40,6 +40,7 @@ fn call_mcp_env(
     std::fs::create_dir_all(&runtime).unwrap();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", path)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -286,6 +287,7 @@ fn ljos_vote_schema_describes_issue_options() {
     let home = dir.path();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home)
         .current_dir(home)
@@ -346,6 +348,7 @@ fn listed_tools() -> Vec<serde_json::Value> {
     let dir = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", dir.path())
         .current_dir(dir.path())

@@ -79,6 +79,7 @@ fn an_idle_server_returns_the_burst_to_the_system() {
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"probe\"]\n").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))

@@ -3,6 +3,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -43,8 +46,18 @@ impl Drop for Guard {
 }
 
 fn sh_at(dir: &Path, script: &str) -> std::process::Output {
-    Command::new("sh")
-        .current_dir(dir)
+    let mut sh = Command::new("sh");
+    ljos_test_boot::no_login_git_config(&mut sh);
+    // `git config --global` in the script writes the file this test named.
+    // The helper does not copy it; this command opts in.
+    if let Some(cfg) = std::env::var_os("GIT_CONFIG_GLOBAL") {
+        sh.env("GIT_CONFIG_GLOBAL", cfg);
+    }
+    if let Some(cfg) = std::env::var_os("GIT_CONFIG_SYSTEM") {
+        sh.env("GIT_CONFIG_SYSTEM", cfg);
+        sh.env_remove("GIT_CONFIG_NOSYSTEM");
+    }
+    sh.current_dir(dir)
         .arg("-c")
         .arg(script)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -68,13 +81,18 @@ fn sh_ok(dir: &Path, script: &str) -> String {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .arg("-C")
+    let mut cmd = isolated_git::command();
+    cmd.arg("-C")
         .arg(dir)
         .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .unwrap();
+        .env("GIT_TERMINAL_PROMPT", "0");
+    // `config --global` writes the file `isolate_git` named. The helper
+    // does not copy that variable; this command opts in.
+    if args.contains(&"--global") {
+        let cfg = std::env::var_os("GIT_CONFIG_GLOBAL").expect("a global gitconfig for this seat");
+        cmd.env("GIT_CONFIG_GLOBAL", cfg);
+    }
+    let out = cmd.output().unwrap();
     assert!(
         out.status.success(),
         "git {args:?} in {}: {}\n{}",
@@ -363,12 +381,11 @@ fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
     // the test's cwd, that is this checkout.
     let gitconfig = root.path().join("gitconfig");
     fs::write(&gitconfig, b"").unwrap();
-    let init = Command::new("git")
+    let init = isolated_git::command()
         .arg("-C")
         .arg(&seat)
         .args(["init", "-q"])
         .env("GIT_CONFIG_GLOBAL", &gitconfig)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(init.status.success(), "{init:?}");
@@ -382,6 +399,7 @@ fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
             .args(["cloud", "up"])
             .current_dir(&seat)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("GIT_CONFIG_GLOBAL", &gitconfig)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("HOME", &home)
@@ -967,6 +985,7 @@ fn ljos_seat(home: &Path) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("seat")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("PATH", "/usr/bin:/bin")
@@ -976,11 +995,17 @@ fn ljos_seat(home: &Path) -> String {
     if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR") {
         cmd.env("XDG_RUNTIME_DIR", run);
     }
+    ljos_test_boot::no_login_git_config(&mut cmd);
+    // The seat's own gitconfig, when this test named one. A later env
+    // overrides the helper.
     if let Some(cfg) = std::env::var_os("GIT_CONFIG_GLOBAL") {
         cmd.env("GIT_CONFIG_GLOBAL", cfg);
     }
     if let Some(cfg) = std::env::var_os("GIT_CONFIG_SYSTEM") {
         cmd.env("GIT_CONFIG_SYSTEM", cfg);
+    }
+    if let Some(off) = std::env::var_os("GIT_CONFIG_NOSYSTEM") {
+        cmd.env("GIT_CONFIG_NOSYSTEM", off);
     }
     if let Ok(seat) = std::env::var("LJOS_SEAT") {
         cmd.env("LJOS_SEAT", seat);
@@ -1244,7 +1269,7 @@ fn a_tracker_token_stays_private_and_answers_for_the_clone() {
         git(&tracker, &["config", "--get", "remote.origin.url"]).trim(),
         "https://x-access-token@github.com/example/tracker"
     );
-    let mut fill = Command::new("git")
+    let mut fill = isolated_git::command()
         .arg("-C")
         .arg(&tracker)
         .args(["credential", "fill"])
@@ -1263,7 +1288,7 @@ fn a_tracker_token_stays_private_and_answers_for_the_clone() {
     assert!(answer.contains("password=tracker-secret\n"), "{answer}");
 
     fs::write(&file, "rotated\n").unwrap();
-    let mut fill = Command::new("git")
+    let mut fill = isolated_git::command()
         .arg("-C")
         .arg(&tracker)
         .args(["credential", "fill"])
@@ -1712,6 +1737,7 @@ fn cloud_up_writes_the_absolute_server_whatever_path_it_found() {
         );
         let client = Command::new(&command)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", format!("{}:/usr/bin:/bin", stale.display()))
             .env("HOME", root.path().join("elsewhere"))
             .output()
@@ -1849,6 +1875,7 @@ fn assert_path_before_guard(rc: &str, guard: &str) {
         .arg("-c")
         .arg(". \"$HOME/.bashrc\"; command -v ljos-mcp")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", &home)
         .env("PATH", "/usr/bin:/bin")
         .output()
@@ -4933,7 +4960,7 @@ fn pin_at(repo: &Path, seat: &str, unix: &str) -> String {
     text.push_str(&format!("{seat} {public}\n"));
     fs::write(&pins, text).unwrap();
     git(repo, &["add", ".ljos-seat-keys"]);
-    let out = Command::new("git")
+    let out = isolated_git::command()
         .arg("-C")
         .arg(repo)
         .args(["commit", "-q", "-m", &format!("pin {seat}")])
@@ -5486,7 +5513,7 @@ fn commit_dated(repo: &Path, paths: &[&str], message: &str, unix: &str) {
     let mut args = vec!["add", "--"];
     args.extend_from_slice(paths);
     git(repo, &args);
-    let out = Command::new("git")
+    let out = isolated_git::command()
         .arg("-C")
         .arg(repo)
         .args(["commit", "-q", "-m", message])

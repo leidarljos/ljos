@@ -4,6 +4,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/seat_env.rs"]
 mod seat_env;
 
@@ -65,6 +68,7 @@ impl Bench {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", &self.path)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -740,11 +744,10 @@ fn a_vissue_file_that_links_to_nothing_refuses_every_write() {
 
 fn git_tracker(b: &Bench) {
     let git = |args: &[&str]| {
-        let out = Command::new("git")
+        let out = isolated_git::command()
             .arg("-C")
             .arg(&b.tracker)
             .args(args)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("HOME", &b.tracker)
             .output()
             .unwrap();

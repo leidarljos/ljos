@@ -54,6 +54,7 @@ fn run_hook(
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", home)
         .env("USER", "person")

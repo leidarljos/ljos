@@ -9,6 +9,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -30,7 +33,7 @@ struct Place {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args([
@@ -42,8 +45,6 @@ fn git(dir: &Path, args: &[&str]) {
             "commit.gpgsign=false",
         ])
         .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(
@@ -117,6 +118,7 @@ impl Place {
         let mut cmd = Command::new(program);
         cmd.current_dir(&self.product)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env(
                 "PATH",
                 format!(

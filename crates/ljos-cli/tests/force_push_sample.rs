@@ -6,12 +6,15 @@
 //! not this hook line.
 
 ljos_test_boot::harness!();
+
+#[path = "common/git.rs"]
+mod isolated_git;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)

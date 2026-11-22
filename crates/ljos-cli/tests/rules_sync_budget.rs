@@ -5,6 +5,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -33,15 +36,7 @@ impl Drop for Hab {
 }
 
 fn hab(name: &str) -> Hab {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let root = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp).join(format!(
-        "m5s-{name}-{}-{}",
-        std::process::id(),
-        nanos % 1_000_000_000
-    ));
+    let root = seat_root::seat_dir(ljos_cli::bookkeep::path_is_temp, &format!("m5s-{name}"));
     let hab = Hab {
         home: root.join("home"),
         run: root.join("run"),
@@ -57,13 +52,12 @@ fn hab(name: &str) -> Hab {
 }
 
 fn git(cwd: &Path, args: &[&str]) {
-    let status = Command::new("git")
+    let status = isolated_git::command()
         .arg("-c")
         .arg("core.hooksPath=/dev/null")
         .arg("-C")
         .arg(cwd)
         .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .status()
         .unwrap();
     assert!(status.success(), "git {args:?} in {}", cwd.display());
@@ -89,19 +83,17 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
         .expect("age public key")
         .to_string();
     let bare = h.root.join("remote.git");
-    let status = Command::new("git")
+    let status = isolated_git::command()
         .args(["init", "-q", "--bare", "-b", "main"])
         .arg(&bare)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .status()
         .unwrap();
     assert!(status.success());
     let other = h.root.join("other");
-    let status = Command::new("git")
+    let status = isolated_git::command()
         .args(["clone", "-q"])
         .arg(&bare)
         .arg(&other)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .status()
         .unwrap();
     assert!(status.success());
@@ -116,11 +108,10 @@ fn tracker(h: &Hab, delay: &str) -> PathBuf {
     git(&other, &["commit", "-q", "-m", "scope"]);
     git(&other, &["push", "-q", "origin", "HEAD:main"]);
     let tracker = h.root.join("tracker");
-    let status = Command::new("git")
+    let status = isolated_git::command()
         .args(["clone", "-q"])
         .arg(&bare)
         .arg(&tracker)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .status()
         .unwrap();
     assert!(status.success());
@@ -147,6 +138,7 @@ fn hook(h: &Hab, tracker: &Path, pack: Option<String>) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env(
             "PATH",
             std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),

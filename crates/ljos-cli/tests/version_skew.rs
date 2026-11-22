@@ -98,6 +98,7 @@ impl Seat {
         }
         let out = cmd
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("HOME", &self.root)
             .env("USER", "person")
             .env(
@@ -183,6 +184,7 @@ fn a_mismatch_is_a_label_and_a_match_is_silent() {
     let prompt = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["hook", "--prompt", "--text"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", &mismatch.root)
         .env(
             "PATH",

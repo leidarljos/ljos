@@ -10,6 +10,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -72,7 +75,7 @@ impl Case {
         }
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let init = Command::new("git")
+        let init = isolated_git::command()
             .args(["init", "-q"])
             .current_dir(&repo)
             .status()
@@ -84,14 +87,14 @@ impl Case {
             ("commit.gpgsign", "false"),
             ("core.hooksPath", "/dev/null"),
         ] {
-            let out = Command::new("git")
+            let out = isolated_git::command()
                 .args(["config", key, value])
                 .current_dir(&repo)
                 .output()
                 .unwrap();
             assert!(out.status.success(), "{key}");
         }
-        let made = Command::new("git")
+        let made = isolated_git::command()
             .args(["commit", "-q", "--allow-empty", "-m", "seed"])
             .current_dir(&repo)
             .output()
@@ -101,7 +104,7 @@ impl Case {
             "{}",
             String::from_utf8_lossy(&made.stderr)
         );
-        let head = Command::new("git")
+        let head = isolated_git::command()
             .args(["rev-parse", "HEAD"])
             .current_dir(&repo)
             .output()

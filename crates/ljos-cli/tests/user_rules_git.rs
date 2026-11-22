@@ -5,6 +5,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -45,17 +48,15 @@ impl Scratch {
     /// git for the test's own setup and reads. No hook runs, whatever the
     /// global file names.
     fn git(&self, cwd: &Path, args: &[&str]) -> Output {
-        Command::new("git")
+        isolated_git::command()
             .arg("-c")
             .arg("core.hooksPath=/dev/null")
             .arg("-C")
             .arg(cwd)
             .args(args)
-            .env_clear()
             .env("PATH", path_var())
             .env("HOME", self.path("home"))
             .env("GIT_CONFIG_GLOBAL", &self.gitconfig)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .stdin(Stdio::null())
             .output()
             .unwrap()
@@ -150,6 +151,7 @@ impl Scratch {
         cmd.args(["prefer", "--user", "--sync"])
             .current_dir(&home)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", path_var())
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))

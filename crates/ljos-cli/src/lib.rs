@@ -56251,9 +56251,71 @@ pub(crate) fn strip_guard_bin(cmd: &mut std::process::Command) {
 /// waits on a terminal for a credential.
 pub(crate) fn git_cmd() -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
+    fence_git(&mut cmd);
     strip_guard_bin(&mut cmd);
     no_git_prompt(&mut cmd);
     cmd
+}
+
+/// Set `GIT_CEILING_DIRECTORIES` on `cmd` to [`git_ceilings`]. A caller
+/// that runs `env_clear` after this calls it again.
+pub(crate) fn fence_git(cmd: &mut std::process::Command) {
+    cmd.env("GIT_CEILING_DIRECTORIES", git_ceilings());
+}
+
+/// The ceilings this process inherited, plus the build tree ljos runs
+/// from: the cargo target directory above the executable, as
+/// [`build_target`] finds it, and the `crates/target` beside it. A
+/// directory there whose `.git` is missing is not a repository, so git
+/// does not walk up into the checkout that built ljos. An installed ljos
+/// has no target directory above it and adds none.
+pub(crate) fn git_ceilings() -> std::ffi::OsString {
+    static BUILD: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    let build = BUILD.get_or_init(|| {
+        let Some(exe) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| std::fs::canonicalize(exe).ok())
+        else {
+            return Vec::new();
+        };
+        let named = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
+        let Some(target) = build_target(&exe, named) else {
+            return Vec::new();
+        };
+        let mut found = vec![target.clone()];
+        if let Some(checkout) = target.parent() {
+            let crates = checkout.join("crates/target");
+            found.push(std::fs::canonicalize(&crates).unwrap_or(crates));
+        }
+        found
+    });
+    let mut roots: Vec<PathBuf> = std::env::var_os("GIT_CEILING_DIRECTORIES")
+        .map(|v| std::env::split_paths(&v).collect())
+        .unwrap_or_default();
+    for root in build {
+        if !roots.contains(root) {
+            roots.push(root.clone());
+        }
+    }
+    std::env::join_paths(&roots).unwrap_or_default()
+}
+
+/// The cargo target directory `exe` was built into: `named` (the
+/// `CARGO_TARGET_DIR` cargo was given) when `exe` sits under it, else the
+/// nearest ancestor cargo marked with `CACHEDIR.TAG` or
+/// `.rustc_info.json`. A target directory may have any name, so the name
+/// `target` alone proves nothing. `None` outside any target directory.
+pub(crate) fn build_target(exe: &Path, named: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(named) = named.filter(|dir| dir.is_absolute()) {
+        let named = std::fs::canonicalize(&named).unwrap_or(named);
+        if exe.starts_with(&named) {
+            return Some(named);
+        }
+    }
+    exe.ancestors()
+        .skip(1)
+        .find(|dir| dir.join("CACHEDIR.TAG").is_file() || dir.join(".rustc_info.json").is_file())
+        .map(Path::to_path_buf)
 }
 
 /// No terminal prompt and no askpass program for the git `cmd` runs. A
@@ -56796,13 +56858,10 @@ mod tests {
 
     impl SeatDir {
         fn new(name: &str) -> Self {
-            use std::os::unix::fs::PermissionsExt;
-            let dir = crate::test_seat_root::seat_root(crate::bookkeep::path_is_temp)
-                .join(format!("ljos-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-            Self(dir)
+            Self(crate::test_seat_root::seat_dir(
+                crate::bookkeep::path_is_temp,
+                &format!("ljos-{name}"),
+            ))
         }
 
         fn path(&self) -> &std::path::Path {
@@ -56833,6 +56892,84 @@ mod tests {
         );
     }
 
+    /// A git ljos starts in a directory under the checkout's
+    /// `crates/target` that has no `.git` finds no repository, so a
+    /// `git config --local` there cannot rewrite the checkout's `[user]`.
+    #[test]
+    fn a_git_under_crates_target_cannot_rewrite_the_checkout_user() {
+        struct PutBack(std::path::PathBuf, Vec<u8>, std::path::PathBuf);
+        impl Drop for PutBack {
+            fn drop(&mut self) {
+                if std::fs::read(&self.0).ok().as_ref() != Some(&self.1) {
+                    let _ = std::fs::write(&self.0, &self.1);
+                }
+                let _ = std::fs::remove_dir_all(&self.2);
+            }
+        }
+        let _g = env_guard();
+        let checkout = ljos_test_boot::checkout();
+        let config = checkout.join(".git/config");
+        let Ok(before) = std::fs::read(&config) else {
+            eprintln!("skip: {} is not a git checkout", checkout.display());
+            return;
+        };
+        let probe = ljos_test_boot::fresh_dir(&ljos_test_boot::checkout_seats(), "ljos-user-probe");
+        let put_back = PutBack(config, before, probe.clone());
+        let out = crate::git_at(&probe)
+            .args(["config", "--local", "user.name", "ljos-probe"])
+            .output()
+            .unwrap();
+        let after = std::fs::read(&put_back.0).unwrap_or_default();
+        assert_eq!(
+            String::from_utf8_lossy(&after),
+            String::from_utf8_lossy(&put_back.1),
+            "git config in {} rewrote the checkout config: {out:?}",
+            probe.display()
+        );
+        assert!(!out.status.success(), "{out:?}");
+    }
+
+    /// The build tree's ceiling is the directory cargo marked as its
+    /// target, whatever it is called, and a directory named `target`
+    /// that cargo did not mark is not one.
+    #[test]
+    fn the_build_target_is_the_directory_cargo_marked_not_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let exe_at = |rel: &str| {
+            let exe = root.join(rel);
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            std::fs::write(&exe, "").unwrap();
+            exe
+        };
+        let out = root.join("out");
+        let deps = exe_at("out/debug/deps/ljos-0123");
+        let nested = exe_at("out/debug/build/target/ljos");
+        std::fs::write(
+            out.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        assert_eq!(crate::build_target(&deps, None), Some(out.clone()));
+        assert_eq!(crate::build_target(&nested, None), Some(out.clone()));
+        let named = root.join("named");
+        let release = exe_at("named/release/ljos");
+        assert_eq!(
+            crate::build_target(&release, Some(named.clone())),
+            Some(named)
+        );
+        // A temp root may itself sit in a marked build tree; nothing under
+        // `root` is a target directory here.
+        let inside = |exe: &Path| crate::build_target(exe, None).filter(|t| t.starts_with(&root));
+        assert_eq!(inside(&release), None);
+        assert_eq!(
+            crate::build_target(&deps, Some(root.join("named"))),
+            Some(out)
+        );
+        let unmarked = exe_at("target/bin/ljos");
+        assert_eq!(inside(&unmarked), None);
+    }
+
     /// A temp home or LJOS_OFF runs the real binary. A temp working
     /// directory under a real home is judged, and so is a temp home with
     /// `LJOS_GUARD=on`.
@@ -56840,6 +56977,7 @@ mod tests {
     #[test]
     fn a_guard_shim_steps_aside_for_a_temp_home_and_ljos_off_only() {
         use std::os::unix::fs::PermissionsExt;
+        let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let guard = dir.path().join("guard-bin");
         let fake = dir.path().join("fake");
@@ -56994,7 +57132,7 @@ mod tests {
         // A parallel test may set GIT_DIR on this process. These git
         // commands have to see this checkout, not that one.
         fn plain(&self, args: &[&str]) {
-            let out = std::process::Command::new(&self.real_git)
+            let out = ljos_test_boot::git_at(&self.real_git)
                 .arg("-C")
                 .arg(self.repo())
                 .args(args)
@@ -57017,7 +57155,7 @@ mod tests {
         /// exit 0 and said the `git-force-push` line once.
         fn runs_with_the_line(&self, args: &[&str]) {
             let root = self.root.path();
-            let out = std::process::Command::new(root.join("guard-bin/git"))
+            let out = ljos_test_boot::git_at(root.join("guard-bin/git"))
                 .args(args)
                 .current_dir(self.repo())
                 .env("HOME", root.join("home"))
@@ -58914,7 +59052,7 @@ mod tests {
     fn a_held_tracker_lock_is_waited_out_only_until_the_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
-        let out = std::process::Command::new("git")
+        let out = ljos_test_boot::git()
             .args(["init", "-q", "-b", "main"])
             .current_dir(repo)
             .output()
@@ -61124,7 +61262,7 @@ mod tests {
         let repo = away.path().join("leidarljos");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = ljos_test_boot::git()
                 .arg("-C")
                 .arg(&repo)
                 .args(args)
@@ -61188,7 +61326,7 @@ mod tests {
         let repo = away.path().join("obchk");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = ljos_test_boot::git()
                 .arg("-C")
                 .arg(&repo)
                 .args(args)
@@ -69454,6 +69592,7 @@ mod tests {
                     env.display()
                 ))
                 .env_clear()
+                .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .output()
                 .unwrap();
@@ -69470,6 +69609,7 @@ mod tests {
                     env.display()
                 ))
                 .env_clear()
+                .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .output()
                 .unwrap();
@@ -81502,6 +81642,7 @@ lesson, due yesterday, seat ada
 
     #[test]
     fn guard_tests_do_not_read_user_rules_from_the_login_home() {
+        let _g = env_guard();
         let home = Path::new("/home/someone");
         let got = resolve_config_base(None, Some(home)).expect("isolated base");
         assert_ne!(got, home.join(".config"));

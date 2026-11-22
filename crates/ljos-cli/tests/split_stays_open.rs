@@ -1,6 +1,9 @@
 //! A split panel stays open for as many rounds as it is read. The round
 //! count used to mark the ticket DONE and commit `settled with notes`.
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -12,11 +15,10 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Output {
-    Command::new("git")
+    isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)
-        .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", dir)
         .output()
@@ -205,6 +207,7 @@ else:
             .args(["consensus", &self.id, "--json"])
             .current_dir(&self.bin)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", path)
             .env("HOME", &self.home)
             .env("XDG_DATA_HOME", self.home.join(".local/share"))

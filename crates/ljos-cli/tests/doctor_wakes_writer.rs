@@ -14,10 +14,7 @@ struct SeatHome(PathBuf);
 
 impl SeatHome {
     fn new(name: &str) -> Self {
-        let dir = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp)
-            .join(format!("ljos-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("seat home");
+        let dir = seat_root::seat_dir(ljos_cli::bookkeep::path_is_temp, &format!("ljos-{name}"));
         Self(dir)
     }
 
@@ -59,6 +56,7 @@ fn doctor_runs_packset_ensure_when_no_writer_answers() {
     let _ = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("doctor")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", home.path())
         .env("XDG_RUNTIME_DIR", home.path().join("run"))
         .env("PATH", path)

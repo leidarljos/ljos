@@ -3,6 +3,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/seat_env.rs"]
 mod seat_env;
 #[path = "common/sibling.rs"]
@@ -16,12 +19,10 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = isolated_git::command()
         .arg("-C")
         .arg(dir)
         .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -105,6 +106,7 @@ fn opencode_lesson_writes_succeed_through_cli_and_mcp() {
         .args(["onboard", "--harness", "opencode"])
         .current_dir(&work)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", &path)
         .env("HOME", &home)
         .env("USER", "probe")
@@ -137,6 +139,7 @@ fn opencode_lesson_writes_succeed_through_cli_and_mcp() {
         .arg("hook")
         .current_dir(&work)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", &path)
         .env("HOME", &home)
         .env("USER", "probe")
@@ -190,6 +193,7 @@ fn opencode_lesson_writes_succeed_through_cli_and_mcp() {
         ])
         .current_dir(&work)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", &path)
         .env("HOME", &home)
         .env("USER", "probe")
@@ -225,6 +229,7 @@ fn opencode_lesson_writes_succeed_through_cli_and_mcp() {
     mcp_cmd
         .current_dir(&work)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", &path)
         .env("HOME", &home)
         .env("USER", "probe")

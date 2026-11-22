@@ -4,6 +4,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -53,14 +56,11 @@ fn session(program: &str, args: &[&str]) -> (String, String, Duration) {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(work.join("Software")).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
-    let git = Command::new("git")
+    let git = isolated_git::command()
         .args(["init", "-q"])
         .current_dir(&work)
-        .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &home)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .output()
         .unwrap();
     assert!(git.status.success(), "git init: {git:?}");
@@ -78,6 +78,7 @@ fn session(program: &str, args: &[&str]) -> (String, String, Duration) {
     let mut child = Command::new(program)
         .args(args)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HOME", &home)
         .env("TMPDIR", &home)

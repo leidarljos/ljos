@@ -224,6 +224,7 @@ impl Seat {
         // A seat's tracker file lands where ljos stands, not the crate.
         cmd.current_dir(self.home.path());
         cmd.env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", self.home.path())
             .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
@@ -401,6 +402,7 @@ fn mcp_user_prefer_of_a_plant_is_the_agents() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .current_dir(seat.home.path())
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", seat.home.path())
         .env("XDG_CONFIG_HOME", seat.home.path().join(".config"))

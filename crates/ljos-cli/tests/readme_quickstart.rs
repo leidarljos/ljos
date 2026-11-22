@@ -9,6 +9,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/pty.rs"]
 mod pty;
 
@@ -315,6 +318,7 @@ impl Seat {
             .arg(&script)
             .current_dir(&self.work)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .envs(&self.env)
             .stdin(Stdio::null())
             .output()
@@ -332,7 +336,8 @@ impl Seat {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(line);
         cmd.current_dir(&self.work);
-        cmd.env_clear();
+        cmd.env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling());
         cmd.envs(&self.env);
         cmd.stdin(Stdio::null());
         term.attach_output(&mut cmd);
@@ -477,9 +482,9 @@ fn expect_output(cmd: &str, output: &str) {
 }
 
 fn git_value(seat: &Seat, key: &str) -> String {
-    let out = Command::new("git")
+    let out = isolated_git::command()
         .args(["config", "--global", "--get", key])
-        .env_clear()
+        .env_remove("GIT_CONFIG_GLOBAL")
         .envs(&seat.env)
         .stdin(Stdio::null())
         .output()

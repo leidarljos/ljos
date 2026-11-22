@@ -8,6 +8,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -62,11 +65,9 @@ impl Seat {
             std::fs::create_dir_all(dir.path().join(sub)).unwrap();
         }
         let seat = Self { dir };
-        let init = Command::new("git")
+        let init = isolated_git::command()
             .args(["init", "-q"])
             .current_dir(seat.tracker())
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
         assert!(init.status.success(), "{}", said(&init));
@@ -95,6 +96,7 @@ impl Seat {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.current_dir(self.home())
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", path)
             .env("HOME", self.home())
             .env("XDG_CONFIG_HOME", self.home().join(".config"))

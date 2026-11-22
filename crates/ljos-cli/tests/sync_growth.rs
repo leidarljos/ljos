@@ -7,6 +7,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -103,12 +106,10 @@ fn keygen(path: &Path) -> String {
 }
 
 fn git(cwd: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = isolated_git::command()
         .arg("-C")
         .arg(cwd)
         .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .output()
         .unwrap();
     assert!(
@@ -221,6 +222,7 @@ impl World {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", format!("{}:{path}", self.shim.display()))
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))

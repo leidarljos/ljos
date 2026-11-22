@@ -42,6 +42,27 @@ fn write_exe(path: &Path, body: &str) {
 struct Seat {
     home: PathBuf,
     bin: PathBuf,
+    /// Removed on drop: the seat directory, or the temp root it sits in.
+    root: PathBuf,
+}
+
+impl Drop for Seat {
+    fn drop(&mut self) {
+        if let Ok(text) = std::fs::read_to_string(self.home.join("pack.pid")) {
+            if let Ok(server) = text.trim().parse::<u32>() {
+                let _ = Command::new("kill")
+                    .args(["-TERM", &server.to_string()])
+                    .status();
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+        // Fails while another test still has a seat there.
+        if let Some(seats) = ljos_test_boot::home_seats() {
+            if self.root.parent() == Some(seats.as_path()) {
+                let _ = std::fs::remove_dir(&seats);
+            }
+        }
+    }
 }
 
 impl Seat {
@@ -49,19 +70,20 @@ impl Seat {
     /// there. A home under /tmp is a sandbox and must not.
     fn outside(name: &str) -> Self {
         scrub();
-        let home = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp)
-            .join(format!("ljos-doctor-fix-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        Self::at(home)
+        let home = seat_root::seat_dir(
+            ljos_cli::bookkeep::path_is_temp,
+            &format!("ljos-doctor-fix-{name}"),
+        );
+        Self::at(home.clone(), home)
     }
 
     fn new(name: &str) -> Self {
         scrub();
-        let home = root().join(name);
-        Self::at(home)
+        let root = root();
+        Self::at(root.join(name), root)
     }
 
-    fn at(home: PathBuf) -> Self {
+    fn at(home: PathBuf, root: PathBuf) -> Self {
         let bin = home.join("bin");
         for dir in [".config", ".local/share", ".cache", "run", "tmp", "bin"] {
             std::fs::create_dir_all(home.join(dir)).unwrap();
@@ -70,7 +92,7 @@ impl Seat {
             &bin.join("curl"),
             "#!/bin/sh\necho 'curl: network is unreachable' >&2\nexit 6\n",
         );
-        Self { home, bin }
+        Self { home, bin, root }
     }
 
     fn state(&self) -> PathBuf {
@@ -90,6 +112,7 @@ impl Seat {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .env("HOME", &self.home)
             .env("USER", "ada")
@@ -344,6 +367,7 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("PATH", format!("{}:/usr/bin:/bin", seat.bin.display()))
             .env("HOME", &seat.home)
             .env("USER", "ada")
@@ -388,6 +412,18 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
 }
 
 const CONFIG_KEEP: &str = "# kept\n";
+
+/// A seat home under `~/.cache/ljos-test-seats` is gone once its test
+/// is done with it.
+#[test]
+fn a_seat_outside_the_temp_roots_is_removed_when_dropped() {
+    let seat = Seat::outside("drop");
+    let home = seat.home.clone();
+    std::fs::write(home.join("pack.pid"), "not a pid\n").unwrap();
+    assert!(home.is_dir(), "{}", home.display());
+    drop(seat);
+    assert!(!home.exists(), "{} was left behind", home.display());
+}
 
 #[test]
 fn doctor_fix_records_a_runner_session_seat() {
@@ -456,6 +492,7 @@ fn doctor_fix_leaves_a_missing_packset_with_one_command() {
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["doctor", "--fix"])
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("PATH", format!("{}:/usr/bin:/bin", seat.bin.display()))
         .env("HOME", &seat.home)
         .env("USER", "ada")

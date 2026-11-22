@@ -5,6 +5,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/git.rs"]
+mod isolated_git;
+
 use std::io::{BufRead, Read};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -57,7 +60,7 @@ impl Board {
         std::fs::create_dir_all(layout.projects_dir()).unwrap();
         vissue_core::ops::create(&layout, "probe", "wait for the writer", Default::default())
             .unwrap();
-        let initialized = Command::new("git")
+        let initialized = isolated_git::command()
             .arg("-C")
             .arg(&root)
             .args(["init", "-q", "-b", "main"])
@@ -154,6 +157,7 @@ esac
             .args(["sitting", &self.issue, "--verbose"])
             .current_dir(self._dir.path())
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self._dir.path().display()),

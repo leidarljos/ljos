@@ -3,10 +3,18 @@
 //! name this one. `ljos` does not.
 //!
 //! [`Packsetd`] starts the pack writer for a test and stops it again.
+//!
+//! [`git`] and [`fresh_dir`] are the git and the scratch directories a
+//! test uses.
 
 mod packsetd;
+mod scratch;
 
 pub use packsetd::{reap_listener, Builder, Packsetd};
+pub use scratch::{
+    build_target, checkout, checkout_seats, fresh_dir, git, git_at, git_ceiling, home_seats,
+    no_login_git_config, GIT_CEILING,
+};
 
 use std::ffi::c_char;
 
@@ -139,6 +147,33 @@ static LJOS_TEST_SESSION: unsafe extern "C" fn() = SESSION;
 
 extern "C" {
     fn ljos_test_canon_tmpdir_keep();
+    fn ljos_test_boot_home() -> *const c_char;
+}
+
+/// `HOME` as this process had it before `main`, symlinks resolved.
+/// `None` when it was unset or empty.
+#[must_use]
+pub fn boot_home() -> Option<&'static std::path::Path> {
+    static HOME: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        // SAFETY: the pointer is null or names a NUL-terminated buffer the
+        // constructor filled before main and nothing writes again.
+        let ptr = unsafe { ljos_test_boot_home() };
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: as above.
+        let bytes = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_bytes();
+        #[cfg(unix)]
+        let home = {
+            use std::os::unix::ffi::OsStrExt;
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+        };
+        #[cfg(not(unix))]
+        let home = std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned());
+        Some(home)
+    })
+    .as_deref()
 }
 
 /// Address of the temp-dir setup. Referencing it keeps that object,
@@ -152,6 +187,139 @@ static LJOS_TEST_CANON_TMP: unsafe extern "C" fn() = CANON_TMP;
 
 #[cfg(test)]
 mod tests {
+    /// Held by every test here that changes this process's environment.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct PutEnv(&'static str, Option<std::ffi::OsString>);
+
+    impl PutEnv {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let old = std::env::var_os(key);
+            // SAFETY: the caller holds ENV.
+            unsafe { std::env::set_var(key, value) };
+            Self(key, old)
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let old = std::env::var_os(key);
+            // SAFETY: the caller holds ENV.
+            unsafe { std::env::remove_var(key) };
+            Self(key, old)
+        }
+    }
+
+    impl Drop for PutEnv {
+        fn drop(&mut self) {
+            // SAFETY: the guard is dropped before ENV.
+            unsafe {
+                match &self.1 {
+                    Some(v) => std::env::set_var(self.0, v),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_home_set_mid_run_moves_no_seat_root_or_ceiling() {
+        let _env = ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let seats = crate::home_seats();
+        let ceiling = crate::git_ceiling();
+        let temp = tempfile_dir("home-mid-run");
+        let _home = PutEnv::set("HOME", &temp);
+        assert_eq!(crate::home_seats(), seats, "HOME is {}", temp.display());
+        assert_eq!(crate::git_ceiling(), ceiling);
+        let moved =
+            std::env::split_paths(&crate::git_ceiling()).any(|root| root.starts_with(&temp));
+        assert!(!moved, "a ceiling followed HOME to {}", temp.display());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// A `~/.gitconfig` that signs every commit with a program that is not
+    /// there fails a plain `git commit`, and not one from [`crate::git`].
+    #[test]
+    fn a_hostile_home_gitconfig_does_not_reach_the_scratch_git() {
+        let _env = ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile_dir("hostile-gitconfig");
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join(".config/git")).unwrap();
+        let hostile = "[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = /nonexistent/ljos-gpg\n";
+        std::fs::write(home.join(".gitconfig"), hostile).unwrap();
+        std::fs::write(home.join(".config/git/config"), hostile).unwrap();
+        let _home = PutEnv::set("HOME", &home);
+        let _xdg = PutEnv::set("XDG_CONFIG_HOME", home.join(".config"));
+        let _global = PutEnv::remove("GIT_CONFIG_GLOBAL");
+        let _system = PutEnv::remove("GIT_CONFIG_SYSTEM");
+        let _nosystem = PutEnv::remove("GIT_CONFIG_NOSYSTEM");
+        let repo = root.join("repo");
+        let commit = |mut git: std::process::Command| {
+            git.arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t.invalid"])
+                .args(["commit", "-q", "--allow-empty", "-m", "seed"])
+                .output()
+                .unwrap()
+        };
+        let init = crate::git()
+            .args(["init", "-q"])
+            .arg(&repo)
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "{init:?}");
+        let mut plain = std::process::Command::new("git");
+        plain.env(crate::GIT_CEILING, crate::git_ceiling());
+        let refused = commit(plain);
+        assert!(
+            !refused.status.success(),
+            "the hostile config did not apply: {refused:?}"
+        );
+        for (what, git) in [("git", crate::git()), ("git_at", crate::git_at("git"))] {
+            let out = commit(git);
+            assert!(out.status.success(), "{what}: {out:?}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A global or system config the process names does not reach this git.
+    #[test]
+    fn a_git_config_the_process_names_is_dropped() {
+        let _env = ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _global = PutEnv::set("GIT_CONFIG_GLOBAL", "/tmp/named-global");
+        let _system = PutEnv::set("GIT_CONFIG_SYSTEM", "/tmp/named-system");
+        let _nosystem = PutEnv::set("GIT_CONFIG_NOSYSTEM", "0");
+        let cmd = crate::git();
+        let val = |key: &str| {
+            cmd.get_envs()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.map(std::ffi::OsStr::to_owned))
+        };
+        assert_eq!(val("GIT_CONFIG_GLOBAL").unwrap().unwrap(), "/dev/null");
+        assert_eq!(val("GIT_CONFIG_NOSYSTEM").unwrap().unwrap(), "1");
+        assert!(val("GIT_CONFIG_SYSTEM").unwrap().is_none());
+    }
+
+    /// The target directory this binary runs from is a ceiling, wherever
+    /// `CARGO_TARGET_DIR` put it.
+    #[test]
+    fn the_build_target_of_this_binary_is_a_ceiling() {
+        let exe = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let target = crate::build_target().expect("a test binary runs from a target directory");
+        assert!(exe.starts_with(&target), "{}", target.display());
+        assert!(target.join("CACHEDIR.TAG").is_file() || target.join(".rustc_info.json").is_file());
+        let ceilings: Vec<_> = std::env::split_paths(&crate::git_ceiling()).collect();
+        assert!(ceilings.contains(&target), "{ceilings:?}");
+    }
+
+    fn tempfile_dir(prefix: &str) -> std::path::PathBuf {
+        crate::fresh_dir(&std::env::temp_dir(), &format!("ljos-test-boot-{prefix}"))
+    }
+
     #[test]
     fn this_process_left_the_host_cgroup() {
         let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();

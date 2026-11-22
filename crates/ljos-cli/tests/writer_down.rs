@@ -80,15 +80,10 @@ struct Seat {
 
 impl Seat {
     fn new(name: &str) -> Self {
-        let root = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp).join(format!(
-            "ljos-down-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = seat_root::seat_dir(
+            ljos_cli::bookkeep::path_is_temp,
+            &format!("ljos-down-{name}"),
+        );
         for sub in [
             "home", "bin", "bare", "state", "config", "data", "run", "tmp", "other",
         ] {
@@ -163,6 +158,7 @@ fn spawn_decoy(bin: &Path, home: &Path, root: &Path) -> Decoy {
         .arg(&port_file)
         .arg("daemon")
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin")
         .stdin(Stdio::null())
@@ -248,6 +244,7 @@ impl Writer {
         let child = Command::new(bin)
             .arg(&port_file)
             .env_clear()
+            .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
             .env("HOME", home)
             .env("PATH", "/usr/bin:/bin")
             .stdin(Stdio::null())
@@ -294,6 +291,7 @@ fn ljos(seat: &Seat, path: &str, state: &Path, port: u16, args: &[&str]) -> Comm
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", seat.home())
         .env("PATH", path)
         .env("USER", "ada")
@@ -448,6 +446,7 @@ fn walk_commands(seat: &Seat, case: &Case, dead: u16) {
         .arg("-c")
         .arg(&script)
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", seat.home())
         .env("PATH", &case.path)
         .env("USER", "ada")
@@ -533,6 +532,7 @@ fn walk_mcp(seat: &Seat, case: &Case, dead: u16) {
     std::fs::create_dir_all(&state).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", seat.home())
         .env("PATH", &case.path)
         .env("USER", "ada")
@@ -677,6 +677,7 @@ fn walk_mcp(seat: &Seat, case: &Case, dead: u16) {
     // so a pack failure still has to name the same command.
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
+        .env(ljos_test_boot::GIT_CEILING, ljos_test_boot::git_ceiling())
         .env("HOME", seat.home())
         .env("PATH", &case.path)
         .env("USER", "ada")
