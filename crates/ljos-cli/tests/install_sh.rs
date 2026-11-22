@@ -484,6 +484,7 @@ fn command_paths_with_spaces_are_shell_quoted() {
         .args(["--no-embed", "--no-modify-path"])
         .env_clear()
         .env("HOME", &home)
+        .env("TMPDIR", dir.path())
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
@@ -1139,6 +1140,7 @@ fn a_named_pack_in_a_temporary_home_keeps_its_own_memory_reason() {
             .args(["--no-embed", "--no-modify-path"])
             .env_clear()
             .env("HOME", &home)
+            .env("TMPDIR", dir.path())
             .env("PACKSET_URL", packset_url)
             .env("PATH", "/usr/bin:/bin")
             .output()
