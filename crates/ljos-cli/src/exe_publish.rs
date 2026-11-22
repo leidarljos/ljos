@@ -804,7 +804,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         let dest = dir.path().join("dest");
-        for (from, want) in [(0o700, 0o700), (0o750, 0o750), (0o644, 0o644), (0o4755, 0o755)] {
+        for (from, want) in [
+            (0o700, 0o700),
+            (0o750, 0o750),
+            (0o644, 0o644),
+            (0o4755, 0o755),
+        ] {
             install_executable_mode(&src, OURS, 0o700).unwrap();
             File::open(&src)
                 .unwrap()

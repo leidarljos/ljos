@@ -794,24 +794,17 @@ fn unpack(tarball: &Path, dir: &Path) -> Result<()> {
 }
 
 fn place_bin(src: &Path, dest: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
     let meta =
         std::fs::symlink_metadata(src).with_context(|| format!("missing {}", src.display()))?;
     if !meta.is_file() {
         bail!("{} is not a regular file", src.display());
     }
-    let _ = std::fs::remove_file(dest);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "renames a path that is not a git hook"
-    )]
-    std::fs::rename(src, dest).with_context(|| format!("install {}", dest.display()))?;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))?;
-    Ok(())
+    crate::publish(
+        dest,
+        crate::Content::CopyOf(src),
+        crate::Mode::Exactly(0o755),
+    )
+    .with_context(|| format!("install {}", dest.display()))
 }
 
 fn tailscale_cmd(tailscale: &Path, socket: &Path) -> Command {
@@ -1254,6 +1247,40 @@ pub fn acl(more: &[String]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `place_bin` renamed the binary in and then chmodded the name, which
+    /// followed a link planted there after the rename. It now publishes
+    /// the binary, so the link is replaced and its target is not changed.
+    #[test]
+    fn placing_a_binary_follows_no_link_at_its_name() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("tailscaled");
+        crate::install_executable_mode(&src, "#!/bin/sh\necho new\n", 0o600).unwrap();
+        let victim = dir.path().join("victim");
+        crate::install_executable_mode(&victim, "keep\n", 0o600).unwrap();
+        let dest = dir.path().join("bin");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "plants a link that is not a git hook"
+        )]
+        std::os::unix::fs::symlink(&victim, &dest).unwrap();
+        place_bin(&src, &dest).unwrap();
+        let mode = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .unwrap()
+                .permissions()
+                .mode()
+        };
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
+        assert_eq!(mode(&victim) & 0o7777, 0o600);
+        assert!(std::fs::symlink_metadata(&dest).unwrap().is_file());
+        assert_eq!(mode(&dest) & 0o7777, 0o755);
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "#!/bin/sh\necho new\n"
+        );
+    }
 
     #[test]
     fn a_daemon_whose_start_time_cannot_be_read_runs_on_and_down_signals_nothing() {

@@ -1284,9 +1284,8 @@ mod tests {
     #[test]
     fn restoring_a_non_executable_hook_over_a_symlink_leaves_the_target() {
         use std::os::unix::fs::PermissionsExt;
-        let mode_of = |path: &Path| {
-            fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
-        };
+        let mode_of =
+            |path: &Path| fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777;
         let dir = tempfile::tempdir().unwrap();
         let victim = dir.path().join("victim");
         crate::install_executable_mode(&victim, "SECRET\n", 0o700).unwrap();
