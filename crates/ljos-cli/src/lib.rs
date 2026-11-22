@@ -46842,16 +46842,21 @@ fn sitting_budget_left(step: &str, total: std::time::Duration) -> Result<()> {
 
 /// How long a sitting may wait for a tracker lock, and the limit that sets
 /// it. With no wall budget armed, the claim budget `total` stands in.
+/// An armed wall budget keeps the name it was given.
 fn sitting_lock_limit(total: std::time::Duration) -> (std::time::Duration, &'static str) {
     let claim = WALL_DEADLINE.with(|cell| {
-        cell.get()
-            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+        cell.get().map(|(deadline, name)| {
+            (
+                deadline.saturating_duration_since(std::time::Instant::now()),
+                name,
+            )
+        })
     });
     let wall = match (claim, tool_bound::remaining()) {
-        (Some(claim), Some(tool)) if tool < claim => (tool, "the tool budget"),
-        (None, Some(tool)) => (tool, "the tool budget"),
-        (Some(claim), _) => (claim, "the claim budget"),
-        (None, None) => (total, "the claim budget"),
+        (Some((left, _)), Some(tool)) if tool < left => (tool, "tool budget"),
+        (None, Some(tool)) => (tool, "tool budget"),
+        (Some((left, name)), _) => (left, name),
+        (None, None) => (total, "claim budget"),
     };
     let lock = tracker_lock_wait();
     if lock < wall.0 {
@@ -46861,10 +46866,21 @@ fn sitting_lock_limit(total: std::time::Duration) -> (std::time::Duration, &'sta
     }
 }
 
+/// Words for `limit` after "until" in a sitting lock line. The lock-wait
+/// variable is already a name. A budget name takes an article.
+fn sitting_limit_words(limit: &str) -> String {
+    if limit == "LJOS_TRACKER_LOCK_WAIT" {
+        limit.to_string()
+    } else {
+        format!("the {limit}")
+    }
+}
+
 fn wait_for_sitting_lock(path: &Path, what: &str, total: std::time::Duration) -> Result<()> {
     let (left, limit) = sitting_lock_limit(total);
     let started = std::time::Instant::now();
     let Some(held) = CommitLock::acquire_by(path, started + left) else {
+        let limit = sitting_limit_words(limit);
         bail!(
             "sitting: another tracker writer held the {what} at {} for {}s, until {limit} ran out; nothing was claimed",
             path.display(),
@@ -59206,6 +59222,51 @@ mod tests {
         assert!(said.contains("another writer held"), "{said}");
         assert!(said.contains("of the sitting wall budget"), "{said}");
         assert!(!said.contains("hook"), "{said}");
+    }
+
+    /// A sitting lock wait names the armed wall budget. A shorter tool
+    /// budget or `LJOS_TRACKER_LOCK_WAIT` is named instead, and neither
+    /// arm names the claim budget that only stands in when nothing is armed.
+    #[test]
+    fn a_sitting_lock_limit_names_the_budget_that_ends_the_wait() {
+        let _env = env_guard();
+        disarm_wall();
+        tool_bound::disarm();
+        let total = std::time::Duration::from_secs(30);
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        let (wait, name) = {
+            let _wall =
+                arm_wall_budget_for(std::time::Duration::from_secs(10), "sitting wall budget");
+            sitting_lock_limit(total)
+        };
+        assert_eq!(name, "sitting wall budget");
+        assert!(wait <= std::time::Duration::from_secs(10), "{wait:?}");
+        assert_eq!(sitting_limit_words(name), "the sitting wall budget");
+        let (wait, name) = {
+            let _wall =
+                arm_wall_budget_for(std::time::Duration::from_secs(10), "sitting wall budget");
+            let _tool = tool_bound::arm(std::time::Duration::from_secs(2));
+            sitting_lock_limit(total)
+        };
+        assert_eq!(name, "tool budget");
+        assert!(wait <= std::time::Duration::from_secs(2), "{wait:?}");
+        assert_eq!(sitting_limit_words(name), "the tool budget");
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "1");
+        let (wait, name) = {
+            let _wall =
+                arm_wall_budget_for(std::time::Duration::from_secs(10), "sitting wall budget");
+            sitting_lock_limit(total)
+        };
+        assert_eq!(name, "LJOS_TRACKER_LOCK_WAIT");
+        assert_eq!(wait, std::time::Duration::from_secs(1));
+        assert_eq!(sitting_limit_words(name), "LJOS_TRACKER_LOCK_WAIT");
+        disarm_wall();
+        tool_bound::disarm();
+        std::env::set_var("LJOS_TRACKER_LOCK_WAIT", "60");
+        let (wait, name) = sitting_lock_limit(total);
+        assert_eq!((wait, name), (total, "claim budget"));
+        assert_eq!(sitting_limit_words(name), "the claim budget");
+        std::env::remove_var("LJOS_TRACKER_LOCK_WAIT");
     }
 
     /// A bare `GIT_DIR` plus `GIT_WORK_TREE` checkout still commits and
