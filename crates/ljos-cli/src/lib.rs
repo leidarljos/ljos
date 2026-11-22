@@ -57596,8 +57596,15 @@ mod tests {
         );
         assert_eq!(super::take_guard_note(), None, "a temp HOME names no rule");
         let refused = super::ensure_writer().expect_err("a temp HOME names its refusal");
-        let temp =
+        // The line names a fixed temp root that holds the home before a
+        // longer TMPDIR inside it.
+        let canon_temp =
             std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        let temp = ["/tmp", "/var/tmp", "/private/tmp", "/dev/shm"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|root| canon_temp.starts_with(root))
+            .unwrap_or(canon_temp);
         let under_temp = format!("under {}", temp.display());
         let refused = refused.to_string();
         assert!(
