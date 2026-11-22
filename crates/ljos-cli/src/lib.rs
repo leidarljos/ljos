@@ -21071,8 +21071,9 @@ fn memory_off_temp_line(home: &Path) -> String {
 }
 
 /// That line when this process's `HOME` is a sandbox and no writer address
-/// was named. A named `PACKSET_URL`, `PACKSET_PORT` or `LJOS_MEM_PORT`
-/// keeps its own line.
+/// was named. A nonblank `PACKSET_URL` or selected port keeps its own line.
+/// The selected port is `PACKSET_PORT` when set, even blank, and
+/// `LJOS_MEM_PORT` otherwise.
 pub fn sandbox_memory_off() -> Option<String> {
     if std::env::var("PACKSET_URL")
         .ok()

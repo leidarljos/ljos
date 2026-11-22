@@ -3,7 +3,8 @@
 # SHA-256 published beside it and its GitHub build attestation, and run
 # `ljos onboard` for every coding runner found on this machine. With none
 # found, the tracker and deed store are still set up. Outside a temporary
-# home, the memory writer is set up too. Under a temporary home, memory is off unless PACKSET_URL names a pack.
+# home, the memory writer is set up too. Under a temporary home, memory is off unless PACKSET_URL or the selected writer port is nonblank.
+# PACKSET_PORT is the selected port when set, and LJOS_MEM_PORT otherwise.
 #
 # One command for a new machine. It fetches the release assets, checks
 # each SHA-256, installs the encoder and its model, and sets up the tracker
@@ -1446,7 +1447,7 @@ cline dir:Documents/Cline"
 # this install does not leave a writer running.
 root=$temporary_root
 memory_off=0
-case ${PACKSET_URL:-} in
+case "${PACKSET_URL:-}${PACKSET_PORT-${LJOS_MEM_PORT-}}" in
   *[![:space:]]*) root= ;;
 esac
 if [ "${PACKSET_URL:-}" = off ]; then

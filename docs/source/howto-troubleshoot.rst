@@ -53,7 +53,7 @@ With ``packset`` on ``PATH`` and nothing listening, a home that is not a tempora
 That one command starts the writer. ``ljos doctor --fix`` runs ``packset ensure`` itself, and prints one line that says it did.
 
 Under a temporary home the command guard is off.
-Memory is off there unless ``PACKSET_URL`` names a writer, and ``ljos doctor --fix`` does not start one.
+Memory is off there unless ``PACKSET_URL`` names a writer or a writer port is set, and ``ljos doctor --fix`` does not start one.
 The home was ``/tmp/seat``.
 The printed row is one line, and ``ljos search`` and ``ljos consensus`` print that same line and exit 1:
 
