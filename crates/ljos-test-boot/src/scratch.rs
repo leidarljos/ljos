@@ -21,12 +21,12 @@ pub fn checkout() -> PathBuf {
     std::fs::canonicalize(&crates).unwrap_or(crates)
 }
 
-/// Seat roots under `HOME`, which sit outside the checkout.
+/// Seat roots under the login home, which sit outside the checkout.
+/// This is [`crate::boot_home`], not the live `HOME`: a test that points
+/// `HOME` at a temp tree does not move every other test's seat root.
 #[must_use]
 pub fn home_seats() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(|home| PathBuf::from(home).join(".cache/ljos-test-seats"))
+    crate::boot_home().map(|home| home.join(".cache/ljos-test-seats"))
 }
 
 /// The checkout's `crates/target`. No seat goes here; it stays a git

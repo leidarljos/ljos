@@ -56785,6 +56785,7 @@ mod tests {
     #[test]
     fn a_guard_shim_steps_aside_for_a_temp_home_and_ljos_off_only() {
         use std::os::unix::fs::PermissionsExt;
+        let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let guard = dir.path().join("guard-bin");
         let fake = dir.path().join("fake");
@@ -81107,6 +81108,7 @@ lesson, due yesterday, seat ada
 
     #[test]
     fn guard_tests_do_not_read_user_rules_from_the_login_home() {
+        let _g = env_guard();
         let home = Path::new("/home/someone");
         let got = resolve_config_base(None, Some(home)).expect("isolated base");
         assert_ne!(got, home.join(".config"));

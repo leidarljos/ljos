@@ -146,6 +146,33 @@ static LJOS_TEST_SESSION: unsafe extern "C" fn() = SESSION;
 
 extern "C" {
     fn ljos_test_canon_tmpdir_keep();
+    fn ljos_test_boot_home() -> *const c_char;
+}
+
+/// `HOME` as this process had it before `main`, symlinks resolved.
+/// `None` when it was unset or empty.
+#[must_use]
+pub fn boot_home() -> Option<&'static std::path::Path> {
+    static HOME: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        // SAFETY: the pointer is null or names a NUL-terminated buffer the
+        // constructor filled before main and nothing writes again.
+        let ptr = unsafe { ljos_test_boot_home() };
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: as above.
+        let bytes = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_bytes();
+        #[cfg(unix)]
+        let home = {
+            use std::os::unix::ffi::OsStrExt;
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+        };
+        #[cfg(not(unix))]
+        let home = std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned());
+        Some(home)
+    })
+    .as_deref()
 }
 
 /// Address of the temp-dir setup. Referencing it keeps that object,
@@ -159,6 +186,53 @@ static LJOS_TEST_CANON_TMP: unsafe extern "C" fn() = CANON_TMP;
 
 #[cfg(test)]
 mod tests {
+    /// Held by every test here that changes this process's environment.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct PutEnv(&'static str, Option<std::ffi::OsString>);
+
+    impl PutEnv {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let old = std::env::var_os(key);
+            // SAFETY: the caller holds ENV.
+            unsafe { std::env::set_var(key, value) };
+            Self(key, old)
+        }
+    }
+
+    impl Drop for PutEnv {
+        fn drop(&mut self) {
+            // SAFETY: the guard is dropped before ENV.
+            unsafe {
+                match &self.1 {
+                    Some(v) => std::env::set_var(self.0, v),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_home_set_mid_run_moves_no_seat_root_or_ceiling() {
+        let _env = ENV
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let seats = crate::home_seats();
+        let ceiling = crate::git_ceiling();
+        let temp = tempfile_dir("home-mid-run");
+        let _home = PutEnv::set("HOME", &temp);
+        assert_eq!(crate::home_seats(), seats, "HOME is {}", temp.display());
+        assert_eq!(crate::git_ceiling(), ceiling);
+        let moved =
+            std::env::split_paths(&crate::git_ceiling()).any(|root| root.starts_with(&temp));
+        assert!(!moved, "a ceiling followed HOME to {}", temp.display());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    fn tempfile_dir(prefix: &str) -> std::path::PathBuf {
+        crate::fresh_dir(&std::env::temp_dir(), &format!("ljos-test-boot-{prefix}"))
+    }
+
     #[test]
     fn this_process_left_the_host_cgroup() {
         let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
