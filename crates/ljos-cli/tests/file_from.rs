@@ -416,6 +416,62 @@ fn a_batch_in_only_ignored_projects_writes_no_filed_by_line() {
     }
 }
 
+/// Files `titles` and checks that `Software/other/issues.org`, which git
+/// takes, is stamped and in the one new commit, with nothing left over.
+fn other_is_filed_and_committed(world: &World, titles: &[&str]) {
+    let before = world.commits();
+    let rows: String = titles.iter().map(|title| row(title)).collect();
+    let file = world.write("rows.jsonl", rows);
+    let filed = world.ljos(&["file", "--from", &file]);
+    assert!(filed.status.success(), "{}", said(&filed));
+    assert!(!stderr(&filed).contains("is ignored"), "{}", said(&filed));
+    assert!(!stderr(&filed).contains("refused"), "{}", said(&filed));
+    assert_eq!(world.commits(), before + 1, "{}", said(&filed));
+    let other = std::fs::read_to_string(world.tracker().join("Software/other/issues.org")).unwrap();
+    assert!(other.contains(UNDER_OTHER), "{other}");
+    assert!(other.contains("Filed by"), "{other}");
+    let changed = world.git(&["show", "--name-only", "--format=", "HEAD"]);
+    assert!(changed.contains("Software/other/issues.org"), "{changed}");
+    if titles.contains(&UNDER_DEMO) {
+        assert!(changed.contains("Software/demo/issues.org"), "{changed}");
+    }
+    let left = world.git(&[
+        "status",
+        "--porcelain",
+        "--",
+        "Software/other/issues.org",
+        "Software/demo/issues.org",
+    ]);
+    assert_eq!(left, "", "{}", said(&filed));
+}
+
+/// Commits `Software/other`, then has `exclude` name its directory: the
+/// committed `.gitignore`, or `.git/info/exclude`.
+fn tracked_other_under_an_ignored_dir(world: &World, exclude: &str) {
+    other_project(world);
+    let rules = world.tracker().join(exclude);
+    std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
+    std::fs::write(rules, "Software/other/\n").unwrap();
+    if exclude == ".gitignore" {
+        world.git(&["add", ".gitignore"]);
+        world.git(&["commit", "-q", "-m", "ignore other"]);
+    }
+}
+
+#[test]
+fn a_tracked_project_under_an_ignored_dir_is_stamped_and_committed() {
+    let world = World::new();
+    tracked_other_under_an_ignored_dir(&world, ".gitignore");
+    other_is_filed_and_committed(&world, &[UNDER_OTHER]);
+}
+
+#[test]
+fn a_batch_with_a_tracked_project_under_an_ignored_dir_commits_it() {
+    let world = World::new();
+    tracked_other_under_an_ignored_dir(&world, ".git/info/exclude");
+    other_is_filed_and_committed(&world, &[UNDER_OTHER, UNDER_DEMO]);
+}
+
 #[test]
 fn a_csv_header_named_twice_is_refused_and_nothing_is_filed() {
     let world = World::new();

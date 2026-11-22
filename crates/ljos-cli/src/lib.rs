@@ -49776,7 +49776,7 @@ pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
 }
 
 fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
-    let git = |head: &[&str]| {
+    let git_on = |head: &[&str], paths: &[&str]| {
         let mut cmd = git_cmd();
         cmd.arg("-C")
             .arg(dir)
@@ -49794,14 +49794,39 @@ fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         seat_git_child(&mut cmd);
         bounded_output(&mut cmd)
     };
+    let git = |head: &[&str]| git_on(head, paths);
     // `Err` is a busy index, with what git said.
     let attempt = || -> Result<PathCommit, String> {
-        let added = match git(&["add"]) {
-            Ok(out) => out,
-            Err(e) => return Ok(PathCommit::Refused(format!("git: {e}"))),
+        // A plain add exits 1 for a tracked file whose directory an ignore
+        // rule names, after staging it. `add -u` stages tracked files and
+        // reads no ignore rule.
+        let tracked: Vec<String> = match git(&["ls-files", "-z"]) {
+            Ok(out) if out.status.success() => out
+                .stdout
+                .split(|&b| b == 0)
+                .filter(|name| !name.is_empty())
+                .map(|name| String::from_utf8_lossy(name).into_owned())
+                .collect(),
+            _ => Vec::new(),
         };
-        if !added.status.success() {
-            return refused_or_busy(dir, &added);
+        let (known, new): (Vec<&str>, Vec<&str>) = paths
+            .iter()
+            .partition(|path| tracked.iter().any(|name| name == *path));
+        let mut adds: Vec<(&[&str], &[&str])> = Vec::new();
+        if !known.is_empty() {
+            adds.push((&["add", "-u"], &known));
+        }
+        if !new.is_empty() || known.is_empty() {
+            adds.push((&["add"], &new));
+        }
+        for (head, part) in adds {
+            let added = match git_on(head, part) {
+                Ok(out) => out,
+                Err(e) => return Ok(PathCommit::Refused(format!("git: {e}"))),
+            };
+            if !added.status.success() {
+                return refused_or_busy(dir, &added);
+            }
         }
         if git(&["diff", "--cached", "--quiet"]).is_ok_and(|o| o.status.success()) {
             return Ok(PathCommit::AlreadyIn);
