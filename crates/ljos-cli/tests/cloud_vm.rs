@@ -507,6 +507,17 @@ fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
     );
 }
 
+/// The runtime the rpath of the encoder `bin` starts finds.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn runtime_of(bin: &Path) -> PathBuf {
+    fs::canonicalize(bin)
+        .unwrap()
+        .ancestors()
+        .nth(2)
+        .unwrap()
+        .join("lib/onnxruntime/libonnxruntime.so.1")
+}
+
 /// A home and a release directory with the required binaries and the
 /// encoder archives as the release workflow packs them, each beside its
 /// `.sha256`.
@@ -584,17 +595,27 @@ fn cloud_up_installs_the_release_encoder_on_a_cloud_vm() {
     let said = ljos_cli::cloud::up(false).unwrap();
     assert!(said.contains("encoder: installed"), "{said}");
     assert!(said.contains("(checksums match)"), "{said}");
-    assert!(home.join(".local/bin/packset-embed").is_file(), "{said}");
+    let bin = home.join(".local/bin/packset-embed");
+    assert!(bin.is_file(), "{said}");
     assert_eq!(
-        fs::read(home.join(".local/lib/onnxruntime/libonnxruntime.so.1")).unwrap(),
+        fs::read(runtime_of(&bin)).unwrap(),
         b"runtime",
-        "the rpath $ORIGIN/../lib/onnxruntime finds the runtime here"
+        "the rpath $ORIGIN/../lib/onnxruntime finds the runtime beside the binary"
     );
     let left: Vec<_> = fs::read_dir(home.join(".local/lib"))
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .collect();
-    assert_eq!(left, ["onnxruntime"], "the staging directory stays behind");
+    assert_eq!(left, ["packset-embed"], "{said}");
+    let versions: Vec<_> = fs::read_dir(home.join(".local/lib/packset-embed"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(
+        versions,
+        [fs::canonicalize(&bin).unwrap().ancestors().nth(2).unwrap()],
+        "the staging directory stays behind"
+    );
     let again = ljos_cli::cloud::up(false).unwrap();
     assert!(
         again.contains("encoder: packset-embed already in"),
@@ -620,7 +641,9 @@ fn an_encoder_checksum_mismatch_installs_neither_archive() {
     assert!(err.contains("nothing was installed"), "{err}");
     assert!(!home.join(".local/bin/packset-embed").exists());
     assert_eq!(
-        fs::read_dir(home.join(".local/lib")).unwrap().count(),
+        fs::read_dir(home.join(".local/lib/packset-embed"))
+            .unwrap()
+            .count(),
         0,
         "the runtime's own sum matched, and it still waits for both"
     );
@@ -781,8 +804,11 @@ fn a_hostile_encoder_archive_installs_nothing() {
             !home.join(".local/bin/packset-embed").exists(),
             "{case}: encoder installed: {err}"
         );
-        assert!(
-            !home.join(".local/lib/onnxruntime").exists(),
+        assert_eq!(
+            fs::read_dir(home.join(".local/lib/packset-embed"))
+                .unwrap()
+                .count(),
+            0,
             "{case}: runtime installed: {err}"
         );
         if case == "symlink" || case == "runtime-symlink" {
@@ -833,9 +859,8 @@ fn a_failed_encoder_swap_keeps_the_previous_pair() {
     let said = ljos_cli::cloud::up(false).unwrap();
     assert!(said.contains("encoder: installed"), "{said}");
     let bin = home.join(".local/bin/packset-embed");
-    let soname = home.join(".local/lib/onnxruntime/libonnxruntime.so.1");
     let old_bin = fs::read(&bin).unwrap();
-    assert_eq!(fs::read(&soname).unwrap(), b"runtime");
+    assert_eq!(fs::read(runtime_of(&bin)).unwrap(), b"runtime");
     replace_archive(
         &rel,
         "onnxruntime",
@@ -851,9 +876,16 @@ fn a_failed_encoder_swap_keeps_the_previous_pair() {
     let bin_dir = lock_bin_dir(&home);
     let err = ljos_cli::cloud::up(true).unwrap_err().to_string();
     unlock_bin_dir(&bin_dir);
-    assert_eq!(fs::read(&soname).unwrap(), b"runtime", "{err}");
+    assert_eq!(fs::read(runtime_of(&bin)).unwrap(), b"runtime", "{err}");
     assert_eq!(fs::read(&bin).unwrap(), old_bin, "{err}");
     assert!(err.contains("nothing was installed"), "{err}");
+    assert_eq!(
+        fs::read_dir(home.join(".local/lib/packset-embed"))
+            .unwrap()
+            .count(),
+        1,
+        "the failed install left its directory: {err}"
+    );
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -870,8 +902,11 @@ fn a_failed_first_encoder_install_leaves_no_runtime() {
     lock_bin_dir(&home);
     let err = ljos_cli::cloud::up(false).unwrap_err().to_string();
     unlock_bin_dir(&bin_dir);
-    assert!(
-        !home.join(".local/lib/onnxruntime").exists(),
+    assert_eq!(
+        fs::read_dir(home.join(".local/lib/packset-embed"))
+            .unwrap()
+            .count(),
+        0,
         "a failed first install left the runtime: {err}"
     );
     assert!(!bin_dir.join("packset-embed").exists(), "{err}");
@@ -968,7 +1003,7 @@ fn a_ci_job_downloads_no_encoder() {
     let said = ljos_cli::cloud::up(false).unwrap();
     assert!(said.contains("encoder: not a cloud VM"), "{said}");
     assert!(!home.join(".local/bin/packset-embed").exists());
-    assert!(!home.join(".local/lib/onnxruntime").exists());
+    assert!(!home.join(".local/lib/packset-embed").exists());
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -984,7 +1019,7 @@ fn a_generic_ci_job_downloads_no_encoder() {
         "CI=true is not a cloud VM: {said}"
     );
     assert!(!home.join(".local/bin/packset-embed").exists());
-    assert!(!home.join(".local/lib/onnxruntime").exists());
+    assert!(!home.join(".local/lib/packset-embed").exists());
 }
 
 #[test]

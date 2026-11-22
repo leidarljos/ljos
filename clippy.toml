@@ -5,6 +5,9 @@
 # published through `install_executable`, `install_executable_mode` or
 # `copy_executable`, not through an expected call. A mode is changed with
 # `change_mode` or `change_mode_of`, which never make a file executable.
+# Clippy resolves item paths, so an alias, grouped import, or re-export of
+# a listed method is rejected too. Generated and native code are outside
+# Clippy's Rust-item analysis.
 disallowed-methods = [
     { path = "std::fs::write", reason = "use ljos_cli::write_file, or install_executable for a hook" },
     { path = "std::fs::copy", reason = "use ljos_cli::copy_executable" },
@@ -13,6 +16,8 @@ disallowed-methods = [
     { path = "std::fs::soft_link", reason = "use ljos_cli::install_executable" },
     { path = "std::fs::set_permissions", reason = "use ljos_cli::change_mode, or ljos_cli::publish for a file that is executed" },
     { path = "std::fs::File::set_permissions", reason = "use ljos_cli::change_mode_of, or ljos_cli::publish for a file that is executed" },
+    { path = "std::os::unix::fs::PermissionsExt::from_mode", reason = "construct write modes only in the publication module" },
+    { path = "std::os::unix::fs::PermissionsExt::set_mode", reason = "change modes only in the publication module", allow-invalid = true },
     { path = "std::os::unix::fs::symlink", reason = "use ljos_cli::install_executable" },
     { path = "std::fs::File::create", reason = "use ljos_cli::write_file, or install_executable for a hook" },
     { path = "std::fs::File::create_new", reason = "use ljos_cli::write_file, or install_executable for a hook" },
@@ -40,4 +45,23 @@ disallowed-methods = [
     { path = "libc::renameat2", reason = "use ljos_cli::install_executable", allow-invalid = true },
     { path = "libc::renamex_np", reason = "use ljos_cli::install_executable", allow-invalid = true },
     { path = "libc::renameatx_np", reason = "use ljos_cli::install_executable", allow-invalid = true },
+    { path = "rustix::fs::open", reason = "use ljos_cli::install_executable" },
+    { path = "rustix::fs::openat", reason = "use ljos_cli::install_executable" },
+    { path = "rustix::fs::fchmod", reason = "change modes only in the publication module" },
+    { path = "rustix::fs::chmod", reason = "change modes only in the publication module" },
+    { path = "rustix::fs::chmodat", reason = "change modes only in the publication module" },
+    { path = "rustix::fs::symlink", reason = "use ljos_cli::install_executable" },
+    { path = "rustix::fs::symlinkat", reason = "use ljos_cli::install_executable" },
+    { path = "rustix::fs::rename", reason = "use ljos_cli::install_executable" },
+    { path = "rustix::fs::renameat", reason = "rename executable or secret files only in the publication module" },
+    { path = "rustix::fs::renameat_with", reason = "rename executable or secret files only in the publication module" },
+    { path = "rustix::fs::link", reason = "use ljos_cli::install_executable" },
+    { path = "rustix::fs::linkat", reason = "use ljos_cli::install_executable" },
+    { path = "nix::sys::stat::fchmod", reason = "change modes only in the publication module", allow-invalid = true },
+    { path = "nix::sys::stat::fchmodat", reason = "change modes only in the publication module", allow-invalid = true },
+]
+
+disallowed-types = [
+    { path = "rustix::fs::Mode", reason = "filesystem write modes belong in the publication module" },
+    { path = "nix::sys::stat::Mode", reason = "filesystem write modes belong in the publication module", allow-invalid = true },
 ]

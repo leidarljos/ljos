@@ -1193,6 +1193,58 @@ fn an_ljos_tracker_commit_is_checked_as_the_seat_that_wrote() {
     assert!(!log.contains("tracker commit"), "{log}");
 }
 
+/// A `core.hooksPath` that is a symlink to the user's hooks directory.
+/// Install and uninstall follow the link and leave it in place.
+#[test]
+fn git_hooks_follow_a_symlinked_hooks_path() {
+    let hab = Hab::new("repo");
+    let real = hab.root.join("real-hooks");
+    fs::create_dir_all(&real).unwrap();
+    let link = hab.root.join("linked-hooks");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "plants the hooks directory link this test follows"
+    )]
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let marker = hab.root.join("repo-hook");
+    let user = format!("#!/bin/sh\nprintf ran >> {}\n", shellish(&marker));
+    ljos_cli::install_executable(&real.join("post-commit"), &user).unwrap();
+    hab.git(
+        &hab.repo,
+        &[
+            "config",
+            "--global",
+            "core.hooksPath",
+            link.to_str().unwrap(),
+        ],
+    );
+    let installed = hab.ljos(&["git-hooks", "install"]);
+    let said = format!(
+        "status {:?}\nstdout:\n{}\nstderr:\n{}",
+        installed.status.code(),
+        String::from_utf8_lossy(&installed.stdout),
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert!(installed.status.success(), "{said}");
+    let hooked = fs::read_to_string(real.join("post-commit")).unwrap();
+    assert!(hooked.starts_with(&user), "{hooked}");
+    assert!(hooked.contains("# ljos:begin git-hook"), "{hooked}");
+    assert_eq!(fs::read_link(&link).unwrap(), real);
+    assert!(real.join("pre-push").is_file());
+
+    let removed = hab.ljos(&["git-hooks", "uninstall"]);
+    let said = format!(
+        "status {:?}\nstdout:\n{}\nstderr:\n{}",
+        removed.status.code(),
+        String::from_utf8_lossy(&removed.stdout),
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(removed.status.success(), "{said}");
+    assert_eq!(fs::read_to_string(real.join("post-commit")).unwrap(), user);
+    assert!(!real.join("pre-push").exists());
+    assert_eq!(fs::read_link(&link).unwrap(), real);
+}
+
 /// A `core.hooksPath` the user already set stays put. Install chains the
 /// user's `post-commit`, and uninstall puts that file back.
 #[test]

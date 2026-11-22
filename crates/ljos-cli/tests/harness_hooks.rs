@@ -853,7 +853,6 @@ fn short_sha(sha: &str) -> String {
 /// `LJOS_GUARD_FAIL_OPEN=1` the answer is the ordinary one.
 #[test]
 fn a_workdir_that_does_not_resolve_still_allows_the_command() {
-    use std::os::unix::fs::PermissionsExt;
     let (_dir, hab) = habitat();
     sit(&hab);
     let session = hab.repo.to_str().unwrap();
@@ -871,11 +870,8 @@ fn a_workdir_that_does_not_resolve_still_allows_the_command() {
     std::os::unix::fs::symlink(&looped, hab.root.join("loop-b")).unwrap();
     let locked = hab.root.join("locked");
     std::fs::create_dir(&locked).unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "sets the mode of a path that is not a git hook"
-    )]
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let locked_fd = std::fs::File::open(&locked).unwrap();
+    ljos_cli::change_mode(&locked, 0o000).unwrap();
     let on = [("LJOS_GUARD", "on"), ("LJOS_OFF", "0")];
     let payloads = [
         pretool(session, Some("/path/to/git/repo"), NORMAL_GIT),
@@ -900,7 +896,7 @@ fn a_workdir_that_does_not_resolve_still_allows_the_command() {
         serde_json::json!({"prompt": "Fix the build"}),
     );
     let asked = hook_in(&hab, &prompt, &hab.repo, &on);
-    ljos_cli::change_mode(&locked, 0o755).unwrap();
+    ljos_cli::change_mode_of(&locked_fd, 0o755).unwrap();
     for (payload, out) in payloads.iter().zip(&denied) {
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);

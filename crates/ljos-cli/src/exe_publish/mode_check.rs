@@ -1,46 +1,311 @@
-//! No source under `crates/` outside `exe_publish` sets a mode that can
-//! make a file executable.
+//! A source lint for common executable-publication mistakes.
 //!
-//! Each source is read as tokens, so a call wrapped over many lines, a
-//! comment, or an `#[expect]` around it changes nothing the check sees. A
-//! file to be executed is published with [`super::publish`], and any other
-//! mode change goes through [`super::change_mode`] or
-//! [`super::change_mode_of`], which refuse to make a file executable. The
-//! check refuses, outside this module:
+//! This is not a proof. Clippy's resolved disallowed-method and
+//! disallowed-type checks enforce the filesystem API boundary. This lint
+//! reads production Rust sources and `build.rs` in every workspace member and
+//! catches common mistakes, including mode changes, shell programs, and a
+//! `Command` program built from a non-literal. It cannot see generated code,
+//! native code, or commands hidden inside shell strings.
 //!
 //! - `set_permissions` and `.permissions(..)` unless the mode is a literal
 //!   without an execute bit, or is masked by one;
 //! - `.mode(..)` and a two-argument `::mode(..)` on the same terms, except
 //!   at the end of a `DirBuilder::new()` chain, which makes only
 //!   directories;
-//! - the mode argument of `libc::open`, `openat`, `creat` and `mknod` on the
-//!   same terms;
+//! - the mode argument of `libc` and `rustix::fs` `open`, `openat`, `creat`
+//!   and `mknod` on the same terms;
 //! - `chmod`, `fchmod`, `fchmodat`, `fchmodat2` and `lchmod` in any form;
 //! - `fs::copy`, which copies the source's execute bits;
 //! - a glob import of `fs` or `libc`, `fs` renamed, and anything else named
 //!   `DirBuilder`, any of which would hide a form above;
 //! - `paste` and `concat_idents`, which can build any name;
-//! - `Command::new` and `program` of `cp`, `mv`, `install`, `ln` and
-//!   `chmod`.
-//!
-//! Text passed to a shell is out of its reach.
+//! - `Command::new` and `program` with non-literal programs, writer
+//!   programs, or shell programs.
 
 use std::path::{Path, PathBuf};
 
 use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
 
-/// Calls outside this module the check lets through, by the file under
-/// `crates/` and the call's tokens without spaces, each with its reason.
-const ALLOWED: &[(&str, &str, &str)] = &[(
-    "ljos-hud/src/summon.rs",
-    "set_permissions(parent,std::fs::Permissions::from_mode(0o700))",
-    "the socket's directory, which create_dir_all made or found just before; ljos-hud does not depend on ljos-cli",
-)];
+/// Narrow lint exceptions, matched by workspace-relative file, item path,
+/// and exact number of hits in that item.
+const ALLOWED: &[(&str, &str, usize, &str)] = &[
+    (
+        "crates/ljos-hud/src/summon.rs",
+        "install_unix",
+        1,
+        "the HUD creates its private socket directory before changing its mode",
+    ),
+    (
+        "crates/ljos-cli/src/book_queue.rs",
+        "kick",
+        1,
+        "runs the queued executable",
+    ),
+    (
+        "crates/ljos-cli/src/book_queue.rs",
+        "run_batch",
+        1,
+        "runs the queued executable",
+    ),
+    (
+        "crates/ljos-cli/src/cloud.rs",
+        "shell_command_path",
+        1,
+        "probes a configured shell",
+    ),
+    (
+        "crates/ljos-cli/src/cloud.rs",
+        "binary_version",
+        1,
+        "probes a downloaded binary",
+    ),
+    (
+        "crates/ljos-cli/src/cloud.rs",
+        "run_installer",
+        1,
+        "runs the bundled installer script",
+    ),
+    (
+        "crates/ljos-cli/src/hookd.rs",
+        "start_server",
+        1,
+        "starts the resolved hook server",
+    ),
+    (
+        "crates/ljos-cli/src/hud.rs",
+        "run",
+        1,
+        "starts the resolved HUD binary",
+    ),
+    (
+        "crates/ljos-cli/src/jev.rs",
+        "key_by_command",
+        1,
+        "runs a configured key command",
+    ),
+    (
+        "crates/ljos-cli/src/jev.rs",
+        "command_post",
+        1,
+        "runs a configured post command",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "exec_server",
+        1,
+        "executes the resolved server",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "mcp_forward_with_requests",
+        1,
+        "starts the selected MCP program",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "responsible_comm",
+        1,
+        "runs the selected process viewer",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "detach",
+        1,
+        "starts the selected detached binary",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "file_yes_no",
+        1,
+        "runs the located vissue binary",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "spawn_member",
+        1,
+        "starts an argv-selected member",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "spawn_judge_worker",
+        1,
+        "starts the current executable as the judge worker",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "warm_command",
+        1,
+        "starts the selected warmer",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "probe_lists_ljos_run",
+        1,
+        "probes a configured binary",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "probe_version",
+        1,
+        "probes a resolved binary",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "check_vissue_ballot_protocol",
+        1,
+        "probes the resolved vissue binary",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "git_parents",
+        1,
+        "runs the selected process viewer",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "ljos_mcp_servers",
+        1,
+        "runs the selected process viewer",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "vouch_sign",
+        1,
+        "runs the configured signing binary",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "run_fed",
+        1,
+        "runs the configured federation binary",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "git_runs_in",
+        1,
+        "runs the selected process viewer",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "tcb_answer_in_with_env",
+        1,
+        "runs the configured TCB binary",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "run_as",
+        1,
+        "runs a resolved testable program",
+    ),
+    (
+        "crates/ljos-cli/src/lib.rs",
+        "run_captured_within",
+        1,
+        "runs a resolved testable program",
+    ),
+    (
+        "crates/ljos-cli/src/mailbox/notmuch.rs",
+        "command",
+        1,
+        "runs the configured notmuch binary",
+    ),
+    (
+        "crates/ljos-cli/src/main.rs",
+        "prompt_as_text",
+        1,
+        "restarts the current executable",
+    ),
+    (
+        "crates/ljos-cli/src/mesh.rs",
+        "tailscale_cmd",
+        1,
+        "runs the installed tailscale binary",
+    ),
+    (
+        "crates/ljos-cli/src/mesh.rs",
+        "start_daemon",
+        1,
+        "runs the installed tailscaled binary",
+    ),
+    (
+        "crates/ljos-cli/src/panel_gate.rs",
+        "run_job",
+        1,
+        "starts an argv-selected panel job",
+    ),
+    (
+        "crates/ljos-cli/src/runner_hooks.rs",
+        "relay",
+        1,
+        "starts the resolved relay binary",
+    ),
+    (
+        "crates/ljos-cli/src/sync.rs",
+        "age_cmd",
+        1,
+        "runs the selected age-compatible binary",
+    ),
+    (
+        "crates/ljos-cli/src/sync.rs",
+        "keygen_cmd",
+        1,
+        "runs the selected key generator",
+    ),
+    (
+        "crates/ljos-cli/src/tools.rs",
+        "run",
+        1,
+        "runs a resolved sibling binary",
+    ),
+    (
+        "crates/ljos-cli/src/tools.rs",
+        "answers",
+        1,
+        "runs a resolved sibling binary",
+    ),
+    (
+        "crates/ljos-cli/src/upgrade.rs",
+        "run_ok",
+        1,
+        "runs a selected upgrade helper",
+    ),
+    (
+        "crates/ljos-cli/src/version_skew.rs",
+        "version_of",
+        1,
+        "probes a resolved binary",
+    ),
+    (
+        "crates/ljos-cli/src/wake.rs",
+        "run_command",
+        1,
+        "runs a configured shell command",
+    ),
+    (
+        "crates/ljos-hud/src/detach.rs",
+        "start_detached",
+        1,
+        "restarts the current HUD executable",
+    ),
+    (
+        "crates/ljos-test-boot/src/packsetd.rs",
+        "command",
+        1,
+        "constructs a test boot command",
+    ),
+    (
+        "crates/ljos-test-boot/src/packsetd.rs",
+        "spawn",
+        1,
+        "starts a test boot command",
+    ),
+];
 
 const CHMODS: &[&str] = &["chmod", "fchmod", "fchmodat", "fchmodat2", "lchmod"];
 
 /// Programs that write the paths they are given or change their modes.
 const WRITERS: &[&str] = &["cp", "mv", "install", "ln", "chmod"];
+const SHELLS: &[&str] = &["sh", "bash", "dash", "fish", "ksh", "zsh"];
 
 /// A call the check refuses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +313,7 @@ pub(super) struct Hit {
     pub line: usize,
     pub call: String,
     pub why: &'static str,
+    pub item: String,
 }
 
 /// The mode changes in `src` that could make a file executable.
@@ -55,17 +321,62 @@ pub(super) fn mode_changes(src: &str) -> Result<Vec<Hit>, String> {
     let stream: TokenStream = src.parse().map_err(|err| format!("{err:?}"))?;
     let toks: Vec<TokenTree> = stream.into_iter().collect();
     let mut hits = Vec::new();
-    scan(&toks, &mut hits);
+    scan(&toks, "", &mut hits);
     hits.sort_by_key(|hit| hit.line);
     Ok(hits)
 }
 
-fn scan(toks: &[TokenTree], hits: &mut Vec<Hit>) {
-    for (i, tok) in toks.iter().enumerate() {
+fn scan(toks: &[TokenTree], item: &str, hits: &mut Vec<Hit>) {
+    let mut i = 0;
+    while i < toks.len() {
+        let tok = &toks[i];
+        if is_punct(tok, '#') {
+            if let Some(TokenTree::Group(attribute)) = toks.get(i + 1) {
+                let attr = attribute
+                    .stream()
+                    .to_string()
+                    .split_whitespace()
+                    .collect::<String>();
+                let test_only = attr == "test"
+                    || attr.starts_with("cfg(test)")
+                    || attr.starts_with("cfg(all(test,")
+                    || attr.starts_with("cfg(any(test,");
+                if test_only {
+                    if let Some((body_at, _)) =
+                        toks.iter().enumerate().skip(i + 2).find(|(_, tok)| {
+                            matches!(tok, TokenTree::Group(group) if group.delimiter() == Delimiter::Brace)
+                        })
+                    {
+                        i = body_at + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        if ident(tok).as_deref() == Some("fn") {
+            if let (Some(name), Some((body_at, TokenTree::Group(body)))) =
+                (toks.get(i + 1).and_then(ident), toks.iter().enumerate().skip(i + 2).find(|(_, tok)| {
+                    matches!(tok, TokenTree::Group(group) if group.delimiter() == Delimiter::Brace)
+                }))
+            {
+                let child = if item.is_empty() {
+                    name
+                } else {
+                    format!("{item}::{name}")
+                };
+                scan(
+                    &body.stream().into_iter().collect::<Vec<_>>(),
+                    &child,
+                    hits,
+                );
+                i = body_at + 1;
+                continue;
+            }
+        }
         match tok {
             TokenTree::Group(group) => {
                 let inner: Vec<TokenTree> = group.stream().into_iter().collect();
-                scan(&inner, hits);
+                scan(&inner, item, hits);
             }
             TokenTree::Ident(_) => {
                 if let Some(why) = refused(toks, i) {
@@ -73,11 +384,13 @@ fn scan(toks: &[TokenTree], hits: &mut Vec<Hit>) {
                         line: tok.span().start().line,
                         call: call_text(toks, i),
                         why,
+                        item: item.to_string(),
                     });
                 }
             }
             _ => {}
         }
+        i += 1;
     }
 }
 
@@ -114,7 +427,7 @@ fn refused(toks: &[TokenTree], i: usize) -> Option<&'static str> {
             None => None,
         },
         "open" | "open64" | "openat" | "openat64" | "creat" | "creat64" | "mknod" | "mknodat"
-            if owner.as_deref() == Some("libc") =>
+            if owner.as_deref() == Some("libc") || rustix_fs(toks, i) =>
         {
             let at = match name.as_str() {
                 "open" | "open64" | "mknodat" => 2,
@@ -123,8 +436,8 @@ fn refused(toks: &[TokenTree], i: usize) -> Option<&'static str> {
             };
             match call {
                 Some(args) if args.get(at).is_none_or(|mode| no_exec(mode)) => None,
-                Some(_) => Some("a libc create with a mode that may hold an execute bit"),
-                None => Some("a libc create named without a call"),
+                Some(_) => Some("an open or create with a mode that may hold an execute bit"),
+                None => Some("an open or create named without a call"),
             }
         }
         "DirBuilder" => {
@@ -139,8 +452,8 @@ fn refused(toks: &[TokenTree], i: usize) -> Option<&'static str> {
             (defines || foreign).then_some("a DirBuilder that may not be std::fs::DirBuilder")
         }
         "paste" | "concat_idents" => Some("a macro that can build any name"),
-        "new" if owner.as_deref() == Some("Command") => writer_program(call.as_deref()),
-        "program" if !method => writer_program(call.as_deref()),
+        "new" if owner.as_deref() == Some("Command") => writer_program(call.as_deref(), true),
+        "program" if !method => writer_program(call.as_deref(), false),
         _ => None,
     }
 }
@@ -192,19 +505,31 @@ fn glob_or_alias(toks: &[TokenTree], i: usize, name: &str) -> Option<&'static st
     }
 }
 
-fn writer_program(args: Option<&[Vec<TokenTree>]>) -> Option<&'static str> {
-    let [arg] = args? else {
-        return None;
+fn writer_program(args: Option<&[Vec<TokenTree>]>, require_literal: bool) -> Option<&'static str> {
+    let Some(args) = args else {
+        return require_literal.then_some("a command program that is not one literal");
+    };
+    let [arg] = args else {
+        return require_literal.then_some("a command program that is not one literal");
     };
     let [TokenTree::Literal(lit)] = arg.as_slice() else {
-        return None;
+        return require_literal.then_some("a command program that is not one literal");
     };
     let text = lit.to_string();
-    let program = text.strip_prefix('"')?.strip_suffix('"')?;
+    let Some(program) = text
+        .strip_prefix('"')
+        .and_then(|text| text.strip_suffix('"'))
+    else {
+        return require_literal.then_some("a command program that is not one literal");
+    };
     let base = program.rsplit('/').next().unwrap_or(program);
-    WRITERS
-        .contains(&base)
-        .then_some("a program that writes paths or changes modes")
+    if WRITERS.contains(&base) {
+        Some("a program that writes paths or changes modes")
+    } else if SHELLS.contains(&base) {
+        Some("a shell invocation")
+    } else {
+        None
+    }
 }
 
 /// `toks` is a mode with no execute bit: a literal without one, possibly
@@ -228,7 +553,8 @@ fn no_exec(toks: &[TokenTree]) -> bool {
             no_exec(&group.stream().into_iter().collect::<Vec<_>>())
         }
         [.., TokenTree::Ident(id), TokenTree::Group(group)]
-            if id == "from_mode" && group.delimiter() == Delimiter::Parenthesis =>
+            if (id == "from_mode" || id == "from_raw_mode")
+                && group.delimiter() == Delimiter::Parenthesis =>
         {
             no_exec(&group.stream().into_iter().collect::<Vec<_>>())
         }
@@ -356,6 +682,20 @@ fn path_sep_before(toks: &[TokenTree], i: usize) -> bool {
     i >= 2 && is_punct(&toks[i - 1], ':') && is_punct(&toks[i - 2], ':')
 }
 
+/// `rustix::fs` immediately before the name at `toks[i]`.
+fn rustix_fs(toks: &[TokenTree], i: usize) -> bool {
+    let Some(fs_at) = i.checked_sub(3) else {
+        return false;
+    };
+    let Some(root_at) = fs_at.checked_sub(3) else {
+        return false;
+    };
+    path_sep_before(toks, i)
+        && ident(&toks[fs_at]).as_deref() == Some("fs")
+        && path_sep_before(toks, fs_at)
+        && ident(&toks[root_at]).as_deref() == Some("rustix")
+}
+
 fn ident(tok: &TokenTree) -> Option<String> {
     match tok {
         TokenTree::Ident(id) => Some(id.to_string()),
@@ -397,21 +737,55 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn no_source_outside_exe_publish_can_make_a_file_executable() {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+fn workspace_source_lint_catches_common_publication_mistakes() {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the lint invokes cargo metadata with a fixed literal program"
+    )]
+    let output = std::process::Command::new(cargo)
+        .args([
+            "metadata",
+            "--no-deps",
+            "--offline",
+            "--format-version",
+            "1",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let root = Path::new(metadata["workspace_root"].as_str().unwrap());
     let mut files = Vec::new();
-    rust_sources(crates, &mut files);
+    for package in metadata["packages"].as_array().unwrap() {
+        let manifest = Path::new(package["manifest_path"].as_str().unwrap());
+        let member = manifest.parent().unwrap();
+        rust_sources(&member.join("src"), &mut files);
+        let build = member.join("build.rs");
+        if build.is_file() {
+            files.push(build);
+        }
+    }
+    files.sort();
+    files.dedup();
     files.sort();
     assert!(files.len() > 100, "found {} sources", files.len());
     let mut found = Vec::new();
-    let mut used = vec![false; ALLOWED.len()];
+    let mut used = vec![0_usize; ALLOWED.len()];
     for file in &files {
         let rel = file
-            .strip_prefix(crates)
+            .strip_prefix(root)
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        if rel == "ljos-cli/src/exe_publish.rs" || rel.starts_with("ljos-cli/src/exe_publish/") {
+        if rel == "crates/ljos-cli/src/exe_publish.rs"
+            || rel.starts_with("crates/ljos-cli/src/exe_publish/")
+        {
             continue;
         }
         let text = std::fs::read_to_string(file).unwrap();
@@ -419,26 +793,32 @@ fn no_source_outside_exe_publish_can_make_a_file_executable() {
         for hit in hits {
             let allowed = ALLOWED
                 .iter()
-                .position(|(path, call, _)| rel == *path && hit.call == *call);
+                .position(|(path, item, _, _)| rel == *path && hit.item == *item);
             match allowed {
-                Some(at) => used[at] = true,
+                Some(at) if used[at] < ALLOWED[at].2 => used[at] += 1,
                 None => found.push(format!(
-                    "crates/{rel}:{}: {}: {}",
-                    hit.line, hit.why, hit.call
+                    "{rel}:{}: {} in {}: {}",
+                    hit.line, hit.why, hit.item, hit.call
+                )),
+                Some(_) => found.push(format!(
+                    "{rel}:{}: extra lint exception hit in {}: {}",
+                    hit.line, hit.item, hit.call
                 )),
             }
         }
     }
     assert!(
         found.is_empty(),
-        "publish a file to be executed with ljos_cli::publish, and change any other mode with change_mode or change_mode_of:\n{}",
+        "use the publication module and literal non-shell command programs:\n{}",
         found.join("\n")
     );
     let stale: Vec<_> = ALLOWED
         .iter()
         .zip(&used)
-        .filter(|(_, used)| !**used)
-        .map(|((path, call, _), _)| format!("{path}: {call}"))
+        .filter(|((_, _, count, _), used)| **used != *count)
+        .map(|((path, item, count, _), used)| {
+            format!("{path}::{item}: expected {count} hits, found {used}")
+        })
         .collect();
     assert!(
         stale.is_empty(),
@@ -562,5 +942,32 @@ fn i() { unsafe { libc::chmod(p, 0o644); libc::openat(dir, name, flags, 0o755); 
             lines(src),
             vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 12, 13, 14, 14, 15, 15, 16, 16]
         );
+    }
+
+    #[test]
+    fn rustix_open_and_openat_with_an_execute_bit_are_refused() {
+        let src = r#"
+fn plant(dir: &File) {
+    rustix::fs::openat(dir, "pre-commit", flags, 0o755.into());
+    rustix::fs::open("pre-commit", flags, 0o755);
+    rustix::fs::openat(dir, "note", flags, Mode::from_raw_mode(0o600));
+    rustix::fs::open("note", flags, 0o644);
+}
+"#;
+        assert_eq!(lines(src), vec![3, 4]);
+    }
+
+    #[test]
+    fn nonliteral_programs_and_shells_are_refused() {
+        let src = r#"
+fn command(program: &str) {
+    std::process::Command::new(program);
+    std::process::Command::new(concat!("ch", "mod"));
+    crate::program("sh");
+    crate::program("/bin/bash");
+    crate::program("true");
+}
+"#;
+        assert_eq!(lines(src), vec![3, 4, 5, 6]);
     }
 }
