@@ -1,0 +1,1 @@
+`ljos file --from` across several projects now writes the `Filed by` logbook lines only after it holds the checkout's commit lock, and writes none when the commit is deferred or refused, where it used to leave them in every project but the first.

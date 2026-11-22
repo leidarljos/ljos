@@ -50384,7 +50384,7 @@ pub fn flush_tracker_commits() -> String {
         }
     }
     for (path, list) in files {
-        out.push_str(&persist_tracker_writes(&path, &list, &[], None));
+        out.push_str(&persist_tracker_writes(&path, &list, &[], &[], None));
     }
     out
 }
@@ -50413,7 +50413,13 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
 /// root is named from the root, beside the issue's path from there, so one
 /// commit carries both.
 fn persist_tracker_paths(path: &Path, issue: &str, verb: &str, also: &[String]) -> String {
-    persist_tracker_writes(path, &[(issue.to_string(), verb.to_string())], also, None)
+    persist_tracker_writes(
+        path,
+        &[(issue.to_string(), verb.to_string())],
+        also,
+        &[],
+        None,
+    )
 }
 
 /// One tracker commit for every id in `ids`, each written by `verb`.
@@ -50443,10 +50449,7 @@ pub fn persist_tracker_many(ids: &[String], verb: &str) -> String {
     }
     let seat = tracker_seat();
     let mut also = Vec::new();
-    for (path, writes) in &files[1..] {
-        for (issue, verb) in writes {
-            stamp_seat_logbook(path, issue, verb, &seat);
-        }
+    for (path, _) in &files[1..] {
         let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
             return format!(
                 "tracker git: could not place {} in the checkout\n",
@@ -50469,15 +50472,18 @@ pub fn persist_tracker_many(ids: &[String], verb: &str) -> String {
         )
     });
     let (path, writes) = &files[0];
-    persist_tracker_writes(path, writes, &also, subject.as_deref())
+    persist_tracker_writes(path, writes, &also, &files[1..], subject.as_deref())
 }
 
 /// [`persist_tracker_paths`] for several writes to the one file at
-/// `path`, in one commit.
+/// `path`, in one commit. `others` are files among `also` whose writes
+/// are stamped with `path`'s: after the checkout lock is held and before
+/// any issues lock, and only once nothing refuses the commit.
 fn persist_tracker_writes(
     path: &Path,
     writes: &[(String, String)],
     also: &[String],
+    others: &[(PathBuf, Vec<(String, String)>)],
     message: Option<&str>,
 ) -> String {
     let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
@@ -50595,6 +50601,11 @@ fn persist_tracker_writes(
     let seat = tracker_seat();
     for (issue, verb) in writes {
         stamp_seat_logbook(path, issue, verb, &seat);
+    }
+    for (other, list) in others {
+        for (issue, verb) in list {
+            stamp_seat_logbook(other, issue, verb, &seat);
+        }
     }
     let named: Vec<String> = writes
         .iter()

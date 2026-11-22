@@ -1,0 +1,1 @@
+The `ljos_file_from` and `ljos_table` MCP tools now write their rows to a 0600 file in a 0700 directory with a random name, and remove that directory when the write fails, where they used a name two calls could share and left the text readable by other users.
