@@ -55,6 +55,10 @@ impl Home {
         ] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
         let kept = root.join("tracker/.ljos/memory/kept");
         std::fs::create_dir_all(&kept).unwrap();
@@ -65,6 +69,10 @@ impl Home {
             .collect();
         for id in full.iter().filter(|id| id.starts_with("local:")) {
             let name = id.trim_start_matches("local:");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(kept.join(format!("{name}.json")), kept_row(id)).unwrap();
         }
         let body = json!({"atoms": pack});
@@ -81,7 +89,11 @@ impl Home {
 
     fn run(&self, args: &[&str]) -> std::process::Output {
         let home = self.root.join("home");
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.root.join("work"))
             .env_clear()
@@ -108,7 +120,7 @@ impl Home {
             .env("LC_ALL", "C.UTF-8")
             .stdin(Stdio::null())
             .output()
-            .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")))
+            .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")));
     }
 }
 
@@ -267,6 +279,10 @@ fn printed_ids(text: &str) -> Vec<String> {
 
 fn mcp_ids(home: &Home) -> Vec<String> {
     let dir = home.root.join("home");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("mcp")
         .current_dir(home.root.join("work"))

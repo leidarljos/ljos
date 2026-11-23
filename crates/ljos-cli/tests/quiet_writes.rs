@@ -26,14 +26,13 @@ impl Board {
         std::fs::create_dir_all(root.join("Software/probe")).unwrap();
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("vissue"), "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::write(bin.join("claimdag"), "#!/bin/sh\nexit 1\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        for name in ["vissue", "claimdag"] {
-            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
-        }
+        ljos_cli::install_executable(&bin.join("vissue"), "#!/bin/sh\nexit 0\n").unwrap();
+        ljos_cli::install_executable(&bin.join("claimdag"), "#!/bin/sh\nexit 1\n").unwrap();
         let gitconfig = dir.path().join("gitconfig");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&gitconfig, "[core]\n\thooksPath = /dev/null\n").unwrap();
         let board = Self {
             root,
@@ -45,6 +44,10 @@ impl Board {
         board.git(&["init", "-q"]);
         board.git(&["config", "core.hooksPath", "/dev/null"]);
         let issues = board.root.join("Software/probe/issues.org");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &issues,
             "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
@@ -64,6 +67,10 @@ impl Board {
     }
 
     fn git_cmd(&self, args: &[&str], author: bool) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new("git");
         cmd.arg("-C").arg(&self.root).args(args);
         cmd.env("GIT_CONFIG_GLOBAL", &self.gitconfig);
@@ -91,11 +98,19 @@ impl Board {
     fn dirty(&self) {
         let issues = self.root.join("Software/probe/issues.org");
         let text = std::fs::read_to_string(&issues).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&issues, text.replace("TODO", "STARTED")).unwrap();
     }
 
     fn ljos(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(&self.root)
             .env_clear()
@@ -112,7 +127,7 @@ impl Board {
             .env("LJOS_SYNC_HOST", "runner")
             .stdin(std::process::Stdio::null())
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 
@@ -150,6 +165,10 @@ fn a_commit_mode_note_prints_no_tracker_or_sync_line() {
     board.dirty();
     let out = board.ljos(&["note", "probe-a1b2", "the parser kept the hyphen"]);
     assert_quiet(&out);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let log = Command::new("git")
         .arg("-C")
         .arg(&board.root)

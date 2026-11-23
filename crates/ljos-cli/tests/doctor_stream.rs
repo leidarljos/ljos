@@ -11,10 +11,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn seat(root: &Path) -> PathBuf {
@@ -47,6 +45,10 @@ struct Run {
 
 impl Run {
     fn start(root: &Path, bin: &Path, args: &[&str]) -> Self {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.arg("doctor")
             .args(args)

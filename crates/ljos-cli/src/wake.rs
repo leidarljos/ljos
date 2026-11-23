@@ -213,6 +213,10 @@ fn save_atomic(wake_path: &Path, table: &BTreeMap<String, Wake>) -> Result<()> {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let mut out = options
             .open(&tmp)
             .with_context(|| format!("wake: {}", tmp.display()))?;
@@ -223,10 +227,13 @@ fn save_atomic(wake_path: &Path, table: &BTreeMap<String, Wake>) -> Result<()> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
+        crate::change_mode(&tmp, mode & 0o666)
             .with_context(|| format!("wake: mode {mode:04o} {}", tmp.display()))?;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     if let Err(err) = std::fs::rename(&tmp, wake_path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(err).with_context(|| format!("wake: {}", wake_path.display()));
@@ -240,6 +247,10 @@ fn edit_table<T>(edit: impl FnOnce(&mut BTreeMap<String, Wake>) -> Result<(T, bo
         std::fs::create_dir_all(dir)?;
     }
     let lock_file_path = lock_path(&wake_path);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -560,13 +571,17 @@ fn log(line: &str) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
     {
         let _ = writeln!(f, "{} {line}", super::now_utc());
-    }
+    };
 }
 
 /// The `ljos` a detached wake runs. `LJOS_WAKE_BIN` is the test stand-in.
@@ -664,6 +679,10 @@ fn webhook_key(wake: &Wake) -> Option<String> {
 
 fn run_command(command: &str, event: &Event, timeout: Duration) -> Result<String> {
     let warned = warning(command)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c")
         .arg(command)
@@ -692,6 +711,10 @@ fn run_command(command: &str, event: &Event, timeout: Duration) -> Result<String
         let _ = std::fs::create_dir_all(dir);
     }
     let logged_at = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     if let Ok(mut out) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -1188,6 +1211,10 @@ mod tests {
         let wake_file = path();
         std::fs::create_dir_all(wake_file.parent().expect("wake dir")).expect("wake dir");
         let broken = "[inky\nwebhook = \"https://old.example/hook\"\n";
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&wake_file, broken).expect("seed broken wake");
         let err = set_webhook("inky", "http://127.0.0.1:9/hook", None, None)
             .expect_err("broken wake.toml should refuse writes");
@@ -1208,7 +1235,15 @@ mod tests {
         let (_lock, _dir) = isolated();
         let wake_file = path();
         std::fs::create_dir_all(wake_file.parent().expect("wake dir")).expect("wake dir");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&wake_file, "[seed]\ncommand = \"true\"\n").expect("seed wake");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(&wake_file, std::fs::Permissions::from_mode(0o600))
             .expect("mode 0600 wake");
 
@@ -1382,16 +1417,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_send_starts_the_prefix_wake_for_a_run_seat() {
-        use std::os::unix::fs::PermissionsExt;
         let (_lock, dir) = isolated();
         let marker = dir.path().join("spawn.log");
         let script = dir.path().join("record-wake");
-        std::fs::write(
+        crate::install_executable(
             &script,
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$WAKE_RECORD\"\n",
         )
         .expect("script");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         // SAFETY: test_env_lock holds the environment and restores it.
         unsafe {
             std::env::set_var("LJOS_WAKE_BIN", &script);

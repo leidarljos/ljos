@@ -54,11 +54,15 @@ impl Secret {
 ///
 /// This process has no controlling terminal.
 pub fn open() -> Result<std::fs::File> {
-    std::fs::OpenOptions::new()
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
+    return std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/tty")
-        .context("no controlling terminal (/dev/tty does not open)")
+        .context("no controlling terminal (/dev/tty does not open)");
 }
 
 /// Turn echo off on `tty`, which drops anything typed ahead, write

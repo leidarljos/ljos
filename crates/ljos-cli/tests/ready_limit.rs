@@ -55,6 +55,10 @@ impl Board {
     }
 
     fn command(&self, program: &str) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut command = Command::new(program);
         command
             .current_dir(self.dir.path())
@@ -260,9 +264,17 @@ fn the_default_page_is_short_and_names_how_to_see_more() {
 #[test]
 fn own_claims_come_first_then_priority_then_recent_activity() {
     let board = Board::open(0);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(board.root.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
     let org = board.root.join("Software/probe/issues.org");
     std::fs::create_dir_all(org.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         &org,
         "\
@@ -370,6 +382,10 @@ fn own_claims_come_first_then_priority_then_recent_activity() {
 ",
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut org = std::fs::OpenOptions::new().append(true).open(&org).unwrap();
     for n in 0..10 {
         writeln!(

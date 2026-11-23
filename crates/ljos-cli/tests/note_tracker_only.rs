@@ -13,10 +13,8 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 /// A pack that records every request line it is asked for and answers
@@ -73,7 +71,11 @@ impl Hab {
             self.dir.path().display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["note", "proj-aaaa", text])
             .env_clear()
             .env("PATH", &path)
@@ -93,7 +95,7 @@ impl Hab {
             .env("PACKSET_TIMEOUT_MS", "2000")
             .env("PACKSET_URL", pack)
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn calls(&self) -> String {

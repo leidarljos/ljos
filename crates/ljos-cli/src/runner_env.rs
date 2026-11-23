@@ -165,8 +165,16 @@ fn change_suffix(before: &str, after: &str, template: &str) -> String {
 
 fn write_new(path: &Path, text: &str, template: &str) -> std::io::Result<()> {
     ensure_parent(path)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, text)?;
-    std::fs::write(mark_path(path), template)
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    return std::fs::write(mark_path(path), template);
 }
 
 /// Write the env file, or leave a hand edit and a file ljos did not write.
@@ -177,6 +185,10 @@ pub(crate) fn install(path: &Path, name: &str, dry: bool) -> crate::Step {
     let verb = if dry { "would leave" } else { "left" };
     match classify(path, &template) {
         Kind::Current => {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             if !dry && read_mark(path).as_deref() != Some(template.as_str()) {
                 if let Err(err) =
                     ensure_parent(path).and_then(|()| std::fs::write(mark_path(path), &template))
@@ -312,6 +324,10 @@ fn write_stamp() {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let _ = std::fs::write(path, format!("{stamp}\n"));
 }
 
@@ -374,6 +390,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("example_host.env");
         let text = crate::seat_env_text("example_host");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, &text).unwrap();
         assert!(install(&path, "example_host", false)
             .detail

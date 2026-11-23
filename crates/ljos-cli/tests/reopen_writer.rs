@@ -38,6 +38,10 @@ impl Board {
         let git_cfg = dir.path().join("gitconfig");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&root).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&git_cfg, "").unwrap();
         let _bin = vissue_bin();
         git(&root, &["init", "-q"]);
@@ -78,7 +82,11 @@ impl Board {
         } else {
             PathBuf::from(bin)
         };
-        Command::new(program)
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(program)
             .args(args)
             .env_clear()
             .env("PATH", path_env())
@@ -93,7 +101,7 @@ impl Board {
             .env("GIT_CONFIG_GLOBAL", &self.git_cfg)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn git_add_commit(&self, subject: &str) {
@@ -123,7 +131,11 @@ impl Board {
     }
 
     fn reopen(&self, id: &str, seat: &str) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["reopen", id])
             .env_clear()
             .env("PATH", path_env())
@@ -141,7 +153,7 @@ impl Board {
             .env("GIT_CONFIG_GLOBAL", &self.git_cfg)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn stamp_close(&self, id: &str, seat: &str) {
@@ -152,7 +164,11 @@ impl Board {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Output {
-    Command::new("git")
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -165,7 +181,7 @@ fn git(dir: &Path, args: &[&str]) -> Output {
         .env("GIT_COMMITTER_NAME", "seat")
         .env("GIT_COMMITTER_EMAIL", "seat@example.invalid")
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 fn said(out: &Output) -> String {

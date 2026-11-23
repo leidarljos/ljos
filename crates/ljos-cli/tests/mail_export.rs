@@ -29,6 +29,10 @@ fn config() -> &'static MailConfig {
         .get_or_init(|| {
             let dir = tempfile::tempdir().unwrap();
             let deny = dir.path().join("deny.txt");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&deny, "domain: denied.example.test\nterm: project-x\n").unwrap();
             let config = MailConfig {
                 identity: Some("owner@example.test".into()),

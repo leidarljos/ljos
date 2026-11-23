@@ -21,11 +21,9 @@ fn vissue_bin() -> Option<PathBuf> {
 }
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn said(out: &Output) -> String {
@@ -74,6 +72,10 @@ impl Seat {
             "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\n",
         );
         script(&bin, "deedar", "#!/bin/sh\necho head\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.path().join("gitconfig"),
             "[user]\n\tname = seat\n\temail = seat@example.test\n\
@@ -90,6 +92,10 @@ impl Seat {
 
     fn command(&self, program: &Path, from: &Path) -> Command {
         let home = self.home();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(program);
         cmd.current_dir(from)
             .env_clear()
@@ -144,6 +150,10 @@ impl Seat {
     fn product(&self, name: &str) -> PathBuf {
         let at = self.dir.path().join(name);
         self.git(&at, &["init", "-q"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(at.join("README"), "a product\n").unwrap();
         self.git(&at, &["add", "README"]);
         self.git(&at, &["commit", "-q", "-m", "product"]);
@@ -154,6 +164,10 @@ impl Seat {
     /// one issue the cloned project's boards hold.
     fn checkouts(&self) -> ([PathBuf; 3], String) {
         let untracked = self.product("untracked");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(untracked.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
         let bare = self.product("bare");
         std::fs::create_dir_all(bare.join("Software")).unwrap();
@@ -185,6 +199,10 @@ impl Seat {
         std::fs::create_dir_all(root.join("Software")).unwrap();
         let cfg = self.home().join(".config/vissue/config.toml");
         std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &cfg,
             format!(
@@ -277,6 +295,10 @@ fn a_tracker_under_vissue_prefix_is_the_tracker() {
     let root = seat.dir.path().join("work");
     seat.git(&root, &["init", "-q"]);
     std::fs::create_dir_all(root.join("Work")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(root.join("vissue.toml"), "").unwrap();
     seat.git(&root, &["add", "vissue.toml"]);
     seat.git(&root, &["commit", "-q", "-m", "tracker"]);

@@ -20,10 +20,8 @@ const NARRATED: &str = "GPRidge narrated video set is the milestone for the ridg
 const KILN: &str = "The damper sticks when the kiln is cold.";
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn keep(dir: &Path, id: &str, text: &str) {
@@ -34,6 +32,10 @@ fn keep(dir: &Path, id: &str, text: &str) {
         "entities": ["seat:ada"],
     });
     let path = dir.join(format!("{id}.json"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, serde_json::to_vec_pretty(&body).unwrap()).unwrap();
 }
 
@@ -125,7 +127,11 @@ impl Seat {
     fn run(&self, args: &[&str]) -> std::process::Output {
         let root = self.root.path();
         let home = root.join("home");
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(root)
             .env_clear()
@@ -154,7 +160,7 @@ impl Seat {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .expect("ljos")
+            .expect("ljos");
     }
 }
 

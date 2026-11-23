@@ -16,6 +16,10 @@ fn expand(home: &Path, path: &str) -> PathBuf {
 
 fn write(path: &Path, text: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(path, text).unwrap();
 }
 
@@ -50,7 +54,7 @@ fn seed_runner(home: &Path, harness: &Harness) {
 fn fake_runner_commands(home: &Path) -> PathBuf {
     let bin = home.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    write(
+    ljos_cli::install_executable(
         &bin.join("claude"),
         r#"#!/bin/sh
 case "$*" in
@@ -58,21 +62,16 @@ case "$*" in
   "mcp add"*) mkdir -p "$HOME"; printf '%s\n' '{"mcpServers":{"ljos":{"command":"ljos-mcp"}}}' > "$HOME/.claude.json" ;;
 esac
 "#,
-    );
-    write(
+    )
+    .unwrap();
+    ljos_cli::install_executable(
         &bin.join("hermes"),
         r#"#!/bin/sh
 mkdir -p "$HOME/.hermes"
 printf '%s\n' 'mcp_servers:' '  ljos:' '    command: ljos-mcp' > "$HOME/.hermes/config.yaml"
 "#,
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for name in ["claude", "hermes"] {
-            fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
-        }
-    }
+    )
+    .unwrap();
     bin
 }
 
@@ -104,7 +103,11 @@ fn run(home: &Path, bin: &Path, args: &[&str]) -> Output {
         std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&inherited)),
     )
     .unwrap();
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -118,7 +121,7 @@ fn run(home: &Path, bin: &Path, args: &[&str]) -> Output {
         .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 #[test]
@@ -188,6 +191,44 @@ fn dry_run_and_one_runner_do_not_touch_other_files() {
     assert!(remove.status.success(), "{remove:?}");
     assert!(!home.join(".config/zed/settings.json").is_file());
     assert!(home.join(".aws/amazonq/mcp.json").is_file());
+}
+
+/// `~/.config/zed` is a symlink into another directory. Offboard restores
+/// the settings file through that link.
+#[test]
+fn offboard_restores_a_file_under_a_symlinked_config_dir() {
+    let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap();
+    let zed = shipped.harness.iter().find(|h| h.name == "zed").unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let real = home.join("dotfiles-zed");
+    fs::create_dir_all(&real).unwrap();
+    fs::create_dir_all(home.join(".config")).unwrap();
+    let link = home.join(".config/zed");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "plants the config directory link this test follows"
+    )]
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    seed_runner(home, zed);
+    let settings = real.join("settings.json");
+    let original = fs::read(&settings).unwrap();
+    let bin = fake_runner_commands(home);
+    let onboard = run(home, &bin, &["onboard", "--harness", "zed"]);
+    assert!(
+        onboard.status.success(),
+        "{}",
+        String::from_utf8_lossy(&onboard.stderr)
+    );
+    assert_ne!(fs::read(&settings).unwrap(), original);
+    let offboard = run(home, &bin, &["offboard"]);
+    assert!(
+        offboard.status.success(),
+        "{}",
+        String::from_utf8_lossy(&offboard.stderr)
+    );
+    assert_eq!(fs::read(&settings).unwrap(), original);
+    assert_eq!(fs::read_link(&link).unwrap(), real);
 }
 
 #[test]
@@ -406,6 +447,10 @@ fn offboard_names_a_hand_edit_it_cannot_undo() {
     let skill = home.join(".cursor/skills/ljos/SKILL.md");
     let mut skill_text = fs::read_to_string(&skill).unwrap();
     skill_text.push_str("\n# a note added by hand\n");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&skill, &skill_text).unwrap();
 
     let off = run(home, &bin, &["offboard"]);

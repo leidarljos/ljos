@@ -325,14 +325,8 @@ fn program_step(bin: &Path, name: &str, opts: &Options) -> Option<Step> {
 ///
 /// The directory cannot be written.
 pub fn write_stub(path: &Path) -> std::io::Result<()> {
-    let tmp = path.with_extension(format!("stub.{}", std::process::id()));
-    std::fs::write(&tmp, STUB)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
-    }
-    std::fs::rename(&tmp, path)
+    // Rename onto `path`, so a running `ljos` keeps the previous inode.
+    crate::install_executable(path, STUB)
 }
 
 fn xdg(var: &str, under_home: &str) -> Option<PathBuf> {
@@ -401,7 +395,8 @@ mod tests {
         write_stub(&path).unwrap();
         let run = |args: &[&str], stdin: &str| {
             use std::io::Write as _;
-            let mut child = std::process::Command::new("sh")
+            let mut child = crate::program("sh")
+                .unwrap()
                 .arg(&path)
                 .args(args)
                 .stdin(std::process::Stdio::piped())
@@ -490,8 +485,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("ljos"), "x").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("ljos-mcp"), "x").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("packset"), "x").unwrap();
         let opts = Options {
             dry: true,
@@ -523,8 +530,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("packset"), "x").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("packsetd"), "x").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("vissue"), "x").unwrap();
         let step = seat_programs_stay(&bin, false).unwrap();
         assert_eq!(step.what, "programs");

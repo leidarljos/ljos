@@ -228,13 +228,25 @@ mod tests {
     fn ljos_toml_sets_orphan_idle_under_mcp() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("ljos.toml");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&file, "[mcp]\norphan_idle = 30\n").unwrap();
         assert_eq!(
             configured_orphan(&file),
             Some(Some(Duration::from_secs(30)))
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&file, "[mcp]\norphan_idle = \"off\"\n").unwrap();
         assert_eq!(configured_orphan(&file), Some(None));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&file, "[mcp]\nidle_drop = 30\n").unwrap();
         assert_eq!(configured_orphan(&file), None);
     }
@@ -243,10 +255,22 @@ mod tests {
     fn ljos_toml_sets_the_window_under_mcp() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("ljos.toml");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&file, "[mcp]\nidle_drop = 30\n").unwrap();
         assert_eq!(configured(&file), Some(Some(Duration::from_secs(30))));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&file, "[mcp]\nidle_drop = \"off\"\n").unwrap();
         assert_eq!(configured(&file), Some(None));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&file, "[git_hooks]\nskip = []\n").unwrap();
         assert_eq!(configured(&file), None);
     }

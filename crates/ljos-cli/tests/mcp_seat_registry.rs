@@ -2,20 +2,20 @@
 //! does not list, once that file lists seats. Reads stay open.
 
 ljos_test_boot::harness!();
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 /// A server under `root` with a cleared environment, and a way to call it.
 fn server(root: &Path) -> impl Fn(&str, serde_json::Value) -> String {
     let tracker = root.join("tracker");
     std::fs::create_dir(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
     let server = root.join("server");
-    let mut server_file = std::fs::File::create(&server).unwrap();
-    write!(
-        server_file,
+    let body = format!(
         "#!/bin/sh\nexec env -i PATH=/usr/bin:/bin HOME={home} \
          XDG_CONFIG_HOME={home}/config XDG_RUNTIME_DIR={home} \
          XDG_STATE_HOME={home}/state XDG_DATA_HOME={home}/data \
@@ -24,11 +24,8 @@ fn server(root: &Path) -> impl Fn(&str, serde_json::Value) -> String {
         home = quote(root.to_str().unwrap()),
         tracker = quote(tracker.to_str().unwrap()),
         binary = quote(env!("CARGO_BIN_EXE_ljos-mcp")),
-    )
-    .unwrap();
-    server_file.sync_all().unwrap();
-    drop(server_file);
-    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
+    ljos_cli::install_executable_mode(&server, body, 0o700).unwrap();
     move |name: &str, arguments: serde_json::Value| {
         ljos_cli::mcp_forward(
             &server,
@@ -149,6 +146,10 @@ fn a_listed_seat_records_a_persona_ballot() {
     let call = server(root.path());
     let seats = root.path().join("config/ljos/seats.toml");
     std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&seats, "seats = [\"saddle\", \"stranger\"]\n").unwrap();
     for args in [
         serde_json::json!({"issue": "proj-aaaa", "choice": "accept", "used": "none"}),

@@ -73,6 +73,10 @@ fn this_seat_and_the_queries_project_lead_without_hiding_a_strong_other_seat() {
     ] {
         std::fs::create_dir_all(dir).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["search", QUERY, "-n", "5"])
         .current_dir(root.path())

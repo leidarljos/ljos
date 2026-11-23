@@ -5,7 +5,6 @@
 
 ljos_test_boot::harness!();
 
-use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Output};
 
 struct World {
@@ -48,8 +47,7 @@ exit 0
         let deedar = "#!/bin/sh\nprintf 'id=%s kind=file\\n' \"$2\"\nexit 0\n";
         for (name, body) in [("vissue", vissue.as_str()), ("deedar", deedar)] {
             let path = dir.path().join(name);
-            std::fs::write(&path, body).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            ljos_cli::install_executable(&path, body).unwrap();
         }
         let home = dir.path().join("home");
         std::fs::create_dir_all(home.join("run")).unwrap();
@@ -66,7 +64,11 @@ exit 0
     }
 
     fn ljos(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("PATH", &self.path)
@@ -78,7 +80,7 @@ exit 0
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off")
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 
@@ -150,6 +152,10 @@ fn porcelain_file_prints_only_the_new_id() {
         assert!(err.contains("file:"), "{flag}: {said}");
         let id = String::from_utf8_lossy(&filed.stdout);
         let id = id.trim();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let sitting = Command::new("timeout")
             .args(["30", env!("CARGO_BIN_EXE_ljos"), "sitting", id])
             .env_clear()

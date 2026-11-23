@@ -16,3 +16,6 @@ packset-core = "0.18.1"
 serde_json.workspace = true
 sha2 = "0.10"
 ureq = { version = "2", default-features = false, features = ["tls"] }
+
+[lints]
+workspace = true

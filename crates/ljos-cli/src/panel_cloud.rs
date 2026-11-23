@@ -125,6 +125,10 @@ pub fn panel_cloud(issue: &str, out: &Path) -> Result<String> {
     for (index, persona) in personas.iter().enumerate() {
         let family = family(index);
         let path = out.join(format!("{}.md", persona.name));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, prompt(&persona.name, issue, family))
             .with_context(|| format!("panel --cloud: {}", path.display()))?;
         lines.push(format!(

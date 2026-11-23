@@ -1225,7 +1225,11 @@ impl KeyDir {
         }
         let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
         // SAFETY: as above; the flags refuse a link in place of the directory.
-        match os_result(unsafe { libc::openat(up.as_raw_fd(), name.as_ptr(), flags) }) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
+        return match os_result(unsafe { libc::openat(up.as_raw_fd(), name.as_ptr(), flags) }) {
             // SAFETY: a fresh descriptor, owned here alone.
             Ok(fd) => Ok(Some(Self {
                 fd: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) },
@@ -1236,7 +1240,7 @@ impl KeyDir {
                 bail!("person-key: {} is a link or not a directory", dir.display())
             }
             Err(e) => Err(e).with_context(ctx),
-        }
+        };
     }
 
     /// `dir` opened, made mode 0700 first when missing, with the
@@ -1256,6 +1260,10 @@ impl KeyDir {
         let name = c_name(name)?;
         let flags = flags | libc::O_NOFOLLOW | libc::O_CLOEXEC;
         // SAFETY: a directory descriptor, a NUL-terminated name, and a mode.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let fd = os_result(unsafe {
             libc::openat(
                 self.fd.as_raw_fd(),
@@ -1305,6 +1313,10 @@ impl KeyDir {
             let (from, to) = (c_name(&tmp)?, c_name(name)?);
             let fd = self.fd.as_raw_fd();
             // SAFETY: one directory descriptor and two NUL-terminated names.
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "renames a path that is not a git hook"
+            )]
             os_result(unsafe { libc::renameat(fd, from.as_ptr(), fd, to.as_ptr()) })?;
             // SAFETY: the directory descriptor this owns.
             os_result(unsafe { libc::fsync(fd) }).map(drop)
@@ -1792,6 +1804,10 @@ mod tests {
     #[test]
     fn the_right_passphrase_answers_once_and_clears_the_count() {
         let dir = keyed();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.path().join(FAILS_NAME), "1000\n").unwrap();
         let asked = ask_at(dir.path(), Some("correct horse battery"), 1100);
         assert_eq!(asked.out, Ok(()));
@@ -1953,6 +1969,10 @@ mod tests {
         assert!(why.contains("so run `ljos person-key set`."), "{why}");
         assert!(asked.shown.is_empty(), "{}", asked.shown);
         assert!(!dir.path().join(FAILS_NAME).exists());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&at, [1u8; PEPPER_LEN - 1]).unwrap();
         assert!(read_pepper(&at).is_err());
     }
@@ -1995,6 +2015,10 @@ mod tests {
         assert!(!verify(b"correct horse battery", &old, PEPPER));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(KEY_NAME);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, format!("{old}\n")).unwrap();
         assert!(read(&path).is_err());
     }
@@ -2074,6 +2098,10 @@ mod tests {
             .map(|e| e.file_name())
             .collect();
         assert_eq!(left, vec![std::ffi::OsString::from(KEY_NAME)]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, "not a key\n").unwrap();
         assert!(read(&path).is_err());
     }
@@ -2084,6 +2112,10 @@ mod tests {
         let real = dir.path().join("elsewhere");
         store(&real, &hash(b"correct horse battery", PEPPER).unwrap()).unwrap();
         let path = dir.path().join(KEY_NAME);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&real, &path).unwrap();
         assert!(read(&path).is_err());
     }
@@ -2103,11 +2135,23 @@ mod tests {
         keep(&evil.join(KEY_NAME), b"a runner's own phrase").unwrap();
         let phc = read(&dir.join(KEY_NAME)).unwrap().unwrap();
         let swap = || {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "renames a path that is not a git hook"
+            )]
             std::fs::rename(&dir, &moved).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             std::os::unix::fs::symlink(&evil, &dir).unwrap();
         };
         let unswap = || {
             std::fs::remove_file(&dir).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "renames a path that is not a git hook"
+            )]
             std::fs::rename(&moved, &dir).unwrap();
         };
 
@@ -2145,7 +2189,15 @@ mod tests {
                 "git push",
                 move || {
                     if !flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        #[expect(
+                            clippy::disallowed_methods,
+                            reason = "renames a path that is not a git hook"
+                        )]
                         std::fs::rename(&clock_dir, &clock_away).unwrap();
+                        #[expect(
+                            clippy::disallowed_methods,
+                            reason = "links a path that is not a git hook"
+                        )]
                         std::os::unix::fs::symlink(&clock_other, &clock_dir).unwrap();
                     }
                     1000
@@ -2163,6 +2215,10 @@ mod tests {
         unswap();
 
         std::fs::remove_file(dir.join(PEPPER_NAME)).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(evil.join(PEPPER_NAME), dir.join(PEPPER_NAME)).unwrap();
         let why = format!("{:#}", read_pepper(&dir.join(PEPPER_NAME)).unwrap_err());
         assert!(why.contains("not a regular file"), "{why}");
@@ -2206,6 +2262,10 @@ mod tests {
         let real = root.path().join("private/tmp");
         std::fs::create_dir_all(&real).unwrap();
         let link = root.path().join("tmp");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let words = vec!["cd".to_string(), link.display().to_string()];
         let cwd = crate::kept_prompt::after_cd(&words, Some(root.path())).unwrap();

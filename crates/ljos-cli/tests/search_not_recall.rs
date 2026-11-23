@@ -11,10 +11,8 @@ const LESSON: &str = "Fire the zircon kiln before dusk on the north bench.";
 const PROMPT: &str = "Fire the zircon kiln before dusk on the north bench today.";
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 struct Seat {
@@ -46,6 +44,10 @@ impl Seat {
     fn command(&self, args: &[&str]) -> Command {
         let root = self.root.path();
         let home = root.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(root)

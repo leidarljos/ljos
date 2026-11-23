@@ -123,6 +123,10 @@ fn stand_in(log: Arc<Mutex<Vec<String>>>) -> String {
 fn tracker(root: &Path) {
     let project = root.join("Software/cue");
     std::fs::create_dir_all(&project).expect("project dir");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         project.join("issues.org"),
         "\
@@ -150,12 +154,7 @@ fn tracker(root: &Path) {
 fn stub_vissue(bin: &Path) {
     std::fs::create_dir_all(bin).expect("bin");
     let path = bin.join("vissue");
-    std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("vissue stub");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    }
+    ljos_cli::install_executable(&path, "#!/bin/sh\nexit 0\n").expect("vissue stub");
 }
 
 struct Seat {
@@ -175,6 +174,10 @@ impl Seat {
     }
 
     fn recall(&self, issue: &str) -> String {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["recall", issue])
             .current_dir(self.home.path())

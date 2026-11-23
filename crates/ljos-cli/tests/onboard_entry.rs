@@ -6,15 +6,13 @@
 
 ljos_test_boot::harness!();
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 fn script(dir: &Path, name: &str, body: &str) {
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn said(out: &Output) -> String {
@@ -71,7 +69,11 @@ impl Seat {
         // temporary home, and the onboard lines here are the memory-off ones.
         // TMPDIR is the temp dir the home was made in, so the home is a
         // temporary one wherever the process TMPDIR is.
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(home)
             .env_clear()
@@ -90,7 +92,7 @@ impl Seat {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 

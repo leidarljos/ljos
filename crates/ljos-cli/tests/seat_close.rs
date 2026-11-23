@@ -12,10 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 const ORG: &str = "\
@@ -105,8 +103,16 @@ impl World {
         );
         let file = tracker.join("Software/proj/issues.org");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&file, ORG).unwrap();
         let git = |args: &[&str]| {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let out = Command::new("git")
                 .arg("-C")
                 .arg(&tracker)
@@ -137,6 +143,10 @@ impl World {
     }
 
     fn ljos(&self, seat: &str, args: &[&str], runner: bool) -> std::process::Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
@@ -197,6 +207,10 @@ fn hook_line(w: &World, session: &str, line: &str) -> Output {
 }
 
 fn runner_cmd(w: &World, args: &[&str]) -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
@@ -413,6 +427,10 @@ fn a_quoted_grant_closes_own_tickets_and_a_hand_edit_does_not() {
     row.insert("via".into(), toml::Value::String("clerk".into()));
     row.insert("commit".into(), toml::Value::String(commit.clone()));
     seats.insert("reachbook".into(), toml::Value::Table(row));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         w.tracker.join("vissue.toml"),
         toml::to_string_pretty(&doc).unwrap(),
@@ -566,6 +584,10 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
     assert_eq!(log_updates(&w, "proj-clerk"), 1);
 
     let ids = w.root.join("ids.txt");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&ids, "proj-hand\n\nproj-inky\n").unwrap();
     let from_file = w.ljos(
         "clerk",
@@ -633,6 +655,10 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
         "close".into(),
         toml::Value::String("proj-else,proj-own".into()),
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         w.tracker.join("vissue.toml"),
         toml::to_string_pretty(&doc).unwrap(),

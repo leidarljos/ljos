@@ -284,6 +284,10 @@ mod tests {
 
         let _bound = arm(Duration::from_millis(400));
         let started = Instant::now();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", "exec sleep 30"]);
         let err = crate::bounded_output(&mut cmd).unwrap_err();
@@ -301,6 +305,10 @@ mod tests {
         let _g = crate::tests::env_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("held.lock");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let held = std::fs::OpenOptions::new()
             .create(true)
             .append(true)

@@ -11,10 +11,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 /// Accepts and reads one request, then stays silent.
@@ -55,6 +53,10 @@ fn a_quiet_pack_does_not_hold_consensus_for_every_read() {
     let pack = silent_pack();
     // One read is two seconds. Five reads are ten. The harness is eight,
     // so a run that waits on every read is cut off.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("timeout")
         .args([
             "8",

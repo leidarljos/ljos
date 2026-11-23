@@ -55,6 +55,10 @@ impl Seat {
 
     fn command(&self, bin: &str, args: &[&str]) -> Command {
         let path = format!("{}:/usr/bin:/bin", self.home.path().join("bin").display());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(bin);
         cmd.args(args)
             .current_dir(self.home.path())
@@ -92,29 +96,29 @@ fn fixture() -> LegacyFixture {
 }
 
 fn stage_doctor_bins(home: &Path) {
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::symlink;
     let bin = home.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let mode = std::fs::Permissions::from_mode(0o755);
     let vissue = bin.join("vissue");
-    std::fs::write(
+    ljos_cli::install_executable(
         &vissue,
         "#!/bin/sh\nif [ \"$1\" = vote ]; then echo '--used --confidence'; else echo 'vissue 0.21.0'; fi\n",
     )
     .unwrap();
-    std::fs::set_permissions(&vissue, mode.clone()).unwrap();
     let claimdag = bin.join("claimdag");
-    std::fs::write(&claimdag, "#!/bin/sh\necho 'claimdag 0.8.0'\n").unwrap();
-    std::fs::set_permissions(&claimdag, mode.clone()).unwrap();
+    ljos_cli::install_executable(&claimdag, "#!/bin/sh\necho 'claimdag 0.8.0'\n").unwrap();
     let curl = bin.join("curl");
-    std::fs::write(&curl, "#!/bin/sh\nexit 1\n").unwrap();
-    std::fs::set_permissions(&curl, mode).unwrap();
+    ljos_cli::install_executable(&curl, "#!/bin/sh\nexit 1\n").unwrap();
     for (name, src) in [
         ("ljos", env!("CARGO_BIN_EXE_ljos")),
         ("ljos-mcp", env!("CARGO_BIN_EXE_ljos-mcp")),
     ] {
         let dest = bin.join(name);
         if !dest.exists() {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             symlink(src, dest).unwrap();
         }
     }

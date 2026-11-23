@@ -54,6 +54,10 @@ fn mail_commands_report_token_refusal_instead_of_silent_pack_on_401() {
         vec!["reply", id, "ack"],
         vec!["send", "bob", "hi"],
     ] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(&args)
             .env_clear()

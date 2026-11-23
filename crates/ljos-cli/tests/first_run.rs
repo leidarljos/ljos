@@ -17,7 +17,6 @@ mod pty;
 mod tools;
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -102,7 +101,7 @@ impl Seat {
             std::fs::create_dir_all(dir)
                 .unwrap_or_else(|err| panic!("create {}: {err}", dir.display()));
         }
-        std::fs::set_permissions(root.join("run"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        ljos_cli::change_mode(root.join("run"), 0o700).unwrap();
         link_programs(&bin);
         let port = free_port();
         let mut env = BTreeMap::new();
@@ -158,6 +157,10 @@ impl Seat {
         }
         let started = Instant::now();
         let term = pty::Pty::open();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new("bash");
         cmd.arg("-c").arg(line);
         cmd.current_dir(cwd);
@@ -177,6 +180,10 @@ impl Seat {
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new("kill")
                 .args(["-s", "KILL", "--", &format!("-{pid}")])
                 .status();
@@ -198,6 +205,10 @@ impl Seat {
             return (2, format!("could not read `{line}`"), started.elapsed());
         }
         let script = format!("{line}\nprintf '%s' \"${{{name}}}\"");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("bash")
             .arg("-c")
             .arg(&script)
@@ -232,6 +243,10 @@ impl Drop for Seat {
         {
             ljos_test_boot::reap_listener(port);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("packset")
             .arg("stop")
             .env_clear()
@@ -252,8 +267,8 @@ fn link_programs(bin: &Path) {
         ("ljos", env!("CARGO_BIN_EXE_ljos")),
         ("ljos-mcp", env!("CARGO_BIN_EXE_ljos-mcp")),
     ] {
-        std::fs::copy(src, bin.join(name)).unwrap_or_else(|err| panic!("copy {name}: {err}"));
-        std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::copy_executable(Path::new(src), &bin.join(name))
+            .unwrap_or_else(|err| panic!("copy {name}: {err}"));
     }
     for name in [
         "vissue",
@@ -267,6 +282,10 @@ fn link_programs(bin: &Path) {
         "age-keygen",
     ] {
         if let Some(path) = which(name) {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             let _ = symlink(&path, bin.join(name));
         }
     }

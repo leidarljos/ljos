@@ -3,11 +3,14 @@
 //! and every row stayed green while no other host saw them.
 
 ljos_test_boot::harness!();
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
 fn git(dir: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -26,13 +29,17 @@ fn doctor_warns_on_uncommitted_issue_edits_in_the_tracker() {
     git(&tracker, &["config", "user.email", "seat@example.invalid"]);
     git(&tracker, &["config", "user.name", "seat"]);
     git(&tracker, &["config", "core.hooksPath", "/dev/null"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("Software/issues.org"), "* TODO a\n").unwrap();
     git(&tracker, &["add", "."]);
     git(&tracker, &["commit", "-q", "-m", "seed"]);
     let bin = dir.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let stub = bin.join("vissue");
-    std::fs::write(
+    ljos_cli::install_executable(
         &stub,
         format!(
             "#!/bin/sh\n[ \"$1\" = identity ] && printf 'vissue 0.16.2\\nprotocol: 1\\nroot={}\\nprefix=Software\\n'\nexit 0\n",
@@ -40,7 +47,6 @@ fn doctor_warns_on_uncommitted_issue_edits_in_the_tracker() {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
     let home = dir.path().join("home");
     std::fs::create_dir_all(home.join("run")).unwrap();
     let path = format!(
@@ -49,6 +55,10 @@ fn doctor_warns_on_uncommitted_issue_edits_in_the_tracker() {
         std::env::var("PATH").unwrap_or_default()
     );
     let doctor = |env: &[(&str, &str)]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .arg("doctor")
             .env_clear()
@@ -73,7 +83,15 @@ fn doctor_warns_on_uncommitted_issue_edits_in_the_tracker() {
     let clean = doctor(&[]);
     assert!(!clean.contains("uncommitted"), "{clean}");
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("Software/issues.org"), "* DONE a\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("Software/issues/Software-b.org"), "* TODO b\n").unwrap();
     let dirty = doctor(&[]);
     let row = tracker_row(&dirty).unwrap_or_else(|| panic!("no tracker row:\n{dirty}"));

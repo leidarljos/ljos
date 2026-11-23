@@ -360,6 +360,10 @@ fn install_unix() -> Result<SummonServer, SummonError> {
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::fs::PermissionsExt;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "sets the mode of a path that is not a git hook"
+            )]
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
         }
     }
@@ -374,6 +378,10 @@ fn install_unix() -> Result<SummonServer, SummonError> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::PermissionsExt;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
     let _ = action_sender();

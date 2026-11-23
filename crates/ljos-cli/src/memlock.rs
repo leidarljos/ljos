@@ -194,6 +194,10 @@ mod tests {
             child();
             return;
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

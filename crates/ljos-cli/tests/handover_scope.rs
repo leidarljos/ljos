@@ -37,12 +37,20 @@ fn sibling_dir() -> PathBuf {
 
 fn keygen(path: &Path) -> String {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let made = Command::new("age-keygen")
         .arg("-o")
         .arg(path)
         .output()
         .expect("age-keygen must be installed");
     assert!(made.status.success());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let public = Command::new("age-keygen")
         .arg("-y")
         .arg(path)
@@ -116,12 +124,12 @@ impl World {
         let tracker = root.path().join("tracker");
         std::fs::create_dir_all(tracker.join("Software/probe")).unwrap();
         std::fs::create_dir_all(tracker.join(".ljos")).unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             tracker.join("Software/probe/issues.org"),
             "#+VISSUE: 1\n#+TODO: TODO | DONE\n\n* TODO [#A] Probe\n:PROPERTIES:\n:ID:       probe-0001\n:END:\n",
         )
         .unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             tracker.join(".ljos/sync.toml"),
             format!(
                 "name = \"example-host\"\nrecipients = [\"{box_public}\"]\n[scopes]\ncloud = [\"{cloud_public}\"]\n"
@@ -155,7 +163,11 @@ impl World {
     /// [`World::ljos`] with `first` searched before the tools.
     fn ljos_with(&self, machine: &str, args: &[&str], first: &Path) -> Output {
         let home = self.root.path().join(machine);
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("HOME", &home)
@@ -178,7 +190,7 @@ impl World {
             .env("DEEDAR_HOST_SIGNING_KEY", "off")
             .current_dir(self.root.path())
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn bag(&self, name: &str) -> PathBuf {
@@ -320,7 +332,6 @@ fn a_plaintext_export_that_cannot_be_removed_stops_the_handover() {
     if tools::halt(tools::Tool::Packsetd) {
         return;
     }
-    use std::os::unix::fs::PermissionsExt;
     let w = World::new();
     let wrap = w.root.path().join("wrap");
     std::fs::create_dir_all(&wrap).unwrap();
@@ -334,8 +345,7 @@ fn a_plaintext_export_that_cannot_be_removed_stops_the_handover() {
         w.tools.join("packset").display(),
         seen.display()
     );
-    std::fs::write(wrap.join("packset"), script).unwrap();
-    std::fs::set_permissions(wrap.join("packset"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&wrap.join("packset"), script).unwrap();
     let bag = w.bag("stuck");
     let bag_arg = bag.display().to_string();
     let out = w.ljos_with(
@@ -353,10 +363,7 @@ fn a_plaintext_export_that_cannot_be_removed_stops_the_handover() {
     );
     let text = said(&out);
     let export = PathBuf::from(std::fs::read_to_string(&seen).expect("packset export ran"));
-    let _ = std::fs::set_permissions(
-        export.join("locked"),
-        std::fs::Permissions::from_mode(0o700),
-    );
+    let _ = ljos_cli::change_mode(export.join("locked"), 0o700);
     assert!(!out.status.success(), "{text}");
     assert!(text.contains("could not be removed"), "{text}");
     assert!(text.contains("nothing was handed over"), "{text}");

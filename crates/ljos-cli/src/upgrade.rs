@@ -202,23 +202,64 @@ fn already_installed(dir: &Path, version: &str) -> bool {
     saw
 }
 
-/// Copy `installed` aside as `NAME.bak-pre-VERSION`, unless that file
-/// already holds some other version. That copy is the rollback, and a
-/// second install of the same release must not replace it with itself.
-fn keep_rollback(name: &str, installed: &Path, dir: &Path, version: &str) -> Result<()> {
+/// Copy `installed` aside with `installed`'s mode and return the copy's
+/// path, or `None` when nothing is installed.
+///
+/// The copy is created as `NAME.bak-pre-VERSION`, or as
+/// `NAME.bak-pre-VERSION.N` for the first `N` whose name is free. An entry
+/// already at one of those names is left unread and unrun, and is never
+/// taken for the rollback. The copy must read back as a regular file with
+/// `installed`'s bytes.
+fn keep_rollback(
+    name: &str,
+    installed: &Path,
+    dir: &Path,
+    version: &str,
+) -> Result<Option<PathBuf>> {
     if !installed.exists() {
-        return Ok(());
+        return Ok(None);
     }
-    let keep = dir.join(format!("{name}.bak-pre-{version}"));
-    if keep.is_file() {
-        if let Ok(said) = run_ok(&keep.display().to_string(), &["--version"]) {
-            if !names_version(&said, name, version) {
-                return Ok(());
+    let base = format!("{name}.bak-pre-{version}");
+    for n in 0..100 {
+        let keep = match n {
+            0 => dir.join(&base),
+            n => dir.join(format!("{base}.{n}")),
+        };
+        match crate::copy_executable_new(installed, &keep) {
+            Ok(()) => {}
+            Err(err) if crate::exe_publish::renamed(&err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "upgrade: kept a rollback of {name} at {}, and {name} was not replaced",
+                        keep.display()
+                    )
+                })
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "upgrade: could not keep a rollback of {name} at {}",
+                        keep.display()
+                    )
+                })
             }
         }
+        let kept = std::fs::symlink_metadata(&keep)?.is_file()
+            && std::fs::read(&keep)? == std::fs::read(installed)?;
+        if !kept {
+            bail!(
+                "upgrade: the rollback {} does not match {}, so {name} was not replaced",
+                keep.display(),
+                installed.display()
+            );
+        }
+        return Ok(Some(keep));
     }
-    std::fs::copy(installed, &keep)?;
-    Ok(())
+    bail!(
+        "upgrade: {base} through {base}.99 are all taken in {}, and one must be moved aside, so run `ljos upgrade`.",
+        dir.display()
+    )
 }
 
 fn release_dir() -> Option<PathBuf> {
@@ -232,7 +273,7 @@ fn release_dir() -> Option<PathBuf> {
 fn obtain(name: &str, to: &Path, url: &str) -> Result<()> {
     if let Some(dir) = release_dir() {
         let src = dir.join(name);
-        std::fs::copy(&src, to).with_context(|| {
+        crate::copy_file(&src, to).with_context(|| {
             format!(
                 "upgrade: could not read {} from the release directory, and the archive must be there or LJOS_RELEASE_DIR must be unset, so run `ljos upgrade`.",
                 src.display()
@@ -262,6 +303,10 @@ fn fetch(url: &str, to: &Path) -> Result<()> {
         .with_context(|| {
             download_failed(url, "the download stopped before the file was complete")
         })?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(to, body)?;
     Ok(())
 }
@@ -323,6 +368,10 @@ fn latest() -> Result<String> {
 }
 
 fn run_ok(cmd: &str, args: &[&str]) -> Result<String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(cmd)
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -420,8 +469,14 @@ fn running_note(name: &str, pids: &[u32]) -> String {
     )
 }
 
-fn replace_installed(staged: &Path, installed: &Path, held: &[u32]) -> Result<()> {
-    if let Err(err) = std::fs::rename(staged, installed) {
+/// Publish a copy of `new` over `installed` with `new`'s mode. The publish
+/// stages under a name no one can guess and ends in a rename, so a running
+/// binary keeps its old inode.
+fn replace_installed(new: &Path, installed: &Path, held: &[u32]) -> Result<()> {
+    if let Err(err) = crate::copy_executable(new, installed) {
+        if crate::exe_publish::renamed(&err) {
+            bail!("upgrade: replaced {}, but {err}", installed.display());
+        }
         let list = held
             .iter()
             .map(u32::to_string)
@@ -432,7 +487,7 @@ fn replace_installed(staged: &Path, installed: &Path, held: &[u32]) -> Result<()
         } else {
             format!("and the process using it must stop (kill {list}), so run `ljos upgrade`.")
         };
-        if err.raw_os_error() == Some(26) {
+        if err.kind() == std::io::ErrorKind::ExecutableFileBusy {
             bail!(
                 "upgrade: could not replace {}: Text file busy, {next}",
                 installed.display()
@@ -464,19 +519,20 @@ fn resolve_dir(dir: Option<&Path>) -> Result<PathBuf> {
     }
 }
 
-fn work_dir(label: &str) -> Result<PathBuf> {
+fn work_dir(label: &str) -> Result<tempfile::TempDir> {
     // The cache directory, on the home filesystem: a temporary directory
     // can be a quota'd tmpfs that is already full.
-    let work = std::env::var_os("XDG_CACHE_HOME")
+    let root = std::env::var_os("XDG_CACHE_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(std::env::temp_dir)
-        .join("ljos")
-        .join(format!("upgrade-{label}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(&work)?;
-    Ok(work)
+        .join("ljos");
+    std::fs::create_dir_all(&root)?;
+    tempfile::Builder::new()
+        .prefix(&format!("upgrade-{label}-"))
+        .tempdir_in(root)
+        .map_err(Into::into)
 }
 
 /// Install release `version` (the newest when `None`) into `dir`.
@@ -506,6 +562,7 @@ fn upgrade_ljos(version: Option<&str>, dir: &Path, only: Option<&str>) -> Result
     let asset = asset_name(&version, target);
     let base = format!("https://github.com/{RELEASE_REPO}/releases/download/v{version}");
     let work = work_dir("ljos")?;
+    let work = work.path();
     let archive = work.join(&asset);
     let sum = work.join(format!("{asset}.sha256"));
     obtain(&asset, &archive, &format!("{base}/{asset}"))?;
@@ -565,17 +622,14 @@ fn upgrade_ljos(version: Option<&str>, dir: &Path, only: Option<&str>) -> Result
     }
     let mut out = String::new();
     for (name, new, installed) in ready {
-        let old = old_version(&installed);
-        keep_rollback(name, &installed, dir, &version)?;
-        let staged = dir.join(format!("{name}.new"));
-        std::fs::copy(&new, &staged)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
+        if installed.is_file() && reports(&installed, name, &version) {
+            out.push_str(&format!("{name} {version} current\n"));
+            continue;
         }
+        let old = old_version(&installed);
+        let kept = keep_rollback(name, &installed, dir, &version)?;
         let held = pids_holding(&installed);
-        replace_installed(&staged, &installed, &held)?;
+        replace_installed(&new, &installed, &held)?;
         out.push_str(&running_note(name, &held));
         if only.is_some() {
             out.push_str(&format!("{name} {old} {version}\n"));
@@ -585,12 +639,10 @@ fn upgrade_ljos(version: Option<&str>, dir: &Path, only: Option<&str>) -> Result
                 installed.display()
             ));
         }
+        out.push_str(&saved_line(name, &old, kept.as_deref()));
     }
-    let _ = std::fs::remove_dir_all(&work);
     if only.is_none() {
-        out.push_str(&format!(
-            "from {base}/{asset}, sha256 {have}; the old binaries are kept as NAME.bak-pre-{version}\n"
-        ));
+        out.push_str(&format!("from {base}/{asset}, sha256 {have}\n"));
     }
     Ok(out)
 }
@@ -686,21 +738,20 @@ fn place_component(dir: &Path, name: &str, version: &str, tree: &Path) -> Result
     }
     let installed = dir.join(name);
     let old = old_version(&installed);
-    keep_rollback(name, &installed, dir, version).map_err(|e| one_line(&e))?;
-    let staged = dir.join(format!("{name}.new"));
-    std::fs::copy(&new, &staged).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| e.to_string())?;
-    }
+    let kept = keep_rollback(name, &installed, dir, version).map_err(|e| one_line(&e))?;
     let held = pids_holding(&installed);
-    replace_installed(&staged, &installed, &held).map_err(|e| one_line(&e))?;
+    replace_installed(&new, &installed, &held).map_err(|e| one_line(&e))?;
     Ok(format!(
-        "{name} {old} {version}\n{}",
+        "{name} {old} {version}\n{}{}",
+        saved_line(name, &old, kept.as_deref()),
         running_note(name, &held)
     ))
+}
+
+/// The line naming the rollback copy, empty when nothing was installed.
+fn saved_line(name: &str, old: &str, kept: Option<&Path>) -> String {
+    kept.map(|path| format!("{name} {old} saved as {}\n", path.display()))
+        .unwrap_or_default()
 }
 
 /// Each installed component, one line. A failure is a warning line.
@@ -708,7 +759,7 @@ fn upgrade_components(dir: &Path, only: Option<&str>) -> Result<String> {
     let mut out = String::new();
     let mut versions: HashMap<String, Result<Option<String>, String>> = HashMap::new();
     let mut trees: HashMap<(String, String), Result<PathBuf, String>> = HashMap::new();
-    let mut work: Option<PathBuf> = None;
+    let mut work: Option<tempfile::TempDir> = None;
     for component in COMPONENTS {
         if only.is_some_and(|name| name != component.name) {
             continue;
@@ -746,11 +797,12 @@ fn upgrade_components(dir: &Path, only: Option<&str>) -> Result<String> {
         if !trees.contains_key(&key) {
             let fetched = (|| {
                 let slot = match work {
-                    Some(ref dir) => dir.clone(),
+                    Some(ref dir) => dir.path().to_path_buf(),
                     None => {
                         let made = work_dir("components").map_err(|e| one_line(&e))?;
-                        work = Some(made.clone());
-                        made
+                        let path = made.path().to_path_buf();
+                        work = Some(made);
+                        path
                     }
                 };
                 fetch_tree(component.repo, component.asset, &version, &slot)
@@ -777,9 +829,6 @@ fn upgrade_components(dir: &Path, only: Option<&str>) -> Result<String> {
             }
             None => {}
         }
-    }
-    if let Some(dir) = &work {
-        let _ = std::fs::remove_dir_all(dir);
     }
     Ok(out)
 }
@@ -823,6 +872,120 @@ pub fn upgrade(version: Option<&str>, dir: Option<&Path>, only: Option<&str>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    }
+
+    /// A 0700 binary was kept as a 0755 rollback copy, which any user
+    /// could then run.
+    #[cfg(unix)]
+    #[test]
+    fn a_rollback_copy_keeps_a_0700_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("ljos");
+        let body = "#!/bin/sh\necho 'ljos 0.1.0'\n";
+        crate::install_executable_mode(&installed, body, 0o700).unwrap();
+        let keep = keep_rollback("ljos", &installed, dir.path(), "9.9.9")
+            .unwrap()
+            .unwrap();
+        assert_eq!(keep, dir.path().join("ljos.bak-pre-9.9.9"));
+        assert_eq!(mode_of(&keep), 0o700);
+        assert_eq!(std::fs::read_to_string(&keep).unwrap(), body);
+    }
+
+    /// An existing rollback is left unread and unrun. The copy goes to the
+    /// next free name.
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_rollback_is_left_unread() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("ljos");
+        let installed_body = "#!/bin/sh\necho installed\n";
+        crate::install_executable(&installed, installed_body).unwrap();
+        let rollback = dir.path().join("ljos.bak-pre-9.9.9");
+        let marker = dir.path().join("ran");
+        let body = format!("#!/bin/sh\ntouch '{}'\n", marker.display());
+        crate::install_executable(&rollback, &body).unwrap();
+        let keep = keep_rollback("ljos", &installed, dir.path(), "9.9.9")
+            .unwrap()
+            .unwrap();
+        assert!(!marker.exists());
+        assert_eq!(std::fs::read_to_string(&rollback).unwrap(), body);
+        assert_eq!(keep, dir.path().join("ljos.bak-pre-9.9.9.1"));
+        assert_eq!(std::fs::read_to_string(&keep).unwrap(), installed_body);
+    }
+
+    /// A copy that fails for another reason does not claim a rollback is
+    /// already there.
+    #[cfg(unix)]
+    #[test]
+    fn a_rollback_copy_failure_does_not_claim_an_existing_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("ljos");
+        std::fs::create_dir(&installed).unwrap();
+        let err = keep_rollback("ljos", &installed, dir.path(), "9.9.9")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("could not keep a rollback"), "{err}");
+    }
+
+    /// A process stopped after writing its unpredictable temporary rollback
+    /// leaves no partial final name. A later upgrade chooses another name and
+    /// can publish the rollback.
+    #[cfg(unix)]
+    #[test]
+    fn a_crash_before_the_rollback_rename_does_not_block_the_next_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("ljos");
+        let body = "#!/bin/sh\necho installed\n";
+        crate::install_executable(&installed, body).unwrap();
+        let stale = dir.path().join(".ljos-rollback.crashed");
+        crate::write_file(&stale, "partial").unwrap();
+
+        keep_rollback("ljos", &installed, dir.path(), "9.9.9").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&stale).unwrap(), "partial");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ljos.bak-pre-9.9.9")).unwrap(),
+            body
+        );
+    }
+
+    /// The new binary was copied to `NAME.new` and that name renamed over
+    /// the installed one, so a link left at `NAME.new`, or swapped in
+    /// before the rename, was written through and then installed.
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_binary_takes_no_side_name_and_follows_no_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = dir.path().join("unpacked-ljos");
+        crate::install_executable_mode(&new, "#!/bin/sh\necho new\n", 0o750).unwrap();
+        let installed = dir.path().join("ljos");
+        crate::install_executable_mode(&installed, "#!/bin/sh\necho old\n", 0o700).unwrap();
+        let victim = dir.path().join("victim");
+        crate::write_file(&victim, "keep\n").unwrap();
+        let side = dir.path().join("ljos.new");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "plants a link that is not a git hook"
+        )]
+        std::os::unix::fs::symlink(&victim, &side).unwrap();
+        replace_installed(&new, &installed, &[]).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
+        assert_eq!(std::fs::read_link(&side).unwrap(), victim);
+        assert_eq!(
+            std::fs::read_to_string(&installed).unwrap(),
+            "#!/bin/sh\necho new\n"
+        );
+        assert_eq!(mode_of(&installed), 0o750);
+    }
 
     #[test]
     fn each_published_target_has_its_archive_triple() {

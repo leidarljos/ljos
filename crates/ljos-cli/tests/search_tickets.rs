@@ -58,7 +58,15 @@ impl Seat {
         ] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("tracker/Software/Software/issues.org"), issues).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -71,7 +79,11 @@ impl Seat {
 
     fn search(&self, args: &[&str]) -> Output {
         let home = self.root.join("home");
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.root.join("work"))
             .env_clear()
@@ -96,7 +108,7 @@ impl Seat {
             .env("LC_ALL", "C.UTF-8")
             .stdin(std::process::Stdio::null())
             .output()
-            .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")))
+            .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")));
     }
 }
 

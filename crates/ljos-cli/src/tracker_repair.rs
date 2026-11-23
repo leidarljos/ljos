@@ -238,6 +238,10 @@ mod tests {
 
     fn git(dir: &Path, args: &[&str]) {
         // `GIT_DIR` overrides `-C`. A sibling test exports it for a moment.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("git")
             .arg("-C")
             .arg(dir)
@@ -265,6 +269,10 @@ mod tests {
         git(root, &["config", "user.name", "seat"]);
         git(root, &["config", "commit.gpgsign", "false"]);
         git(root, &["config", "core.hooksPath", "/dev/null"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("Software/issues.org"), "* TODO a\n").unwrap();
         git(root, &["add", "."]);
         git(root, &["commit", "-q", "-m", "seed"]);
@@ -297,6 +305,10 @@ mod tests {
     }
 
     fn point_head_at_missing(root: &Path) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("git")
             .arg("-C")
             .arg(root)
@@ -319,6 +331,10 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(path, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n").unwrap();
     }
 

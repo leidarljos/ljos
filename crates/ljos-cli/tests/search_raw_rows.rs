@@ -42,7 +42,6 @@ fn world() -> Option<World> {
 }
 
 fn write_embed_stub(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     let body = "#!/usr/bin/env python3\n\
 import json, sys\n\
 for line in sys.stdin:\n\
@@ -58,10 +57,7 @@ for line in sys.stdin:\n\
 \t\tprint(json.dumps({'scores': [0.8] * max(n, 1)}), flush=True)\n\
 \telse:\n\
 \t\tprint(json.dumps({'v': [0.2, 0.4, 0.1]}), flush=True)\n";
-    std::fs::write(path, body).unwrap();
-    let mut perm = std::fs::metadata(path).unwrap().permissions();
-    perm.set_mode(0o755);
-    std::fs::set_permissions(path, perm).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 fn world_with(encoder: bool) -> Option<World> {
@@ -99,6 +95,10 @@ fn world_with(encoder: bool) -> Option<World> {
     ] {
         std::fs::create_dir_all(root.join(sub)).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
     let pack_home = root.join("home/.local/share/packset");
     let mut started = ljos_test_boot::Packsetd::build();
@@ -161,6 +161,10 @@ impl World {
 
     fn command(&self, seat: &str, args: &[&str]) -> Command {
         let home = self.root.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(self.root.join("work"))
@@ -361,6 +365,10 @@ fn mcp_search(world: &World) -> (String, String) {
 
 fn mcp_search_query(world: &World, query: &str) -> (String, String) {
     let home = world.root.join("home");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
         .env("PATH", &world.path)

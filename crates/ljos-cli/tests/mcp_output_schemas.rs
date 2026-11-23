@@ -162,7 +162,15 @@ impl Session {
         std::fs::create_dir_all(home.join(".config")).unwrap();
         std::fs::create_dir_all(home.join("tracker")).unwrap();
         let gitconfig = home.join("gitconfig");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&gitconfig, "").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -192,6 +200,10 @@ impl Session {
         let pid = child.id();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(120));
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new("kill").arg(pid.to_string()).status();
         });
         let stdin = child.stdin.take().unwrap();

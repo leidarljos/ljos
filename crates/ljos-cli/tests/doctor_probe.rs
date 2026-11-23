@@ -15,18 +15,22 @@ fn doctor_reports_a_hanging_version_probe_and_finishes() {
     let bin = root.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let wrapper = bin.join("ljos-mcp");
-    std::fs::write(&wrapper, "#!/bin/sh\n# exec /no/such/ljos-mcp\nsleep 30\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    ljos_cli::install_executable(&wrapper, "#!/bin/sh\n# exec /no/such/ljos-mcp\nsleep 30\n")
+        .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.join(".cursor/mcp.json"),
         r#"{"mcpServers":{"ljos":{"command":"ljos-mcp"}}}"#,
     )
     .unwrap();
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("doctor")
         .env_clear()

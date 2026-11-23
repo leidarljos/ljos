@@ -743,9 +743,21 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let issues = dir.join("issues.org");
         let read = || std::fs::read_to_string(&issues).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&issues, "before\n").unwrap();
         let before = snapshot(&dir).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&issues, "ours\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("issues.org.lock"), "").unwrap();
         let board = Board {
             project: "demo".into(),
@@ -755,10 +767,18 @@ mod tests {
             ours: snapshot(&dir).unwrap(),
             board: String::new(),
         };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&issues, "theirs\n").unwrap();
         let boards = std::slice::from_ref(&board);
         assert_eq!(roll_back(boards).unwrap(), Some(dir.clone()));
         assert_eq!(read(), "theirs\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&issues, "ours\n").unwrap();
         assert_eq!(roll_back(boards).unwrap(), None);
         assert_eq!(read(), "before\n");
@@ -774,6 +794,10 @@ mod tests {
         let dir = issues.parent().unwrap().to_path_buf();
         std::fs::create_dir_all(dir.join("issues")).unwrap();
         if ledger {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(dir.join("issues/.ledger"), "").unwrap();
         }
         file(&layout, "old");
@@ -854,6 +878,10 @@ mod tests {
             let (_root, layout, mut board) = demo(ledger);
             let id = file(&layout, "new");
             let side = board.dir.join("issues/side.txt");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&side, "other writer\n").unwrap();
             assert_eq!(refuse_next(&mut board, &want(&layout, &id)), None);
             assert_eq!(std::fs::read_to_string(&side).unwrap(), "other writer\n");
@@ -871,6 +899,10 @@ mod tests {
         let end = at + text[at..].find(":END:\n").unwrap() + ":END:\n".len();
         let line = "- Noted by other [2026-11-21 Sat 12:00]";
         let theirs = format!("{}:LOGBOOK:\n{line}\n:END:\n{}", &text[..end], &text[end..]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&board.issues, &theirs).unwrap();
         assert_eq!(refuse_next(&mut board, &want(&layout, &id)), None);
         assert_eq!(std::fs::read_to_string(&board.issues).unwrap(), theirs);
@@ -884,6 +916,10 @@ mod tests {
         let path = doc.heading_path(&id).to_path_buf();
         let mut theirs = std::fs::read_to_string(&path).unwrap();
         theirs.push_str("%% later-op 3\nabc\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, &theirs).unwrap();
         assert_eq!(refuse_next(&mut board, &want(&layout, &id)), None);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs);

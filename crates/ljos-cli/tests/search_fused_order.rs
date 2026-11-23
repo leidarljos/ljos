@@ -110,6 +110,10 @@ fn serve() -> Seat {
 fn the_page_follows_fused_order_when_dense_rank_disagrees() {
     let seat = serve();
     let home = seat.home.path();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["search", "kiln", "schedule"])
         .current_dir(home)

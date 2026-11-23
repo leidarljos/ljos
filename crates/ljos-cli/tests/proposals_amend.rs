@@ -22,6 +22,10 @@ fn serve(posted: std::path::PathBuf) -> String {
             let req = String::from_utf8_lossy(&buf[..n]).into_owned();
             let body = if req.contains("POST /v1/atoms") {
                 if let Some(body) = req.split("\r\n\r\n").nth(1) {
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "writes a file that is not a git hook"
+                    )]
                     let _ = std::fs::write(&posted, body);
                 }
                 r#"{"id":"atom-kept","kind":"lesson","text":"kept","origin":"agent-derived"}"#
@@ -65,6 +69,10 @@ impl Seat {
 
     fn run(&self, args: &[&str], stdin: Option<&str>) -> String {
         let home = self.root.path().join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
@@ -119,6 +127,10 @@ impl Seat {
             "seat": "ada",
             "atom": {"kind": "lesson", "text": text, "level": "derived", "origin": "agent-derived"},
         });
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)

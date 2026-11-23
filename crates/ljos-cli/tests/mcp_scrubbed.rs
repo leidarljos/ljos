@@ -5,7 +5,6 @@
 ljos_test_boot::harness!();
 
 use std::io::Write as _;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -40,8 +39,7 @@ const MISSING_TRACKER: &str = "No tracker found, so run `ljos onboard`. To make 
 
 fn script(dir: &Path, name: &str, body: &str) {
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 /// Speak `initialize`, `tools/list` and one note to `program`.
@@ -53,6 +51,10 @@ fn session(program: &str, args: &[&str]) -> (String, String, Duration) {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(work.join("Software")).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let git = Command::new("git")
         .args(["init", "-q"])
         .current_dir(&work)
@@ -75,6 +77,10 @@ fn session(program: &str, args: &[&str]) -> (String, String, Duration) {
             &format!("#!/bin/sh\nprintf '%s\\n' \"{name} $*\" >> '{log_path}'\nexit 1\n"),
         );
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(program)
         .args(args)
         .env_clear()
@@ -90,6 +96,10 @@ fn session(program: &str, args: &[&str]) -> (String, String, Duration) {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(20));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let lines = [

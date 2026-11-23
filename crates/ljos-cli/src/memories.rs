@@ -308,6 +308,10 @@ fn bump_counts(path: &Path, ids: &[String]) {
         *uses.entry(id.clone()).or_default() += 1;
     }
     if let Ok(text) = serde_json::to_string(&uses) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let _ = std::fs::write(path, text);
     }
 }
@@ -1597,6 +1601,10 @@ mod tests {
         bytes.extend_from_slice(b"{\"id\":\"b\",\"verdict\":\"caf\xc3\n");
         bytes.extend_from_slice(format!("{}\n", row("c")).as_bytes());
         bytes.extend_from_slice(b"{\"id\":\"d\",\"verdict\":\"caf\xc3");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, bytes).unwrap();
         let got: Vec<String> = reviews().into_keys().collect();
         assert_eq!(got, ["a", "c"]);
@@ -1653,6 +1661,10 @@ mod tests {
         std::env::set_var("XDG_STATE_HOME", dir.path());
         let path = reviews_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let held = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -1746,6 +1758,10 @@ mod tests {
         let said = describe(&after[0]);
         assert!(said.contains("recalled 1x"), "{said}");
         assert!(said.contains("looked up 1x"), "{said}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(recall_uses_path(), r#"{"a1aaaaaaaaaaaaaa":4}"#).unwrap();
         let mixed = list(&atoms, &BTreeMap::new(), &Filter::default());
         assert_eq!(mixed[0].earlier, 4);

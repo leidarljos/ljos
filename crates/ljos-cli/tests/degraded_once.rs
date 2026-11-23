@@ -155,10 +155,7 @@ fn serve(writer: Writer) -> String {
 }
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&dir.join(name), body).unwrap();
 }
 
 struct Seat {
@@ -181,6 +178,10 @@ fn seat() -> Seat {
     let home = dir.join("home");
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
     std::fs::create_dir_all(dir.join("run")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.join(".cursor/mcp.json"),
         r#"{"mcpServers":{"ljos":{"command":"/no/such/ljos-mcp"}}}"#,
@@ -231,6 +232,10 @@ fn seat() -> Seat {
             "ts": "2026-11-01T08:00:00Z",
         }],
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         share.join("listing-seat@travel-open.json"),
         kept.to_string(),
@@ -258,6 +263,10 @@ fn run_with(
         Command_::Sitting => vec!["sitting", seat.issue.as_str()],
     };
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .current_dir(dir)

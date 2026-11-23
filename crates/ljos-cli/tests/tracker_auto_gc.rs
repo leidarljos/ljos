@@ -12,6 +12,10 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn git(dir: &Path, args: &[&str]) -> Output {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -71,7 +75,15 @@ fn tracker_commits_do_not_trigger_git_auto_gc_repack() {
         git(&tracker, &["config", k, v]);
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         project.join("issues.org"),
         "\
@@ -93,6 +105,10 @@ fn tracker_commits_do_not_trigger_git_auto_gc_repack() {
     );
     git(&tracker, &["repack", "-d"]);
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("extra.txt"), "second pack\n").unwrap();
     git(&tracker, &["add", "extra.txt"]);
     git(
@@ -112,6 +128,10 @@ fn tracker_commits_do_not_trigger_git_auto_gc_repack() {
         .trim()
         .to_string();
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["note", "probe-autogc", "recorded without auto gc"])
         .current_dir(&tracker)
@@ -198,8 +218,20 @@ fn tracker_loose_objects_stay_bounded_over_200_commits() {
 
     // Blob "anchor-11\n" hashes to 17311b936343c60fc459bac3a04b6752a9894476
     // so objects/17/ has a loose object for `git gc --auto`.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("anchor.txt"), "anchor-11\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         project.join("issues.org"),
         "\
@@ -219,6 +251,10 @@ fn tracker_loose_objects_stay_bounded_over_200_commits() {
 
     let path = format!("{}:/usr/bin:/bin", vissue.parent().unwrap().display());
     let run_ljos = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(&tracker)
@@ -254,6 +290,10 @@ fn tracker_loose_objects_stay_bounded_over_200_commits() {
         let issues = project.join("issues.org");
         let mut text = std::fs::read_to_string(&issues).unwrap();
         text.push_str(&format!("note {i}\n"));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&issues, text).unwrap();
         assert!(
             ljos_cli::commit_paths(

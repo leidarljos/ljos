@@ -76,7 +76,15 @@ fn an_idle_server_returns_the_burst_to_the_system() {
     let home = tempfile::tempdir().unwrap();
     let tracker = home.path().join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"probe\"]\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")

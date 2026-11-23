@@ -72,6 +72,10 @@ impl Case {
         }
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let init = Command::new("git")
             .args(["init", "-q"])
             .current_dir(&repo)
@@ -84,6 +88,10 @@ impl Case {
             ("commit.gpgsign", "false"),
             ("core.hooksPath", "/dev/null"),
         ] {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let out = Command::new("git")
                 .args(["config", key, value])
                 .current_dir(&repo)
@@ -91,6 +99,10 @@ impl Case {
                 .unwrap();
             assert!(out.status.success(), "{key}");
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let made = Command::new("git")
             .args(["commit", "-q", "--allow-empty", "-m", "seed"])
             .current_dir(&repo)
@@ -101,6 +113,10 @@ impl Case {
             "{}",
             String::from_utf8_lossy(&made.stderr)
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let head = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&repo)
@@ -123,10 +139,18 @@ impl Case {
         let exe = std::env::current_exe().unwrap();
         let mut cmd = match wrapper {
             Some(runner) => {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "starts a program outside git hook code"
+                )]
                 let mut cmd = Command::new(runner);
                 cmd.args(["-c", "\"$@\"; exit $?", "claude"]).arg(&exe);
                 cmd
             }
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             None => Command::new(&exe),
         };
         cmd.args(["--exact", "gate_child", "--nocapture", "--test-threads=1"])

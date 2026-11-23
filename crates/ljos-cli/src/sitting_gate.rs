@@ -607,6 +607,10 @@ mod tests {
         };
         git(&["init", "-q", "-b", "develop"]);
         std::fs::create_dir_all(dir.path().join(".ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.path().join(".ljos/gates.toml"), "quorum = [\n").unwrap();
         let _posed = Posed::runner();
         let rule = guard_line("git push origin develop", Some(dir.path())).unwrap();

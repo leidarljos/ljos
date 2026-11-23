@@ -14,12 +14,7 @@ fn write_exe(path: &Path, body: &str) {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).unwrap();
     }
-    std::fs::write(path, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 /// Habitat stubs. `vissue identity` prints `VISSUE_ROOT` when it is set.
@@ -59,6 +54,10 @@ esac\n",
     ] {
         let link = bin.join(name);
         let _ = std::fs::remove_file(&link);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink("habitat", &link).unwrap();
     }
 }
@@ -68,6 +67,10 @@ fn doctor(home: &Path, path: &str) -> (i32, String) {
 }
 
 fn doctor_args(home: &Path, path: &str, args: &[&str]) -> (i32, String) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
@@ -143,6 +146,10 @@ fn doctor_all_names_landscape_and_its_source() {
 #[test]
 fn doctor_names_a_seat_someone_exported() {
     let (home, bin) = layout("named-seat");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("doctor")
         .env_clear()
@@ -180,6 +187,10 @@ fn doctor_names_an_unknown_host_left_by_the_last_write() {
     let seat = format!("unknown-{host}");
     let dir = home.join(".local/state/ljos");
     std::fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         dir.join("seat-writes.log"),
         format!("2026-11-13T00:00:00Z\t{seat}\t{host}\n"),
@@ -200,9 +211,12 @@ fn doctor_fails_an_unwritable_tracker_and_names_chmod() {
     std::fs::create_dir_all(tracker.join("Software")).unwrap();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tracker, std::fs::Permissions::from_mode(0o555)).unwrap();
+        ljos_cli::change_mode(&tracker, 0o555).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("doctor")
         .env_clear()
@@ -240,8 +254,7 @@ fn doctor_fails_an_unwritable_tracker_and_names_chmod() {
     );
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tracker, std::fs::Permissions::from_mode(0o755));
+        let _ = ljos_cli::change_mode(&tracker, 0o755);
     }
 }
 
@@ -251,6 +264,10 @@ fn doctor_names_a_stale_tracker_config_and_mkdir() {
     let root = home.join("old-tracker");
     let cfg = home.join(".config/vissue");
     std::fs::create_dir_all(&cfg).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         cfg.join("config.toml"),
         format!("root = \"{}\"\n", root.display()),
@@ -273,6 +290,10 @@ fn doctor_names_the_install_when_a_habitat_binary_is_missing() {
     let _ = std::fs::remove_file(bin.join("deedar"));
     let tracker = home.join("tracker");
     std::fs::create_dir_all(tracker.join("Software")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["doctor", "--all"])
         .env_clear()
@@ -315,6 +336,10 @@ fn doctor_warns_when_crates_io_does_not_answer() {
     let (home, bin) = layout("net");
     let tracker = home.join("tracker");
     std::fs::create_dir_all(tracker.join("Software")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("doctor")
         .env_clear()
@@ -351,6 +376,10 @@ fn doctor_names_onboard_when_no_tracker_exists() {
     // vissue is gone, so the row is the missing binary, which already
     // names the install. Put vissue back and leave the root unset so
     // identity says the seat is not inside a tracker.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink("habitat", bin.join("vissue")).unwrap();
     let (code, text) = doctor(&home, &format!("{}:/usr/bin:/bin", bin.display()));
     assert_eq!(code, 1, "{text}");
@@ -375,6 +404,10 @@ fn doctor_names_onboard_when_no_tracker_exists() {
 fn doctor_says_no_tracker_yet_without_vissues_refusal() {
     let (home, bin) = layout("none-yet");
     let _ = std::fs::remove_file(bin.join("vissue"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink("habitat", bin.join("vissue")).unwrap();
     let (_, text) = doctor(&home, &format!("{}:/usr/bin:/bin", bin.display()));
     let row = text

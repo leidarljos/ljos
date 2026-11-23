@@ -588,7 +588,15 @@ fn write_doc(path: &Path, doc: &toml::Value) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("toml.new");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&tmp, &text).with_context(|| format!("write {}", tmp.display()))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     std::fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
     Ok(())
 }
@@ -780,6 +788,10 @@ via = \"bea\"
 
 [seats.bea]
 ";
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("vissue.toml"), listed).unwrap();
         git(root, &["add", "vissue.toml"]);
         git(root, &["commit", "-q", "-m", "roster"]);
@@ -788,6 +800,10 @@ via = \"bea\"
             "via = \"bea\"\n",
             &format!("via = \"bea\"\ncommit = \"{good}\"\n"),
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("vissue.toml"), &on_head).unwrap();
         git(root, &["add", "vissue.toml"]);
         git(root, &["commit", "-q", "-m", "record grant"]);
@@ -806,6 +822,10 @@ via = \"bea\"
             ],
         );
         let side = on_head.replace(&good, &orphan);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("vissue.toml"), side).unwrap();
         assert!(
             honored_grant("ada").is_none(),
@@ -813,6 +833,10 @@ via = \"bea\"
         );
 
         let ghost = on_head.replace("via = \"bea\"", "via = \"ghost\"");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("vissue.toml"), ghost).unwrap();
         assert!(
             honored_grant("ada").is_none(),

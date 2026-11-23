@@ -118,6 +118,10 @@ fn serve(busy: usize) -> (String, Arc<AtomicUsize>) {
 
 fn search(url: &str, home: &Path, args: &[&str]) -> (std::process::Output, Duration) {
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
@@ -379,16 +383,18 @@ fn a_remember_that_stays_busy_stores_nothing() {
 }
 
 fn stub_vissue(bin: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(bin).unwrap();
     let path = bin.join("vissue");
-    std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, "#!/bin/sh\nexit 0\n").unwrap();
 }
 
 fn recall(url: &str, home: &Path, issue: &str) -> (std::process::Output, Duration) {
     stub_vissue(&home.join("bin"));
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["recall", issue])
         .env_clear()
@@ -540,7 +546,11 @@ fn serve_lesson() -> String {
 }
 
 fn search_fast(url: &str, home: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -559,7 +569,7 @@ fn search_fast(url: &str, home: &Path, args: &[&str]) -> std::process::Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 /// A busy pack with a word match prints one header, then the count and the row.

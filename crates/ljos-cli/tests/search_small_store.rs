@@ -81,6 +81,10 @@ fn search(url: &str, query: &str) -> (bool, String, String) {
     std::fs::create_dir_all(home.join("state")).unwrap();
     std::fs::create_dir_all(root.path().join("run")).unwrap();
     std::fs::create_dir_all(root.path().join("tracker")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["search", query])
         .current_dir(root.path())

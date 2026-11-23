@@ -85,6 +85,10 @@ pub(crate) fn keep(atom: &Value, warning: &str) -> Result<Value> {
         map.insert("prose".into(), Value::Object(prose));
     }
     let bytes = serde_json::to_vec_pretty(&stored)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, bytes)
         .with_context(|| format!("verbatim: cannot write {}", path.display()))?;
     Ok(stored)

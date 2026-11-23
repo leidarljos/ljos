@@ -8,13 +8,15 @@ use std::process::{Command, Output};
 
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, text).unwrap();
 }
 
 fn executable(path: &Path, text: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    write(path, text);
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, text).unwrap();
 }
 
 /// A home with a copy of this ljos in `bin`, a fake `the terminal harness` that answers
@@ -24,7 +26,7 @@ fn seat_home() -> (tempfile::TempDir, PathBuf) {
     let home = temp.path().to_path_buf();
     let bin = home.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_ljos"), bin.join("ljos")).unwrap();
+    ljos_cli::copy_executable(Path::new(env!("CARGO_BIN_EXE_ljos")), &bin.join("ljos")).unwrap();
     executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
     executable(&bin.join("packset"), "#!/bin/sh\nexit 0\n");
     executable(
@@ -45,7 +47,11 @@ fn run(home: &Path, bin: &Path, args: &[&str]) -> Output {
         std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&inherited)),
     )
     .unwrap();
-    Command::new(bin.join("ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(bin.join("ljos"))
         .args(args)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -62,7 +68,7 @@ fn run(home: &Path, bin: &Path, args: &[&str]) -> Output {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("LJOS_HOOKD", "off")
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 fn said(out: &Output) -> String {
@@ -128,6 +134,10 @@ fn uninstall_takes_the_seat_off_and_leaves_the_stub() {
     assert!(stub.starts_with("#!/bin/sh"), "{stub}");
     assert!(stub.contains("ljos was uninstalled"), "{stub}");
     assert!(std::fs::metadata(bin.join("ljos")).unwrap().len() < ljos_len);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let answer = Command::new("sh")
         .arg(bin.join("ljos"))
         .arg("hook")

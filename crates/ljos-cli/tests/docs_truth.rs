@@ -85,11 +85,9 @@ fn getting_started_distinguishes_open_non_plan_sittings() {
 
 #[cfg(unix)]
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 struct Home {
@@ -144,6 +142,10 @@ impl Home {
             .local_addr()
             .unwrap()
             .port();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(program);
         cmd.env_clear()
             .env("HOME", home)

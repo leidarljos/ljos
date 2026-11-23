@@ -22,7 +22,15 @@ fn release_remap_order_maps_checkout_inside_home_and_strips_host_paths() {
     for src in [&src_in_home, &src_outside] {
         let rs = src.join("probe.rs");
         let out = src.join("probe");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&rs, "fn main() { println!(\"{}\", file!()); }\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let st = Command::new("rustc")
             .arg(&rs)
             .arg("-o")
@@ -35,6 +43,10 @@ fn release_remap_order_maps_checkout_inside_home_and_strips_host_paths() {
             .status()
             .unwrap();
         assert!(st.success());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let printed = Command::new(&out).output().unwrap();
         assert_eq!(
             String::from_utf8_lossy(&printed.stdout).trim(),

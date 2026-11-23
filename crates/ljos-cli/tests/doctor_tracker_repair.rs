@@ -3,11 +3,14 @@
 //! checkout gains no new text.
 
 ljos_test_boot::harness!();
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
 fn git(dir: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -23,6 +26,10 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn doctor(path: &str, home: &Path, tracker: &Path, git_log: &Path) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("doctor")
         .env_clear()
@@ -90,6 +97,10 @@ fn doctor_names_a_broken_tracker_and_leaves_a_healthy_one_unchanged() {
     git(&tracker, &["config", "user.email", "seat@example.invalid"]);
     git(&tracker, &["config", "user.name", "seat"]);
     git(&tracker, &["config", "core.hooksPath", "/dev/null"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("Software/issues.org"), "* TODO a\n").unwrap();
     git(&tracker, &["add", "."]);
     git(&tracker, &["commit", "-q", "-m", "seed"]);
@@ -103,8 +114,8 @@ fn doctor_names_a_broken_tracker_and_leaves_a_healthy_one_unchanged() {
         .find(|path| path.is_file())
         .expect("git on PATH");
     let git_log = dir.path().join("git.log");
-    std::fs::write(
-        bin.join("git"),
+    ljos_cli::install_executable(
+        &bin.join("git"),
         format!(
             "#!/bin/sh\n\
              printf '%s\\n' \"$*\" >> \"$GIT_LOG\"\n\
@@ -121,16 +132,14 @@ fn doctor_names_a_broken_tracker_and_leaves_a_healthy_one_unchanged() {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::write(
-        bin.join("vissue"),
+    ljos_cli::install_executable(
+        &bin.join("vissue"),
         format!(
             "#!/bin/sh\n[ \"$1\" = identity ] && printf 'vissue 0.16.2\\nprotocol: 1\\nroot={}\\nprefix=Software\\n'\nexit 0\n",
             tracker.display()
         ),
     )
     .unwrap();
-    std::fs::set_permissions(bin.join("vissue"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let home = dir.path().join("home");
     std::fs::create_dir_all(home.join("run")).unwrap();
     let path = format!(
@@ -162,6 +171,10 @@ fn doctor_names_a_broken_tracker_and_leaves_a_healthy_one_unchanged() {
         }
     }
     let index = std::fs::read(tracker.join(".git/index")).ok();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let _ = std::fs::write(&git_log, "");
     let broken = doctor(&path, &home, &tracker, &git_log);
     assert_steps(&broken, &tracker);
@@ -181,9 +194,17 @@ fn doctor_names_a_broken_tracker_and_leaves_a_healthy_one_unchanged() {
     git(&other, &["config", "user.email", "seat@example.invalid"]);
     git(&other, &["config", "user.name", "seat"]);
     git(&other, &["config", "core.hooksPath", "/dev/null"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(other.join("Software/issues.org"), "* TODO a\n").unwrap();
     git(&other, &["add", "."]);
     git(&other, &["commit", "-q", "-m", "seed"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let head = Command::new("git")
         .arg("-C")
         .arg(&other)
@@ -192,12 +213,16 @@ fn doctor_names_a_broken_tracker_and_leaves_a_healthy_one_unchanged() {
         .unwrap();
     assert!(head.status.success());
     let rel = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         other.join(".git").join(&rel),
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
     )
     .unwrap();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         bin.join("vissue"),
         format!(
             "#!/bin/sh\n[ \"$1\" = identity ] && printf 'vissue 0.16.2\\nprotocol: 1\\nroot={}\\nprefix=Software\\n'\nexit 0\n",
@@ -205,6 +230,10 @@ fn doctor_names_a_broken_tracker_and_leaves_a_healthy_one_unchanged() {
         ),
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let _ = std::fs::write(&git_log, "");
     let missing = doctor(&path, &home, &other, &git_log);
     assert_steps(&missing, &other);

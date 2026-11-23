@@ -1261,6 +1261,10 @@ fn store_marker(at: i64, root: &Path, rows: &[Row]) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, format!("{at}\n"))?;
     let mut state = marker_state();
     let mut held: BTreeSet<String> = state.seen.iter().cloned().collect();
@@ -1277,6 +1281,10 @@ fn store_marker(at: i64, root: &Path, rows: &[Row]) -> Result<()> {
     state.head = crate::git_ok_stdout(root, &["rev-parse", "HEAD"])
         .map(|head| head.trim().to_string())
         .filter(|head| !head.is_empty());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(marker_state_path(), serde_json::to_vec(&state)?)?;
     Ok(())
 }
@@ -1562,8 +1570,6 @@ mod tests {
         assert!(blank.chars().count() <= crate::scan::COLS, "{blank}");
     }
 
-    use std::os::unix::fs::PermissionsExt;
-
     fn git(dir: &std::path::Path, args: &[&str], date: &str) {
         let out = crate::git_cmd()
             .arg("-C")
@@ -1656,12 +1662,11 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let stub = bin.join("deedar");
-        std::fs::write(
+        crate::install_executable(
             &stub,
             "#!/bin/sh\nprintf 'time=1760000000\\nproducedBy=ada\\n'\n",
         )
         .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
         let org = "\
 * DONE [#C] Close the probe
 :PROPERTIES:
@@ -1683,6 +1688,10 @@ mod tests {
 :ID:         probe-b
 :END:
 ";
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("Software/probe/issues.org"), org).unwrap();
         git(&root, &["add", "."], "2020-01-01T00:00:00Z");
         git(
@@ -1720,7 +1729,7 @@ mod tests {
         }
         let guard = home.join("data/ljos");
         std::fs::create_dir_all(&guard).unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             guard.join("guard.jsonl"),
             "{\"ts\":\"2026-10-27T12:00:00Z\",\"kind\":\"refusal\",\"seat\":\"erin\",\"text\":\"rm -rf /tmp/probe\"}\n\
 {\"ts\":\"2026-10-27T12:05:00Z\",\"kind\":\"rewrite\",\"seat\":\"erin\",\"text\":\"git status\"}\n",
@@ -1927,12 +1936,15 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let stub = bin.join("deedar");
-        std::fs::write(
+        crate::install_executable(
             &stub,
             "#!/bin/sh\nsleep 0.6\nprintf 'time=1760000000\\nproducedBy=ada\\n'\n",
         )
         .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join("Software/probe/issues.org"),
             "\
@@ -1993,6 +2005,10 @@ mod tests {
         let root = tracker(dir.path());
         let home = dir.path().join("home");
         std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join("Software/probe/issues.org"),
             "* TODO [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n",
@@ -2100,6 +2116,10 @@ mod tests {
                 ));
             }
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("Software/probe/issues.org"), org).unwrap();
         git(&root, &["add", "."], "2020-01-01T00:00:00Z");
         git(
@@ -2115,12 +2135,11 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let stub = bin.join("deedar");
-        std::fs::write(
+        crate::install_executable(
             &stub,
             "#!/bin/sh\nsleep 0.45\nprintf 'time=1760000000\\nproducedBy=ada\\n'\n",
         )
         .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
         let (url, stored) = crate::serve_sync_pack(crate::SyncPack::Keep);
         for i in 0..40 {
             stored.lock().unwrap().push(serde_json::json!({
@@ -2153,6 +2172,10 @@ mod tests {
     fn review_filed_tracker(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
         let root = tracker(dir);
         let home = dir.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join("Software/probe/issues.org"),
             "* TODO [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n",
@@ -2213,9 +2236,17 @@ mod tests {
         let org = format!(
             "* DONE [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n:LOGBOOK:\n- State \"DONE\" from \"TODO\" {stamp}\n- Finished by alice {stamp}\n:END:\n"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("Software/probe/issues.org"), org).unwrap();
         let minute = stamp_unix(&stamp).unwrap();
         std::fs::create_dir_all(home.join("state/ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             home.join("state/ljos/digest-last"),
             format!("{}\n", minute + 30),
@@ -2280,6 +2311,10 @@ mod tests {
 - Note: \"Started a workflow by bounty-driftwatch\" [2020-06-05 Fri 08:36]
 :END:
 ";
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("Software/probe/issues.org"), org).unwrap();
         git(&root, &["add", "."], "2020-06-01T11:00:00Z");
         git(
@@ -2359,6 +2394,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = tracker(dir.path());
         let home = dir.path().join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join("Software/probe/issues.org"),
             "* TODO [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n",
@@ -2430,9 +2469,17 @@ mod tests {
         let org = format!(
             "* DONE [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n:LOGBOOK:\n- State \"DONE\" from \"TODO\" {stamp}\n- Finished by alice {stamp}\n:END:\n"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("Software/probe/issues.org"), org).unwrap();
         let minute = stamp_unix(&stamp).unwrap();
         std::fs::create_dir_all(home.join("state/ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             home.join("state/ljos/digest-last"),
             format!("{}\n", minute + 1),
@@ -2440,6 +2487,10 @@ mod tests {
         .unwrap();
         let first = digest(Some("last"), false).unwrap();
         assert!(first.contains("closed probe-b"), "{first}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             home.join("state/ljos/digest-last"),
             format!("{}\n", minute + 30),
@@ -2462,7 +2513,7 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             root.join("Software/probe/issues.org"),
             "* TODO [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n* TODO [#C] Two\n:PROPERTIES:\n:ID:         probe-c\n:END:\n",
         )
@@ -2515,7 +2566,7 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             root.join("Software/probe/issues.org"),
             "* TODO [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n* TODO [#C] Two\n:PROPERTIES:\n:ID:         probe-old\n:END:\n",
         )
@@ -2691,6 +2742,10 @@ mod tests {
                 text.push_str(&format!(
                     "* TODO [#C] {id}\n:PROPERTIES:\n:ID:         {id}\n:END:\n\n"
                 ));
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "writes a file that is not a git hook"
+                )]
                 std::fs::write(&path, text).unwrap();
                 git(&root, &["add", "Software/probe/issues.org"], date);
             }
@@ -2764,6 +2819,10 @@ mod tests {
         let root = tracker(dir.path());
         let home = dir.path().join("home");
         let path = root.join("Software/probe/issues.org");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &path,
             "* TODO [#C] Old\n:PROPERTIES:\n:ID:         old-out\n:END:\n",
@@ -2786,6 +2845,10 @@ mod tests {
         let head = state["head"].as_str().unwrap().to_string();
         let mut org = std::fs::read_to_string(&path).unwrap();
         org.push_str("\n* TODO [#C] Late\n:PROPERTIES:\n:ID:         late-old\n:END:\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, org).unwrap();
         git(&root, &["add", "."], "2020-02-01T00:00:00Z");
         git(

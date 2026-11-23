@@ -13,10 +13,8 @@ use std::time::Duration;
 const MISSING: &str = "missing-ab12";
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn files(dir: &Path) -> Vec<String> {
@@ -49,6 +47,10 @@ fn a_sitting_on_a_missing_issue_names_it_and_writes_nothing() {
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(root.path().join("run")).unwrap();
     let git = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("git")
             .arg("-C")
             .arg(&product)
@@ -64,6 +66,10 @@ fn a_sitting_on_a_missing_issue_names_it_and_writes_nothing() {
         );
     };
     git(&["init", "-q", "-b", "main"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(product.join("README"), "a product\n").unwrap();
     git(&["add", "README"]);
     git(&[
@@ -91,6 +97,10 @@ fn a_sitting_on_a_missing_issue_names_it_and_writes_nothing() {
     );
     script(&bin, "deedar", "#!/bin/sh\necho head\nexit 0\n");
     let before = files(&product);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .current_dir(&product)
         .env_clear()
@@ -115,6 +125,10 @@ fn a_sitting_on_a_missing_issue_names_it_and_writes_nothing() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(40));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut stdin = child.stdin.take().unwrap();
@@ -190,6 +204,10 @@ impl Probe {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&run).unwrap();
         let git = |args: &[&str]| {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let out = Command::new("git")
                 .arg("-C")
                 .arg(&product)
@@ -205,6 +223,10 @@ impl Probe {
             );
         };
         git(&["init", "-q", "-b", "main"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(product.join("README"), "a product\n").unwrap();
         git(&["add", "README"]);
         git(&[
@@ -230,6 +252,10 @@ impl Probe {
             "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\nexit 0\n",
         );
         script(&bin, "deedar", "#!/bin/sh\necho head\nexit 0\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ljos"), bin.join("ljos")).unwrap();
         Self {
             _root: root,
@@ -245,6 +271,10 @@ impl Probe {
     }
 
     fn command(&self, program: &Path) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(program);
         cmd.current_dir(&self.product)
             .env_clear()
@@ -370,6 +400,10 @@ fn mcp_write_verbs_on_a_missing_issue_name_it_and_write_nothing() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(40));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut stdin = child.stdin.take().unwrap();
