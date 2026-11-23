@@ -82,7 +82,7 @@ The Doc samples step runs that script and then `git diff --exit-code`, and fails
 
 ## Commit identity
 
-[`scripts/identity-gate.sh`](scripts/identity-gate.sh) checks the commits a push or a pull request adds.
+A push, a tag push or a pull request checks every commit reachable from that commit with [`scripts/identity-history.sh`](scripts/identity-history.sh).
 The rule is [Commit identity](CONTRIBUTING.md#commit-identity).
 
 ## Cloud briefs

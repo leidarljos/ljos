@@ -1,12 +1,14 @@
 #!/bin/sh
-# Judge the commits selected by the git rev-list arguments.
+# Judge the commits selected by the git rev-list arguments, or the SHAs
+# on stdin when the first argument is --stdin.
 # Exit 1 when an author is not Rohit Goswami <rgoswami@ieee.org>, a
 # committer is neither that identity nor GitHub <noreply@github.com>, or
 # a message line is a by-trailer, a made-with line, a generated line, or
 # a machine account mark. A Tests or note paragraph is not that line.
-# Dates are not read. Exit 2 when no range was given. Commits outside
-# the arguments are not read.
+# Dates are not read. Exit 2 when no range was given. A git error fails
+# the check. Commits outside the arguments are not read.
 # Usage: identity-gate.sh <git rev-list arguments>
+#        identity-gate.sh --stdin
 set -eu
 
 if [ "$#" -eq 0 ]; then
@@ -14,40 +16,18 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
-read_hashes() {
-  git rev-list "$@"
-}
-
-fallback_hashes() {
-  [ "$#" -eq 1 ] || return 1
-  case "$1" in
-    *..*) ;;
-    *) return 1 ;;
-  esac
-  before=${1%%..*}
-  after=${1#*..}
-  [ -n "$before" ] || return 1
-  [ -n "$after" ] || return 1
-  if base=$(git merge-base "$after" origin/develop 2>/dev/null); then
-    read_hashes "$base..$after"
-    return $?
+if [ "$1" = "--stdin" ]; then
+  if [ "$#" -ne 1 ]; then
+    echo "identity-gate: usage: identity-gate.sh <range>" >&2
+    exit 2
   fi
-  if only_new=$(read_hashes "$after" --not \
-    --exclude="refs/remotes/origin/HEAD" \
-    --remotes=origin 2>/dev/null); then
-    if [ -n "$only_new" ]; then
-      printf '%s\n' "$only_new"
-      return 0
-    fi
-  fi
-  read_hashes -1 "$after"
-}
-
-if ! hashes=$(read_hashes "$@" 2>/dev/null); then
-  if ! hashes=$(fallback_hashes "$@"); then
-    echo "identity-gate: git rev-list failed" >&2
+  hashes=$(cat) || {
+    echo "identity-gate: cannot read commits" >&2
     exit 1
-  fi
+  }
+elif ! hashes=$(git rev-list "$@" 2>/dev/null); then
+  echo "identity-gate: git rev-list failed" >&2
+  exit 1
 fi
 
 want="Rohit Goswami <rgoswami@ieee.org>"

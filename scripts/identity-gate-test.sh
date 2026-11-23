@@ -2,13 +2,18 @@
 # A clean range passes. A wrong author, a wrong committer, and a
 # trailer each fail. A committer date that differs from the author
 # date passes. A foreign commit that sits before the range is not
-# judged, including one that is already on another remote-tracking
-# branch. A merge or squash GitHub commits for Rohit passes; one that
+# judged. A merge or squash GitHub commits for Rohit passes; one that
 # brings a foreign commit or a trailer fails, and so does an agent or bot
-# author or committer.
+# author or committer. scripts/identity-history.sh checks every commit
+# reachable from one commit and skips none. No exclusion list exists. A
+# bad commit fails for a branch, a tag and a pull request. A later clean
+# commit still fails when a [skip ci] bad commit is reachable, also after
+# a commit that names it in a list. Deleting and recreating branches
+# does not change the result. A release merge passes. One bad commit on
+# main and develop fails on both.
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 gate=$root/scripts/identity-gate.sh
 
 tmp=$(mktemp -d)
@@ -18,6 +23,8 @@ git init -q -b main "$repo"
 git -C "$repo" config user.name "Rohit Goswami"
 git -C "$repo" config user.email "rgoswami@ieee.org"
 git -C "$repo" config commit.gpgsign false
+git -C "$repo" config tag.gpgsign false
+git -C "$repo" config advice.detachedHead false
 git -C "$repo" config core.hooksPath /dev/null
 
 export GIT_AUTHOR_NAME="Rohit Goswami"
@@ -260,65 +267,163 @@ git checkout -q -B plain "$base"
 git commit --allow-empty -q -m "Signed-off-by"
 "$gate" "$base..HEAD"
 
-# New branch: history already on another remote-tracking branch is out.
-git checkout -q -B develop "$base"
-GIT_AUTHOR_NAME="Ada Lovelace" \
-  GIT_AUTHOR_EMAIL="ada@example.com" \
-  git commit --allow-empty -q -m "already on develop"
-git commit --allow-empty -q -m "develop tip"
-devtip=$(git rev-parse HEAD)
-git checkout -q -B fresh "$devtip"
-git commit --allow-empty -q -m "new branch work"
-git update-ref refs/remotes/origin/develop "$devtip"
-git update-ref refs/remotes/origin/fresh HEAD
-# origin/HEAD follows this branch. It must not hide the new commits.
-git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/fresh
-"$gate" HEAD --not \
-  --exclude="origin/fresh" \
-  --exclude="origin/HEAD" \
-  --remotes=origin
-
-git commit --allow-empty -q -m "note" \
-  -m "Co-authored-by: Ada Lovelace <ada@example.com>"
-git update-ref refs/remotes/origin/fresh HEAD
-must_fail "new branch trailer" "$gate" HEAD --not \
-  --exclude="origin/fresh" \
-  --exclude="origin/HEAD" \
-  --remotes=origin
+must_fail_text() {
+  desc=$1
+  needle=$2
+  shift 2
+  if noise=$("$@" 2>&1); then
+    echo "identity-gate-test: $desc was accepted" >&2
+    exit 1
+  fi
+  case "$noise" in
+    *"$needle"*) ;;
+    *)
+      echo "identity-gate-test: $desc failed another way: $noise" >&2
+      exit 1
+      ;;
+  esac
+}
 
 missing_before=1111111111111111111111111111111111111111
 
-# Push event fallback: unreachable before falls back to merge-base with
-# origin/develop.
-git checkout -q -B fallback-with-develop "$base"
-git commit --allow-empty -q -m "fallback keeps new work"
-git update-ref refs/remotes/origin/develop "$base"
-noise=$("$gate" "$missing_before..HEAD" 2>&1)
-if [ -n "$noise" ]; then
-  echo "identity-gate-test: unexpected output on fallback with develop: $noise" >&2
-  exit 1
-fi
-git commit --allow-empty -q -m "note" \
-  -m "Co-authored-by: Ada Lovelace <ada@example.com>"
-must_fail "fallback with develop catches trailer" "$gate" "$missing_before..HEAD"
+# An unknown revision fails closed. It does not pick another set of commits.
+git checkout -q -B plain "$base"
+git commit --allow-empty -q -m "clean work after a missing before"
+must_fail_text "unknown revision" "git rev-list failed" \
+  "$gate" "$missing_before..HEAD"
 
-# If origin/develop is missing, fallback judges the pushed commits alone.
-git update-ref -d refs/remotes/origin/develop
-git checkout -q -B fallback-head-only "$base"
+hist=$root/scripts/identity-history.sh
+zero=0000000000000000000000000000000000000000
+
+# develop carries clean work. A release merge of that develop into
+# main passes. A later bad commit fails wherever it is reachable.
+git checkout -q -B develop "$base"
+git commit --allow-empty -q -m "clean develop"
+clean=$(git rev-parse HEAD)
+"$hist" "$clean"
+
+git checkout -q -B main "$base"
+git merge -q --no-ff --no-edit -m "chore: release 0.45.3" "$clean"
+release=$(git rev-parse HEAD)
+"$hist" "$release"
+
+git checkout -q -B develop "$clean"
 GIT_AUTHOR_NAME="Ada Lovelace" \
   GIT_AUTHOR_EMAIL="ada@example.com" \
-  git commit --allow-empty -q -m "older foreign already on remote"
-old_foreign=$(git rev-parse HEAD)
-git update-ref refs/remotes/origin/old "$old_foreign"
-git commit --allow-empty -q -m "fallback without develop keeps new work"
-noise=$("$gate" "$missing_before..HEAD" 2>&1)
-if [ -n "$noise" ]; then
-  echo "identity-gate-test: unexpected output on fallback without develop: $noise" >&2
+  git commit --allow-empty -q -m "bad work [skip ci]"
+skip=$(git rev-parse HEAD)
+git commit --allow-empty -q -m "later clean develop"
+later=$(git rev-parse HEAD)
+must_fail_text "later push after skipped bad commit" "wrong identity: $skip" \
+  "$hist" "$later"
+# The old before..sha range would have started after the skipped commit.
+BEFORE=$skip must_fail_text "before does not hide the skipped commit" \
+  "wrong identity: $skip" "$hist" "$later"
+
+must_fail_text "branch push" "wrong identity: $skip" \
+  "$hist" "$later"
+git tag -a v9.9.9 -m v9.9.9 "$later"
+must_fail_text "tag" "wrong identity: $skip" \
+  "$hist" "$(git rev-parse v9.9.9)"
+git checkout -q --detach "$base"
+GIT_COMMITTER_NAME="GitHub" \
+  GIT_COMMITTER_EMAIL="noreply@github.com" \
+  git merge -q --no-ff --no-edit \
+  -m "Merge pull request #50 from example/topic" "$later"
+must_fail_text "pull request" "wrong identity: $skip" \
+  "$hist" HEAD
+
+git tag -a v0.1.0 -m v0.1.0 "$clean"
+"$hist" "$(git rev-parse v0.1.0)"
+git checkout -q --detach "$base"
+GIT_COMMITTER_NAME="GitHub" \
+  GIT_COMMITTER_EMAIL="noreply@github.com" \
+  git merge -q --no-ff --no-edit \
+  -m "Merge pull request #51 from example/topic" "$clean"
+"$hist" HEAD
+
+# One commit pushed to main and develop. Both tips are that commit, and
+# both checks still fail. Remote tips are not consulted.
+git checkout -q --detach "$base"
+GIT_AUTHOR_NAME="Ada Lovelace" \
+  GIT_AUTHOR_EMAIL="ada@example.com" \
+  git commit --allow-empty -q -m "pushed to main and develop"
+both=$(git rev-parse HEAD)
+git update-ref refs/heads/main "$both"
+git update-ref refs/heads/develop "$both"
+git update-ref refs/remotes/origin/main "$both"
+git update-ref refs/remotes/origin/develop "$both"
+must_fail_text "bad commit on main" "wrong identity: $both" \
+  "$hist" "$(git rev-parse refs/heads/main)"
+must_fail_text "bad commit on develop" "wrong identity: $both" \
+  "$hist" "$(git rev-parse refs/heads/develop)"
+
+# Deleting and recreating the branches leaves both results unchanged.
+git checkout -q --detach
+git update-ref -d refs/heads/main
+git update-ref -d refs/heads/develop
+git update-ref refs/heads/main "$both"
+git update-ref refs/heads/develop "$both"
+must_fail_text "re-run main" "wrong identity: $both" \
+  "$hist" "$(git rev-parse refs/heads/main)"
+must_fail_text "re-run develop" "wrong identity: $both" \
+  "$hist" "$(git rev-parse refs/heads/develop)"
+git update-ref -d refs/heads/main
+git update-ref -d refs/heads/develop
+git update-ref refs/heads/main "$release"
+git update-ref refs/heads/develop "$clean"
+"$hist" "$(git rev-parse refs/heads/main)"
+"$hist" "$(git rev-parse refs/heads/develop)"
+git update-ref -d refs/heads/main
+git update-ref -d refs/heads/develop
+git update-ref refs/heads/main "$release"
+git update-ref refs/heads/develop "$clean"
+"$hist" "$(git rev-parse refs/heads/main)"
+"$hist" "$(git rev-parse refs/heads/develop)"
+
+# No exclusion list exists, and no argument or file in the checked tree
+# skips a bad commit. A later Rohit commit that adds a list naming the
+# bad commit still fails.
+if [ -e "$root/scripts/identity-legacy.txt" ]; then
+  echo "identity-gate-test: an exclusion list exists" >&2
   exit 1
 fi
-git commit --allow-empty -q -m "note" \
-  -m "Co-authored-by: Ada Lovelace <ada@example.com>"
-must_fail "fallback without develop catches trailer" "$gate" "$missing_before..HEAD"
+echo "$skip" >"$tmp/skip.txt"
+must_fail_text "second argument" "usage:" "$hist" "$later" "$tmp/skip.txt"
+git checkout -q -B listed "$later"
+mkdir -p scripts
+cp "$gate" "$hist" scripts/
+echo "$skip" >scripts/identity-legacy.txt
+git add scripts
+git commit -q -m "list the bad commit"
+must_fail_text "bad commit named in the tree" "wrong identity: $skip" \
+  scripts/identity-history.sh HEAD
+"$hist" "$base"
+must_fail_text "bad commit is never skipped" "wrong identity: $skip" \
+  "$hist" "$later"
+
+must_fail_text "unknown commit" "not a commit:" \
+  "$hist" "$missing_before"
+must_fail_text "ref deletion" "not a commit:" \
+  "$hist" "$zero"
+must_fail_text "history usage" "usage:" "$hist"
+
+git clone -q --depth 1 --branch develop "file://$repo" "$tmp/shallow"
+if (cd "$tmp/shallow" && "$hist" HEAD) >"$tmp/shallow-out" 2>&1; then
+  echo "identity-gate-test: shallow clone was accepted" >&2
+  exit 1
+fi
+shallow_noise=$(cat "$tmp/shallow-out")
+case "$shallow_noise" in
+  *"shallow repository"*) ;;
+  *)
+    echo "identity-gate-test: shallow clone failed another way: $shallow_noise" >&2
+    exit 1
+    ;;
+esac
+
+# The checkout this suite lives in passes.
+(cd "$root" && "$hist" HEAD)
 
 must_fail "missing range" "$gate"
 
