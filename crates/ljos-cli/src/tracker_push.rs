@@ -204,13 +204,12 @@ fn prepare_for_push(dir: &Path) -> Result<(), String> {
     }
 }
 
-/// Commit paths an earlier tracker write left on disk. Nothing to do when
-/// none are waiting. The caller does not already hold the tracker lock.
-fn land_deferred(dir: &Path) {
-    let _held = crate::tracker_commit_lock(dir);
-    let _ = crate::commit_paths(
+/// Commit paths an earlier tracker write left on disk, and the notes the
+/// batch window holds. Nothing to do when none are waiting. The caller
+/// does not already hold the tracker lock.
+pub(crate) fn land_deferred(dir: &Path) {
+    crate::land_deferred_writes(
         dir,
-        &[],
         "chore(tracker): commit writes deferred while git held the index",
     );
 }
@@ -593,6 +592,7 @@ fn resolve_org(dir: &Path, file: &str) -> Result<(), String> {
     let theirs = stage(dir, 3, file);
     let merged = match (ours, theirs) {
         (Some(a), Some(b)) => field_or_union(&base, &a, &b, file)?,
+        (Some(a), None) | (None, Some(a)) if vissue_core::ledger::is_ledger_text(&a) => a,
         (Some(a), None) | (None, Some(a)) => fold_org_text(&a),
         (None, None) => {
             return Err(format!(
@@ -623,6 +623,14 @@ fn looks_like_issue(text: &str) -> bool {
 }
 
 fn field_merge(base: &str, ours: &str, theirs: &str) -> Result<String, String> {
+    // A per-issue file of a split board is a heading and appended records.
+    // Read as a board, the records are body text: records on both sides
+    // conflict, and theirs go to a MERGE_CONFLICT drawer.
+    if vissue_core::ledger::is_ledger_text(ours) || vissue_core::ledger::is_ledger_text(theirs) {
+        return vissue_core::ledger::merge_file(base, ours, theirs)
+            .map(|merged| merged.text)
+            .map_err(|e| e.to_string());
+    }
     let merged = vissue_core::merge::merge_tracker("tracker", base, ours, theirs)
         .map_err(|e| e.to_string())?;
     if merged.text.contains("<<<<<<<") {
@@ -910,19 +918,11 @@ pub(crate) fn merge_atoms_driver(current: &Path, rel: &str) -> Result<(), String
     } else {
         current.to_path_buf()
     };
-    // git names the work tree by its real path. `%A` may reach the same
-    // directory through a symlink (`/var` is `/private/var` on macOS), so
-    // compare the real directories when the spelled paths differ.
-    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let real_current = resolved
+    // Only the directory is resolved: `%A` itself is the file written.
+    let rel_current = resolved
         .parent()
         .zip(resolved.file_name())
-        .map(|(dir, name)| real(dir).join(name));
-    let real_root = real(&root);
-    let rel_current = resolved
-        .strip_prefix(&root)
-        .ok()
-        .or_else(|| real_current.as_deref()?.strip_prefix(&real_root).ok())
+        .and_then(|(dir, name)| Some(Path::new(&crate::rel_to_top(&root, dir)?).join(name)))
         .ok_or_else(|| {
             format!(
                 "atoms merge: {} is outside the work tree",
@@ -937,9 +937,13 @@ pub(crate) fn merge_atoms_driver(current: &Path, rel: &str) -> Result<(), String
 
 /// One org file, after a union. Two headings that share a `:ID:` become
 /// one heading that keeps both bodies. Text with no duplicate id is
-/// returned unchanged.
+/// returned unchanged. So is a per-issue file of a split board: its
+/// records repeat the heading's `:ID:` and are not headings to merge.
 #[must_use]
 pub(crate) fn fold_org_text(text: &str) -> String {
+    if vissue_core::ledger::is_ledger_text(text) {
+        return text.to_string();
+    }
     let (_, headings) = parse_org(text);
     let mut seen = BTreeSet::new();
     let mut duplicated = false;
@@ -1740,6 +1744,19 @@ body b
         assert!(folded.contains("body b"), "{folded}");
         let plain = "* TODO [#C] Only\n:PROPERTIES:\n:ID:         only\n:END:\n";
         assert_eq!(fold_org_text(plain), plain);
+    }
+
+    /// A per-issue file of a split board is a heading and records. A
+    /// replace record renders the heading again, `:ID:` and all, and a
+    /// fold would merge the two and break the record framing.
+    #[test]
+    fn a_ledger_file_with_a_replace_record_is_not_folded() {
+        let heading = "* TODO [#C] One\n:PROPERTIES:\n:ID:         same\n:END:\nbody b\n";
+        let text = format!(
+            "#+VISSUE_LEDGER:\n#+VISSUE_LINES: 3 7\n* TODO [#C] One\n:PROPERTIES:\n:ID:         same\n:END:\nbody a\n#+VISSUE_LEDGER_LOG:\n%% replace {}\n{heading}\n",
+            heading.len()
+        );
+        assert_eq!(fold_org_text(&text), text);
     }
 
     #[test]
@@ -2633,5 +2650,40 @@ body b
             "{plain}"
         );
         assert!(!plain.contains("<<<<<<<"), "{plain}");
+    }
+
+    /// Two seats that each appended to the same per-issue file of a split
+    /// board merge to ours with theirs appended, with no conflict drawer.
+    #[test]
+    fn a_split_issue_file_merges_both_sides_records() {
+        let _env = crate::tests::env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("Software/probe/issues.org");
+        std::fs::create_dir_all(board.parent().unwrap()).unwrap();
+        std::fs::write(
+            &board,
+            "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        let layout = vissue_core::Layout::new(dir.path(), "Software");
+        vissue_core::ledger::migrate(&layout, false).unwrap();
+        let file = dir.path().join("Software/probe/issues/probe-a1b2.org");
+        let base = std::fs::read_to_string(&file).unwrap();
+        vissue_core::ops::note(&layout, "probe-a1b2", "from ours").unwrap();
+        let ours = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, &base).unwrap();
+        vissue_core::ops::note(&layout, "probe-a1b2", "from theirs").unwrap();
+        let theirs = std::fs::read_to_string(&file).unwrap();
+        let merged = field_merge(&base, &ours, &theirs).unwrap();
+        assert!(merged.starts_with(&ours), "{merged}");
+        assert!(merged.contains("from theirs"), "{merged}");
+        assert!(!merged.contains("MERGE_CONFLICT"), "{merged}");
+        std::fs::write(&file, &merged).unwrap();
+        let card = vissue_core::agent::show_json(&layout, "probe-a1b2").unwrap();
+        let shown = card.to_string();
+        assert!(
+            shown.contains("from ours") && shown.contains("from theirs"),
+            "{shown}"
+        );
     }
 }

@@ -265,11 +265,57 @@ fn a_write_from_a_product_checkout_lands_in_the_configured_tracker() {
         let sat = seat.ljos(product, &["sitting", &id]);
         assert!(sat.status.success(), "{}", said(&sat));
         assert_eq!(seat.snapshot(product), before, "{}", product.display());
-        let log = seat.git(&tracker, &["log", "--format=%s"]);
+        // A note held for the batch commit is named in the body of the
+        // commit that carries it.
+        let log = seat.git(&tracker, &["log", "--format=%B"]);
         for verb in ["filed", "noted", "claimed"] {
             assert!(log.contains(&format!("{id} {verb} by saddle")), "{log}");
         }
     }
+}
+
+/// A note the batch window holds is a commit once the process that held
+/// it exits, with no session-end hook and no later write or push.
+#[test]
+fn a_held_note_is_committed_when_its_process_exits() {
+    let Some(seat) = Seat::new() else {
+        return;
+    };
+    let tracker = seat.configured_tracker();
+    let product = seat.product("work");
+    let env = [("LJOS_TRACKER_BATCH_SECS", "600")];
+    let filed = seat.ljos_with(&product, &["file", "-p", "app", "crash on start"], &env);
+    assert!(filed.status.success(), "{}", said(&filed));
+    let stdout = String::from_utf8_lossy(&filed.stdout);
+    let id = stdout.split_whitespace().next().unwrap().to_string();
+    let before = seat.git(&tracker, &["rev-list", "--count", "HEAD"]);
+    let noted = seat.ljos_with(&product, &["note", &id, "seen again", "--verbose"], &env);
+    assert!(noted.status.success(), "{}", said(&noted));
+    assert!(
+        said(&noted).contains("held for the batch"),
+        "{}",
+        said(&noted)
+    );
+    let status = seat.git(
+        &tracker,
+        &[
+            "status",
+            "--porcelain",
+            "--",
+            "Software/app/issues.org",
+            "Software/app/issues",
+        ],
+    );
+    assert!(status.is_empty(), "{status}\n{}", said(&noted));
+    let after = seat.git(&tracker, &["rev-list", "--count", "HEAD"]);
+    assert_eq!(
+        after.trim().parse::<u32>().unwrap(),
+        before.trim().parse::<u32>().unwrap() + 1
+    );
+    let body = seat.git(&tracker, &["log", "-1", "--format=%B"]);
+    assert!(body.contains(&format!("{id} noted by saddle")), "{body}");
+    let shown = seat.git(&tracker, &["show", "HEAD:Software/app/issues.org"]);
+    assert!(shown.contains("seen again"), "{shown}");
 }
 
 /// A tracker whose projects sit under `VISSUE_PREFIX` is the tracker when

@@ -267,7 +267,7 @@ fn restore(dir: &Path, before: &Files) -> Result<()> {
     }
     for (path, bytes) in before {
         if std::fs::read(path).ok().as_deref() != Some(bytes.as_slice()) {
-            vissue_core::store::replace_file_atomically(path, &String::from_utf8_lossy(bytes))
+            crate::tracker_tmp::replace_file(path, &String::from_utf8_lossy(bytes))
                 .with_context(|| format!("restoring {}", path.display()))?;
         }
     }

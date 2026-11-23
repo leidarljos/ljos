@@ -221,6 +221,8 @@ impl Board {
             .env("LJOS_HOOKD", "off")
             .env("PACKSET_AUTH", "off")
             .env("PACKSET_URL", "http://127.0.0.1:1")
+            // Each verb here meets the remote; a held note would not.
+            .env("LJOS_TRACKER_BATCH_SECS", "0")
             .env(
                 "LJOS_TRACKER_PUSH_WAIT",
                 ljos_cli::DEFAULT_PUSH_WAIT_SECS.to_string(),
