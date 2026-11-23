@@ -471,7 +471,7 @@ impl Reader {
             })?;
         let mut cmd = Command::new(&self.bin);
         cmd.env_clear();
-        for key in ["PATH", "HOME"] {
+        for key in ["PATH", "HOME", "TMPDIR"] {
             if let Some(value) = std::env::var_os(key) {
                 cmd.env(key, value);
             }

@@ -6554,6 +6554,26 @@ pub fn exe_from_cargo_target(path: &Path) -> bool {
     false
 }
 
+/// True when `path` is a binary cargo built: [`exe_from_cargo_target`], or
+/// a binary in a profile directory, or its `deps`, of a target directory
+/// with another name, as `CARGO_TARGET_DIR` can give. Cargo keeps a
+/// `.cargo-lock` file in each profile directory it builds into.
+#[must_use]
+pub fn exe_from_cargo_build(path: &Path) -> bool {
+    if exe_from_cargo_target(path) {
+        return true;
+    }
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    let profile = if dir.file_name().is_some_and(|name| name == "deps") {
+        dir.parent()
+    } else {
+        Some(dir)
+    };
+    profile.is_some_and(|dir| dir.join(".cargo-lock").is_file())
+}
+
 /// `ljos seat`: who is sitting, one field a line.
 #[must_use]
 pub fn format_seat(seat: &Seat) -> String {
@@ -7720,37 +7740,133 @@ if [ -z "$real" ]; then echo "ljos guard: no $me found on PATH" >&2; exit 127; f
 case ",1,true,TRUE,yes,YES,on,ON," in
   *,"${LJOS_OFF:-}",*) exec "$real" "$@" ;;
 esac
+# A uid with no passwd entry, as in some containers, is not a reason to
+# refuse rm, git or find. The passwd home wins; $HOME is the fallback.
+# With neither, there is no home to limit the command to, and it runs.
+# id, getent and dscl are run from their system paths, never from PATH: a
+# stand-in on PATH could name another passwd home and make a TMPDIR that
+# holds the real home look like a sandbox. Without an answer from them
+# TMPDIR is not a temp root, so the guard stays on.
+# macOS has no getent; its directory service names the home there.
+pw_home=
+pw_id=
+for c in /usr/bin/id /bin/id; do
+  if [ -x "$c" ]; then pw_id=$c; break; fi
+done
+pw_getent=
+for c in /usr/bin/getent /bin/getent; do
+  if [ -x "$c" ]; then pw_getent=$c; break; fi
+done
+if [ -n "$pw_id" ]; then
+  if [ -n "$pw_getent" ]; then
+    pw=$("$pw_getent" passwd "$("$pw_id" -u)" 2>/dev/null || true)
+    rest=$pw
+    i=0
+    while [ "$i" -lt 5 ]; do
+      rest=${rest#*:}
+      i=$((i + 1))
+    done
+    pw_home=${rest%%:*}
+  elif [ -x /usr/bin/dscl ]; then
+    pw_user=$("$pw_id" -un 2>/dev/null || true)
+    if [ -n "$pw_user" ]; then
+      pw=$(/usr/bin/dscl . -read "/Users/$pw_user" NFSHomeDirectory 2>/dev/null || true)
+      pw_home=${pw#NFSHomeDirectory:}
+      while :; do
+        case $pw_home in
+          [[:space:]]*) pw_home=${pw_home#?} ;;
+          *) break ;;
+        esac
+      done
+      while :; do
+        case $pw_home in
+          *[[:space:]]) pw_home=${pw_home%?} ;;
+          *) break ;;
+        esac
+      done
+    fi
+  fi
+fi
+case $pw_home in
+  /*) ;;
+  *) pw_home= ;;
+esac
+resolve_path() {
+  rp_in=$1
+  [ -n "$rp_in" ] || return 0
+  rp_out=$(cd -P -- "$rp_in" 2>/dev/null && pwd -P || printf '')
+  if [ -z "$rp_out" ]; then
+    case $rp_in in
+      /*) rp_cur=$rp_in ;;
+      *) rp_cur=$PWD/$rp_in ;;
+    esac
+    rp_tail=
+    while [ ! -d "$rp_cur" ] && [ -n "$rp_cur" ] && [ "$rp_cur" != / ]; do
+      rp_base=${rp_cur##*/}
+      rp_cur=${rp_cur%/*}
+      [ -n "$rp_cur" ] || rp_cur=/
+      rp_tail=$rp_base${rp_tail:+/$rp_tail}
+    done
+    rp_out=$(cd -P -- "$rp_cur" 2>/dev/null && pwd -P || printf '%s' "$rp_cur")
+    rp_ifs=$IFS
+    IFS=/
+    set -f
+    for rp_seg in $rp_tail; do
+      case $rp_seg in
+        ""|".") ;;
+        "..")
+          case $rp_out in
+            /|/*/*) rp_out=${rp_out%/*}; [ -n "$rp_out" ] || rp_out=/ ;;
+            /*) rp_out=/ ;;
+          esac
+          ;;
+        *) rp_out=${rp_out%/}/$rp_seg ;;
+      esac
+    done
+    set +f
+    IFS=$rp_ifs
+  fi
+  while [ "${rp_out%/}" != "$rp_out" ] && [ -n "${rp_out%/}" ]; do rp_out=${rp_out%/}; done
+  printf '%s' "$rp_out"
+}
+pw_real=$(resolve_path "$pw_home")
 under_temp() {
   p=$1
   [ -n "$p" ] || return 1
-  for root in /tmp /var/tmp /private/tmp /dev/shm ${TMPDIR-}; do
-    [ -n "$root" ] || continue
-    root=${root%/}
-    [ -n "$root" ] || continue
+  for root in /tmp /var/tmp /private/tmp /dev/shm; do
     case $p in
       "$root"|"$root"/*) return 0 ;;
     esac
   done
+  # Without a passwd home a TMPDIR cannot be told from one that holds the
+  # person's home, so it is not a temp root.
+  case ${TMPDIR-} in
+    /*)
+      t=$(resolve_path "$TMPDIR")
+      case $t in
+        /*/*)
+          case ${pw_real-} in
+            ""|"$t"|"$t"/*) ;;
+            *)
+              case $p in
+                "$t"|"$t"/*) return 0 ;;
+              esac
+              ;;
+          esac
+          ;;
+      esac
+      ;;
+  esac
   return 1
 }
 case ",1,true,TRUE,yes,YES,on,ON," in
   *,"${LJOS_GUARD:-}",*) ;;
-  *) if under_temp "$(cd -- "$HOME" 2>/dev/null && pwd -P)"; then exec "$real" "$@"; fi ;;
+  *)
+    home_real=$(resolve_path "${HOME-}")
+    if under_temp "$home_real"; then exec "$real" "$@"; fi
+    ;;
 esac
-# A uid with no passwd entry, as in some containers, is not a reason to
-# refuse rm, git or find. The passwd home wins; $HOME is the fallback.
-# With neither, there is no home to limit the command to, and it runs.
-guard_home=
-if command -v getent >/dev/null 2>&1 && command -v id >/dev/null 2>&1; then
-  pw=$(getent passwd "$(id -u)" 2>/dev/null || true)
-  rest=$pw
-  i=0
-  while [ "$i" -lt 5 ]; do
-    rest=${rest#*:}
-    i=$((i + 1))
-  done
-  guard_home=${rest%%:*}
-fi
+guard_home=$pw_home
 if [ -z "$guard_home" ]; then
   case ${HOME-} in
     /*) guard_home=$HOME ;;
@@ -12353,12 +12469,12 @@ type Pool = Option<Vec<(Hit, DenseSignal)>>;
 
 /// Jev's judgment of the prompt, and the local search that answers when
 /// Jev does not. With Jev on, the pack is searched once, here, and the
-/// judge reads those hits on its own thread. The wait is
-/// [`JEV_HOOK_BUDGET_MS`] from when that thread starts. The search time
-/// stays on the search budget. The local search comes back as `Some`
-/// when it ran, so the caller does not repeat it. Two searches of one
-/// cue at once cost the hook the slower of the two, about 190 ms against
-/// 115 ms for one.
+/// judge reads those hits in a detached worker process (or on its own
+/// thread if the worker cannot spawn). The wait is [`JEV_HOOK_BUDGET_MS`]
+/// from when that wait starts. The search time stays on the search
+/// budget. The local search comes back as `Some` when it ran, so the
+/// caller does not repeat it. Two searches of one cue at once cost the
+/// hook the slower of the two, about 190 ms against 115 ms for one.
 fn judged_with_local(
     call: &HookCall,
     cue: &str,
@@ -12375,12 +12491,53 @@ fn judged_with_local(
     let hits: Option<Vec<Hit>> = local
         .as_ref()
         .map(|pool| pool.iter().map(|(h, _)| h.clone()).collect());
+    let dirs = jev::Dirs::from_env();
+    let cfg = jev::config().map(|(c, _)| c);
+    let seen = seen_ids(call.session.as_deref());
+    if let Some(hits) = hits {
+        let Some(cfg) = cfg else {
+            return (None, Some(local));
+        };
+        let Some((candidates, texts, claims)) = prepare_prompt_candidates(cue, hits, &seen, &cfg)
+        else {
+            return (None, Some(local));
+        };
+        let job = JudgeWorkerJob {
+            cfg,
+            cue: cue.to_string(),
+            candidates: texts,
+            claims,
+            dirs,
+        };
+        let rx = match spawn_judge_worker(&job) {
+            Some(rx) => rx,
+            None => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let refs: Vec<&str> = job.candidates.iter().map(String::as_str).collect();
+                    let judged = hook_timed("jev_judge", || {
+                        jev::judge_with(&job.cfg, &job.cue, &refs, &job.claims, &job.dirs)
+                    });
+                    let _ = tx.send(judged);
+                });
+                rx
+            }
+        };
+        let judged = rx
+            .recv_timeout(std::time::Duration::from_millis(jev_hook_budget_ms()))
+            .ok()
+            .flatten()
+            .map(|j| (candidates, j));
+        return (judged, Some(local));
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     {
         let call = call.clone();
         let cue = cue.to_string();
         std::thread::spawn(move || {
-            let _ = tx.send(judged_prompt_over(&call, &cue, hits));
+            let _ = tx.send(judged_prompt_over_with(
+                &call, &cue, None, cfg, &seen, &dirs,
+            ));
         });
     }
     let judged = rx
@@ -12390,36 +12547,40 @@ fn judged_with_local(
     (judged, Some(local))
 }
 
-/// The prompt's candidates and Jev's judgment of them, when this machine
-/// turned Jev on and the prompt is worth a call: enough words to judge,
-/// at least `min_candidates` claims to choose between after the local
-/// kind, refresher and seen filters, and the month's spend under its cap.
-/// Candidates come from the search without the local cross-encoder, which
-/// Jev replaces.
-fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)> {
-    judged_prompt_over(call, cue, None)
+#[derive(serde::Serialize, serde::Deserialize)]
+struct JudgeWorkerJob {
+    cfg: jev::Config,
+    cue: String,
+    candidates: Vec<String>,
+    claims: Vec<jev::LoggedClaim>,
+    dirs: jev::Dirs,
 }
 
-/// [`judged_prompt`] over `hits` already found for `cue`, searching the
-/// pack only when none are given. A search does not count as a recall.
-/// The memories the prompt is handed are counted where the note is built.
-fn judged_prompt_over(
-    call: &HookCall,
-    cue: &str,
-    hits: Option<Vec<Hit>>,
-) -> Option<(Vec<Hit>, jev::Judgment)> {
-    if call.event != "UserPromptSubmit" {
-        return None;
+/// Run one prompt judgment in a detached worker started by `ljos hook`.
+pub fn run_jev_judge_worker() -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    let mut raw = String::new();
+    std::io::stdin().read_to_string(&mut raw)?;
+    let job: JudgeWorkerJob = serde_json::from_str(&raw)?;
+    let texts: Vec<&str> = job.candidates.iter().map(String::as_str).collect();
+    let judged = jev::judge_with(&job.cfg, &job.cue, &texts, &job.claims, &job.dirs);
+    if let Ok(line) = serde_json::to_string(&judged) {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
     }
-    let (cfg, _) = jev::config()?;
+    Ok(())
+}
+
+fn prepare_prompt_candidates(
+    cue: &str,
+    hits: Vec<Hit>,
+    seen: &std::collections::BTreeSet<String>,
+    cfg: &jev::Config,
+) -> Option<(Vec<Hit>, Vec<String>, Vec<jev::LoggedClaim>)> {
     if cue.split_whitespace().count() < cfg.min_words {
         return None;
     }
-    let seen = seen_ids(call.session.as_deref());
-    let hits = match hits {
-        Some(hits) => hits,
-        None => hook_timed("judge_search", || packset_search_relevant(cue, RERANK_POOL)).ok()?,
-    };
     let pool: Vec<Hit> = hits
         .into_iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
@@ -12434,7 +12595,7 @@ fn judged_prompt_over(
     if candidates.len() < cfg.min_candidates {
         return None;
     }
-    let texts: Vec<&str> = candidates.iter().map(|h| h.text.as_str()).collect();
+    let texts: Vec<String> = candidates.iter().map(|h| h.text.clone()).collect();
     let claims: Vec<jev::LoggedClaim> = candidates
         .iter()
         .map(|h| jev::LoggedClaim {
@@ -12442,7 +12603,109 @@ fn judged_prompt_over(
             kind: h.kind.clone(),
         })
         .collect();
-    let judged = hook_timed("jev_judge", || jev::judge(cue, &texts, &claims))?;
+    Some((candidates, texts, claims))
+}
+
+#[cfg(unix)]
+fn spawn_judge_worker(
+    job: &JudgeWorkerJob,
+) -> Option<std::sync::mpsc::Receiver<Option<jev::Judgment>>> {
+    use std::io::{BufRead, Write};
+    use std::os::unix::process::CommandExt as _;
+    let exe = std::env::current_exe()
+        .ok()
+        .filter(|p| p.file_name().is_some_and(|n| n == "ljos"))?;
+    let payload = serde_json::to_vec(job).ok()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["hook", "--judge-worker"])
+        .env_remove("LJOS_IN_HOOK")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: setsid is async-signal-safe and detaches the worker from the
+    // hook's session so a late reply finishes after `ljos hook` exits.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(&payload).is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    }
+    let stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        let parsed = if reader.read_line(&mut line).is_ok() {
+            serde_json::from_str::<Option<jev::Judgment>>(line.trim())
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let _ = tx.send(parsed);
+        let _ = child.wait();
+    });
+    Some(rx)
+}
+
+#[cfg(not(unix))]
+fn spawn_judge_worker(
+    _job: &JudgeWorkerJob,
+) -> Option<std::sync::mpsc::Receiver<Option<jev::Judgment>>> {
+    None
+}
+
+/// The prompt's candidates and Jev's judgment of them, when this machine
+/// turned Jev on and the prompt is worth a call: enough words to judge,
+/// at least `min_candidates` claims to choose between after the local
+/// kind, refresher and seen filters, and the month's spend under its cap.
+/// Candidates come from the search without the local cross-encoder, which
+/// Jev replaces.
+fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)> {
+    if call.event != "UserPromptSubmit" {
+        return None;
+    }
+    let dirs = jev::Dirs::from_env();
+    let cfg = jev::config().map(|(c, _)| c);
+    let seen = seen_ids(call.session.as_deref());
+    judged_prompt_over_with(call, cue, None, cfg, &seen, &dirs)
+}
+
+/// [`judged_prompt`] over `hits` already found for `cue`, searching the
+/// pack only when none are given. A search does not count as a recall.
+/// The memories the prompt is handed are counted where the note is built.
+fn judged_prompt_over_with(
+    call: &HookCall,
+    cue: &str,
+    hits: Option<Vec<Hit>>,
+    cfg: Option<jev::Config>,
+    seen: &std::collections::BTreeSet<String>,
+    dirs: &jev::Dirs,
+) -> Option<(Vec<Hit>, jev::Judgment)> {
+    if call.event != "UserPromptSubmit" {
+        return None;
+    }
+    let cfg = cfg?;
+    if cue.split_whitespace().count() < cfg.min_words {
+        return None;
+    }
+    let hits = match hits {
+        Some(hits) => hits,
+        None => hook_timed("judge_search", || packset_search_relevant(cue, RERANK_POOL)).ok()?,
+    };
+    let (candidates, texts, claims) = prepare_prompt_candidates(cue, hits, seen, &cfg)?;
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let judged = hook_timed("jev_judge", || {
+        jev::judge_with(&cfg, cue, &refs, &claims, dirs)
+    })?;
     Some((candidates, judged))
 }
 
@@ -17175,6 +17438,7 @@ fn other_home_writer_line(base: &str) -> Option<String> {
         let facts = DownFacts {
             url_off: false,
             url_set: false,
+            port_set: false,
             asked: host.to_string(),
             asked_port: Some(port),
             packset: true,
@@ -20751,6 +21015,7 @@ struct SeenWriter {
 struct DownFacts {
     url_off: bool,
     url_set: bool,
+    port_set: bool,
     asked: String,
     asked_port: Option<u16>,
     packset: bool,
@@ -20806,11 +21071,17 @@ fn memory_off_temp_line(home: &Path) -> String {
 }
 
 /// That line when this process's `HOME` is a sandbox and no writer address
-/// was named. A named `PACKSET_URL`, including `off`, keeps its own line.
+/// was named. A nonblank `PACKSET_URL` or selected port keeps its own line.
+/// The selected port is `PACKSET_PORT` when set, even blank, and
+/// `LJOS_MEM_PORT` otherwise.
 pub fn sandbox_memory_off() -> Option<String> {
     if std::env::var("PACKSET_URL")
         .ok()
         .is_some_and(|url| !url.trim().is_empty())
+        || std::env::var("PACKSET_PORT")
+            .ok()
+            .or_else(|| std::env::var("LJOS_MEM_PORT").ok())
+            .is_some_and(|port| !port.trim().is_empty())
     {
         return None;
     }
@@ -20824,14 +21095,16 @@ fn down_facts() -> DownFacts {
         .unwrap_or_default();
     let url_off = url == "off";
     let url_set = !url.is_empty() && !url_off;
+    let port_raw = std::env::var("PACKSET_PORT")
+        .ok()
+        .or_else(|| std::env::var("LJOS_MEM_PORT").ok())
+        .map(|raw| raw.trim().to_string())
+        .unwrap_or_default();
+    let port_set = !port_raw.is_empty();
     let asked = if url_set {
         url.trim_end_matches('/').to_string()
     } else {
-        let port = std::env::var("PACKSET_PORT")
-            .ok()
-            .or_else(|| std::env::var("LJOS_MEM_PORT").ok())
-            .and_then(|raw| raw.trim().parse::<u16>().ok())
-            .unwrap_or(PACK_DEFAULT_PORT);
+        let port = port_raw.parse::<u16>().ok().unwrap_or(PACK_DEFAULT_PORT);
         format!("127.0.0.1:{port}")
     };
     let asked_port = asked
@@ -20844,20 +21117,23 @@ fn down_facts() -> DownFacts {
         .filter(|path| !path.is_empty())
         .unwrap_or_else(|| pack_home_under(&our_home));
     let packset = on_path("packset");
+    let temp = bookkeep::temp_home();
+    let probe_writers = packset && !url_off && (url_set || port_set || temp.is_none());
     DownFacts {
         url_off,
         url_set,
+        port_set,
         asked,
         asked_port,
         packset,
-        writers: if packset && !url_off {
+        writers: if probe_writers {
             seen_writers(asked_port, &our_home, &our_pack)
         } else {
             Vec::new()
         },
         our_home,
         our_pack,
-        temp: bookkeep::temp_home(),
+        temp,
     }
 }
 
@@ -20876,6 +21152,11 @@ fn render_down(facts: &DownFacts) -> String {
     if facts.url_off {
         return "PACKSET_URL=off: this seat has no pack on purpose".to_string();
     }
+    if !facts.url_set && !facts.port_set {
+        if let Some(home) = &facts.temp {
+            return memory_off_temp_line(home);
+        }
+    }
     if !facts.packset {
         return "no pack writer is answering and packset is not on PATH, so run `cargo install --locked packset`.".to_string();
     }
@@ -20893,9 +21174,6 @@ fn render_down(facts: &DownFacts) -> String {
             "the pack writer at {} is not answering, so run `packset ensure`.",
             facts.asked
         );
-    }
-    if let Some(home) = &facts.temp {
-        return memory_off_temp_line(home);
     }
     format!(
         "no pack writer is answering on {}, so run `packset ensure`.",
@@ -22580,6 +22858,9 @@ fn pack_workspace() -> String {
 
 pub fn pack() -> Result<PacksetClient> {
     load_seat_env();
+    if let Some(line) = sandbox_memory_off() {
+        bail!("{line}");
+    }
     scope_pack_port()?;
     Ok(PacksetClient::from_env()
         .context("PACKSET_URL=off: this seat has no pack on purpose")?
@@ -53856,8 +54137,24 @@ pub fn tcb_check(argv: &[String]) -> Option<String> {
 
 /// [`tcb_check`] for a command that will run in `cwd`.
 fn tcb_check_in(argv: &[String], cwd: Option<&Path>) -> Option<String> {
+    tcb_check_in_with_env(argv, cwd, &[])
+}
+
+/// [`tcb_check`] for a command that will run in `cwd`, passing `extra_env`
+/// only to the spawned `ljos-policyd` child process.
+pub fn tcb_check_in_with_env(
+    argv: &[String],
+    cwd: Option<&Path>,
+    extra_env: &[(&str, &str)],
+) -> Option<String> {
     let bin = policyd_bin()?;
-    Some(tcb_answer_in(&bin, argv, guard_timeout(), cwd))
+    Some(tcb_answer_in_with_env(
+        &bin,
+        argv,
+        guard_timeout(),
+        cwd,
+        extra_env,
+    ))
 }
 
 /// What `bin check -- argv` says within `deadline`, as a verdict line.
@@ -53881,6 +54178,16 @@ pub fn tcb_answer_in(
     argv: &[String],
     deadline: std::time::Duration,
     cwd: Option<&Path>,
+) -> String {
+    tcb_answer_in_with_env(bin, argv, deadline, cwd, &[])
+}
+
+fn tcb_answer_in_with_env(
+    bin: &Path,
+    argv: &[String],
+    deadline: std::time::Duration,
+    cwd: Option<&Path>,
+    extra_env: &[(&str, &str)],
 ) -> String {
     use std::io::Read as _;
     // A missing file is not a fault. CI and a fresh install have no
@@ -53940,6 +54247,9 @@ pub fn tcb_answer_in(
         // the command will run in. The hook already has that directory.
         if let Some(dir) = run_dir.as_deref() {
             cmd.current_dir(dir);
+        }
+        for (k, v) in extra_env {
+            cmd.env(k, v);
         }
         cmd.spawn()
     };
@@ -56726,8 +57036,9 @@ mod tests {
             "#!/bin/sh\nprintf '%s\\n' \"$0\" >> '{}'\nexit 0\n",
             marker.display()
         );
+        let no_lookup = shim_without_passwd_lookup();
         for cmd in ["rm", "git", "find"] {
-            publish_exe(&guard.join(cmd), super::GUARD_SHIM);
+            publish_exe(&guard.join(cmd), &no_lookup);
             publish_exe(&fake.join(cmd), &record);
         }
         publish_exe(
@@ -56787,6 +57098,78 @@ mod tests {
             let ran = std::fs::read_to_string(&marker).unwrap_or_default();
             assert!(ran.contains(cmd), "{cmd} was refused: {ran} {err}");
         }
+    }
+
+    /// The guard shim with its passwd lookup programs moved to paths that
+    /// do not exist, as on a box with no `getent` and no `dscl`.
+    fn shim_without_passwd_lookup() -> String {
+        let getent = "for c in /usr/bin/getent /bin/getent; do";
+        let dscl = "[ -x /usr/bin/dscl ]";
+        assert!(super::GUARD_SHIM.contains(getent));
+        assert!(super::GUARD_SHIM.contains(dscl));
+        super::GUARD_SHIM
+            .replace(getent, "for c in /nonexistent/getent; do")
+            .replace(dscl, "[ -x /nonexistent/dscl ]")
+    }
+
+    /// A `getent` and an `id` first on PATH do not name the passwd home.
+    /// With HOME and TMPDIR both the real passwd home, the stand-ins answer
+    /// another home, which would make that TMPDIR a temp root holding HOME.
+    /// The shim reads the passwd entry itself, so the command is judged.
+    #[cfg(unix)]
+    #[test]
+    fn a_getent_on_path_does_not_make_the_passwd_home_a_sandbox() {
+        let _env = env_guard();
+        let Some(pw) = crate::proc_tree::own_home() else {
+            eprintln!("skipping: this uid has no passwd home");
+            return;
+        };
+        let pw = std::fs::canonicalize(&pw).unwrap_or(pw);
+        if pw.components().count() < 3 || crate::bookkeep::path_is_temp(Some(&pw)) {
+            eprintln!(
+                "skipping: passwd home {} is a temp root or too short for one",
+                pw.display()
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let guard = dir.path().join("guard-bin");
+        let fake = dir.path().join("fake");
+        std::fs::create_dir_all(&guard).unwrap();
+        std::fs::create_dir_all(&fake).unwrap();
+        publish_exe(&guard.join("rm"), super::GUARD_SHIM);
+        publish_exe(&fake.join("rm"), "#!/bin/sh\nexit 0\n");
+        publish_exe(
+            &fake.join("ljos-policyd"),
+            "#!/bin/sh\nprintf 'allow\\twarn\\tRULE\\tGUARDED\\n'\n",
+        );
+        publish_exe(
+            &fake.join("getent"),
+            "#!/bin/sh\nprintf 'u:x:4242:4242::/nonexistent/fake-home:/bin/sh\\n'\n",
+        );
+        publish_exe(
+            &fake.join("id"),
+            "#!/bin/sh\ncase \"$1\" in -un) echo u ;; *) echo 4242 ;; esac\n",
+        );
+        let out = std::process::Command::new(guard.join("rm"))
+            .args(["-f", "dummy"])
+            .current_dir(dir.path())
+            .env_clear()
+            .env("HOME", &pw)
+            .env("TMPDIR", &pw)
+            .env(
+                "PATH",
+                format!("{}:{}:/usr/bin:/bin", guard.display(), fake.display()),
+            )
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "shim failed: {err}");
+        assert!(
+            err.contains("GUARDED"),
+            "a getent on PATH made the passwd home a sandbox: {err:?}"
+        );
     }
 
     /// A directory this test creates, outside the temp roots, mode `0o755`.
@@ -57214,8 +57597,15 @@ mod tests {
         );
         assert_eq!(super::take_guard_note(), None, "a temp HOME names no rule");
         let refused = super::ensure_writer().expect_err("a temp HOME names its refusal");
-        let temp =
+        // The line names a fixed temp root that holds the home before a
+        // longer TMPDIR inside it.
+        let canon_temp =
             std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+        let temp = ["/tmp", "/var/tmp", "/private/tmp", "/dev/shm"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|root| canon_temp.starts_with(root))
+            .unwrap_or(canon_temp);
         let under_temp = format!("under {}", temp.display());
         let refused = refused.to_string();
         assert!(
@@ -75056,6 +75446,7 @@ lesson, due yesterday, seat ada
         let base = super::DownFacts {
             url_off: false,
             url_set: false,
+            port_set: false,
             asked: "127.0.0.1:8761".into(),
             asked_port: Some(8761),
             packset: true,
@@ -75143,6 +75534,7 @@ lesson, due yesterday, seat ada
         let mut base = super::DownFacts {
             url_off: false,
             url_set: false,
+            port_set: false,
             asked: "127.0.0.1:8761".into(),
             asked_port: Some(8761),
             packset: true,
@@ -75184,6 +75576,7 @@ lesson, due yesterday, seat ada
         let mut facts = super::DownFacts {
             url_off: false,
             url_set: false,
+            port_set: false,
             asked: "127.0.0.1:8761".into(),
             asked_port: Some(8761),
             packset: true,
@@ -77461,6 +77854,43 @@ lesson, due yesterday, seat ada
         }
     }
 
+    /// A passwd home and `HOME` that are one private directory outside the
+    /// temp roots, so `~`, `cd ~` and the key directory agree whatever
+    /// `HOME` the suite runs under, and the real passwd home is not touched.
+    struct HoldPersonHome {
+        _env: HoldEnv,
+        _own: crate::proc_tree::HoldOwnHome,
+        _dir: tempfile::TempDir,
+    }
+
+    impl HoldPersonHome {
+        fn new() -> Self {
+            let dir = tempfile::Builder::new()
+                .prefix("ljos-person-home-")
+                .tempdir_in(crate::test_seat_root::seat_root(
+                    crate::bookkeep::path_is_temp,
+                ))
+                .unwrap();
+            let home = dir.path().join("u");
+            std::fs::create_dir_all(home.join(".config/ljos")).unwrap();
+            let own = crate::proc_tree::HoldOwnHome::set(&home);
+            let env = HoldEnv::set(&[
+                ("HOME", home.to_str().unwrap()),
+                ("XDG_CONFIG_HOME", home.join(".config").to_str().unwrap()),
+                ("XDG_DATA_HOME", home.join(".local/share").to_str().unwrap()),
+                (
+                    "XDG_STATE_HOME",
+                    home.join(".local/state").to_str().unwrap(),
+                ),
+            ]);
+            Self {
+                _env: env,
+                _own: own,
+                _dir: dir,
+            }
+        }
+    }
+
     /// A runner that could rewrite the person key could choose the
     /// passphrase, and one that could clear the failure count could guess
     /// without a lockout. A write to either, or into their directory, runs
@@ -77582,6 +78012,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn a_tree_above_the_person_key_runs_with_its_warning() {
         let _g = env_guard();
+        let _person_home = HoldPersonHome::new();
         let data = tempfile::tempdir().unwrap();
         let _env = HoldEnv::set(&[
             ("XDG_DATA_HOME", data.path().to_str().unwrap()),
@@ -78103,6 +78534,7 @@ lesson, due yesterday, seat ada
     #[test]
     fn every_route_to_the_person_key_directory_names_its_rule() {
         let _g = env_guard();
+        let _person_home = HoldPersonHome::new();
         let dir = person_key::key_dir().expect("a passwd home");
         std::fs::create_dir_all(&dir).unwrap();
         let config = dir.parent().unwrap().to_path_buf();

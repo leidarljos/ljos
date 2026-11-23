@@ -3,7 +3,8 @@
 # SHA-256 published beside it and its GitHub build attestation, and run
 # `ljos onboard` for every coding runner found on this machine. With none
 # found, the tracker and deed store are still set up. Outside a temporary
-# home, the memory writer is set up too. Under a temporary home, memory is off unless PACKSET_URL names a pack.
+# home, the memory writer is set up too. Under a temporary home, memory is off unless PACKSET_URL or the selected writer port is nonblank.
+# PACKSET_PORT is the selected port when set, and LJOS_MEM_PORT otherwise.
 #
 # One command for a new machine. It fetches the release assets, checks
 # each SHA-256, installs the encoder and its model, and sets up the tracker
@@ -570,13 +571,119 @@ if [ -d "$tmp_root" ]; then
   tmp_root=$(CDPATH='' cd -- "$tmp_root" 2>/dev/null && pwd -P) ||
     die "could not resolve TMPDIR $TMPDIR. Create it and run \`sh install.sh\` again."
 fi
+resolve_path() {
+  rp_in=$1
+  [ -n "$rp_in" ] || return 0
+  rp_out=$(cd -P -- "$rp_in" 2>/dev/null && pwd -P || printf '')
+  if [ -z "$rp_out" ]; then
+    case $rp_in in
+      /*) rp_cur=$rp_in ;;
+      *) rp_cur=$PWD/$rp_in ;;
+    esac
+    rp_tail=
+    while [ ! -d "$rp_cur" ] && [ -n "$rp_cur" ] && [ "$rp_cur" != / ]; do
+      rp_base=${rp_cur##*/}
+      rp_cur=${rp_cur%/*}
+      [ -n "$rp_cur" ] || rp_cur=/
+      rp_tail=$rp_base${rp_tail:+/$rp_tail}
+    done
+    rp_out=$(cd -P -- "$rp_cur" 2>/dev/null && pwd -P || printf '%s' "$rp_cur")
+    rp_ifs=$IFS
+    IFS=/
+    set -f
+    # shellcheck disable=SC2086
+    for rp_seg in $rp_tail; do
+      case $rp_seg in
+        ""|".") ;;
+        "..")
+          case $rp_out in
+            /|/*/*) rp_out=${rp_out%/*}; [ -n "$rp_out" ] || rp_out=/ ;;
+            /*) rp_out=/ ;;
+          esac
+          ;;
+        *) rp_out=${rp_out%/}/$rp_seg ;;
+      esac
+    done
+    set +f
+    IFS=$rp_ifs
+  fi
+  while [ "${rp_out%/}" != "$rp_out" ] && [ -n "${rp_out%/}" ]; do rp_out=${rp_out%/}; done
+  printf '%s' "$rp_out"
+}
 temporary_root=
 case "${home_real}/" in
   /tmp/*) temporary_root=/tmp ;;
   /var/tmp/*) temporary_root=/var/tmp ;;
   /private/tmp/*) temporary_root=/private/tmp ;;
   /dev/shm/*) temporary_root=/dev/shm ;;
-  "${tmp_root%/}"/*) temporary_root=${tmp_root%/} ;;
+  *)
+    case ${TMPDIR-} in
+      /*)
+        t=$(resolve_path "$tmp_root")
+        # id, getent and dscl run from their system paths, never from
+        # PATH: a stand-in on PATH could name another passwd home and make
+        # a TMPDIR that holds the real home look like a sandbox.
+        # macOS has no getent; its directory service names the home there.
+        pw_home=
+        pw_id=
+        for c in /usr/bin/id /bin/id; do
+          if [ -x "$c" ]; then pw_id=$c; break; fi
+        done
+        pw_getent=
+        for c in /usr/bin/getent /bin/getent; do
+          if [ -x "$c" ]; then pw_getent=$c; break; fi
+        done
+        if [ -n "$pw_id" ]; then
+          if [ -n "$pw_getent" ]; then
+            pw=$("$pw_getent" passwd "$("$pw_id" -u)" 2>/dev/null || true)
+            rest=$pw
+            i=0
+            while [ "$i" -lt 5 ]; do
+              rest=${rest#*:}
+              i=$((i + 1))
+            done
+            pw_home=${rest%%:*}
+          elif [ -x /usr/bin/dscl ]; then
+            pw_user=$("$pw_id" -un 2>/dev/null || true)
+            if [ -n "$pw_user" ]; then
+              pw=$(/usr/bin/dscl . -read "/Users/$pw_user" NFSHomeDirectory 2>/dev/null || true)
+              pw_home=${pw#NFSHomeDirectory:}
+              while :; do
+                case $pw_home in
+                  [[:space:]]*) pw_home=${pw_home#?} ;;
+                  *) break ;;
+                esac
+              done
+              while :; do
+                case $pw_home in
+                  *[[:space:]]) pw_home=${pw_home%?} ;;
+                  *) break ;;
+                esac
+              done
+            fi
+          fi
+        fi
+        case $pw_home in
+          /*) pw_real=$(resolve_path "$pw_home") ;;
+          *) pw_real= ;;
+        esac
+        # Without a passwd home a TMPDIR cannot be told from one that
+        # holds the person's home, so it is not a temp root.
+        case $t in
+          /*/*)
+            case ${pw_real-} in
+              ""|"$t"|"$t"/*) ;;
+              *)
+                case "${home_real}/" in
+                  "$t"/*) temporary_root=$t ;;
+                esac
+                ;;
+            esac
+            ;;
+        esac
+        ;;
+    esac
+    ;;
 esac
 if ! mkdir -p "$BIN_DIR" 2>"$TMP/mkdir.err"; then
   why=$(head -n 1 "$TMP/mkdir.err" 2>/dev/null | tr -d '\r' || true)
@@ -1340,7 +1447,7 @@ cline dir:Documents/Cline"
 # this install does not leave a writer running.
 root=$temporary_root
 memory_off=0
-case ${PACKSET_URL:-} in
+case "${PACKSET_URL:-}${PACKSET_PORT-${LJOS_MEM_PORT-}}" in
   *[![:space:]]*) root= ;;
 esac
 if [ "${PACKSET_URL:-}" = off ]; then

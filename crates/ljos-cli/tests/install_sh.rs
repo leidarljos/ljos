@@ -484,6 +484,7 @@ fn command_paths_with_spaces_are_shell_quoted() {
         .args(["--no-embed", "--no-modify-path"])
         .env_clear()
         .env("HOME", &home)
+        .env("TMPDIR", dir.path())
         .env("PATH", "/usr/bin:/bin")
         .output()
         .unwrap();
@@ -1139,6 +1140,7 @@ fn a_named_pack_in_a_temporary_home_keeps_its_own_memory_reason() {
             .args(["--no-embed", "--no-modify-path"])
             .env_clear()
             .env("HOME", &home)
+            .env("TMPDIR", dir.path())
             .env("PACKSET_URL", packset_url)
             .env("PATH", "/usr/bin:/bin")
             .output()
@@ -1159,6 +1161,75 @@ fn a_named_pack_in_a_temporary_home_keeps_its_own_memory_reason() {
             "{packset_url}:\n{text}"
         );
     }
+}
+
+#[test]
+fn a_writer_port_in_a_temporary_home_keeps_memory_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    for port_var in ["PACKSET_PORT", "LJOS_MEM_PORT"] {
+        let out = Command::new("sh")
+            .arg(install_sh())
+            .arg("--from-dir")
+            .arg(&progs)
+            .args(["--no-embed", "--no-modify-path"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("TMPDIR", dir.path())
+            .env(port_var, "9876")
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        let text = said(&out);
+        assert!(out.status.success(), "{port_var}:\n{text}");
+        assert!(
+            !text.contains("memory and the command guard are off"),
+            "{port_var}:\n{text}"
+        );
+        assert!(
+            text.contains("the command guard is off because the home is under"),
+            "{port_var}:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn a_blank_packset_port_hides_ljos_mem_port_under_a_temporary_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .args(["--no-embed", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("TMPDIR", dir.path())
+        .env("PACKSET_PORT", " ")
+        .env("LJOS_MEM_PORT", "9876")
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("memory and the command guard are off"),
+        "{text}"
+    );
 }
 
 #[test]

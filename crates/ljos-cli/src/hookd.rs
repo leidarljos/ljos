@@ -152,8 +152,8 @@ pub fn release() {
 }
 
 /// Whether `args` (after the program name) are a hook call that reads a
-/// payload and answers it. The git and runner forms, `--text` and the
-/// queue's own verbs are not admitted here.
+/// payload and answers it. The git, runner and judge-worker forms,
+/// `--text` and the queue's own verbs are not admitted here.
 fn admitted_command(args: &[String]) -> bool {
     if args.first().map(String::as_str) != Some("hook") {
         return false;
@@ -170,6 +170,7 @@ fn admitted_command(args: &[String]) -> bool {
                 | "--drain"
                 | "--apply-book"
                 | "--finish-session"
+                | "--judge-worker"
                 | "-h"
                 | "--help"
         )

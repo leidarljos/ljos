@@ -41,7 +41,6 @@ impl Home {
             ".local/state",
             ".cache",
             "run",
-            "tmp",
             "bin",
         ] {
             std::fs::create_dir_all(root.path().join(sub)).unwrap();
@@ -63,21 +62,17 @@ impl Home {
             PathBuf::from("/bin"),
         ])
         .unwrap();
-        // A writer another home left on the default port answers 401.
-        // This stub packset is the one the step should run.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        // No pack address or port: naming one keeps memory on in this
+        // temporary home, and the onboard lines here are the memory-off ones.
+        // TMPDIR is the temp dir the home was made in, so the home is a
+        // temporary one wherever the process TMPDIR is.
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("HOME", home)
             .env("PATH", path)
-            .env("PACKSET_PORT", port.to_string())
             .env("LANG", "C.UTF-8")
-            .env("TMPDIR", home.join("tmp"))
+            .env("TMPDIR", home.parent().unwrap())
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("XDG_DATA_HOME", home.join(".local/share"))
             .env("XDG_STATE_HOME", home.join(".local/state"))
