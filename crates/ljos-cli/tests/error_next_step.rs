@@ -26,7 +26,10 @@ fn a_miss_names_a_shorter_query_in_plain_text() {
         ljos_cli::scan::nothing_matched_line("a\"b"),
         "Nothing matched this query."
     );
-    let page = ljos_cli::scan::nothing_matched_page("usability friction confusing error");
+    let page = ljos_cli::scan::nothing_matched_page(
+        "usability friction confusing error",
+        ljos_cli::scan::Width::FIXED,
+    );
     assert!(
         page.lines().any(|line| line == "ljos search usability"),
         "{page}"
@@ -40,7 +43,8 @@ fn a_miss_names_a_shorter_query_in_plain_text() {
         ljos_cli::scan::empty_store_line("fusing"),
         "Nothing matched fusing. A shorter search would miss too. Try storing a lesson in your own words, such as: ljos remember \"LESSON\""
     );
-    let stored = ljos_cli::scan::empty_store_page("which fusion method");
+    let stored =
+        ljos_cli::scan::empty_store_page("which fusion method", ljos_cli::scan::Width::FIXED);
     assert!(
         stored
             .lines()

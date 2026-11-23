@@ -2,6 +2,11 @@
 //! stampeding it. Each call answers from its own process within a small,
 //! fixed budget; the book, the claim it files and the tracker commit are
 //! applied after the answer by one drainer.
+
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
@@ -14,6 +19,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[path = "common/pty.rs"]
+mod pty;
 #[path = "common/seat_root.rs"]
 mod seat_root;
 
@@ -560,6 +567,7 @@ fn a_hung_pack_still_allows_mcp_and_read_with_the_queue_off() {
 
 /// The server's queue is full: the gate is refused in the runner's JSON
 /// with the reason, and exits 2, rather than run another hook or allow.
+/// The queue fallback is one machine-output line on a narrow terminal.
 #[test]
 fn a_full_queue_refuses_the_gate_with_its_reason() {
     let hab = hab("full");
@@ -582,17 +590,27 @@ fn a_full_queue_refuses_the_gate_with_its_reason() {
     assert_eq!(&said, b"go ");
     let _waiting = ask(5000);
     std::thread::sleep(Duration::from_millis(100));
-    let out = within(
-        feed(ljos(&hab, &["hook"]), &cursor_shell(&hab, "full", "ls")),
-        Duration::from_secs(5),
-        "a call to a full queue",
-    );
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("COLUMNS", "20");
+    let term = pty::Pty::open();
+    term.set_winsize(20, 40);
+    term.attach_stderr(&mut cmd);
+    let mut child = term.spawn(&mut cmd);
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(cursor_shell(&hab, "full", "ls").as_bytes())
+        .unwrap();
+    let out = term.wait_output(child, 5);
+    term.finish_reading();
+    let shown = term.shown().replace("\r\n", "\n");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    assert_eq!(out.status.code(), Some(0), "{stdout}\n{shown}");
     assert!(stdout.contains("\"permission\":\"allow\""), "{stdout}");
-    assert!(stderr.contains("already waiting for a slot"), "{stderr}");
-    assert!(stderr.contains("judged in this process"), "{stderr}");
+    let line = "ljos hook: hook queue: 1 hook calls are already waiting for a slot; the call is judged in this process";
+    assert!(line.len() > 20);
+    assert!(shown.lines().any(|shown| shown == line), "{shown}");
     let _ = server.kill();
     let _ = server.wait();
 }

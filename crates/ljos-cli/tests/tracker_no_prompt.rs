@@ -4,6 +4,11 @@
 //! says the remote was not reached, the verb exits 0, and a later
 //! `ljos sync` with a reachable remote pushes what was saved.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 
 use std::io::{Read, Write};

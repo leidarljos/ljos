@@ -6,6 +6,11 @@
 //! that issue, stays an agent note, and a later prompt does not repeat
 //! the sentence.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::thread;

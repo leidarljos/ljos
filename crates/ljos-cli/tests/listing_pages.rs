@@ -9,10 +9,13 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/pty.rs"]
+mod pty;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -58,10 +61,20 @@ impl Home {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_with(args, None)
+    }
+
+    fn run_with(&self, args: &[&str], columns: Option<&str>) -> Output {
+        self.command(args, columns)
+            .output()
+            .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")))
+    }
+
+    fn command(&self, args: &[&str], columns: Option<&str>) -> Command {
         let home = self.root.join("home");
         let path = format!("{}:/usr/bin:/bin", home.join(".local/bin").display());
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
-            .args(args)
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        cmd.args(args)
             .current_dir(self.root.join("work"))
             .env_clear()
             .env("PATH", path)
@@ -84,9 +97,11 @@ impl Home {
             .env("NO_COLOR", "1")
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")))
+            .stdin(Stdio::null());
+        if let Some(cols) = columns {
+            cmd.env("COLUMNS", cols);
+        }
+        cmd
     }
 }
 
@@ -608,4 +623,424 @@ fn listing_commands_match_the_saved_pages() {
             );
         }
     }
+}
+
+#[test]
+fn non_tty_pages_match_saved_base_bytes_under_columns_variants() {
+    let columns = [None, Some("60"), Some("0"), Some("garbage"), Some("999999")];
+    let sequence: [(&str, &[&str]); 16] = [
+        ("search-kiln", &["search", "kiln"][..]),
+        ("search-glaze", &["search", "glaze", "-n", "3"][..]),
+        ("search-none", &["search", "zzzznotaword"][..]),
+        ("search-icelandic", &["search", "Reykjavík"][..]),
+        ("memories-list", &["memories", "list", "--all"][..]),
+        ("search-other-seat", &["search", "thermocouple"][..]),
+        ("show-kiln", &["show", "demo-kiln"][..]),
+        ("show-tile", &["show", "demo-tile"][..]),
+        ("ready", &["ready"][..]),
+        ("due", &["due"][..]),
+        ("timeline", &["timeline", "demo-kiln"][..]),
+        ("hubs", &["hubs", "-n", "4"][..]),
+        ("island", &["island", "kiln"][..]),
+        ("recall", &["recall", "demo-kiln"][..]),
+        ("search-json", &["search", "thermocouple", "--json"][..]),
+        ("recall-json", &["recall", "demo-kiln", "--json"][..]),
+    ];
+    let targets = [
+        "search-kiln",
+        "memories-list",
+        "ready",
+        "show-kiln",
+        "timeline",
+        "recall",
+        "recall-json",
+    ];
+    for name in targets {
+        let upto = sequence
+            .iter()
+            .position(|(n, _)| *n == name)
+            .expect("target command missing from sequence");
+        let want = std::fs::read_to_string(format!("{SNAP_DIR}/{name}.txt")).unwrap();
+        for cols in columns {
+            let home = Home::open(atoms());
+            let mut out = None;
+            for (_, args) in sequence.iter().take(upto + 1) {
+                out = Some(home.run_with(args, cols));
+            }
+            let out = out.expect("target output missing");
+            let got = page(&out, &home.root);
+            assert_eq!(got, want, "name={name} columns={cols:?}");
+        }
+    }
+}
+
+#[test]
+fn the_token_miss_on_stderr_wraps_to_the_stderr_terminal() {
+    let miss = ljos_cli::SEARCH_TOKEN_MISS;
+    let fixed = ljos_cli::scan::wrap_for(miss, ljos_cli::scan::Width::FIXED);
+    let narrow = ljos_cli::output_wrap::wrap_prose(miss, Some(40));
+    assert_ne!(fixed, narrow);
+
+    let home = Home::open(atoms());
+    let term = pty::Pty::open();
+    let mut cmd = home.command(&["recall", "demo-kiln"], Some("40"));
+    cmd.stdout(Stdio::piped());
+    term.attach_stderr(&mut cmd);
+    let child = term.spawn(&mut cmd);
+    let out = term.wait_output(child, 20);
+    term.finish_reading();
+    let shown = term.shown().replace("\r\n", "\n");
+    assert!(out.status.success(), "{shown}");
+    assert!(shown.contains(&narrow), "{shown}");
+
+    let home = Home::open(atoms());
+    let term = pty::Pty::open();
+    let mut cmd = home.command(&["recall", "demo-kiln"], Some("40"));
+    cmd.stderr(Stdio::piped());
+    term.attach_stdout(&mut cmd);
+    let child = term.spawn(&mut cmd);
+    let out = term.wait_output(child, 20);
+    term.finish_reading();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains(&fixed), "{stderr}");
+}
+
+#[test]
+fn a_fault_line_on_stderr_wraps_to_the_stderr_terminal() {
+    let args = ["show", "demo-nosuchticket"];
+    let home = Home::open(atoms());
+    let piped = home.run(&args);
+    assert!(!piped.status.success());
+    let line = String::from_utf8_lossy(&piped.stderr)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let cols = 30;
+    let once = ljos_cli::output_wrap::wrap_prose(&line, Some(cols));
+    assert!(once.lines().count() > 1, "{line}");
+
+    let term = pty::Pty::open();
+    let mut cmd = home.command(&args, Some(&cols.to_string()));
+    cmd.stdout(Stdio::piped());
+    term.attach_stderr(&mut cmd);
+    let child = term.spawn(&mut cmd);
+    let out = term.wait_output(child, 20);
+    term.finish_reading();
+    let shown = term.shown().replace("\r\n", "\n");
+    assert!(!out.status.success(), "{shown}");
+    assert!(shown.starts_with(&format!("{once}\n")), "{line}\n{shown}");
+}
+
+#[test]
+fn a_told_line_on_stdout_wraps_to_the_stdout_terminal() {
+    let home = Home::open(atoms());
+    let empty = tempfile::tempdir().unwrap();
+    let dir = empty.path().display().to_string();
+    let args = ["cards", "--dir", dir.as_str()];
+    let piped = home.run(&args);
+    let line = String::from_utf8_lossy(&piped.stdout).into_owned();
+    assert!(line.starts_with("no USER.md or MEMORY.md"), "{line}");
+    let cols = 30;
+    let once = ljos_cli::output_wrap::wrap_prose(&line, Some(cols));
+    assert!(once.lines().count() > 2, "{line}");
+
+    let term = pty::Pty::open();
+    let mut cmd = home.command(&args, Some(&cols.to_string()));
+    cmd.stderr(Stdio::piped());
+    term.attach_stdout(&mut cmd);
+    let child = term.spawn(&mut cmd);
+    let out = term.wait_output(child, 20);
+    term.finish_reading();
+    let shown = term.shown().replace("\r\n", "\n");
+    assert!(out.status.success(), "{shown}");
+    assert_eq!(shown, once);
+}
+
+/// A line that may run past the width: one URL, path, code span or fence
+/// marker that the wrapper keeps whole, under its indent and quote mark.
+fn unbreakable(line: &str) -> bool {
+    let body = line.trim_start();
+    let body = body.strip_prefix("| ").unwrap_or(body);
+    let body = body.strip_prefix("- ").unwrap_or(body);
+    if body.starts_with("[unverified ") || body.starts_with("[end ") {
+        return true;
+    }
+    let body = body.trim_end_matches(['.', ',', ':', ';']);
+    !body.contains(char::is_whitespace)
+        || (body.starts_with('`')
+            && body.ends_with('`')
+            && body[1..body.len() - 1].find('`').is_none())
+}
+
+/// The listing commands a person runs at a terminal.
+const TERMINAL_CASES: [&[&str]; 14] = [
+    &["search", "kiln"],
+    &["search", "glaze", "-n", "3"],
+    &["search", "zzzznotaword"],
+    &["search", "Reykjavík"],
+    &["memories", "list", "--all"],
+    &["search", "thermocouple"],
+    &["show", "demo-kiln"],
+    &["show", "demo-tile"],
+    &["ready"],
+    &["due"],
+    &["timeline", "demo-kiln"],
+    &["hubs", "-n", "4"],
+    &["island", "kiln"],
+    &["recall", "demo-kiln"],
+];
+
+/// What `args` prints with stdout on a terminal `cols` columns wide.
+fn on_terminal(home: &Home, args: &[&str], cols: usize) -> String {
+    let term = pty::Pty::open();
+    let mut cmd = home.command(args, Some(&cols.to_string()));
+    cmd.stderr(Stdio::piped());
+    term.attach_stdout(&mut cmd);
+    let child = term.spawn(&mut cmd);
+    let out = term.wait_output(child, 20);
+    term.finish_reading();
+    let shown = term.shown().replace("\r\n", "\n");
+    assert!(out.status.success(), "{args:?}\n{shown}");
+    shown
+}
+
+#[test]
+fn listing_pages_on_a_terminal_fit_the_terminal_width() {
+    let home = Home::open(atoms());
+    let mut over = Vec::new();
+    for cols in [40usize, 24] {
+        for args in TERMINAL_CASES {
+            let shown = on_terminal(&home, args, cols);
+            for line in shown.lines() {
+                if ljos_cli::output_wrap::prose_display_width(line) > cols && !unbreakable(line) {
+                    over.push(format!("{args:?} at {cols}: {line:?}"));
+                }
+            }
+        }
+    }
+    assert!(over.is_empty(), "{}", over.join("\n"));
+}
+
+/// Each fence nonce as sixteen zeros, even where a wrap split it from its
+/// marker. A nonce is fresh on each run, and the zeros keep its width.
+fn zero_nonces(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let hex = |b: &u8| b.is_ascii_digit() || (b'a'..=b'f').contains(b);
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let bounded = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+        if bounded
+            && bytes.len() >= i + 16
+            && bytes[i..i + 16].iter().all(hex)
+            && bytes.get(i + 16).is_none_or(|b| !b.is_ascii_alphanumeric())
+        {
+            out.push_str(&"0".repeat(16));
+            i += 16;
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// The indent and quote mark a wrapped line repeats on its continuations.
+fn line_prefix(line: &str) -> &str {
+    let spaces = line.len() - line.trim_start_matches(' ').len();
+    if line[spaces..].starts_with("| ") {
+        &line[..spaces + 2]
+    } else {
+        &line[..spaces]
+    }
+}
+
+fn visible(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+/// The fence markers a timeline row keeps whole, each with its nonce.
+const MARKERS: [&str; 2] = ["[unverified ", "[end "];
+
+/// `line` wrapped once at `cols` under `first` and `cont`. A line with a
+/// fence marker is wrapped greedily word by word, the marker one word.
+fn wrap_once(line: &str, cols: usize, first: &str, cont: &str) -> String {
+    use ljos_cli::output_wrap::{prose_display_width as width, wrap_hanging_prose};
+    if !MARKERS.iter().any(|marker| line.contains(marker)) {
+        return wrap_hanging_prose(line, cols, first, cont);
+    }
+    let mut words: Vec<String> = Vec::new();
+    for word in line.split_whitespace() {
+        match words.last_mut() {
+            Some(last) if MARKERS.iter().any(|m| m.trim_end() == last) => {
+                last.push(' ');
+                last.push_str(word);
+            }
+            _ => words.push(word.to_string()),
+        }
+    }
+    let mut lines = vec![first.to_string()];
+    let mut bare = true;
+    for word in words {
+        let fits = width(lines.last().unwrap()) + 1 + width(&word) <= cols;
+        if !bare && !fits {
+            lines.push(cont.to_string());
+            bare = true;
+        }
+        let current = lines.last_mut().unwrap();
+        if !bare {
+            current.push(' ');
+        }
+        current.push_str(&word);
+        bare = false;
+    }
+    lines.join("\n")
+}
+
+/// The other layout a builder picks when the one-line form of `line` does
+/// not fit `cols`, wrapped once at `cols`. A count line puts its command on
+/// the next line. A ticket's head line puts the title under it.
+fn other_layout(line: &str, cols: usize) -> Option<String> {
+    if let Some((counts, rest)) = line.split_once(". Run ") {
+        if counts.starts_with("shown ") {
+            let (cmd, tail) = rest.rsplit_once(" to see ")?;
+            let lead = format!("{counts}. To see {}, run:", tail.trim_end_matches('.'));
+            return Some(format!(
+                "{}\n{cmd}",
+                ljos_cli::output_wrap::wrap_prose(&lead, Some(cols))
+            ));
+        }
+    }
+    let parts: Vec<&str> = line.splitn(4, "  ").collect();
+    let state = parts.get(1)?;
+    if parts[0].contains(' ') || !state.chars().all(|ch| ch.is_ascii_uppercase()) {
+        return None;
+    }
+    let (head, title) = match parts.get(2) {
+        Some(prio) if prio.starts_with("[#") => {
+            (parts[..3].join("  "), parts.get(3).copied().unwrap_or(""))
+        }
+        _ => (
+            parts[..2].join("  "),
+            &line[parts[0].len() + state.len() + 4..],
+        ),
+    };
+    Some(format!(
+        "{}\n{}",
+        ljos_cli::output_wrap::wrap_prose(&head, Some(cols)),
+        wrap_once(title, cols, "  ", "  ")
+    ))
+}
+
+/// Whether `narrow` is `wide` with each line wrapped once at `cols`.
+///
+/// A line of `wide` is a line of the page before it is wrapped. It maps
+/// to the run of `narrow` lines that hold the same visible text, and that
+/// run must be the line wrapped once at `cols`, under the line's own prefix
+/// and the continuation's prefix, or [`other_layout`] of the line. A page
+/// wrapped at 80 columns and again at `cols` breaks where the first wrap
+/// did, so its runs are not one wrap of the line.
+fn wrapped_once(wide: &str, narrow: &str, cols: usize) -> Result<(), String> {
+    let lines: Vec<&str> = narrow.lines().collect();
+    let mut at = 0;
+    for line in wide.lines() {
+        if let Some(other) = other_layout(line, cols) {
+            let other: Vec<&str> = other.lines().collect();
+            if lines.get(at..at + other.len()) == Some(&other[..]) {
+                at += other.len();
+                continue;
+            }
+        }
+        let want = visible(line);
+        let mut run: Vec<&str> = Vec::new();
+        let mut got = String::new();
+        while run.is_empty() || got.len() < want.len() {
+            let Some(next) = lines.get(at) else {
+                return Err(format!("the page ends before {line:?}"));
+            };
+            at += 1;
+            got.push_str(&visible(if run.is_empty() {
+                next
+            } else {
+                &next[line_prefix(next).len()..]
+            }));
+            run.push(next);
+        }
+        if got != want {
+            return Err(format!("{line:?} is not the text of {run:?}"));
+        }
+        if run.len() == 1 {
+            if run[0].trim_end() != line.trim_end() {
+                return Err(format!("{line:?} became {:?}", run[0]));
+            }
+            continue;
+        }
+        let first = line_prefix(line);
+        let once = wrap_once(&line[first.len()..], cols, first, line_prefix(run[1]));
+        let shown = run.join("\n");
+        if once != shown {
+            return Err(format!(
+                "{line:?} wrapped once at {cols} is\n{once}\nbut the page has\n{shown}"
+            ));
+        }
+    }
+    match lines[at..].iter().find(|line| !line.trim().is_empty()) {
+        Some(line) => Err(format!("{line:?} is past the end of the wide page")),
+        None => Ok(()),
+    }
+}
+
+#[test]
+fn the_wrap_once_check_refuses_a_page_wrapped_twice() {
+    let wide = "Glaze batch 1 waits until the kiln is cool enough to open, and the damper log says the flue was shut for the night.\n";
+    for cols in [24usize, 30] {
+        let once = ljos_cli::output_wrap::wrap_prose(wide, Some(cols));
+        assert_eq!(wrapped_once(wide, &once, cols), Ok(()), "{once}");
+        let fixed = ljos_cli::scan::wrap_for(wide, ljos_cli::scan::Width::FIXED);
+        let twice = ljos_cli::output_wrap::wrap_prose(&fixed, Some(cols));
+        assert_ne!(once, twice);
+        assert!(wrapped_once(wide, &twice, cols).is_err(), "{twice}");
+    }
+}
+
+/// The cases whose fixtures hold a line of prose longer than [`ljos_cli::scan::COLS`].
+const LONG_LINE_CASES: [&[&str]; 8] = [
+    &["memories", "list", "--all"],
+    &["search", "thermocouple"],
+    &["show", "demo-tile"],
+    &["ready"],
+    &["due"],
+    &["timeline", "demo-kiln"],
+    &["hubs", "-n", "4"],
+    &["island", "kiln"],
+];
+
+#[test]
+fn listing_pages_on_a_terminal_are_wrapped_once_at_its_width() {
+    let home = Home::open(atoms());
+    let mut faults = Vec::new();
+    for args in TERMINAL_CASES {
+        let wide = zero_nonces(&on_terminal(&home, args, ljos_cli::output_wrap::MAX_COLS));
+        let longest = wide
+            .lines()
+            .filter(|line| line.split_whitespace().count() > 2)
+            .map(ljos_cli::output_wrap::prose_display_width)
+            .max()
+            .unwrap_or(0);
+        if LONG_LINE_CASES.contains(&args) && longest <= ljos_cli::scan::COLS {
+            faults.push(format!(
+                "{args:?} wide page is wrapped at 80 columns:\n{wide}"
+            ));
+        }
+        for cols in [24usize, 40] {
+            let narrow = zero_nonces(&on_terminal(&home, args, cols));
+            if let Err(why) = wrapped_once(&wide, &narrow, cols) {
+                faults.push(format!("{args:?} at {cols}: {why}"));
+            }
+        }
+    }
+    assert!(faults.is_empty(), "{}", faults.join("\n\n"));
 }

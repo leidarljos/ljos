@@ -23,6 +23,10 @@ pub struct Pty {
 #[allow(dead_code)]
 impl Pty {
     #[must_use]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "owns the two descriptors openpty made"
+    )]
     pub fn open() -> Self {
         let (mut master, mut slave) = (-1, -1);
         #[cfg(target_os = "macos")]
@@ -68,6 +72,22 @@ impl Pty {
         cmd.stderr(Self::stdio_dup(fd));
     }
 
+    /// Point only `cmd`'s stdout at this terminal. Call this before
+    /// [`Self::spawn`].
+    pub fn attach_stdout(&self, cmd: &mut Command) {
+        let guard = self.slave.lock().unwrap();
+        let fd = guard.as_ref().expect("pty slave open").as_raw_fd();
+        cmd.stdout(Self::stdio_dup(fd));
+    }
+
+    /// Point only `cmd`'s stderr at this terminal. Call this before
+    /// [`Self::spawn`].
+    pub fn attach_stderr(&self, cmd: &mut Command) {
+        let guard = self.slave.lock().unwrap();
+        let fd = guard.as_ref().expect("pty slave open").as_raw_fd();
+        cmd.stderr(Self::stdio_dup(fd));
+    }
+
     /// Point `cmd`'s stdin at this terminal, so `is_terminal` is true.
     /// Call this before [`Self::spawn`].
     pub fn attach_stdin(&self, cmd: &mut Command) {
@@ -76,7 +96,23 @@ impl Pty {
         cmd.stdin(Self::stdio_dup(fd));
     }
 
+    /// Set terminal size so TIOCGWINSZ in the child sees these dimensions.
+    pub fn set_winsize(&self, cols: u16, rows: u16) {
+        // SAFETY: ioctl writes the provided winsize to the open pty master.
+        unsafe {
+            let mut ws: libc::winsize = std::mem::zeroed();
+            ws.ws_col = cols;
+            ws.ws_row = rows;
+            let rc = libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ as _, &ws);
+            assert_eq!(rc, 0, "TIOCSWINSZ: {}", std::io::Error::last_os_error());
+        }
+    }
+
     /// A copy of `fd` owned by a `Stdio`. The original stays open.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "owns the descriptor dup made, which the child gets"
+    )]
     fn stdio_dup(fd: i32) -> Stdio {
         // SAFETY: `fd` is open. `dup` returns a new descriptor, which
         // `Stdio` owns and closes.

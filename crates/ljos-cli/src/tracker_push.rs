@@ -2433,7 +2433,7 @@ body b
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let _lock = crate::test_env_lock();

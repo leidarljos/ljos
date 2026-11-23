@@ -74,7 +74,7 @@ fn judge_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         Ok(calls) => calls,
         Err(why) => {
             let note = format!("ljos: the guard could not judge ({why}); the call is allowed");
-            eprintln!("{note}");
+            say!("{note}");
             crate::bookkeep::log_line(&note);
             return None;
         }

@@ -1205,6 +1205,10 @@ fn os_result(rc: libc::c_int) -> std::io::Result<libc::c_int> {
 impl KeyDir {
     /// `dir`, or `None` when it does not exist. A symlink or anything
     /// but a directory in its place is an error.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "owns a descriptor this function opened, never stdout or stderr"
+    )]
     fn open(dir: &Path, create: bool) -> Result<Option<Self>> {
         use std::os::fd::{AsRawFd as _, FromRawFd as _};
         let ctx = || format!("person-key: {}", dir.display());
@@ -1251,6 +1255,10 @@ impl KeyDir {
 
     /// `name` in the directory opened with `flags`, never through a link.
     /// A file it makes is mode 0600.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "owns a descriptor this function opened, never stdout or stderr"
+    )]
     fn open_at(&self, name: &str, flags: libc::c_int) -> std::io::Result<std::fs::File> {
         use std::os::fd::{AsRawFd as _, FromRawFd as _};
         let name = c_name(name)?;
@@ -1362,7 +1370,7 @@ pub fn run(action: &str) -> Result<()> {
         "set" => set_at(&path),
         "clear" => clear_at(&path),
         "status" => {
-            println!("{}", status_at(&path));
+            tell!("{}", status_at(&path));
             Ok(())
         }
         other => bail!("person-key: no action `{other}`; use set, status or clear"),
@@ -1423,7 +1431,7 @@ fn set_from(path: &Path, tty: &mut std::fs::File) -> Result<()> {
         bail!("person-key: the two entries differ; the key is unchanged");
     }
     keep(path, first.bytes())?;
-    println!("person-key: set in {}", path.display());
+    tell!("person-key: set in {}", path.display());
     Ok(())
 }
 
@@ -1431,14 +1439,14 @@ fn clear_at(path: &Path) -> Result<()> {
     person_only("clear")?;
     let (dir, name) = split(path)?;
     let Some(at) = KeyDir::open(dir, false)? else {
-        println!("person-key: no key at {}", path.display());
+        tell!("person-key: no key at {}", path.display());
         return Ok(());
     };
     let _ = at.remove(FAILS_NAME);
     match at.remove(name) {
-        Ok(()) => println!("person-key: cleared {}", path.display()),
+        Ok(()) => tell!("person-key: cleared {}", path.display()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("person-key: no key at {}", path.display());
+            tell!("person-key: no key at {}", path.display());
         }
         Err(e) => return Err(e).with_context(|| format!("person-key: {}", path.display())),
     }
@@ -1543,6 +1551,10 @@ mod tests {
 
     /// A pty pair: what the test types goes to the master, and the slave
     /// is the terminal the code reads.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "owns the two descriptors openpty made"
+    )]
     fn pty_pair() -> (std::fs::File, std::fs::File) {
         use std::os::fd::FromRawFd as _;
         let (mut master, mut slave) = (-1, -1);

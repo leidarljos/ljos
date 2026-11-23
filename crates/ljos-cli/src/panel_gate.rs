@@ -805,7 +805,7 @@ impl SessionBallot {
                 .is_some_and(|name| name.starts_with("ljos-mcp"))
         });
         if !mcp {
-            println!("{}", authorship_warning(&self.issue, &self.authored));
+            tell!("{}", authorship_warning(&self.issue, &self.authored));
         }
     }
 }

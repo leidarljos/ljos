@@ -1,6 +1,11 @@
 //! Read-side regressions. What an agent wrote must not reach a prompt, a
 //! recall or a brief as a rule, a fact or the person's words.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::net::TcpListener;

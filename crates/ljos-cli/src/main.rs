@@ -1,10 +1,11 @@
 //! `ljos`: one seat over the habitats. Each habitat keeps its own crate.
 
 use anyhow::{bail, Context, Result};
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod help_groups;
 mod shell_complete;
+use ljos_cli::output_wrap::Width;
 use ljos_cli::{
     age_of, begin_sitting_preclaim, brief, bump_plan, calibrate, cards, claim, claim_next,
     cli_assignee, compact_sitting_block, complete, conflicts, consensus_steps_for, copy_playbook,
@@ -208,9 +209,9 @@ impl MemFilter {
 fn export_memories(out: &std::path::Path, machine: Option<&str>, json: bool) -> Result<()> {
     let said = ljos_cli::memory_port::export_cmd(out, machine, json)?;
     if out == std::path::Path::new("-") {
-        eprint!("{said}");
+        ljos_cli::say_raw!("{said}");
     } else {
-        print!("{said}");
+        ljos_cli::tell_raw!("{said}");
     }
     Ok(())
 }
@@ -227,7 +228,7 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
             as_machine,
             json,
         } => {
-            print!(
+            ljos_cli::tell_raw!(
                 "{}",
                 ljos_cli::memory_port::import_cmd(
                     &path,
@@ -244,13 +245,13 @@ fn memory_cmd(cmd: MemoryCmd) -> Result<()> {
             dry_run,
             json,
         } => {
-            print!(
+            ljos_cli::tell_raw!(
                 "{}",
                 ljos_cli::memory_port::integrate_cmd(import_id.as_deref(), all, dry_run, json)?
             );
         }
         MemoryCmd::Imports { json } => {
-            print!("{}", ljos_cli::memory_port::imports_cmd(json)?);
+            ljos_cli::tell_raw!("{}", ljos_cli::memory_port::imports_cmd(json)?);
         }
     }
     Ok(())
@@ -267,12 +268,13 @@ fn memories_cmd(cmd: MemCmd) -> Result<()> {
         MemCmd::List { f, json } => {
             let shown = mem::list(&mem::live_atoms()?, &mem::reviews(), &f.filter());
             if json {
-                println!("{}", serde_json::to_string_pretty(&shown)?);
+                ljos_cli::emit!("{}", serde_json::to_string_pretty(&shown)?);
             } else {
-                print!(
-                    "{}",
-                    ljos_cli::scan::for_reader(&mem::list_page(&shown), human_color())
+                let page = ljos_cli::scan::for_reader(
+                    &mem::list_page(&shown, Width::stdout()),
+                    human_color(),
                 );
+                ljos_cli::emit_raw!("{page}");
             }
         }
         MemCmd::Review {
@@ -289,29 +291,29 @@ fn memories_cmd(cmd: MemCmd) -> Result<()> {
                 !keep.is_empty() || !drop_ids.is_empty() || edit.is_some() || !merge.is_empty();
             if scripted {
                 for id in &keep {
-                    print!("{}", mem::keep(id, &all)?);
+                    ljos_cli::tell_raw!("{}", mem::keep(id, &all)?);
                 }
                 for id in &drop_ids {
-                    print!("{}", mem::drop_memory(id, &all)?);
+                    ljos_cli::tell_raw!("{}", mem::drop_memory(id, &all)?);
                 }
                 if let Some(id) = edit {
                     let text = text
                         .as_deref()
                         .context("memories review --edit needs --text")?;
-                    print!("{}", mem::edit(&id, text, &all)?);
+                    ljos_cli::tell_raw!("{}", mem::edit(&id, text, &all)?);
                 } else if !merge.is_empty() {
-                    print!("{}", mem::merge(&merge, text.as_deref(), &all)?);
+                    ljos_cli::tell_raw!("{}", mem::merge(&merge, text.as_deref(), &all)?);
                 }
                 return Ok(());
             }
             let shown: Vec<_> = all.into_iter().filter(|m| f.filter().admits(m)).collect();
             if json {
-                println!("{}", serde_json::to_string_pretty(&shown)?);
+                ljos_cli::emit!("{}", serde_json::to_string_pretty(&shown)?);
             } else if std::io::stdin().is_terminal() {
-                mem::review_interactive(&shown)?;
+                mem::review_interactive(&shown, Width::stdout())?;
             } else {
                 for m in &shown {
-                    print!("{}", mem::describe(m));
+                    ljos_cli::emit_raw!("{}", mem::describe(m, Width::stdout()));
                 }
             }
         }
@@ -336,18 +338,18 @@ fn memories_cmd(cmd: MemCmd) -> Result<()> {
             let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
             let found = mem::stale(&all, days, &today);
             if json {
-                println!("{}", serde_json::to_string_pretty(&found)?);
+                ljos_cli::emit!("{}", serde_json::to_string_pretty(&found)?);
             } else {
                 for s in &found {
-                    println!("{}  {}  {}", s.id.get(..8).unwrap_or(&s.id), s.why, s.text);
+                    ljos_cli::tell!("{}  {}  {}", s.id.get(..8).unwrap_or(&s.id), s.why, s.text);
                 }
                 if !apply {
-                    println!("{} stale; dry run, pass --apply to drop them", found.len());
+                    ljos_cli::tell!("{} stale; dry run, pass --apply to drop them", found.len());
                 }
             }
             if apply {
                 for s in &found {
-                    print!("{}", mem::drop_memory(&s.id, &all)?);
+                    ljos_cli::tell_raw!("{}", mem::drop_memory(&s.id, &all)?);
                 }
             }
         }
@@ -2745,15 +2747,16 @@ fn print_ready(args: ReadyArgs) -> Result<()> {
         all,
     } = args;
     if mine {
-        print!("{}", ljos_cli::plan::ready_mine(project.as_deref())?);
-    } else {
-        print!(
+        ljos_cli::emit_raw!(
             "{}",
-            ljos_cli::scan::for_reader(
-                &ljos_cli::ready_view(project.as_deref(), json, limit, all)?,
-                human_color()
-            )
+            ljos_cli::plan::ready_mine(project.as_deref(), Width::stdout())?
         );
+    } else {
+        let page = ljos_cli::scan::for_reader(
+            &ljos_cli::ready_view(project.as_deref(), json, limit, all, Width::stdout())?,
+            human_color(),
+        );
+        ljos_cli::emit_raw!("{page}");
     }
     Ok(())
 }
@@ -3525,7 +3528,7 @@ fn shell_word(word: &str) -> String {
 /// Print a show lookup failure and exit 1. Any other error stays a fault.
 fn show_error(err: anyhow::Error) -> anyhow::Error {
     if ljos_cli::show_memory::is_show_fault(&err) {
-        eprintln!("{err}");
+        ljos_cli::say!("{err}");
         std::process::exit(1);
     }
     ticket_error(err)
@@ -3572,7 +3575,7 @@ fn file_hold(skip: bool) -> Result<FileHold> {
 /// Print a ticket lookup failure and exit 1.
 fn stop_ticket(id: &str) {
     if let Some(line) = ljos_cli::ticket_refusal(id) {
-        eprintln!("{line}");
+        ljos_cli::say!("{line}");
         std::process::exit(1);
     }
 }
@@ -3587,7 +3590,7 @@ fn stop_ticket_node(id: &str) {
 
 fn ticket_error(err: anyhow::Error) -> anyhow::Error {
     if ljos_cli::is_ticket_fault(&err) {
-        eprintln!("{err}");
+        ljos_cli::say!("{err}");
         std::process::exit(1);
     }
     err
@@ -3648,7 +3651,7 @@ fn warn_other_sitting(wrote: &str, quiet: bool, inferred: bool, finish: bool) {
         } else {
             ljos_cli::other_sitting_line(wrote, &open)
         };
-        eprintln!("{line}");
+        ljos_cli::say!("{line}");
     }
 }
 
@@ -3835,7 +3838,17 @@ fn named_node(raw: &str) -> Result<String, String> {
 /// terminal, the tab-separated row for a pipe.
 /// Color on a terminal, unless `NO_COLOR` is set. A pipe stays plain.
 fn human_color() -> bool {
-    ljos_cli::scan::color_allowed(std::io::stdout().is_terminal())
+    ljos_cli::scan::color_allowed(ljos_cli::output::stdout_is_terminal())
+}
+
+/// The width of a page printed to stdout. `--json` carries the page in a
+/// JSON string, which is laid out at [`Width::FIXED`].
+fn page_width(json: bool) -> Width {
+    if json {
+        Width::FIXED
+    } else {
+        Width::stdout()
+    }
 }
 
 /// `--verbose`, or `LJOS_DEBUG`, prints the tracker and sync lines.
@@ -3897,7 +3910,7 @@ fn write_ack(body: &serde_json::Value, verbose: bool) -> String {
     // stays one line. A sentence past 29 words is printed only with
     // `--verbose`.
     if let Some(note) = ljos_cli::prose_warning_shown(body, verbose) {
-        eprintln!("{note}");
+        ljos_cli::say!("{note}");
     }
     // A pipe prints the same lines as a terminal. `--json` is the stored row.
     ljos_cli::format_write_ack_plain(body, &ljos_cli::local_when)
@@ -3906,16 +3919,18 @@ fn write_ack(body: &serde_json::Value, verbose: bool) -> String {
 /// Print a relay fault in the runner's field names, an allow with a
 /// note, and exit 0.
 fn exit_relay_fault(runner: &str, event: &str, what: &str) -> ! {
-    eprintln!("ljos: the guard could not judge ({what}); the call is allowed");
+    ljos_cli::say!("ljos: the guard could not judge ({what}); the call is allowed");
     let (out, err) = ljos_cli::runner_hooks::relay_fault_answer(runner, event, what);
-    print!("{out}");
-    eprint!("{err}");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    ljos_cli::emit_raw!("{out}");
+    ljos_cli::say_raw!("{err}");
+    let _ = ljos_cli::output::flush_stdout();
     std::process::exit(0);
 }
 
 fn main() {
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    ljos_cli::output::set_output_kind(output_kind(&argv));
+    ljos_cli::output::install_panic_hook();
     // Both run before the seat's environment, the tracker or the pack is
     // read: the server stays small, and a hook call waits its turn before
     // it costs anything.
@@ -3926,16 +3941,16 @@ fn main() {
     let ran = run_command();
     if let Err(e) = &ran {
         if e.to_string().contains(ljos_cli::MEMORY_STARTING_LINE) {
-            eprintln!("{}", ljos_cli::MEMORY_STARTING_LINE);
+            ljos_cli::say!("{}", ljos_cli::MEMORY_STARTING_LINE);
             std::process::exit(1);
         }
         let args: Vec<String> = std::env::args().skip(1).collect();
         ljos_cli::memory_port::record_memory_error(&args, &format!("{e:#}"));
         if let Some(label) = ljos_cli::policy_label::as_policy(e) {
             if label.label == "close-unverified" {
-                eprintln!("{}", label.detail);
+                ljos_cli::say!("{}", label.detail);
             } else {
-                println!("label {}: {}", label.label, label.detail);
+                ljos_cli::emit!("label {}: {}", label.label, label.detail);
             }
             // A seat that was not resolved or is not on the roster, and
             // an unseen mail recipient, are failed commands. 2 is the
@@ -3960,7 +3975,7 @@ fn main() {
             if hook_cmd {
                 std::process::exit(0);
             }
-            eprintln!(
+            ljos_cli::say!(
                 "{}",
                 ljos_cli::shed_queue_line(&ljos_cli::pack_fault_line(e))
             );
@@ -3982,7 +3997,7 @@ fn main() {
             } else {
                 ljos_cli::PACK_BUSY_LINE.to_string()
             };
-            eprintln!("{line}");
+            ljos_cli::say!("{line}");
             std::process::exit(ljos_cli::PACK_BUSY_EXIT);
         }
         if let Some(line) = ljos_cli::plain_server_fault(e) {
@@ -3997,15 +4012,25 @@ fn main() {
         // the note that says why, and exits 0: a broken ljos blocks nothing.
         ljos_cli::answer_failed_gate(&format!("{e:#}"));
         let line = ljos_cli::user_fault_line(e);
-        eprintln!("{line}");
+        ljos_cli::say!("{line}");
         if ljos_cli::fault_detail() {
             let detail = format!("{e:#}");
             if ljos_cli::fault_detail_worth_showing(&detail, &line) {
-                eprintln!("{detail}");
+                ljos_cli::say!("{detail}");
             }
         }
         std::process::exit(ljos_cli::user_fault_exit(e, &line));
     }
+}
+
+/// Writes a deed's bytes to stdout as they are.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "writes the deed bytes to stdout as they are"
+)]
+fn write_deed_bytes(bytes: &[u8]) -> Result<()> {
+    std::io::Write::write_all(&mut std::io::stdout(), bytes)?;
+    Ok(())
 }
 
 /// What ljos is. The same words as the command's about line.
@@ -4083,6 +4108,52 @@ fn seat_screen_line(state: &str) -> String {
     }
 }
 
+/// The kind of this run's output, decided from the command-line arguments
+/// before anything can dispatch or write. Help is human output even for
+/// `hook` and `mcp`.
+fn output_kind(args: &[std::ffi::OsString]) -> ljos_cli::output::Kind {
+    let mut command = None;
+    let mut machine_flag = false;
+    let mut help = false;
+    let mut index = 1;
+    while index < args.len() {
+        let arg = args[index].to_string_lossy();
+        if arg == "--" {
+            break;
+        }
+        if arg == "--seat" {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--seat=") {
+            index += 1;
+            continue;
+        }
+        if command.is_none() && !arg.starts_with('-') {
+            command = Some(arg.to_string());
+        }
+        help |= arg == "--help" || arg == "-h";
+        machine_flag |= arg == "--json"
+            || matches!(arg.as_ref(), "--porcelain" | "-q" | "--quiet" | "--id-only")
+            || arg == "--out=-"
+            || (arg == "--out"
+                && args
+                    .get(index + 1)
+                    .is_some_and(|value| value.as_os_str() == "-"));
+        index += 1;
+    }
+    let machine_command = match command.as_deref() {
+        Some("hookd") => true,
+        Some("hook" | "mcp") => !help,
+        _ => false,
+    };
+    if machine_flag || machine_command {
+        ljos_cli::output::Kind::Machine
+    } else {
+        ljos_cli::output::Kind::Prose
+    }
+}
+
 /// True when the only argument is the help flag. A subcommand's own
 /// `--help`, and `ljos help`, are left for clap.
 fn root_help_only() -> bool {
@@ -4100,7 +4171,7 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
     let mut cmd = Cli::command();
     cmd.build();
     if topic.is_empty() {
-        print!("{}", help_groups::render(&cmd, all));
+        ljos_cli::tell_raw!("{}", help_groups::render(&cmd, all));
         return Ok(());
     }
     let mut current = &cmd;
@@ -4110,16 +4181,16 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
             continue;
         }
         if let Some(line) = listing_sentence(name).filter(|_| current.get_name() == "ljos") {
-            eprintln!("{line}");
+            ljos_cli::say!("{line}");
             std::process::exit(USAGE_STATUS);
         }
         if current.get_name() == "ljos" && lessons_topic(name) {
-            eprintln!("{}", lessons_sentence(name, &[]));
+            ljos_cli::say!("{}", lessons_sentence(name, &[]));
             std::process::exit(USAGE_STATUS);
         }
         let verb: Vec<String> = topic[..i].to_vec();
         if let Some(line) = ticket_id_sentence(name, &verb, ticket_form(current).as_ref()) {
-            eprintln!("{line}");
+            ljos_cli::say!("{line}");
             std::process::exit(USAGE_STATUS);
         }
         let names = child_names(current);
@@ -4140,11 +4211,11 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
             }
             None => format!("ljos: no command {name}, so run `ljos help`."),
         };
-        eprintln!("{line}");
+        ljos_cli::say!("{line}");
         std::process::exit(USAGE_STATUS);
     }
-    current.clone().print_help()?;
-    println!();
+    ljos_cli::tell_raw!("{}", current.clone().render_help());
+    ljos_cli::tell!();
     Ok(())
 }
 
@@ -4458,7 +4529,7 @@ fn run_hook(hook: HookArgs) -> Result<()> {
         // A seat tool named mcp__SERVER__ljos_NAME is that hook
         // when SERVER is a key in the seat's MCP config.
         if call.shape.is_cursor() {
-            print!("{}", ljos_cli::hook_output_ruled(&call, "", None));
+            ljos_cli::emit_raw!("{}", ljos_cli::hook_output_ruled(&call, "", None));
         }
         return Ok(());
     }
@@ -4476,7 +4547,7 @@ fn run_hook(hook: HookArgs) -> Result<()> {
     // seat, so the judgment cannot open sittings or judge again;
     // the law on its tool calls still holds.
     if std::env::var_os("LJOS_JUDGE").is_some() && call.event != "PreToolUse" {
-        print!("{}", ljos_cli::hook_output_ruled(&call, "", None));
+        ljos_cli::emit_raw!("{}", ljos_cli::hook_output_ruled(&call, "", None));
         return Ok(());
     }
     // A context event (a prompt, a tool result) says what the seat
@@ -4498,7 +4569,7 @@ fn run_hook(hook: HookArgs) -> Result<()> {
             if ljos_cli::replays_its_copy(&call) {
                 let wait = std::time::Duration::from_millis(ljos_cli::HOOK_DEADLINE_MS);
                 if let Some(answer) = ljos_cli::replay_hook_answer(&call, &input, wait) {
-                    print!("{answer}");
+                    ljos_cli::emit_raw!("{answer}");
                 }
             }
             return Ok(());
@@ -4506,6 +4577,10 @@ fn run_hook(hook: HookArgs) -> Result<()> {
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(ljos_cli::HOOK_DEADLINE_MS));
             // Taking the lock waits out an answer being written.
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "takes the stdout lock to wait out a hook answer; writes nothing"
+            )]
             let _held = std::io::stdout().lock();
             std::process::exit(0);
         });
@@ -4533,14 +4608,14 @@ fn run_hook(hook: HookArgs) -> Result<()> {
             if let Some(reason) =
                 ljos_cli::subagent_stop_reason(kind, issue.as_deref(), decision, stop_active)
             {
-                println!("{}", ljos_cli::block_output(call.shape, &reason));
-                let _ = std::io::Write::flush(&mut std::io::stdout());
+                ljos_cli::emit!("{}", ljos_cli::block_output(call.shape, &reason));
+                let _ = ljos_cli::output::flush_stdout();
                 ljos_cli::mark_seen(call.session.as_deref(), &[key]);
                 return Ok(());
             }
         }
         if let Some(reason) = ljos_cli::stop_audit(&input, stop_active) {
-            println!("{}", ljos_cli::block_output(call.shape, &reason));
+            ljos_cli::emit!("{}", ljos_cli::block_output(call.shape, &reason));
         }
         return Ok(());
     }
@@ -4556,15 +4631,15 @@ fn run_hook(hook: HookArgs) -> Result<()> {
         // At a usage limit the stores hear what the conversation
         // knows before the runner cuts it off.
         if let Some(reason) = ljos_cli::limit_stop(&input, call.session.as_deref()) {
-            println!("{}", ljos_cli::block_output(call.shape, &reason));
+            ljos_cli::emit!("{}", ljos_cli::block_output(call.shape, &reason));
             return Ok(());
         }
         if let Some(reason) = ljos_cli::seat_stop_reason(&input, stop_active, subagent.is_some()) {
-            println!("{}", ljos_cli::block_output(call.shape, &reason));
+            ljos_cli::emit!("{}", ljos_cli::block_output(call.shape, &reason));
             return Ok(());
         }
         if let Some(reason) = ljos_cli::stop_audit(&input, stop_active) {
-            println!("{}", ljos_cli::block_output(call.shape, &reason));
+            ljos_cli::emit!("{}", ljos_cli::block_output(call.shape, &reason));
             return Ok(());
         }
         // Interrupt mail that came in during the turn holds the
@@ -4574,8 +4649,8 @@ fn run_hook(hook: HookArgs) -> Result<()> {
         if subagent.is_none() {
             let (mail, ids) = ljos_cli::mail::stop_note();
             if !mail.is_empty() {
-                println!("{}", ljos_cli::block_output(call.shape, &mail));
-                let _ = std::io::Write::flush(&mut std::io::stdout());
+                ljos_cli::emit!("{}", ljos_cli::block_output(call.shape, &mail));
+                let _ = ljos_cli::output::flush_stdout();
                 ljos_cli::mail::ack_delivered(&ids);
                 return Ok(());
             }
@@ -4650,7 +4725,7 @@ fn run_hook(hook: HookArgs) -> Result<()> {
         && !argv.is_empty()
         && !ljos_cli::subagent::payload_names_mcp_tool(&input);
     if unresolved_dir {
-        eprintln!(
+        ljos_cli::say!(
             "ljos: the guard could not judge (the directory does not resolve); the call is allowed"
         );
     }
@@ -4986,7 +5061,7 @@ fn run_hook(hook: HookArgs) -> Result<()> {
     .unwrap_or_else(|| ljos_cli::hook_output_ruled(&call, &context, verdict));
     ljos_cli::answer_gate(&output);
     if let Some(note) = origin_note {
-        eprintln!("{}", ljos_cli::scan::wrap(&note, ljos_cli::scan::COLS));
+        ljos_cli::say!("{}", ljos_cli::scan::wrap_for(&note, Width::stderr()));
     }
     if let Some(rule) = verdict {
         let seat = std::env::var("LJOS_SEAT").unwrap_or_default();
@@ -5081,19 +5156,19 @@ fn run_command() -> Result<()> {
     // them. `--help` stays here so the command page is this binary's.
     if let Some(args) = mcp_serve_args() {
         let err = ljos_cli::exec_server(&args);
-        eprintln!("ljos: {err:#}");
+        ljos_cli::say!("ljos: {err:#}");
         std::process::exit(1);
     }
     // `--help` exits before the seat is read. `ljos help` is a command.
     if root_help_only() {
-        print!("{}", help_groups::render(&Cli::command(), false));
+        ljos_cli::tell_raw!("{}", help_groups::render(&Cli::command(), false));
         return Ok(());
     }
     if std::env::args_os().len() == 1 {
         // The same seat a read names, including where it came from.
         ljos_cli::load_seat_env();
         ljos_cli::seat_resolve::prepare(None, ljos_cli::seat_resolve::Kind::Read);
-        print!("{}", opening_screen());
+        ljos_cli::tell_raw!("{}", opening_screen());
         return Ok(());
     }
     let raw: Vec<std::ffi::OsString> = std::env::args_os().collect();
@@ -5114,39 +5189,48 @@ fn run_command() -> Result<()> {
     }
     // Help, version and a missing argument exit here, before any write.
     // A memory subcommand that clap cannot parse still records the error.
-    let cmd = match Cli::try_parse_from(args) {
-        Ok(cli) => cli.cmd,
+    let parsed = Cli::command()
+        .try_get_matches_from(args)
+        .and_then(|matches| Ok((Cli::from_arg_matches(&matches)?, matches)));
+    let cmd = match parsed {
+        Ok((cli, _)) => cli.cmd,
         Err(err) => {
-            if !matches!(
+            let shown = matches!(
                 err.kind(),
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-            ) {
+            );
+            if !shown {
                 let args: Vec<String> = std::env::args().skip(1).collect();
                 ljos_cli::memory_port::record_memory_error(&args, &err.to_string());
             }
             if let Some(line) = usage_sentence(&err) {
-                eprintln!("{line}");
+                ljos_cli::say!("{line}");
                 std::process::exit(USAGE_STATUS);
             }
-            err.exit();
+            if shown {
+                ljos_cli::tell_raw!("{}", err.render());
+            } else {
+                ljos_cli::say_raw!("{}", err.render());
+            }
+            std::process::exit(err.exit_code());
         }
     };
     // A blank id is a failed `ljos file` capture. Refuse before the seat
     // check, the note queue and the tracker.
     if let Some(line) = blank_ticket_line(&cmd) {
-        eprintln!("{line}");
+        ljos_cli::say!("{line}");
         std::process::exit(1);
     }
     // A title is not a ticket id. Say how to file it as a plan before the
     // tracker is asked, so a product checkout is not initialised.
     if let Some(line) = sitting_plan_line(&cmd) {
-        eprintln!("{line}");
+        ljos_cli::say!("{line}");
         std::process::exit(USAGE_STATUS);
     }
     // A following id on `block` is `--on`. A mix with `--on` or `--off`,
     // or a word that is not an id, is a usage error. Refuse before the seat.
     if let Some(line) = block_usage_line(&cmd) {
-        eprintln!("{line}");
+        ljos_cli::say!("{line}");
         std::process::exit(USAGE_STATUS);
     }
     ljos_cli::seat_resolve::prepare(seat_flag, seat_kind(&cmd));
@@ -5170,11 +5254,11 @@ fn run_command() -> Result<()> {
             // The short form waits for the claim itself. JSON is one
             // object at the end, so this line would break it.
             if *verbose && !*json && plan.is_none() {
-                println!(
+                ljos_cli::tell!(
                     "sitting {}: checking blockers",
                     issue.as_deref().unwrap_or("plan")
                 );
-                std::io::Write::flush(&mut std::io::stdout())?;
+                ljos_cli::output::flush_stdout()?;
             }
             Some(begin_sitting_preclaim())
         }
@@ -5246,17 +5330,17 @@ fn run_command() -> Result<()> {
         } => {
             ljos_cli::config_diag::emit();
             if transient && standing {
-                eprintln!("remember: pass --transient or --standing, not both.");
+                ljos_cli::say!("remember: pass --transient or --standing, not both.");
                 std::process::exit(USAGE_STATUS);
             }
             let text = join(&text);
             if text.trim().is_empty() {
-                eprintln!("remember: the text is empty, so run `ljos remember \"TEXT\"`.");
+                ljos_cli::say!("remember: the text is empty, so run `ljos remember \"TEXT\"`.");
                 std::process::exit(USAGE_STATUS);
             }
             let chars = text.chars().count();
             if chars > ljos_cli::REMEMBER_TEXT_CAP {
-                eprintln!(
+                ljos_cli::say!(
                     "remember: the text is {chars} characters, past {}, and it needs one or two sentences, so pass a shorter text to `ljos remember`.",
                     ljos_cli::REMEMBER_TEXT_CAP
                 );
@@ -5268,11 +5352,11 @@ fn run_command() -> Result<()> {
             };
             let _remember_project = ljos_cli::RememberProject::set(project);
             if let Err(err) = ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref()) {
-                eprintln!("{err}");
+                ljos_cli::say!("{err}");
                 std::process::exit(USAGE_STATUS);
             }
             if let Some(line) = ljos_cli::sandbox_memory_off() {
-                eprintln!("{line}");
+                ljos_cli::say!("{line}");
                 std::process::exit(1);
             }
             ljos_cli::seat_resolve::mark_write();
@@ -5284,7 +5368,7 @@ fn run_command() -> Result<()> {
             let split_n = chunks.len();
             let split = split_n > 1;
             if split {
-                eprintln!("{}", ljos_cli::remember_split_line(chunks.len()));
+                ljos_cli::say!("{}", ljos_cli::remember_split_line(chunks.len()));
             }
             let mut stored: Vec<(String, String)> = Vec::new();
             for text in chunks {
@@ -5323,29 +5407,29 @@ fn run_command() -> Result<()> {
                     continue;
                 }
                 if body["queued"].as_bool() == Some(true) {
-                    println!("{}", ljos_cli::REMEMBER_QUEUED_LINE);
+                    ljos_cli::tell!("{}", ljos_cli::REMEMBER_QUEUED_LINE);
                     continue;
                 }
                 if json {
                     if let Some(note) = ljos_cli::prose_warning_shown(&body, verbose) {
-                        eprintln!("{note}");
+                        ljos_cli::say!("{note}");
                     }
                     let mut printed = body.clone();
                     ljos_cli::readability::attach(&mut printed);
-                    println!("{}", serde_json::to_string_pretty(&printed)?);
+                    ljos_cli::emit!("{}", serde_json::to_string_pretty(&printed)?);
                 } else if !split {
-                    println!("{}", write_ack(&body, verbose));
+                    ljos_cli::tell!("{}", write_ack(&body, verbose));
                 }
-                eprintln!("{}", ljos_cli::remember_note(&body));
+                ljos_cli::say!("{}", ljos_cli::remember_note(&body));
                 if !ljos_cli::person_present() && !ljos_cli::person_stored(&body) {
-                    eprintln!("{}", ljos_cli::STORED_ORIGIN_LINE);
+                    ljos_cli::say!("{}", ljos_cli::STORED_ORIGIN_LINE);
                 }
                 if let Some(line) = ljos_cli::memories::reinforced_line(&body) {
-                    eprintln!("{line}");
+                    ljos_cli::say!("{line}");
                 } else if let Some(ids) =
                     body["supersedes"].as_array().filter(|ids| !ids.is_empty())
                 {
-                    eprintln!(
+                    ljos_cli::say!(
                         "revises {} earlier memor{}, now closed: {}",
                         ids.len(),
                         if ids.len() == 1 { "y" } else { "ies" },
@@ -5357,7 +5441,7 @@ fn run_command() -> Result<()> {
                 }
             }
             if split && !json && !stored.is_empty() {
-                print!("{}", split_claims_page(split_n, &stored));
+                ljos_cli::tell_raw!("{}", split_claims_page(split_n, &stored));
             }
         }
         Cmd::Prefer {
@@ -5400,9 +5484,9 @@ fn run_command() -> Result<()> {
                     );
                 }
                 if let Some(id) = keep {
-                    print!("{}", ljos_cli::user_rules::keep_held(&id)?);
+                    ljos_cli::tell_raw!("{}", ljos_cli::user_rules::keep_held(&id)?);
                 } else {
-                    print!("{}", ljos_cli::user_rules::review_list()?);
+                    ljos_cli::tell_raw!("{}", ljos_cli::user_rules::review_list()?);
                 }
                 return Ok(());
             }
@@ -5426,10 +5510,10 @@ fn run_command() -> Result<()> {
                     );
                 }
                 if let Some(id) = keep {
-                    print!("{}", ljos_cli::user_rules::keep_held(&id)?);
+                    ljos_cli::tell_raw!("{}", ljos_cli::user_rules::keep_held(&id)?);
                     return Ok(());
                 }
-                println!("no legacy preferences to review");
+                ljos_cli::tell!("no legacy preferences to review");
                 return Ok(());
             }
             if user {
@@ -5448,7 +5532,7 @@ fn run_command() -> Result<()> {
                     {
                         bail!("prefer: --sync pulls and pushes user rules, and takes none of the other flags");
                     }
-                    print!("{}", ljos_cli::user_rules::sync_now()?);
+                    ljos_cli::tell_raw!("{}", ljos_cli::user_rules::sync_now()?);
                     return Ok(());
                 }
                 if !deny.is_empty() || !ask.is_empty() {
@@ -5465,7 +5549,7 @@ fn run_command() -> Result<()> {
                         bail!("prefer: --forget takes the id, not the words or --promote");
                     }
                     let rule = ljos_cli::user_rules::forget(&id)?;
-                    println!("{}", ljos_cli::user_rules::ack(&rule));
+                    ljos_cli::tell!("{}", ljos_cli::user_rules::ack(&rule));
                     return Ok(());
                 }
                 let why = why.as_deref().unwrap_or("");
@@ -5485,14 +5569,14 @@ fn run_command() -> Result<()> {
                 } else {
                     let words = join(&text);
                     if words.trim().is_empty() {
-                        eprintln!(
+                        ljos_cli::say!(
                             "prefer: the text is empty, so run `ljos prefer --user --why REASON \"TEXT\"`."
                         );
                         std::process::exit(USAGE_STATUS);
                     }
                     ljos_cli::user_rules::write_preference(&words, why, &mention, &reply)?
                 };
-                println!("{}", ljos_cli::user_rules::ack(&rule));
+                ljos_cli::tell!("{}", ljos_cli::user_rules::ack(&rule));
                 return Ok(());
             }
             if why.is_some()
@@ -5510,7 +5594,7 @@ fn run_command() -> Result<()> {
             }
             let text = join(&text);
             if text.trim().is_empty() {
-                eprintln!("prefer: the text is empty, so run `ljos prefer \"TEXT\"`.");
+                ljos_cli::say!("prefer: the text is empty, so run `ljos prefer \"TEXT\"`.");
                 std::process::exit(USAGE_STATUS);
             }
             let rules = ljos_cli::preference_rules(&text, &deny, &ask)?;
@@ -5528,16 +5612,16 @@ fn run_command() -> Result<()> {
             ljos_cli::seat_resolve::mark_write();
             ljos_cli::seat_resolve::announce_named_unknown(&ljos_cli::whoami());
             let body = ljos_cli::packset_prefer(&text, as_persona.as_deref())?;
-            println!("{}", write_ack(&body, false));
+            ljos_cli::tell!("{}", write_ack(&body, false));
             if let Some(line) = ljos_cli::memories::reinforced_line(&body) {
-                eprintln!("{line}");
+                ljos_cli::say!("{line}");
             }
             for rule in &rules {
-                println!("{}", write_ack(&write_rule(rule, basis)?, false));
+                ljos_cli::tell!("{}", write_ack(&write_rule(rule, basis)?, false));
             }
             if !proposed.is_empty() && !ljos_cli::person_present() {
                 for rule in &proposed {
-                    println!(
+                    ljos_cli::tell!(
                         "this preference can carry an ask over {}: `ljos rule {} --verdict ask --why {}`",
                         rule.pattern,
                         ljos_cli::tools::sh_quote(&rule.pattern),
@@ -5551,7 +5635,7 @@ fn run_command() -> Result<()> {
                         .get("id")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("");
-                    println!(
+                    ljos_cli::tell!(
                         "the hook now asks before {}, with this preference as the reason; `ljos forget {id}` takes the rule back",
                         rule.pattern
                     );
@@ -5572,7 +5656,7 @@ fn run_command() -> Result<()> {
                     } else {
                         trimmed
                     };
-                    eprintln!(
+                    ljos_cli::say!(
                         "proposals: --status takes {}, not {bad}.",
                         ljos_cli::admit::proposal_status_list()
                     );
@@ -5587,11 +5671,11 @@ fn run_command() -> Result<()> {
                 } else {
                     text
                 };
-                print!("{}", ljos_cli::admit::amend_proposal(&id, &text)?);
+                ljos_cli::tell_raw!("{}", ljos_cli::admit::amend_proposal(&id, &text)?);
             } else if settle {
-                print!("{}", ljos_cli::admit::settle_proposals(seat.as_deref())?);
+                ljos_cli::tell_raw!("{}", ljos_cli::admit::settle_proposals(seat.as_deref())?);
             } else {
-                print!(
+                ljos_cli::tell_raw!(
                     "{}",
                     ljos_cli::admit::list_proposals(seat.as_deref(), status.as_deref())
                 );
@@ -5604,15 +5688,15 @@ fn run_command() -> Result<()> {
             via,
         } => {
             let yes = ljos_cli::quoted_yes::read(quote.as_deref(), at.as_deref(), via.as_deref())?;
-            print!("{}", ljos_cli::admit::accept_ids(&ids, yes.as_ref()));
+            ljos_cli::tell_raw!("{}", ljos_cli::admit::accept_ids(&ids, yes.as_ref()));
         }
         Cmd::Export { out, machine, json } => export_memories(&out, machine.as_deref(), json)?,
         Cmd::Memory { cmd } => memory_cmd(cmd)?,
         Cmd::Memories { cmd } => memories_cmd(cmd)?,
-        Cmd::RetireNotes => print!("{}", ljos_cli::note_retire::sweep()?),
+        Cmd::RetireNotes => ljos_cli::tell_raw!("{}", ljos_cli::note_retire::sweep()?),
         Cmd::Forget { id, why, json } => {
             let body = packset_forget(&id, why.as_deref())?;
-            println!("{}", ljos_cli::atom_out(&body, json)?);
+            ljos_cli::tell!("{}", ljos_cli::atom_out(&body, json)?);
         }
         Cmd::MergeAtoms { current, path } => {
             ljos_cli::merge_atoms(&current, &path)?;
@@ -5622,7 +5706,7 @@ fn run_command() -> Result<()> {
         }
         Cmd::Cloud { cmd } => match cmd {
             CloudCmd::Up { force, repoint } => {
-                print!("{}", ljos_cli::cloud::up_at(force, repoint)?)
+                ljos_cli::tell_raw!("{}", ljos_cli::cloud::up_at(force, repoint)?)
             }
         },
         Cmd::Mesh { cmd } => match cmd {
@@ -5652,21 +5736,21 @@ fn run_command() -> Result<()> {
             }
             MeshCmd::Status => {
                 let (text, failed) = ljos_cli::mesh::status_text();
-                println!("{text}");
+                ljos_cli::tell!("{text}");
                 if failed {
                     std::process::exit(1);
                 }
             }
-            MeshCmd::Acl { swarms } => println!("{}", ljos_cli::mesh::acl(&swarms)?),
+            MeshCmd::Acl { swarms } => ljos_cli::tell!("{}", ljos_cli::mesh::acl(&swarms)?),
             MeshCmd::Pull { seat, from } => {
                 let store = ljos_cli::mesh_lane::SeatStore::open(&seat)?;
                 // Print the line here. A down writer names itself in the
                 // message, and the shared fault path would replace that
                 // line with a bare connection failure.
                 match ljos_cli::mesh_lane::pull(&store, &from) {
-                    Ok(summary) => print!("{}", summary.line()),
+                    Ok(summary) => ljos_cli::tell_raw!("{}", summary.line()),
                     Err(err) => {
-                        eprintln!("Error: {err}");
+                        ljos_cli::say!("Error: {err}");
                         std::process::exit(1);
                     }
                 }
@@ -5674,7 +5758,7 @@ fn run_command() -> Result<()> {
             MeshCmd::Push { seat, to, lane } => {
                 let store = ljos_cli::mesh_lane::SeatStore::open(&seat)?;
                 let lane = lane.unwrap_or_else(ljos_cli::memory_port::export_host);
-                print!("{}", ljos_cli::mesh_lane::push(&store, &to, &lane)?);
+                ljos_cli::tell_raw!("{}", ljos_cli::mesh_lane::push(&store, &to, &lane)?);
             }
         },
         Cmd::Sync {
@@ -5688,15 +5772,15 @@ fn run_command() -> Result<()> {
             compact,
         } => {
             if let Some(host) = adopt {
-                print!("{}", ljos_cli::sync::adopt(&host, force, dry_run)?);
+                ljos_cli::tell_raw!("{}", ljos_cli::sync::adopt(&host, force, dry_run)?);
             } else if let Some(host) = adopt_legacy {
-                print!("{}", ljos_cli::sync::adopt_legacy(&host)?);
+                ljos_cli::tell_raw!("{}", ljos_cli::sync::adopt_legacy(&host)?);
             } else if key {
-                println!("{}", ljos_cli::sync::public_key()?);
+                ljos_cli::emit!("{}", ljos_cli::sync::public_key()?);
             } else {
                 let _compact = compact.then(ljos_cli::sync::compact_for_this_call);
                 let both = !import && !export;
-                print!(
+                ljos_cli::tell_raw!(
                     "{}",
                     ljos_cli::sync::sync_repo(both || import, both || export)?
                 );
@@ -5705,17 +5789,16 @@ fn run_command() -> Result<()> {
         Cmd::Hubs { limit, json } => {
             let body = packset_hubs(limit)?;
             if json {
-                print!("{}", ljos_cli::hubs_json(&body));
+                ljos_cli::emit_raw!("{}", ljos_cli::hubs_json(&body));
             } else {
-                print!(
-                    "{}",
-                    ljos_cli::scan::for_reader(&format_hubs(&body), human_color())
-                );
+                let page =
+                    ljos_cli::scan::for_reader(&format_hubs(&body, Width::stdout()), human_color());
+                ljos_cli::emit_raw!("{page}");
             }
         }
-        Cmd::Conflicts { limit } => print!("{}", conflicts(limit)?),
+        Cmd::Conflicts { limit } => ljos_cli::tell_raw!("{}", conflicts(limit)?),
         Cmd::Consolidate { apply } => {
-            print!("{}", format_consolidation(&packset_consolidate(apply)?))
+            ljos_cli::tell_raw!("{}", format_consolidation(&packset_consolidate(apply)?))
         }
         Cmd::Island {
             cue,
@@ -5725,12 +5808,13 @@ fn run_command() -> Result<()> {
         } => {
             let body = packset_island_as(&join(&cue), fire, as_persona.as_deref())?;
             if json {
-                print!("{}", ljos_cli::island_json(&body));
+                ljos_cli::emit_raw!("{}", ljos_cli::island_json(&body));
             } else {
-                print!(
-                    "{}",
-                    ljos_cli::scan::for_reader(&format_island(&body), human_color())
+                let page = ljos_cli::scan::for_reader(
+                    &format_island(&body, Width::stdout()),
+                    human_color(),
                 );
+                ljos_cli::emit_raw!("{page}");
             }
         }
         Cmd::Search {
@@ -5750,7 +5834,7 @@ fn run_command() -> Result<()> {
             project,
         } => {
             if !min_score.is_finite() || min_score < 0.0 {
-                eprintln!("search: --min-score takes a number from 0 up, not {min_score}.");
+                ljos_cli::say!("search: --min-score takes a number from 0 up, not {min_score}.");
                 std::process::exit(USAGE_STATUS);
             }
             if join(&query).trim().is_empty()
@@ -5758,16 +5842,16 @@ fn run_command() -> Result<()> {
                 && source_seat.is_none()
                 && import_id.is_none()
             {
-                eprintln!("search: the query is empty, so run `ljos search \"QUERY\"`.");
+                ljos_cli::say!("search: the query is empty, so run `ljos search \"QUERY\"`.");
                 std::process::exit(USAGE_STATUS);
             }
             if let Some(line) = ljos_cli::sandbox_memory_off() {
-                eprintln!("{line}");
+                ljos_cli::say!("{line}");
                 std::process::exit(1);
             }
             if let Some(at) = as_of.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                 if !ljos_cli::valid_as_of(at) {
-                    eprintln!(
+                    ljos_cli::say!(
                         "search: --as-of {at:?} is not a date; write YYYY-MM-DD or RFC 3339."
                     );
                     std::process::exit(USAGE_STATUS);
@@ -5777,7 +5861,7 @@ fn run_command() -> Result<()> {
                 Some("any") => None,
                 Some(d) => {
                     if chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").is_err() {
-                        eprintln!("search: --valid-at takes YYYY-MM-DD or any, not {d}.");
+                        ljos_cli::say!("search: --valid-at takes YYYY-MM-DD or any, not {d}.");
                         std::process::exit(USAGE_STATUS);
                     }
                     Some(d.to_string())
@@ -6003,7 +6087,7 @@ fn run_command() -> Result<()> {
                 && !unrelated
                 && ljos_cli::nothing_stored();
             if porcelain {
-                print!("{}", ljos_cli::search_porcelain(&hits, &id_space));
+                ljos_cli::emit_raw!("{}", ljos_cli::search_porcelain(&hits, &id_space));
             } else if json {
                 let relevant = (!busy_miss && floor_emptied)
                     .then(|| ljos_cli::word_rank::no_relevant_line(&asked));
@@ -6028,7 +6112,7 @@ fn run_command() -> Result<()> {
                 } else {
                     None
                 };
-                print!(
+                ljos_cli::tell_raw!(
                     "{}",
                     ljos_cli::search_json_receipts_stored(
                         &hits,
@@ -6044,46 +6128,41 @@ fn run_command() -> Result<()> {
             } else {
                 ljos_cli::say_search_rank(&ranking, &hits);
                 if floor_emptied {
-                    print!(
-                        "{}",
-                        ljos_cli::scan::for_reader(
-                            &ljos_cli::scan::no_relevant_page(&asked),
-                            human_color()
-                        )
+                    let page = ljos_cli::scan::for_reader(
+                        &ljos_cli::scan::no_relevant_page(&asked, Width::stdout()),
+                        human_color(),
                     );
+                    ljos_cli::emit_raw!("{page}");
                 } else if let Some(line) = close_line {
-                    let mut page = ljos_cli::scan::wrap(&line, ljos_cli::scan::COLS);
+                    let mut page = ljos_cli::scan::wrap_for(&line, Width::stdout());
                     if !page.ends_with('\n') {
                         page.push('\n');
                     }
-                    print!("{}", ljos_cli::scan::for_reader(&page, human_color()));
+                    ljos_cli::emit_raw!("{}", ljos_cli::scan::for_reader(&page, human_color()));
                 } else if empty_store {
-                    print!(
-                        "{}",
-                        ljos_cli::scan::for_reader(
-                            &ljos_cli::scan::empty_store_page(&asked),
-                            human_color()
-                        )
+                    let page = ljos_cli::scan::for_reader(
+                        &ljos_cli::scan::empty_store_page(&asked, Width::stdout()),
+                        human_color(),
                     );
+                    ljos_cli::emit_raw!("{page}");
                 } else if hits.is_empty() && unrelated {
-                    print!("{}", ljos_cli::NOTHING_RELEVANT);
+                    ljos_cli::tell_raw!("{}", ljos_cli::NOTHING_RELEVANT);
                 } else {
-                    print!(
-                        "{}",
-                        ljos_cli::without_raw_rows(&ljos_cli::scan::for_reader(
-                            &ljos_cli::format_search_stored_with_flags(
-                                &hits,
-                                matched,
-                                capped,
-                                explain,
-                                &asked,
-                                ranking.mode != "lexical",
-                                &id_space,
-                                &rerun_flags,
-                            ),
-                            human_color()
-                        ))
-                    );
+                    let page = ljos_cli::without_raw_rows(&ljos_cli::scan::for_reader(
+                        &ljos_cli::format_search_stored_with_flags(
+                            &hits,
+                            matched,
+                            capped,
+                            explain,
+                            &asked,
+                            ranking.mode != "lexical",
+                            &id_space,
+                            &rerun_flags,
+                            Width::stdout(),
+                        ),
+                        human_color(),
+                    ));
+                    ljos_cli::emit_raw!("{page}");
                 }
             }
             if busy_miss {
@@ -6093,7 +6172,7 @@ fn run_command() -> Result<()> {
         Cmd::Evidence { args } => {
             if args.len() == 1 {
                 let said = run_captured("deedar", &["evidence", &args[0]])?;
-                print!("{}", ljos_cli::evidence_here(&said.stdout));
+                ljos_cli::tell_raw!("{}", ljos_cli::evidence_here(&said.stdout));
             } else {
                 bail!("evidence: pass one deed accession");
             }
@@ -6104,7 +6183,7 @@ fn run_command() -> Result<()> {
                 ..
             } => {
                 let report = ljos_cli::record::check_tracker(&root)?;
-                print!("{}", ljos_cli::record::format_tracker_report(&report));
+                ljos_cli::tell_raw!("{}", ljos_cli::record::format_tracker_report(&report));
                 if !report.bad.is_empty() {
                     std::process::exit(1);
                 }
@@ -6112,7 +6191,7 @@ fn run_command() -> Result<()> {
             RecordCmd::Check { dir, tracker: None } => {
                 let dir = dir.context("record check: name a directory, or --tracker ROOT")?;
                 let report = ljos_cli::record::check_dir(&dir)?;
-                print!("{}", ljos_cli::record::format_check_report(&report));
+                ljos_cli::tell_raw!("{}", ljos_cli::record::format_check_report(&report));
             }
         },
         Cmd::Current { accession } => run("deedar", &["current", &accession])?,
@@ -6131,7 +6210,7 @@ fn run_command() -> Result<()> {
                     Some(path) => {
                         std::fs::write(&path, &read.bytes)
                             .with_context(|| format!("deed: could not write {}", path.display()))?;
-                        println!(
+                        ljos_cli::tell!(
                             "wrote {} bytes of {} to {} (sha256:{})",
                             read.bytes.len(),
                             read.accession,
@@ -6139,7 +6218,7 @@ fn run_command() -> Result<()> {
                             read.sha256
                         );
                     }
-                    None => std::io::Write::write_all(&mut std::io::stdout(), &read.bytes)?,
+                    None => write_deed_bytes(&read.bytes)?,
                 }
             } else if !remove.is_empty() {
                 let ticket = ticket
@@ -6150,17 +6229,17 @@ fn run_command() -> Result<()> {
                 for a in &remove {
                     let said = uncite_deed(ticket, a)?;
                     if porcelain {
-                        println!("{a}");
-                        eprint!("{said}");
+                        ljos_cli::emit!("{a}");
+                        ljos_cli::say_raw!("{said}");
                     } else {
-                        print!("{said}");
+                        ljos_cli::tell_raw!("{said}");
                     }
                 }
                 let persisted = ljos_cli::persist_tracker(ticket, "removed a deed citation");
                 if porcelain {
-                    eprint!("{persisted}");
+                    ljos_cli::say_raw!("{persisted}");
                 } else {
-                    print!("{persisted}");
+                    ljos_cli::tell_raw!("{persisted}");
                 }
             } else if add.is_empty() {
                 let issue = issue.as_deref().context("deed: an issue is required")?;
@@ -6171,12 +6250,12 @@ fn run_command() -> Result<()> {
                         if let Some(id) = line.strip_prefix("  ") {
                             let id = id.trim();
                             if !id.is_empty() {
-                                println!("{id}");
+                                ljos_cli::emit!("{id}");
                             }
                         }
                     }
-                    eprint!("{}", said.stdout);
-                    eprint!("{}", said.stderr);
+                    ljos_cli::say_raw!("{}", said.stdout);
+                    ljos_cli::say_raw!("{}", said.stderr);
                 } else {
                     run("vissue", &["deed", issue])?;
                 }
@@ -6196,14 +6275,14 @@ fn run_command() -> Result<()> {
                 if porcelain {
                     let said = run_captured("vissue", &refs)?;
                     for id in &cited {
-                        println!("{id}");
+                        ljos_cli::emit!("{id}");
                     }
-                    eprint!("{}", said.stdout);
-                    eprint!("{}", said.stderr);
-                    eprint!("{}", ljos_cli::persist_tracker(issue, "cited a deed"));
+                    ljos_cli::say_raw!("{}", said.stdout);
+                    ljos_cli::say_raw!("{}", said.stderr);
+                    ljos_cli::say_raw!("{}", ljos_cli::persist_tracker(issue, "cited a deed"));
                 } else {
                     run("vissue", &refs)?;
-                    print!("{}", ljos_cli::persist_tracker(issue, "cited a deed"));
+                    ljos_cli::tell_raw!("{}", ljos_cli::persist_tracker(issue, "cited a deed"));
                 }
             }
         }
@@ -6224,19 +6303,19 @@ fn run_command() -> Result<()> {
                 if added.wrote {
                     said.push_str(&ljos_cli::persist_tracker(&issue, &added.verb));
                 }
-                print!("{}", render_write(&said, git_detail(verbose), false, None));
+                ljos_cli::tell_raw!("{}", render_write(&said, git_detail(verbose), false, None));
             } else if let Some(name) = show {
                 let (version, read) = ljos_cli::table::show(&issue, &name, version)?;
                 if json {
-                    print!(
+                    ljos_cli::emit_raw!(
                         "{}",
                         ljos_cli::table::as_json(&issue, &version, &read.bytes)?
                     );
                 } else {
-                    std::io::Write::write_all(&mut std::io::stdout(), &read.bytes)?;
+                    write_deed_bytes(&read.bytes)?;
                 }
             } else {
-                print!("{}", ljos_cli::table::list(&issue, json)?);
+                ljos_cli::tell_raw!("{}", ljos_cli::table::list(&issue, json)?);
             }
         }
         Cmd::OpenPanel {
@@ -6247,7 +6326,7 @@ fn run_command() -> Result<()> {
         } => {
             let prompt = std::fs::read_to_string(&prompt_file)
                 .with_context(|| format!("read {}", prompt_file.display()))?;
-            print!(
+            ljos_cli::tell_raw!(
                 "{}",
                 ljos_cli::open_decision_panel(&prompt, cwd.as_deref(), &log)?
             );
@@ -6306,7 +6385,7 @@ fn run_command() -> Result<()> {
                 let filed = ljos_cli::bulk_file::file_rows(&placed, &defaults)?;
                 ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
                 for id in &filed.ids {
-                    println!("{id}");
+                    ljos_cli::emit!("{id}");
                 }
                 let mut rest = notes.concat();
                 let _ = std::fmt::Write::write_fmt(
@@ -6321,7 +6400,7 @@ fn run_command() -> Result<()> {
                 if !git_detail(verbose) {
                     rest = ljos_cli::without_routine_git(&rest);
                 }
-                eprint!("{rest}");
+                ljos_cli::say_raw!("{rest}");
                 return Ok(());
             }
             let title = title.unwrap_or_default();
@@ -6404,7 +6483,7 @@ fn run_command() -> Result<()> {
                     // came back as an error.
                     let raw = err.to_string();
                     if ljos_cli::call_deadline::stalled(&raw) {
-                        eprintln!("{}", ljos_cli::user_fault_line(&err));
+                        ljos_cli::say!("{}", ljos_cli::user_fault_line(&err));
                         std::process::exit(1);
                     }
                     return Err(ticket_error(err));
@@ -6413,13 +6492,13 @@ fn run_command() -> Result<()> {
             // A failure above printed nothing that says the ticket was filed.
             if !id.is_empty() {
                 if let Some(gone) = &dropped {
-                    eprintln!("held issue {gone} is gone; filed at the top of {project}");
+                    ljos_cli::say!("held issue {gone} is gone; filed at the top of {project}");
                 } else if let Some(id) = &other_tracker {
-                    eprintln!(
+                    ljos_cli::say!(
                         "held issue {id} is on another tracker; filed at the top of {project}"
                     );
                 } else if let Some(line) = &passed_over {
-                    eprint!("{line}");
+                    ljos_cli::say_raw!("{line}");
                 }
             }
             let mut rest = ljos_cli::ensure_project_line(&text, &project);
@@ -6433,7 +6512,7 @@ fn run_command() -> Result<()> {
             rest.push_str(&persisted);
             match candidate {
                 Ok(said) => rest.push_str(&said),
-                Err(e) => eprintln!("ljos file: {e:#}"),
+                Err(e) => ljos_cli::say!("ljos file: {e:#}"),
             }
             if !id.is_empty() && parent.is_none() {
                 let _ = std::fmt::Write::write_fmt(
@@ -6457,7 +6536,7 @@ fn run_command() -> Result<()> {
                 } else {
                     ljos_cli::without_routine_git(&rest)
                 };
-                print!(
+                ljos_cli::emit_raw!(
                     "{}",
                     ljos_cli::format_rendered_json(
                         &text,
@@ -6470,14 +6549,14 @@ fn run_command() -> Result<()> {
                     rest = ljos_cli::without_routine_git(&rest);
                 }
                 if !id.is_empty() {
-                    println!("{id}");
+                    ljos_cli::emit!("{id}");
                 }
-                eprint!("{rest}");
+                ljos_cli::say_raw!("{rest}");
             }
         }
         Cmd::Options { issue, options } => {
             stop_ticket(&issue);
-            print!("{}", ljos_cli::append_issue_options(&issue, &[options])?);
+            ljos_cli::tell_raw!("{}", ljos_cli::append_issue_options(&issue, &[options])?);
         }
         Cmd::Note {
             words,
@@ -6500,7 +6579,7 @@ fn run_command() -> Result<()> {
                 &["note", &issue, &text],
                 ljos_cli::tracker_verb_wait(),
             )?;
-            eprint!("{}", captured.stderr);
+            ljos_cli::say_raw!("{}", captured.stderr);
             warn_other_sitting(&issue, quiet, inferred, false);
             let mut said = format!("{issue}: noted\n");
             said.push_str(&ljos_cli::retry_pending_claim(&issue));
@@ -6509,12 +6588,12 @@ fn run_command() -> Result<()> {
             }
             match ljos_cli::ballot_sig::sign_own_ballot(&issue) {
                 Ok(line) => said.push_str(&line),
-                Err(e) => eprintln!("ljos note: {e:#}"),
+                Err(e) => ljos_cli::say!("ljos note: {e:#}"),
             }
             said.push_str(&ljos_cli::persist_tracker(&issue, "noted"));
             ljos_cli::stamp_note_seat(&issue);
             ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
-            print!("{}", render_write(&said, git_detail(verbose), json, None));
+            ljos_cli::tell_raw!("{}", render_write(&said, git_detail(verbose), json, None));
         }
         Cmd::Slot {
             issue,
@@ -6523,18 +6602,18 @@ fn run_command() -> Result<()> {
             run,
             key,
         } => {
-            print!(
+            ljos_cli::tell_raw!(
                 "{}",
                 ljos_cli::slot::write(&issue, &seat, &model, &run, &key)?
             );
-            print!("{}", ljos_cli::persist_tracker(&issue, "slotted"));
+            ljos_cli::tell_raw!("{}", ljos_cli::persist_tracker(&issue, "slotted"));
         }
-        Cmd::Log { seat } => print!("{}", ljos_cli::tracker_log(Some(&seat))?),
-        Cmd::Usage { since } => print!("{}", ljos_cli::tracker_usage(&since)?),
+        Cmd::Log { seat } => ljos_cli::tell_raw!("{}", ljos_cli::tracker_log(Some(&seat))?),
+        Cmd::Usage { since } => ljos_cli::tell_raw!("{}", ljos_cli::tracker_usage(&since)?),
         Cmd::Digest { since, json, mark } => {
-            print!(
+            ljos_cli::emit_raw!(
                 "{}",
-                ljos_cli::digest::digest_cli(since.as_deref(), json, mark)?
+                ljos_cli::digest::digest_cli(since.as_deref(), json, mark, Width::stdout())?
             );
         }
         Cmd::Send {
@@ -6554,7 +6633,7 @@ fn run_command() -> Result<()> {
                 let seat = words.remove(0);
                 (Some(seat), words.join(" "))
             };
-            print!(
+            ljos_cli::tell_raw!(
                 "{}",
                 ljos_cli::mail::send(&ljos_cli::mail::Send {
                     seat: seat.as_deref(),
@@ -6567,19 +6646,19 @@ fn run_command() -> Result<()> {
             );
         }
         Cmd::Inbox { all, sync } => {
-            print!("{}", ljos_cli::mail::inbox_sync(all, sync.as_deref())?)
+            ljos_cli::tell_raw!("{}", ljos_cli::mail::inbox_sync(all, sync.as_deref())?)
         }
-        Cmd::Read { id } => print!("{}", ljos_cli::mail::read(&id)?),
+        Cmd::Read { id } => ljos_cli::tell_raw!("{}", ljos_cli::mail::read(&id)?),
         Cmd::Reply {
             id,
             text,
             interrupt,
-        } => print!(
+        } => ljos_cli::tell_raw!(
             "{}",
             ljos_cli::mail::reply(&id, &text.join(" "), interrupt)?
         ),
         Cmd::Group { name, add, remove } => {
-            print!("{}", ljos_cli::mail::group(&name, &add, &remove)?)
+            ljos_cli::tell_raw!("{}", ljos_cli::mail::group(&name, &add, &remove)?)
         }
         Cmd::Wake {
             seat,
@@ -6615,7 +6694,7 @@ fn run_command() -> Result<()> {
             } else {
                 ljos_cli::wake::show(&seat)
             };
-            print!("{said}");
+            ljos_cli::tell_raw!("{said}");
         }
         Cmd::Block {
             issue,
@@ -6643,19 +6722,20 @@ fn run_command() -> Result<()> {
                     _ => bail!("block: pass --on ID to add an edge, or --off ID to drop one"),
                 }
             };
-            print!("{said}");
+            ljos_cli::tell_raw!("{said}");
         }
         Cmd::Parent { issue, parent } => {
             stop_ticket(&issue);
             stop_ticket(&parent);
-            print!("{}", ljos_cli::reparent_issue(&issue, &parent)?);
+            ljos_cli::tell_raw!("{}", ljos_cli::reparent_issue(&issue, &parent)?);
         }
         Cmd::Show { issue, json, all } => {
-            let said = ljos_cli::show_memory::show_any(&issue, json, all).map_err(show_error)?;
+            let said = ljos_cli::show_memory::show_any(&issue, json, all, Width::stdout())
+                .map_err(show_error)?;
             if json {
-                print!("{said}");
+                ljos_cli::tell_raw!("{said}");
             } else {
-                print!("{}", ljos_cli::scan::for_reader(&said, human_color()));
+                ljos_cli::tell_raw!("{}", ljos_cli::scan::for_reader(&said, human_color()));
             }
         }
         Cmd::Ready(args) | Cmd::List(args) => print_ready(args)?,
@@ -6680,11 +6760,11 @@ fn run_command() -> Result<()> {
                 if json {
                     bail!("claims: --json is for --stale");
                 }
-                print!("{}", ljos_cli::quiet_claims::list_mine()?);
+                ljos_cli::tell_raw!("{}", ljos_cli::quiet_claims::list_mine()?);
                 return Ok(());
             }
             if stale {
-                print!("{}", ljos_cli::quiet_claims::list_stale(days, json)?);
+                ljos_cli::tell_raw!("{}", ljos_cli::quiet_claims::list_stale(days, json)?);
                 return Ok(());
             }
             if days.is_some() {
@@ -6694,7 +6774,7 @@ fn run_command() -> Result<()> {
             // command forwards. With none, the age is counted here from the
             // claim instant. The binary subtracts calendar dates.
             if args.is_empty() {
-                print!(
+                ljos_cli::tell_raw!(
                     "{}",
                     ljos_cli::claims_view(by.or(agent).as_deref(), project.as_deref(), json)?
                 );
@@ -6734,33 +6814,34 @@ fn run_command() -> Result<()> {
             ljos_cli::config_diag::emit();
             let trimmed = issue.trim();
             if trimmed.is_empty() {
-                eprintln!("recall: the issue id is empty, so run `ljos recall proj-1a2b`.");
+                ljos_cli::say!("recall: the issue id is empty, so run `ljos recall proj-1a2b`.");
                 std::process::exit(USAGE_STATUS);
             }
             if !looks_like_ticket_id(trimmed) {
                 let search_cmd = recall_search_command(trimmed);
                 if search_cmd.contains('`') {
-                    eprintln!("recall: that text is not a ticket id, so run {search_cmd}.");
+                    ljos_cli::say!("recall: that text is not a ticket id, so run {search_cmd}.");
                 } else {
                     let shown =
                         format!("\"{}\"", trimmed.replace('\\', "\\\\").replace('"', "\\\""));
-                    eprintln!("recall: {shown} is not a ticket id, so run `{search_cmd}`.");
+                    ljos_cli::say!("recall: {shown} is not a ticket id, so run `{search_cmd}`.");
                 }
                 std::process::exit(USAGE_STATUS);
             }
             stop_ticket(&issue);
             ljos_cli::log_recall("recall", &issue);
-            let said = ljos_cli::tracker_recall(&issue).map_err(ticket_error)?;
-            eprint!("{}", ljos_cli::without_raw_rows(&said.stderr));
-            let memories = ljos_cli::recall_for_command(&issue)?;
+            let width = page_width(json);
+            let said = ljos_cli::tracker_recall(&issue, width).map_err(ticket_error)?;
+            ljos_cli::say_raw!("{}", ljos_cli::without_raw_rows(&said.stderr));
+            let memories = ljos_cli::recall_for_command(&issue, width)?;
             let code = if no_graph {
                 String::new()
             } else {
-                ljos_cli::graphify::recall_section(&issue)
+                ljos_cli::graphify::recall_section(&issue, width)
             };
             let ranking = ljos_cli::ranking_now();
             if json {
-                print!(
+                ljos_cli::emit_raw!(
                     "{}",
                     ljos_cli::recall_json(&format!("{memories}{code}"), ranking.as_ref())
                 );
@@ -6769,14 +6850,13 @@ fn run_command() -> Result<()> {
                     ljos_cli::say_ranking(ranking);
                 }
                 let page = format!("{}{memories}{code}", said.stdout);
-                print!(
-                    "{}",
-                    ljos_cli::without_raw_rows(&ljos_cli::scan::for_reader(&page, human_color()))
-                );
+                let page =
+                    ljos_cli::without_raw_rows(&ljos_cli::scan::for_reader(&page, human_color()));
+                ljos_cli::emit_raw!("{page}");
             }
         }
         Cmd::Reap { idle, apply } => {
-            print!(
+            ljos_cli::tell_raw!(
                 "{}",
                 ljos_cli::reap::reap(ljos_cli::reap::parse_idle(&idle)?, apply)?
             )
@@ -6814,7 +6894,7 @@ fn run_command() -> Result<()> {
             match choice {
                 None if withdraw => {
                     let who = ljos_cli::ballot_voter_on(&issue, as_persona.as_deref())?;
-                    print!("{}", ljos_cli::undo::withdraw_ballot(&issue, &who)?);
+                    ljos_cli::tell_raw!("{}", ljos_cli::undo::withdraw_ballot(&issue, &who)?);
                 }
                 None if jev => {
                     let name = as_persona.as_deref().unwrap_or_default();
@@ -6827,11 +6907,12 @@ fn run_command() -> Result<()> {
                             } else {
                                 ljos_cli::judge_voter(&b.model)
                             };
-                            println!(
+                            ljos_cli::tell!(
                                 "{voter}: cast {} for {name} at confidence {:.2}",
-                                b.choice, b.confidence
+                                b.choice,
+                                b.confidence
                             );
-                            print!(
+                            ljos_cli::tell_raw!(
                                 "{}",
                                 ljos_cli::hook_timed("vote_persist", || {
                                     ljos_cli::persist_tracker(&issue, "ballot cast")
@@ -6840,7 +6921,7 @@ fn run_command() -> Result<()> {
                         }
                         ljos_cli::JevVote::Escalated(b) => {
                             drop(cast);
-                            println!(
+                            ljos_cli::tell!(
                             "{name}: Jev leaned {} at confidence {:.2}, under the {:.2} cut; not cast.",
                             b.choice, b.confidence, b.escalate_below
                         );
@@ -6849,12 +6930,12 @@ fn run_command() -> Result<()> {
                                 .into_iter()
                                 .find(|p| p.name == name);
                             match persona.as_ref().and_then(|p| ljos_cli::hand_ballot(p, &issue)) {
-                            Some(pane) => println!(
+                            Some(pane) => ljos_cli::tell!(
                                 "  {name} reasons in its own session in {pane}; then `ljos consensus {issue}`"
                             ),
-                            None => println!("Start a subagent from `ljos brief {name} {issue}`"),
+                            None => ljos_cli::tell!("Start a subagent from `ljos brief {name} {issue}`"),
                         }
-                            print!(
+                            ljos_cli::tell_raw!(
                                 "{}",
                                 ljos_cli::persist_tracker(&issue, "escalated a ballot")
                             );
@@ -6897,7 +6978,7 @@ fn run_command() -> Result<()> {
                         args[3]
                     );
                     }
-                    println!("recorded on the tracker: {who} for {} on {issue}", args[3]);
+                    ljos_cli::tell!("recorded on the tracker: {who} for {} on {issue}", args[3]);
                     cast.keep();
                     // Every ballot, a persona's included, is signed and bound to
                     // this connection. The push gate still counts only seat
@@ -6905,41 +6986,42 @@ fn run_command() -> Result<()> {
                     match ljos_cli::hook_timed("vote_sign", || {
                         ljos_cli::ballot_sig::sign_ballot(&issue, &who, &args[3])
                     }) {
-                        Ok(said) => print!("{said}"),
-                        Err(e) => eprintln!("ljos vote: {e:#}"),
+                        Ok(said) => ljos_cli::tell_raw!("{said}"),
+                        Err(e) => ljos_cli::say!("ljos vote: {e:#}"),
                     }
                     if let Some(expect) = expect.as_deref().map(str::trim).filter(|e| !e.is_empty())
                     {
                         write_prediction(&issue, &who, expect).with_context(|| {
                             format!("ballot cast; forecast for {who} was not recorded")
                         })?;
-                        println!("forecast recorded for {who}");
+                        ljos_cli::tell!("forecast recorded for {who}");
                     }
-                    print!("{}", ljos_cli::persist_tracker(&issue, "ballot cast"));
+                    ljos_cli::tell_raw!("{}", ljos_cli::persist_tracker(&issue, "ballot cast"));
                     if let Some((reason, child_id)) = &against_note {
                         let note = format!("{who}: against: {reason} (child {child_id})");
                         run_as("vissue", &["note", &issue, &note], Some(&who))?;
-                        println!(
+                        ljos_cli::tell!(
                         "no ballot linked to child {child_id}. {issue} stays open while {child_id} is open. After `ljos finish {child_id} --close`, replace the ballot: `ljos vote {issue} --withdraw --as {who}` then `ljos vote {issue} --for OPTION --used none --as {who}`, then `ljos consensus {issue}`."
                     );
                     }
                 }
-                None => print!("{}", ljos_cli::panel_gate::tally_report(&issue)?),
+                None => ljos_cli::tell_raw!("{}", ljos_cli::panel_gate::tally_report(&issue)?),
             }
         }
         Cmd::Brief { name, issue } => {
             ljos_cli::panel_gate::note_tracker_read(&issue);
-            print!("{}", brief(&name, &issue)?);
+            ljos_cli::emit_raw!("{}", brief(&name, &issue)?);
         }
         Cmd::Timeline { issue, limit, json } => {
             ljos_cli::panel_gate::note_tracker_read(&issue);
             if json {
-                print!("{}", ljos_cli::timeline_json(&issue, limit)?);
+                ljos_cli::emit_raw!("{}", ljos_cli::timeline_json(&issue, limit)?);
             } else {
-                print!(
-                    "{}",
-                    ljos_cli::scan::for_reader(&timeline(&issue, limit)?, human_color())
+                let page = ljos_cli::scan::for_reader(
+                    &timeline(&issue, limit, Width::stdout())?,
+                    human_color(),
                 );
+                ljos_cli::emit_raw!("{page}");
             }
         }
         Cmd::Panel {
@@ -6958,10 +7040,10 @@ fn run_command() -> Result<()> {
                         "panel --cloud writes one prompt file per persona for one issue; it does not spawn"
                     );
                 }
-                print!("{}", ljos_cli::panel_cloud::panel_cloud(&issue, &out)?);
+                ljos_cli::tell_raw!("{}", ljos_cli::panel_cloud::panel_cloud(&issue, &out)?);
             } else if issue == "run" {
                 let issue = run_issue.context("`ljos panel run` needs an issue")?;
-                print!(
+                ljos_cli::tell_raw!(
                     "{}",
                     ljos_cli::panel_gate::panel_run(
                         &issue,
@@ -6973,10 +7055,10 @@ fn run_command() -> Result<()> {
             } else if run_issue.is_some() {
                 bail!("panel: one issue, or `ljos panel run ISSUE`");
             } else if jev {
-                print!("{}", ljos_cli::panel_jev(&issue, &out)?);
-                print!("{}", ljos_cli::persist_tracker(&issue, "panel through Jev"));
+                ljos_cli::tell_raw!("{}", ljos_cli::panel_jev(&issue, &out)?);
+                ljos_cli::tell_raw!("{}", ljos_cli::persist_tracker(&issue, "panel through Jev"));
             } else {
-                print!("{}", panel(&issue, &out)?);
+                ljos_cli::tell_raw!("{}", panel(&issue, &out)?);
             }
         }
         Cmd::Persona {
@@ -6990,7 +7072,7 @@ fn run_command() -> Result<()> {
             retire,
         } => {
             if retire {
-                print!("{}", ljos_cli::retire_persona(&name, replace)?);
+                ljos_cli::tell_raw!("{}", ljos_cli::retire_persona(&name, replace)?);
                 ljos_cli::refresh_agents();
                 return Ok(());
             }
@@ -7007,15 +7089,15 @@ fn run_command() -> Result<()> {
                 PersonaWrite::Define
             };
             if check {
-                print!("{}", ljos_cli::check_persona(&persona, how)?);
+                ljos_cli::tell_raw!("{}", ljos_cli::check_persona(&persona, how)?);
                 return Ok(());
             }
             let body = write_persona_as(&persona, how)?;
-            println!("{}", write_ack(&body, false));
+            ljos_cli::tell!("{}", write_ack(&body, false));
             ljos_cli::refresh_agents();
         }
         Cmd::Upgrade { version, dir, only } => {
-            print!(
+            ljos_cli::tell_raw!(
                 "{}",
                 ljos_cli::upgrade::upgrade(version.as_deref(), dir.as_deref(), only.as_deref())?
             );
@@ -7069,16 +7151,16 @@ fn run_command() -> Result<()> {
                 herdr,
                 failures: sup.failures,
             };
-            println!("{}", serde_json::to_string_pretty(&decision)?);
+            ljos_cli::emit!("{}", serde_json::to_string_pretty(&decision)?);
         }
         Cmd::Ask { name, text } => {
-            println!("{}", ljos_cli::ask_persona(&name, &text.join(" "))?);
+            ljos_cli::tell!("{}", ljos_cli::ask_persona(&name, &text.join(" "))?);
         }
         Cmd::Personas => {
-            print!("{}", ljos_cli::personas_listing()?);
+            ljos_cli::tell_raw!("{}", ljos_cli::personas_listing()?);
         }
         Cmd::Agents { harness, dry_run } => {
-            print!(
+            ljos_cli::tell_raw!(
                 "{}",
                 ljos_cli::format_steps(&ljos_cli::export_agents(harness.as_deref(), dry_run)?)
             );
@@ -7087,20 +7169,20 @@ fn run_command() -> Result<()> {
             // A runner pipes its status JSON. At a terminal, with nothing
             // piped, reading stdin waits forever.
             if std::io::stdin().is_terminal() {
-                eprintln!("{}", statusline_tty_hint());
+                ljos_cli::say!("{}", statusline_tty_hint());
                 std::process::exit(USAGE_STATUS);
             }
             let mut input = String::new();
             let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
-            println!("{}", ljos_cli::statusline(&input));
+            ljos_cli::emit!("{}", ljos_cli::statusline(&input));
         }
         Cmd::Playbook { issue, name } => {
             stop_ticket(&issue);
-            print!("{}", copy_playbook(&issue, &name)?);
-            print!("{}", ljos_cli::persist_tracker(&issue, "bound a playbook"));
+            ljos_cli::tell_raw!("{}", copy_playbook(&issue, &name)?);
+            ljos_cli::tell_raw!("{}", ljos_cli::persist_tracker(&issue, "bound a playbook"));
         }
         Cmd::Playbooks => {
-            print!("{}", format_playbooks(&playbooks_from_pack()?));
+            ljos_cli::tell_raw!("{}", format_playbooks(&playbooks_from_pack()?));
         }
         Cmd::Workflow {
             issue,
@@ -7108,12 +7190,18 @@ fn run_command() -> Result<()> {
             round,
         } => {
             if let Some(name) = start {
-                print!("{}", ljos_cli::workflow_start(&issue, &name)?);
+                ljos_cli::emit_raw!(
+                    "{}",
+                    ljos_cli::workflow_start(&issue, &name, Width::stdout())?
+                );
             } else if round {
-                print!("{}", ljos_cli::workflow_round(&issue)?);
+                ljos_cli::emit_raw!("{}", ljos_cli::workflow_round(&issue, Width::stdout())?);
             } else {
-                match ljos_cli::workflow_status(&issue)? {
-                    Some(s) => print!("{}", ljos_cli::format_workflow_status(&s)),
+                match ljos_cli::workflow_status(&issue, Width::stdout())? {
+                    Some(s) => ljos_cli::emit_raw!(
+                        "{}",
+                        ljos_cli::format_workflow_status(&s, Width::stdout())
+                    ),
                     None => bail!(
                         "workflow: {issue} carries no workflow; `ljos workflow {issue} --start feature` starts one"
                     ),
@@ -7142,21 +7230,21 @@ fn run_command() -> Result<()> {
                     let said = match said {
                         Ok(said) => said,
                         Err(err) => {
-                            eprintln!("{}", ljos_cli::user_fault_line(&err));
+                            ljos_cli::say!("{}", ljos_cli::user_fault_line(&err));
                             std::process::exit(1);
                         }
                     };
-                    print!("{said}");
+                    ljos_cli::tell_raw!("{said}");
                     if !takeover {
-                        print!("{}", ljos_cli::persist_tracker(&node, "claimed"));
+                        ljos_cli::tell_raw!("{}", ljos_cli::persist_tracker(&node, "claimed"));
                     }
                 }
                 None => {
                     let said = claim_next(&assignee, role.as_deref(), slack)?;
                     let taken = said.split_whitespace().next().unwrap_or("").to_string();
-                    print!("{said}");
+                    ljos_cli::tell_raw!("{said}");
                     if !taken.is_empty() {
-                        print!("{}", ljos_cli::persist_tracker(&taken, "claimed"));
+                        ljos_cli::tell_raw!("{}", ljos_cli::persist_tracker(&taken, "claimed"));
                     }
                 }
             }
@@ -7199,7 +7287,7 @@ fn run_command() -> Result<()> {
                     Some(raw) => Some(ljos_cli::quiet_claims::parse_older_than(raw)?),
                     None => None,
                 };
-                print!(
+                ljos_cli::tell_raw!(
                     "{}",
                     ljos_cli::quiet_claims::release_quiet(
                         &ljos_cli::seat_name(),
@@ -7210,7 +7298,7 @@ fn run_command() -> Result<()> {
                 );
             } else if stale {
                 let assignee = assignee_for("release", assignee.as_deref(), true)?;
-                print!(
+                ljos_cli::tell_raw!(
                     "{}",
                     ljos_cli::quiet_claims::release_stale(&assignee, days, yes)?
                 );
@@ -7218,9 +7306,9 @@ fn run_command() -> Result<()> {
                 let assignee = assignee_for("release", assignee.as_deref(), true)?;
                 stop_ticket_node(&node);
                 let said = release(&node, &assignee)?;
-                print!("{said}");
+                ljos_cli::tell_raw!("{said}");
                 if !said.is_empty() {
-                    print!("{}", ljos_cli::persist_tracker(&node, "released"));
+                    ljos_cli::tell_raw!("{}", ljos_cli::persist_tracker(&node, "released"));
                 }
             } else {
                 bail!("release: pass an id, or --stale");
@@ -7234,7 +7322,7 @@ fn run_command() -> Result<()> {
         } => {
             let assignee = assignee_for("complete", assignee.as_deref(), false)?;
             stop_ticket_node(&node);
-            print!("{}", complete(&node, status.as_deref(), &assignee, gen)?)
+            ljos_cli::tell_raw!("{}", complete(&node, status.as_deref(), &assignee, gen)?)
         }
         Cmd::Cards { dir } => {
             let out = cards(&dir)?;
@@ -7248,12 +7336,12 @@ fn run_command() -> Result<()> {
                         .unwrap_or_else(|_| dir.clone())
                 };
                 let shown = joined.canonicalize().unwrap_or(joined);
-                println!(
+                ljos_cli::tell!(
                     "no USER.md or MEMORY.md in {}. Write them there, or pass --dir. ljos reads them and does not write them.",
                     shown.display()
                 );
             } else {
-                print!("{out}");
+                ljos_cli::tell_raw!("{out}");
             }
         }
         Cmd::Predict {
@@ -7264,7 +7352,7 @@ fn run_command() -> Result<()> {
             stop_ticket(&issue);
             let who = ljos_cli::ballot_voter("predict", as_persona.as_deref())?;
             let body = write_prediction(&issue, &who, &expect)?;
-            println!("{}", serde_json::to_string_pretty(&body)?);
+            ljos_cli::emit!("{}", serde_json::to_string_pretty(&body)?);
         }
         Cmd::Rule {
             pattern,
@@ -7288,12 +7376,12 @@ fn run_command() -> Result<()> {
                     basis,
                 )?;
                 if json {
-                    println!(
+                    ljos_cli::emit!(
                         "{}",
                         serde_json::to_string_pretty(&ljos_cli::user_rules::to_value(&rule))?
                     );
                 } else {
-                    println!("{}", ljos_cli::user_rules::ack(&rule));
+                    ljos_cli::tell!("{}", ljos_cli::user_rules::ack(&rule));
                 }
             } else {
                 let basis = ljos_cli::Basis::of_rule();
@@ -7305,7 +7393,7 @@ fn run_command() -> Result<()> {
                     },
                     basis,
                 )?;
-                println!(
+                ljos_cli::tell!(
                     "{}",
                     if json {
                         ljos_cli::atom_out(&body, true)?
@@ -7317,28 +7405,28 @@ fn run_command() -> Result<()> {
         }
         Cmd::Rules { json } => {
             match ljos_cli::rules_from_pack() {
-                Ok(rules) => print!("{}", ljos_cli::format_rules(&rules, json)),
+                Ok(rules) => ljos_cli::tell_raw!("{}", ljos_cli::format_rules(&rules, json)),
                 Err(err) => {
                     if ljos_cli::user_rules::load().unwrap_or_default().is_empty() {
                         return Err(err);
                     }
-                    eprintln!("ljos: seat rules: {err:#}");
+                    ljos_cli::say!("ljos: seat rules: {err:#}");
                 }
             }
             if !json {
                 ljos_cli::user_rules::note_cutoff();
-                print!("{}", ljos_cli::user_rules::format_list());
+                ljos_cli::tell_raw!("{}", ljos_cli::user_rules::format_list());
             }
         }
         Cmd::Policy { argv, fail_on_deny } => {
             if argv.is_empty() {
-                eprintln!(
+                ljos_cli::say!(
                     "policy: pass the command to check, so run `ljos policy -- git push --force`."
                 );
                 std::process::exit(USAGE_STATUS);
             }
             let text = policy_with_memory(&argv)?;
-            print!("{text}");
+            ljos_cli::emit_raw!("{text}");
             if ljos_cli::shell_exit(fail_on_deny, &text) != 0 {
                 std::process::exit(1);
             }
@@ -7359,7 +7447,7 @@ fn run_command() -> Result<()> {
             deadline,
         } => {
             if let Some(line) = ljos_cli::sandbox_memory_off() {
-                eprintln!("{line}");
+                ljos_cli::say!("{line}");
                 std::process::exit(1);
             }
             stop_ticket(&id);
@@ -7382,7 +7470,7 @@ fn run_command() -> Result<()> {
                 ljos_cli::hook_timed("consensus_trust", || match ljos_cli::consensus_atoms() {
                     Ok(atoms) => atoms,
                     Err(e) => {
-                        eprintln!("ljos: no trust rows ({e:#}); settling with equal weights");
+                        ljos_cli::say!("ljos: no trust rows ({e:#}); settling with equal weights");
                         Vec::new()
                     }
                 });
@@ -7399,10 +7487,10 @@ fn run_command() -> Result<()> {
             if let Some(msg) = ljos_cli::hook_timed("consensus_refusal", || {
                 ljos_cli::panel_gate::settle_refusal(&id)
             }) {
-                println!("ljos: session-authored: {msg}");
+                ljos_cli::tell!("ljos: session-authored: {msg}");
             }
             for line in ljos_cli::panel_gate::blind_lines_for(&id) {
-                println!("blind design: {line}");
+                ljos_cli::tell!("blind design: {line}");
             }
             if let Some(n) = quorum {
                 quorum_or_exit(&id, n, deadline.as_deref(), json)?;
@@ -7475,7 +7563,7 @@ fn run_command() -> Result<()> {
                 for step in steps.iter().chain(&panel) {
                     let captured = run_captured(step.bin, &step.args)?;
                     if !captured.stderr.is_empty() {
-                        eprint!("{}", captured.stderr);
+                        ljos_cli::say_raw!("{}", captured.stderr);
                     }
                     said.push((ljos_cli::consensus_step_label(step), captured.stdout));
                 }
@@ -7488,25 +7576,27 @@ fn run_command() -> Result<()> {
                 if !dissent.is_empty() {
                     doc["dissent"] = serde_json::json!(dissent);
                 }
-                println!("{}", serde_json::to_string_pretty(&doc)?);
+                ljos_cli::emit!("{}", serde_json::to_string_pretty(&doc)?);
                 return Ok(());
             }
-            print!(
+            ljos_cli::tell_raw!(
                 "{}",
                 ljos_cli::consensus_verdict(&gate_json, &protected_json)
             );
-            print!("{gate}");
-            print!("{protected}");
-            print!("{provenance}");
+            ljos_cli::tell_raw!("{gate}");
+            ljos_cli::tell_raw!("{protected}");
+            ljos_cli::tell_raw!("{provenance}");
             for line in &dissent {
-                println!("dissent: {line}");
+                ljos_cli::tell!("dissent: {line}");
             }
-            println!("advice, which does not decide a push: the weighted settle over every ballot");
+            ljos_cli::tell!(
+                "advice, which does not decide a push: the weighted settle over every ballot"
+            );
             if let Some(line) = discount {
-                println!("{line}");
+                ljos_cli::tell!("{line}");
             }
             if let Some(line) = ljos_cli::slot::families_in_words(&families, have_model) {
-                print!("{line}");
+                ljos_cli::tell_raw!("{line}");
             }
             // The page a person reads is the tracker's weighted settle.
             // One ask, whether or not the model crate is installed.
@@ -7521,11 +7611,11 @@ fn run_command() -> Result<()> {
                     // The tracker's settle text stays. A dissent it filed is
                     // named, rather than left as the create line on stderr.
                     let said = run_captured(step.bin, &step.args)?;
-                    print!("{}", said.stdout);
+                    ljos_cli::tell_raw!("{}", said.stdout);
                     for line in
                         ljos_cli::dissent_lines(&format!("{}\n{}", said.stdout, said.stderr))
                     {
-                        println!("dissent: {line}");
+                        ljos_cli::tell!("dissent: {line}");
                     }
                     printed_tracker = true;
                     continue;
@@ -7564,7 +7654,7 @@ fn run_command() -> Result<()> {
                         // The tracker's own settle is the page a person reads.
                         // A stub or a refusal leaves the model crate's reading.
                         if answered && page.contains("social power") {
-                            print!("{page}");
+                            ljos_cli::tell_raw!("{page}");
                             printed_tracker = true;
                             continue;
                         }
@@ -7574,8 +7664,8 @@ fn run_command() -> Result<()> {
                     continue;
                 }
                 match ljos_cli::settle_in_words(&said.stdout, &anchors) {
-                    Some(words) => print!("{words}"),
-                    None => print!("{}", said.stdout),
+                    Some(words) => ljos_cli::tell_raw!("{}", words),
+                    None => ljos_cli::tell_raw!("{}", said.stdout),
                 }
             }
             for step in panel {
@@ -7588,8 +7678,8 @@ fn run_command() -> Result<()> {
                 let said = run_captured(step.bin, &step.args)?;
                 let voters = ljos_cli::voters_of(&ballots);
                 match ljos_cli::standing_in_words(&said.stdout, &voters) {
-                    Some(words) => print!("{words}"),
-                    None => print!("{}", said.stdout),
+                    Some(words) => ljos_cli::tell_raw!("{}", words),
+                    None => ljos_cli::tell_raw!("{}", said.stdout),
                 }
             }
         }
@@ -7607,7 +7697,7 @@ fn run_command() -> Result<()> {
                 about,
             };
             let v = write_trust(&row, &why)?;
-            println!("{}", ljos_cli::atom_out(&v, false)?);
+            ljos_cli::tell!("{}", ljos_cli::atom_out(&v, false)?);
         }
         Cmd::Doctor { all, .. } => {
             // Rows go out as each check finishes. `--all` prints every row.
@@ -7617,13 +7707,15 @@ fn run_command() -> Result<()> {
             // prints in one document.
             let rows = ljos_cli::doctor_stream(move |row| {
                 if all || ljos_cli::doctor_shows_in_short(row) {
-                    print!("{}", format_doctor(std::slice::from_ref(row)));
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    let row_text = format_doctor(std::slice::from_ref(row));
+                    ljos_cli::tell_raw!("{}", row_text);
+                    let _ = ljos_cli::output::flush_stdout();
                 }
             });
             if !all {
-                print!("{}", ljos_cli::doctor_summary(&rows));
-                let _ = std::io::Write::flush(&mut std::io::stdout());
+                let summary = ljos_cli::doctor_summary(&rows);
+                ljos_cli::tell_raw!("{}", summary);
+                let _ = ljos_cli::output::flush_stdout();
             }
             if !healthy(&rows) {
                 std::process::exit(1);
@@ -7646,14 +7738,16 @@ fn run_command() -> Result<()> {
         }
         Cmd::Protocol { full } => {
             if full {
-                print!("{}", protocol_text());
+                ljos_cli::emit_raw!("{}", protocol_text());
             } else {
-                print!("{}", protocol_brief());
+                ljos_cli::emit_raw!("{}", protocol_brief());
             }
         }
         Cmd::Seat { action } => match action {
-            None => print!("{}", format_seat_command()),
-            Some(SeatAction::Add { name }) => print!("{}", ljos_cli::seat_roster::add(&name)?),
+            None => ljos_cli::tell_raw!("{}", format_seat_command()),
+            Some(SeatAction::Add { name }) => {
+                ljos_cli::tell_raw!("{}", ljos_cli::seat_roster::add(&name)?)
+            }
             Some(SeatAction::Grant {
                 seat,
                 spec,
@@ -7661,7 +7755,7 @@ fn run_command() -> Result<()> {
                 quote,
                 at,
                 via,
-            }) => print!(
+            }) => ljos_cli::tell_raw!(
                 "{}",
                 ljos_cli::seat_roster::grant(
                     &seat,
@@ -7681,13 +7775,13 @@ fn run_command() -> Result<()> {
             skills,
         } => {
             if example {
-                print!("{HARNESSES_EXAMPLE}");
+                ljos_cli::emit_raw!("{HARNESSES_EXAMPLE}");
                 return Ok(());
             }
             // A pipe used to print the entry and skip the stores, so the
             // next `ljos file` had no tracker. The stores are set up
             // either way. The entry stays the only text on stdout.
-            let piped = harness.is_none() && !std::io::stdout().is_terminal();
+            let piped = harness.is_none() && !ljos_cli::output::stdout_is_terminal();
             let harness = harness.unwrap_or_else(|| "all".to_string());
             let steps = if harness == "all" {
                 ljos_cli::onboard_detected(dry_run, skills.as_deref())?
@@ -7697,17 +7791,17 @@ fn run_command() -> Result<()> {
             // `--harness json` prints the entry alone, so it parses as it stands.
             if harness == "json" {
                 for s in &steps {
-                    println!("{}", s.detail);
+                    ljos_cli::tell!("{}", s.detail);
                 }
                 return Ok(());
             }
             let lines = format_steps(&steps);
             if piped {
                 let entry = ljos_cli::server_entry()?;
-                println!("{}", serde_json::to_string_pretty(&entry)?);
-                eprint!("{lines}");
+                ljos_cli::emit!("{}", serde_json::to_string_pretty(&entry)?);
+                ljos_cli::say_raw!("{lines}");
             } else {
-                print!("{lines}");
+                ljos_cli::tell_raw!("{lines}");
             }
             if steps.iter().any(|s| !s.ok) {
                 std::process::exit(1);
@@ -7715,7 +7809,7 @@ fn run_command() -> Result<()> {
         }
         Cmd::Offboard { runner, dry_run } => {
             let steps = ljos_cli::offboard::offboard(runner.as_deref(), dry_run)?;
-            print!("{}", format_steps(&steps));
+            ljos_cli::tell_raw!("{}", format_steps(&steps));
             if steps.iter().any(|step| !step.ok) {
                 std::process::exit(1);
             }
@@ -7736,7 +7830,7 @@ fn run_command() -> Result<()> {
                 stub: !no_stub,
                 bin_dir,
             })?;
-            print!("{}", format_steps(&steps));
+            ljos_cli::tell_raw!("{}", format_steps(&steps));
             if steps.iter().any(|step| !step.ok) {
                 std::process::exit(1);
             }
@@ -7753,14 +7847,14 @@ fn run_command() -> Result<()> {
                 stop_ticket(id);
             }
             for line in handover_scoped(&out, &project, &issue, since_size, scope.as_deref())? {
-                println!("{line}");
+                ljos_cli::tell!("{line}");
             }
             if let Some(dest) = to {
                 // The bag is sealed and signed before it moves; the copy is
                 // the runner's scp, so the receiving seat's keys and hosts
                 // apply as they would by hand.
                 run_captured("scp", &["-rq", &out.display().to_string(), &dest])?;
-                println!(
+                ljos_cli::tell!(
                     "copied to {dest}; there, `ljos receive {}`",
                     out.file_name()
                         .map_or_else(|| "DIR".into(), |n| n.to_string_lossy().into_owned())
@@ -7774,23 +7868,22 @@ fn run_command() -> Result<()> {
             import,
         } => {
             for line in receive(&dir, since.as_deref(), keep.as_deref(), import)? {
-                println!("{line}");
+                ljos_cli::tell!("{line}");
             }
         }
         Cmd::Due { all, judge, json } => {
             if judge {
-                print!("{}", ljos_cli::judge_due_page()?);
+                ljos_cli::tell_raw!("{}", ljos_cli::judge_due_page()?);
             } else if json {
-                print!("{}", ljos_cli::due_json(all)?);
+                ljos_cli::emit_raw!("{}", ljos_cli::due_json(all)?);
             } else {
-                print!(
-                    "{}",
-                    ljos_cli::scan::for_reader(&due_report(all)?, human_color())
-                );
+                let page =
+                    ljos_cli::scan::for_reader(&due_report(all, Width::stdout())?, human_color());
+                ljos_cli::emit_raw!("{page}");
             }
         }
         Cmd::JudgeScore => {
-            print!("{}", ljos_cli::judge_score_report());
+            ljos_cli::tell_raw!("{}", ljos_cli::judge_score_report());
         }
         Cmd::BumpPlan {
             bundle,
@@ -7801,7 +7894,7 @@ fn run_command() -> Result<()> {
         } => {
             let (generation, rows) =
                 bump_plan(&bundle, &project, &parent, generation.as_deref(), dry_run)?;
-            print!("{}", format_bump_rows(&generation, &rows));
+            ljos_cli::tell_raw!("{}", format_bump_rows(&generation, &rows));
         }
         Cmd::Findings {
             state,
@@ -7810,12 +7903,12 @@ fn run_command() -> Result<()> {
             issue,
         } => {
             if remember || issue.is_some() {
-                print!(
+                ljos_cli::tell_raw!(
                     "{}",
                     format_remembered(&remember_findings(&state, issue.as_deref(), all)?)
                 );
             } else {
-                print!("{}", format_findings(&read_campaign(&state)?));
+                ljos_cli::tell_raw!("{}", format_findings(&read_campaign(&state)?));
             }
         }
         Cmd::Habit {
@@ -7828,9 +7921,9 @@ fn run_command() -> Result<()> {
             (Some(name), Some(value)) => {
                 let every_s = parse_every(&every)?;
                 let (body, prev) = habit(&name, value, &unit, every_s, &source)?;
-                println!("{}", write_ack(&body, false));
+                ljos_cli::tell!("{}", write_ack(&body, false));
                 if let Some(p) = prev {
-                    eprintln!(
+                    ljos_cli::say!(
                         "was {}{}{} ({}), now closed",
                         trim_num(p.value),
                         if p.unit.is_empty() { "" } else { " " },
@@ -7849,12 +7942,12 @@ fn run_command() -> Result<()> {
                     .filter(|r| name.as_deref().is_none_or(|n| r.name == n.trim()))
                     .collect();
                 if rows.is_empty() {
-                    println!(
+                    ljos_cli::tell!(
                         "no readings{}; `ljos habit NAME VALUE` takes the first",
                         name.map(|n| format!(" of {n}")).unwrap_or_default()
                     );
                 } else {
-                    print!("{}", format_readings(&rows, &now));
+                    ljos_cli::tell_raw!("{}", format_readings(&rows, &now));
                 }
             }
         },
@@ -7872,7 +7965,7 @@ fn run_command() -> Result<()> {
             json,
         } => {
             if plan.is_none() && project.is_some() {
-                eprintln!("{}", sitting_project_line());
+                ljos_cli::say!("{}", sitting_project_line());
                 std::process::exit(USAGE_STATUS);
             }
             // A sitting on an unknown id names that id. Onboard would hide it.
@@ -7894,11 +7987,11 @@ fn run_command() -> Result<()> {
                         shown.push_str(&quiet_plan);
                     }
                 } else {
-                    print!("{}", if detail { &opened.text } else { &quiet_plan });
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    ljos_cli::emit_raw!("{}", if detail { &opened.text } else { &quiet_plan });
+                    let _ = ljos_cli::output::flush_stdout();
                     if detail {
-                        println!("sitting {}: checking blockers", opened.parent);
-                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                        ljos_cli::tell!("sitting {}: checking blockers", opened.parent);
+                        let _ = ljos_cli::output::flush_stdout();
                     }
                 }
                 opened.parent
@@ -7932,22 +8025,22 @@ fn run_command() -> Result<()> {
                             shown.push_str(&compact_sitting_block(&piece, &mut memories));
                         }
                     } else if detail {
-                        print!("{piece}");
+                        ljos_cli::emit_raw!("{piece}");
                     } else {
-                        print!("{}", compact_sitting_block(&piece, &mut memories));
+                        ljos_cli::emit_raw!("{}", compact_sitting_block(&piece, &mut memories));
                     }
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    let _ = ljos_cli::output::flush_stdout();
                 },
             );
             // A refused sitting used to fall through a gate path that
             // exits 0. The refusal is the answer, and it is not success.
             if let Err(e) = printed {
                 let line = ljos_cli::user_fault_line(&e);
-                eprintln!("{line}");
+                ljos_cli::say!("{line}");
                 if ljos_cli::fault_detail() {
                     let detail = format!("{e:#}");
                     if ljos_cli::fault_detail_worth_showing(&detail, &line) {
-                        eprintln!("{detail}");
+                        ljos_cli::say!("{detail}");
                     }
                 }
                 std::process::exit(ljos_cli::user_fault_exit(&e, &line));
@@ -7964,13 +8057,13 @@ fn run_command() -> Result<()> {
                 if json {
                     shown.push_str(&tail);
                 } else {
-                    print!("{tail}");
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    ljos_cli::emit_raw!("{tail}");
+                    let _ = ljos_cli::output::flush_stdout();
                 }
             }
             if json {
                 let text = if detail { &full } else { &shown };
-                print!("{}", ljos_cli::format_rendered_json(text, &full, None));
+                ljos_cli::emit_raw!("{}", ljos_cli::format_rendered_json(text, &full, None));
             }
         }
         Cmd::Finish {
@@ -8008,8 +8101,10 @@ fn run_command() -> Result<()> {
                     ljos_cli::pack_link::PackClock::enter(std::time::Duration::from_secs(2));
                 let _quiet = ljos_cli::pack_link::QuietPack::enter();
                 match ljos_cli::flush_note_queue() {
-                    Ok(done) => print!("{}", ljos_cli::note_queue::drained_lines(&done)),
-                    Err(e) => eprintln!("ljos finish: note queue: {e:#}"),
+                    Ok(done) => {
+                        ljos_cli::tell_raw!("{}", ljos_cli::note_queue::drained_lines(&done))
+                    }
+                    Err(e) => ljos_cli::say!("ljos finish: note queue: {e:#}"),
                 }
             }
             let said = finish(
@@ -8023,13 +8118,15 @@ fn run_command() -> Result<()> {
                 gen,
                 close,
                 verbose,
+                page_width(json),
             )
             .map_err(ticket_error)?;
             warn_other_sitting(&issue, quiet, inferred, true);
-            print!("{}", render_write(&said, git_detail(verbose), json, None));
+            let shown = render_write(&said, git_detail(verbose), json, None);
+            ljos_cli::tell_raw!("{shown}");
         }
         Cmd::Reopen { issue } => {
-            print!("{}", reopen(&issue)?);
+            ljos_cli::tell_raw!("{}", reopen(&issue)?);
         }
         Cmd::Withdraw {
             issue,
@@ -8040,28 +8137,28 @@ fn run_command() -> Result<()> {
             match note {
                 Some(text) => {
                     let seat = ljos_cli::seat_name();
-                    print!("{}", ljos_cli::undo::withdraw_note(&issue, &seat, &text)?);
+                    ljos_cli::tell_raw!("{}", ljos_cli::undo::withdraw_note(&issue, &seat, &text)?);
                 }
                 None => {
                     let who = ljos_cli::ballot_voter("withdraw", as_persona.as_deref())?;
-                    print!("{}", ljos_cli::undo::withdraw_ballot(&issue, &who)?);
+                    ljos_cli::tell_raw!("{}", ljos_cli::undo::withdraw_ballot(&issue, &who)?);
                 }
             }
         }
         Cmd::Calibrate { project, rounds } => {
             let rows = calibrate(&project, rounds)?;
             for row in &rows {
-                println!("{} weighs {} at {:.3}", row.from, row.to, row.weight);
+                ljos_cli::tell!("{} weighs {} at {:.3}", row.from, row.to, row.weight);
             }
         }
 
         Cmd::Graded { id, lapsed } => {
             let v = graded(&id, !lapsed)?;
             let due = v["due_at"].as_str().unwrap_or("graded");
-            if std::io::stdout().is_terminal() {
-                println!("graded; next review {}", ljos_cli::local_when(due));
+            if ljos_cli::output::stdout_is_terminal() {
+                ljos_cli::tell!("graded; next review {}", ljos_cli::local_when(due));
             } else {
-                println!("{due}");
+                ljos_cli::tell!("{due}");
             }
         }
         Cmd::Learn {
@@ -8082,7 +8179,7 @@ fn run_command() -> Result<()> {
                 new_option,
             )?;
             if let Some(line) = off {
-                print!("{line}");
+                ljos_cli::tell_raw!("{line}");
             }
             let ballots: Vec<(String, String)> = forecasts
                 .iter()
@@ -8106,15 +8203,15 @@ fn run_command() -> Result<()> {
             } else {
                 learn_and_write(&id, &ballots, &outcome, beta, &about, &forecasts)?
             };
-            println!(
+            ljos_cli::tell!(
                 "{}",
                 learn_reading(rows.len(), moved.len(), &forecasts, &outcome, &calibration)
             );
             for row in &rows {
-                println!("{} weighs {} at {:.3}", row.from, row.to, row.weight);
+                ljos_cli::tell!("{} weighs {} at {:.3}", row.from, row.to, row.weight);
             }
             for p in &moved {
-                println!("{} now holds its ballot at anchor {:.3}", p.name, p.anchor);
+                ljos_cli::tell!("{} now holds its ballot at anchor {:.3}", p.name, p.anchor);
             }
         }
     }
@@ -8199,24 +8296,24 @@ fn quorum_or_exit(id: &str, n: usize, deadline: Option<&str>, json: bool) -> Res
         ljos_cli::reap::QuorumGate::Short { have, needed } => {
             let line = format!("{have} of {needed} needed for a quorum");
             if json {
-                println!(
+                ljos_cli::emit!(
                     "{}",
                     serde_json::json!({"quorum": {"issue": id, "needed": n, "lapsed": false, "said": line}})
                 );
             } else {
-                println!("quorum: short, nothing is decided yet: {line}");
+                ljos_cli::tell!("quorum: short, nothing is decided yet: {line}");
             }
             std::process::exit(1);
         }
         ljos_cli::reap::QuorumGate::Lapsed { have, needed } => {
             let line = format!("quorum timed out: {have} of {needed}");
             if json {
-                println!(
+                ljos_cli::emit!(
                     "{}",
                     serde_json::json!({"quorum": {"issue": id, "needed": n, "lapsed": true, "said": line}})
                 );
             } else {
-                println!("quorum: lapsed, nothing was decided: {line}");
+                ljos_cli::tell!("quorum: lapsed, nothing was decided: {line}");
             }
             std::process::exit(3);
         }
@@ -8241,9 +8338,9 @@ fn prompt_as_text(limit: usize) -> Result<()> {
     let out = child.wait_with_output()?;
     let said = ljos_cli::hook_text(&String::from_utf8_lossy(&out.stdout));
     if said.is_empty() {
-        println!("Nothing remembered bears on this.");
+        ljos_cli::tell!("Nothing remembered bears on this.");
     } else {
-        print!("{}", ljos_cli::scan::for_reader(&said, human_color()));
+        ljos_cli::tell_raw!("{}", ljos_cli::scan::for_reader(&said, human_color()));
     }
     if !out.status.success() {
         std::process::exit(out.status.code().unwrap_or(1));

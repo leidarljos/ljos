@@ -97,7 +97,7 @@ pub(crate) fn rows() -> Vec<Habitat> {
 /// one command that would repair them.
 pub fn apply() {
     for line in repairs() {
-        eprintln!("ljos: {line}");
+        say!("ljos: {line}");
     }
 }
 

@@ -12,6 +12,11 @@
 //! is a file on `PATH`. A newer age-keygen still runs the test. The number
 //! in the skip line is the package to install.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "test helpers write skip notes to the test harness stderr"
+)]
+
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

@@ -103,7 +103,8 @@ Move the trust rows without an outcome
 .. code:: console
 
    $ ljos calibrate -p demo
-   ljos-consensus is not on PATH. Install it with `cargo install --locked ljos-consensus`.
+   ljos-consensus is not on PATH. Install it with
+   `cargo install --locked ljos-consensus`.
    $ ljos calibrate -p demo
    alice weighs bob at 0.917
    alice weighs carol at 0.643

@@ -37,9 +37,13 @@ scratch stores; =scripts/herd.sh= is the concurrent contention check.
 #+begin_src console
 $ ljos receive /tmp/bag --keep ~/.local/share/ljos/peer.head
 issues=1 deeds=0 files=2
-the payload matches the manifest, and the manifest carries a signature this check did not verify: `deedar vouch check /tmp/bag/manifest-sha256.txt` says whether a key you accept made it
+the payload matches the manifest, and the manifest carries a signature this
+check did not verify:
+`deedar vouch check /tmp/bag/manifest-sha256.txt` says
+whether a key you accept made it
 no deeds enclosed
-signed by 0123456789abcdef (accepted)
+signed by 0123456789abcdef
+(accepted)
 0 atoms enclosed, 0 trust rows
 #+end_src
 # END ljos-sample receive-empty

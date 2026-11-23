@@ -421,6 +421,10 @@ fn stdout_path(path: &Path) -> bool {
     path == Path::new("-")
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "writes the export body bytes to stdout as they are"
+)]
 fn write_export_body(out: &Path, bytes: &[u8]) -> Result<()> {
     if stdout_path(out) {
         let mut stdout = std::io::stdout().lock();
@@ -5097,7 +5101,7 @@ mod tests {
     #[test]
     fn a_listener_on_the_default_port_leaves_integrate_tests_green() {
         let Some(_held) = hold_default_port() else {
-            eprintln!("memory-port: skipped, test listener did not start");
+            say!("memory-port: skipped, test listener did not start");
             return;
         };
         let (_dir, target) = place("port-listener");

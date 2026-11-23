@@ -8,6 +8,11 @@
 //! way `ljos git-hook NAME` does. The child sets the runner variable
 //! itself, since the test harness strips runner variables at load.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 
 use std::io::Write as _;

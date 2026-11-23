@@ -3,6 +3,11 @@
 //! `ljos hookd`, and the hook's own environment may name another of them
 //! or none. The sitting `ljos sitting` opened in a conversation's shell
 //! lets that conversation's history writes through, and no other's.
+
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();

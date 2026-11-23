@@ -160,11 +160,14 @@ A lesson and a search
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
    ljos: no seat was named and this write uses ada, so run `export LJOS_SEAT=NAME`.
-   remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
+   remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on
+   turns.
      id a6ae2751, next review 2026-11-12 21:40 +00:00
    saved as a standing lesson; run `ljos search "QUERY"` to read it
    $ ljos search "lexical default"
-   matched by words (encoder not installed), so read https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`.
+   matched by words (encoder not installed), so read
+   https://leidarljos.github.io/ljos/getting-started.html#install or run
+   `ljos doctor`.
    shown 1 of 1.
    The first row is the closest match.
 
@@ -186,12 +189,16 @@ A container, a CI runner, ``setsid``, or a parent process that carries a runner'
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
    ljos: no seat was named and this write uses ada, so run `export LJOS_SEAT=NAME`.
-   remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
+   remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on
+   turns.
      id a6ae2751, next review 2026-11-12 21:40 +00:00
    saved as a standing lesson; run `ljos search "QUERY"` to read it
-   stored from an agent because no terminal was found or a runner was detected; from your own login terminal, so run `ljos remember`.
+   stored from an agent because no terminal was found or a runner was detected;
+   from your own login terminal, so run `ljos remember`.
    $ ljos search "lexical default"
-   matched by words (encoder not installed), so read https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`.
+   matched by words (encoder not installed), so read
+   https://leidarljos.github.io/ljos/getting-started.html#install or run
+   `ljos doctor`.
    shown 1 of 1.
    The first row is the closest match.
 
@@ -219,7 +226,9 @@ A busy pack is asked again for ``LJOS_SEARCH_BUSY_WAIT`` seconds (2 when unset, 
    remembered (preference): CombMNZ over RRF for fusing two ballots.
      id f8b725a9, next review 2026-11-12 21:40 +00:00
    $ ljos search fusing
-   matched by words (encoder not installed), so read https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`.
+   matched by words (encoder not installed), so read
+   https://leidarljos.github.io/ljos/getting-started.html#install or run
+   `ljos doctor`.
    shown 1 of 1.
    The first row is the closest match.
 

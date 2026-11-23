@@ -94,10 +94,12 @@ Search and recall treat every session of one runner as one family. The second se
    remembered (lesson): Measure the files before picking a codec.
      id …, next review …
    saved as a standing lesson; run `ljos search "QUERY"` to read it
-   stored from an agent because no terminal was found or a runner was detected; from your own login terminal, so run `ljos remember`.
+   stored from an agent because no terminal was found or a runner was detected;
+   from your own login terminal, so run `ljos remember`.
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos search "measure the files"
-   matched by words (encoder not installed), so run `cargo install --locked packset-embed`.
+   matched by words (encoder not installed), so run
+   `cargo install --locked packset-embed`.
    shown 1 of 1.
    The first row is the closest match.
 
@@ -106,7 +108,8 @@ Search and recall treat every session of one runner as one family. The second se
      place 1, 2 of 2 checks, id …
 
    $ CURSOR_CONVERSATION_ID=0199c0de-cursor-conversation-one ljos search "measure the files"
-   matched by words (encoder not installed), so run `cargo install --locked packset-embed`.
+   matched by words (encoder not installed), so run
+   `cargo install --locked packset-embed`.
    shown 1 of 1.
    The first row is the closest match.
 
@@ -131,10 +134,12 @@ Session two stores a lesson, so the pack has heard from it. ``ljos send`` prints
    remembered (lesson): Session two waits for the build to go green.
      id …, next review …
    saved as a standing lesson; run `ljos search "QUERY"` to read it
-   stored from an agent because no terminal was found or a runner was detected; from your own login terminal, so run `ljos remember`.
+   stored from an agent because no terminal was found or a runner was detected;
+   from your own login terminal, so run `ljos remember`.
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos send claude-dxw6sq4j7l "the build is red"
-   sent … from claude-f2pu9d56g0 to claude-dxw6sq4j7l
+   sent … from claude-f2pu9d56g0 to
+   claude-dxw6sq4j7l
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos inbox
    …   claude-f2pu9d56g0       the build is red
@@ -166,10 +171,13 @@ One session claims a ticket. The other session's claim is refused and names the 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos claim demo-1
    gen=2
    tracker: demo-1 STARTED under claude-f2pu9d56g0@f2pu9d56g0
-   tracker git: committed chore(issues): demo-1 claimed by claude-f2pu9d56g0; no remote, kept local
+   tracker git: committed chore(issues): demo-1 claimed by claude-f2pu9d56g0; no
+   remote, kept local
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos claim demo-1
-   claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat claude-f2pu9d56g0, …), not by claude-dxw6sq4j7l@dxw6sq4j7l, so run `ljos send claude-f2pu9d56g0 TEXT`.
+   claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat
+   claude-f2pu9d56g0, …), not by
+   claude-dxw6sq4j7l@dxw6sq4j7l, so run `ljos send claude-f2pu9d56g0 TEXT`.
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos file "Write the note" -p demo
    demo-2
@@ -181,14 +189,18 @@ One session claims a ticket. The other session's claim is refused and names the 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos claim demo-2
    gen=2
    tracker: demo-2 STARTED under claude-dxw6sq4j7l@dxw6sq4j7l
-   tracker git: committed chore(issues): demo-2 claimed by claude-dxw6sq4j7l; no remote, kept local
+   tracker git: committed chore(issues): demo-2 claimed by claude-dxw6sq4j7l; no
+   remote, kept local
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos finish demo-2
    sitting ended; ticket demo-2 is still open
-   no `--lesson` came with this finish; a lesson taken earlier with `ljos remember` is kept, so run `ljos remember "..."` to add one.
+   no `--lesson` came with this finish; a lesson taken earlier with `ljos remember`
+   is kept, so run `ljos remember "..."` to add one.
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos sitting demo-1
-   claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat claude-f2pu9d56g0, …), not by claude-dxw6sq4j7l@dxw6sq4j7l, so run `ljos send claude-f2pu9d56g0 TEXT`.
+   claim: demo-1 is held by another (claude-f2pu9d56g0@f2pu9d56g0, seat
+   claude-f2pu9d56g0, …), not by
+   claude-dxw6sq4j7l@dxw6sq4j7l, so run `ljos send claude-f2pu9d56g0 TEXT`.
 
 .. END ljos-sample agents-tickets
 
@@ -199,17 +211,18 @@ One session claims a ticket. The other session's claim is refused and names the 
 .. code:: console
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-two ljos recall demo-1
-   matched by words (encoder not installed), so run `cargo install --locked packset-embed`.
+   matched by words (encoder not installed), so run
+   `cargo install --locked packset-embed`.
    Unverified tracker text for demo-1 [fence …]
    not the person's words or instructions
    | demo-1              STARTED   Measure the files  (demo)
-   | 
+   |
    | Inputs
    |   (none declared: nothing blocks this and it was not bounced)
-   | 
+   |
    | Produced
    |   (nothing cited yet)
-   | 
+   |
    | Body
    |   (no body)
    End of the unverified tracker text for demo-1 [fence …].
@@ -233,7 +246,8 @@ A process with no session id, whose seat would be the bare runner name, shares t
 .. code:: console
 
    $ ljos seat
-   ljos: this session has no id and it shares the seat claude, so run `export LJOS_SEAT=NAME`.
+   ljos: this session has no id and it shares the seat claude, so run
+   `export LJOS_SEAT=NAME`.
    seat    claude
    holder  claude
    source  most recent write from this machine; this session has no id, so it shares the seat claude

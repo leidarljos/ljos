@@ -1,0 +1,19 @@
+disallowed-macros = [
+    { path = "std::print", reason = "print through tell! or emit!, which take the stdout width" },
+    { path = "std::println", reason = "print through tell! or emit!, which take the stdout width" },
+    { path = "std::eprint", reason = "print through say!, which wraps to the stderr width" },
+    { path = "std::eprintln", reason = "print through say!, which wraps to the stderr width" },
+    { path = "std::dbg", reason = "dbg! writes to stderr unwrapped" },
+]
+disallowed-methods = [
+    { path = "std::io::stdout", reason = "write stdout through tell! or emit!" },
+    { path = "std::io::stderr", reason = "write stderr through say!" },
+    { path = "std::io::Stdout::lock", reason = "write stdout through tell! or emit!" },
+    { path = "std::io::Stderr::lock", reason = "write stderr through say!" },
+    { path = "std::os::fd::FromRawFd::from_raw_fd", reason = "route terminal output through output.rs" },
+    { path = "std::os::unix::io::FromRawFd::from_raw_fd", reason = "route terminal output through output.rs" },
+    { path = "libc::write", reason = "route terminal output through output.rs" },
+    { path = "rustix::io::write", reason = "route terminal output through output.rs" },
+    { path = "libc::writev", reason = "route terminal output through output.rs" },
+    { path = "rustix::io::writev", reason = "route terminal output through output.rs" },
+]

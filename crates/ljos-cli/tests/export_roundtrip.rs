@@ -6,6 +6,11 @@
 //! prompt hook and a search both name the lesson. The materialised count
 //! is the number of memories the file carried.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 
 use std::io::Write;

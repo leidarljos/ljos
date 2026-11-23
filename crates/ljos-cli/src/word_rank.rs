@@ -1885,7 +1885,7 @@ mod tests {
         let (top1, top5) = hit_rates(&after, &rows, &asks);
         // Printed so a run of this test is the measurement. These rates are
         // this fixture only.
-        eprintln!(
+        say!(
             "word-rank fixture n={} queries={} before-search top1={search_top1:.3} top5={search_top5:.3} before-overlap top1={overlap_top1:.3} top5={overlap_top5:.3} after top1={top1:.3} top5={top5:.3}",
             rows.len(),
             asks.len()

@@ -2,6 +2,11 @@
 //! the word-count line only under `--verbose`, a paragraph split into
 //! claims, an edit, and recall with no ticket or no lesson of its own.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 
 #[path = "common/tools.rs"]

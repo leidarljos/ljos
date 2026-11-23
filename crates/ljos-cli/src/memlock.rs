@@ -39,7 +39,7 @@ fn lock(addr: usize, len: usize) -> bool {
     if unsafe { libc::mlock(first as *const libc::c_void, addr + len - first) } != 0 {
         let err = std::io::Error::last_os_error();
         if !WARNED.swap(true, Ordering::Relaxed) {
-            eprintln!(
+            say!(
                 "ljos: the memory that holds the passphrase cannot be locked ({err}), so it \
                  may reach swap; raise `ulimit -l` to lock it"
             );
@@ -179,7 +179,7 @@ mod tests {
         let mut c = Locked::with_capacity(4);
         let d = Locked::zeroed(16);
         if c.is_locked() {
-            eprintln!("CAP_IPC_LOCK");
+            say!("CAP_IPC_LOCK");
             return;
         }
         assert!(!d.is_locked());

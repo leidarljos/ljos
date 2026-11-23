@@ -3367,6 +3367,10 @@ fn refuse_symlink_parent(path: &Path) -> Result<()> {
 
 /// Open `path` by walking from `/` with `O_NOFOLLOW`, so a symlink in any
 /// component is not followed. The returned fd is the last component.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "owns a descriptor this function opened, never stdout or stderr"
+)]
 fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;

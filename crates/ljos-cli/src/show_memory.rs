@@ -5,6 +5,7 @@
 //! or the `local:` form. An id that starts more than one memory lists
 //! those ids. An id that is neither names `ljos search`.
 
+use crate::output_wrap::Width;
 use anyhow::{bail, Result};
 use serde_json::Value;
 
@@ -17,7 +18,7 @@ use serde_json::Value;
 ///
 /// The id is empty, it matches more than one ticket or memory, it is
 /// neither, or the tracker cannot be read.
-pub fn show_any(id: &str, json: bool, all: bool) -> Result<String> {
+pub fn show_any(id: &str, json: bool, all: bool, width: Width) -> Result<String> {
     let id = id.trim();
     if id.is_empty() {
         bail!("The issue id is empty. `ljos ready` lists the open tickets.");
@@ -26,7 +27,7 @@ pub fn show_any(id: &str, json: bool, all: bool) -> Result<String> {
         let atoms = gather();
         let hits = matching(&atoms, id);
         match hits.len() {
-            1 => return Ok(render(&atoms, hits[0], json)),
+            1 => return Ok(render(&atoms, hits[0], json, width)),
             n if n > 1 => {
                 let ids: Vec<String> = hits
                     .iter()
@@ -37,7 +38,7 @@ pub fn show_any(id: &str, json: bool, all: bool) -> Result<String> {
             _ => {}
         }
     }
-    show_ticket_or_neither(id, json, all)
+    show_ticket_or_neither(id, json, all, width)
 }
 
 /// Whether `err` is a show lookup the CLI prints as one line and exits 1.
@@ -49,22 +50,22 @@ pub fn is_show_fault(err: &anyhow::Error) -> bool {
         || text.starts_with("The issue id is empty.")
 }
 
-fn show_ticket(id: &str, json: bool, all: bool) -> Result<String> {
+fn show_ticket(id: &str, json: bool, all: bool, width: Width) -> Result<String> {
     if json {
         crate::show_json(id)
     } else {
-        crate::show_issue(id, all)
+        crate::show_issue(id, all, width)
     }
 }
 
-fn show_ticket_or_neither(id: &str, json: bool, all: bool) -> Result<String> {
+fn show_ticket_or_neither(id: &str, json: bool, all: bool, width: Width) -> Result<String> {
     if let Some(line) = crate::ticket_refusal(id) {
         if plain_miss(&line) {
             bail!("{}", neither(id));
         }
         bail!("{line}");
     }
-    match show_ticket(id, json, all) {
+    match show_ticket(id, json, all, width) {
         Ok(text) => Ok(text),
         Err(err) if plain_miss(&err.to_string()) => {
             if let Some(line) = crate::tracker_place::missing_tracker_line() {
@@ -184,7 +185,7 @@ fn id_matches(input: &str, id: &str) -> bool {
         .is_some_and(|(_, tail)| !tail.is_empty() && tail.starts_with(input))
 }
 
-fn render(atoms: &[Value], index: usize, json: bool) -> String {
+fn render(atoms: &[Value], index: usize, json: bool, width: Width) -> String {
     let atom = &atoms[index];
     let id = field(atom, "id");
     let view = View {
@@ -206,7 +207,7 @@ fn render(atoms: &[Value], index: usize, json: bool) -> String {
     if json {
         render_json(&view)
     } else {
-        render_page(&view)
+        render_page(&view, width)
     }
 }
 
@@ -227,12 +228,12 @@ struct View {
     links: Vec<String>,
 }
 
-fn render_page(view: &View) -> String {
-    let mut out = crate::scan::wrap(&view.id, crate::scan::COLS);
+fn render_page(view: &View, width: Width) -> String {
+    let mut out = crate::scan::wrap_for(&view.id, width);
     out.push('\n');
     let text = view.text.trim();
     if !text.is_empty() {
-        out.push_str(&crate::scan::wrap(text, crate::scan::COLS));
+        out.push_str(&crate::scan::wrap_for(text, width));
         out.push('\n');
     }
     out.push('\n');
@@ -259,7 +260,7 @@ fn render_page(view: &View) -> String {
         format!("tickets: {}", list_or_none(&view.tickets)),
         format!("links: {}", list_or_none(&view.links)),
     ] {
-        out.push_str(&crate::scan::wrap(&line, crate::scan::COLS));
+        out.push_str(&crate::scan::wrap_for(&line, width));
         out.push('\n');
     }
     out
@@ -541,7 +542,7 @@ mod tests {
         assert!(id_matches("local:f0ceee3d", &local));
         assert!(id_matches("f0ceee3d", &local));
         assert!(!id_matches("01234567", &local));
-        let page = render(&atoms, 0, false);
+        let page = render(&atoms, 0, false, crate::output_wrap::Width::FIXED);
         assert!(page.contains("kind: lesson"), "{page}");
         assert!(page.contains("level: explicit"), "{page}");
         assert!(page.contains("origin: user-declared"), "{page}");
@@ -558,10 +559,27 @@ mod tests {
     }
 
     #[test]
+    fn a_long_lesson_wraps_once_to_the_terminal_width() {
+        let text = "The kiln holds a long lesson about the lexical default and the fuse that beat BM25 by two points on the turns the panel measured, and the glaze log that the morning firing left behind on the shelf.";
+        let atoms = vec![atom("0123456789abcdef", text, json!({}))];
+        for cols in [40, 160] {
+            let page = render(&atoms, 0, false, crate::output_wrap::Width::columns(cols));
+            let once = crate::output_wrap::wrap_prose(text, Some(cols));
+            assert!(page.contains(&format!("\n{once}\n")), "{cols}\n{page}");
+        }
+        assert!(
+            crate::output_wrap::wrap_prose(text, Some(160))
+                .lines()
+                .count()
+                == 2
+        );
+    }
+
+    #[test]
     fn a_long_lesson_wraps_to_eighty_columns() {
         let text = "The kiln holds a long lesson about the lexical default and the fuse that beat BM25 by two points on the turns the panel measured.";
         let atoms = vec![atom("0123456789abcdef", text, json!({}))];
-        let page = render(&atoms, 0, false);
+        let page = render(&atoms, 0, false, crate::output_wrap::Width::FIXED);
         assert!(text.len() > 80);
         assert!(page.contains("The kiln holds"), "{page}");
         assert!(
@@ -586,12 +604,14 @@ mod tests {
             ),
             atom(&later, "The fuse is CombMNZ.", json!({"supersedes": [id]})),
         ];
-        let page = render(&atoms, 0, false);
+        let page = render(&atoms, 0, false, crate::output_wrap::Width::FIXED);
         assert!(page.contains("The old fuse was Borda."), "{page}");
         assert!(page.contains("accepted: no"), "{page}");
         assert!(page.contains("retired: yes"), "{page}");
         assert!(page.contains(&format!("superseded by: {later}")), "{page}");
-        let body: Value = serde_json::from_str(&render(&atoms, 0, true)).unwrap();
+        let body: Value =
+            serde_json::from_str(&render(&atoms, 0, true, crate::output_wrap::Width::FIXED))
+                .unwrap();
         assert_eq!(body["retired"], true);
         assert_eq!(body["accepted"], false);
         assert_eq!(body["superseded"], true);

@@ -7,6 +7,11 @@
 //! not that evidence: a terminal in that cgroup, including one `tmux`
 //! already has open, is the person.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 #[path = "common/terminal.rs"]
 mod terminal;

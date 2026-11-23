@@ -7,6 +7,11 @@
 //! skip line names it. A line the README quotes has to stay in the marked
 //! block, and the command has to print it.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 
 #[path = "common/pty.rs"]

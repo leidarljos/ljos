@@ -4,6 +4,7 @@
 //! parent is claimed by the sitting. `ljos ready --mine` and the sitting
 //! name the next unfinished child. `ljos finish` on a child ticks it off.
 
+use crate::output_wrap::Width;
 use anyhow::{bail, Context, Result};
 
 /// One filed plan: the parent, the children in the order they were given,
@@ -41,7 +42,7 @@ pub fn open_plan(
     if !top {
         if let Some((id, hold)) = crate::live_held_issue() {
             if let Some(line) = stale_hold_plan_line(&id, &hold.since) {
-                eprintln!("{line}");
+                say!("{line}");
             }
         }
     }
@@ -119,7 +120,7 @@ pub fn add_items(parent: &str, items: &[String]) -> Result<Opened> {
 /// # Errors
 ///
 /// The tracker cannot be read.
-pub fn ready_mine(project: Option<&str>) -> Result<String> {
+pub fn ready_mine(project: Option<&str>, width: Width) -> Result<String> {
     let layout = vissue_core::Layout::resolve(None, None)?;
     layout.require_tracker()?;
     let recs =
@@ -137,16 +138,19 @@ pub fn ready_mine(project: Option<&str>) -> Result<String> {
             continue;
         }
         match next_open(&recs, &rec.heading.id) {
-            Some((id, title)) => out.push_str(&titled(&format!("next: {id}  "), &title)),
-            None => out.push_str(&format!(
-                "{}  plan complete, so run `ljos finish {} --lesson \"...\"`.\n",
-                rec.heading.id, rec.heading.id
+            Some((id, title)) => out.push_str(&titled(&format!("next: {id}  "), &title, width)),
+            None => out.push_str(&crate::scan::wrap_on_terminal(
+                &format!(
+                    "{}  plan complete, so run `ljos finish {} --lesson \"...\"`.\n",
+                    rec.heading.id, rec.heading.id
+                ),
+                width,
             )),
         }
     }
     if out.is_empty() {
         out.push_str(
-            &sitting_ticket_line(&recs, &seat, want)
+            &sitting_ticket_line(&recs, &seat, want, width)
                 .unwrap_or_else(|| "no unfinished item\n".into()),
         );
     }
@@ -161,6 +165,7 @@ fn sitting_ticket_line(
     recs: &[vissue_core::views::IssueRec],
     seat: &str,
     want: Option<&str>,
+    width: Width,
 ) -> Option<String> {
     let id = crate::recorded_sitting()?;
     let rec = recs.iter().find(|rec| rec.heading.id == id)?;
@@ -172,18 +177,21 @@ fn sitting_ticket_line(
     if plan_heading(&rec.heading) || !held_by(&rec.heading, seat) {
         return None;
     }
-    let mut out = format!("the sitting's ticket is {id} and has no plan items\n");
+    let mut out = crate::scan::wrap_on_terminal(
+        &format!("the sitting's ticket is {id} and has no plan items\n"),
+        width,
+    );
     let title = rec.heading.title.trim();
     if !title.is_empty() {
-        out.push_str(&titled(&format!("{id}  "), title));
+        out.push_str(&titled(&format!("{id}  "), title, width));
     }
     Some(out)
 }
 
 /// The next line a sitting prints for `issue`, when it is a plan or one of
-/// its items. Empty for any other ticket.
+/// its items, laid out at `width`. Empty for any other ticket.
 #[must_use]
-pub fn next_item_line(issue: &str) -> String {
+pub fn next_item_line(issue: &str, width: Width) -> String {
     let Ok(recs) = load_recs() else {
         return String::new();
     };
@@ -191,12 +199,15 @@ pub fn next_item_line(issue: &str) -> String {
         return String::new();
     };
     match next_open(&recs, &parent) {
-        Some((id, title)) => titled(&format!("next: {id}  "), &title),
-        None => format!("plan complete, so run `ljos finish {parent} --lesson \"...\"`.\n"),
+        Some((id, title)) => titled(&format!("next: {id}  "), &title, width),
+        None => crate::scan::wrap_on_terminal(
+            &format!("plan complete, so run `ljos finish {parent} --lesson \"...\"`.\n"),
+            width,
+        ),
     }
 }
 
-/// Mark a checklist item done and name the next one.
+/// Mark a checklist item done and name the next one, laid out at `width`.
 ///
 /// `None` when `issue` is not a checklist item, so an ordinary finish
 /// proceeds. A checklist item has no claim of its own: the parent is what
@@ -205,7 +216,7 @@ pub fn next_item_line(issue: &str) -> String {
 /// # Errors
 ///
 /// The item is a checklist child and the tracker cannot record the tick.
-pub fn tick_checklist(issue: &str) -> Result<Option<String>> {
+pub fn tick_checklist(issue: &str, width: Width) -> Result<Option<String>> {
     let recs = match load_recs() {
         Ok(recs) => recs,
         Err(_) => return Ok(None),
@@ -216,7 +227,7 @@ pub fn tick_checklist(issue: &str) -> Result<Option<String>> {
     let layout = vissue_core::Layout::resolve(None, None)?;
     vissue_core::ops::update(&layout, issue, Some("DONE"), None, None, None)
         .with_context(|| format!("finish: could not tick {issue}"))?;
-    let next = next_item_line(issue);
+    let next = next_item_line(issue, width);
     let persisted = crate::persist_tracker(issue, "ticked");
     Ok(Some(format!("ticked {issue}\n{next}{persisted}")))
 }
@@ -343,13 +354,17 @@ fn mark_ordered(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The plan at [`Width::FIXED`]. `ljos sitting --plan` drops this `next:`
+/// line from the sitting by comparing whole lines, and the sitting is
+/// built at that width.
 fn render(parent: &str, title: &str, children: &[(String, String)], committed: &str) -> String {
-    let mut out = titled(&format!("{parent}  "), title);
+    let width = Width::FIXED;
+    let mut out = titled(&format!("{parent}  "), title, width);
     for (id, item) in children {
-        out.push_str(&titled(&format!("  {id}  "), item));
+        out.push_str(&titled(&format!("  {id}  "), item, width));
     }
     if let Some((id, item)) = children.first() {
-        out.push_str(&titled(&format!("next: {id}  "), item));
+        out.push_str(&titled(&format!("next: {id}  "), item, width));
     }
     out.push_str(committed);
     if !out.ends_with('\n') {
@@ -358,11 +373,8 @@ fn render(parent: &str, title: &str, children: &[(String, String)], committed: &
     out
 }
 
-fn titled(lead: &str, title: &str) -> String {
-    format!(
-        "{}\n",
-        crate::scan::line_with_title(lead, title, crate::scan::COLS)
-    )
+fn titled(lead: &str, title: &str, width: Width) -> String {
+    format!("{}\n", crate::scan::line_with_title_for(lead, title, width))
 }
 
 fn load_recs() -> Result<Vec<vissue_core::views::IssueRec>> {
@@ -596,26 +608,38 @@ mod tests {
             Ok::<(), vissue_core::Error>(())
         })
         .unwrap();
-        let mine = ready_mine(None).unwrap();
+        let mine = ready_mine(None, crate::output_wrap::Width::FIXED).unwrap();
         assert_eq!(
             mine,
             format!("next: {}  measure the files\n", opened.children[0].0)
         );
-        assert_eq!(ready_mine(Some("day")).unwrap(), mine);
-        assert_eq!(ready_mine(Some("other")).unwrap(), "no unfinished item\n");
+        assert_eq!(
+            ready_mine(Some("day"), crate::output_wrap::Width::FIXED).unwrap(),
+            mine
+        );
+        assert_eq!(
+            ready_mine(Some("other"), crate::output_wrap::Width::FIXED).unwrap(),
+            "no unfinished item\n"
+        );
 
-        let ticked = tick_checklist(&opened.children[0].0).unwrap().unwrap();
+        let ticked = tick_checklist(&opened.children[0].0, Width::FIXED)
+            .unwrap()
+            .unwrap();
         assert!(ticked.starts_with(&format!("ticked {}", opened.children[0].0)));
         assert!(
             ticked.contains(&format!("next: {}  pick a default", opened.children[1].0)),
             "{ticked}"
         );
-        let ticked = tick_checklist(&opened.children[1].0).unwrap().unwrap();
+        let ticked = tick_checklist(&opened.children[1].0, Width::FIXED)
+            .unwrap()
+            .unwrap();
         assert!(
             ticked.contains(&format!("next: {}  write the note", opened.children[2].0)),
             "{ticked}"
         );
-        let ticked = tick_checklist(&opened.children[2].0).unwrap().unwrap();
+        let ticked = tick_checklist(&opened.children[2].0, Width::FIXED)
+            .unwrap()
+            .unwrap();
         assert!(
             ticked.contains(&format!(
                 "plan complete, so run `ljos finish {} --lesson \"...\"`.",
@@ -623,7 +647,7 @@ mod tests {
             )),
             "{ticked}"
         );
-        assert!(tick_checklist("day-nope").unwrap().is_none());
+        assert!(tick_checklist("day-nope", Width::FIXED).unwrap().is_none());
     }
 
     #[test]
@@ -641,7 +665,7 @@ mod tests {
         }
         assert!(text.lines().any(|line| line.starts_with("day-1  guard:")));
         assert!(text.lines().any(|line| line.starts_with("next: day-2  ")));
-        let blank = titled("day-0  ", "  ");
+        let blank = titled("day-0  ", "  ", Width::FIXED);
         assert!(
             blank.ends_with(&format!("{}\n", crate::scan::NO_TITLE)),
             "{blank}"

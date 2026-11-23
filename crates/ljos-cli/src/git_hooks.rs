@@ -100,16 +100,16 @@ pub fn run(action: &str) -> Result<()> {
     match action {
         "install" => {
             let dir = install()?;
-            println!("installed {}", dir.display());
+            tell!("installed {}", dir.display());
             Ok(())
         }
         "uninstall" => {
             uninstall()?;
-            println!("uninstalled");
+            tell!("uninstalled");
             Ok(())
         }
         "status" => {
-            print!("{}", status());
+            tell_raw!("{}", status());
             Ok(())
         }
         other => bail!("git-hooks: {other} is not install, uninstall, or status"),
@@ -689,7 +689,7 @@ fn chain_user_hooks(dir: &Path) -> Result<()> {
         };
         if let Some(bytes) = &existing {
             if bytes.contains(&0) || std::str::from_utf8(bytes).is_err() {
-                eprintln!("ljos: {} is not a shell script; left it", path.display());
+                say!("ljos: {} is not a shell script; left it", path.display());
                 continue;
             }
         }
@@ -878,7 +878,7 @@ fn refuse_push_messages(refs: &str) -> Result<()> {
                 let detail =
                     format!("machine-trailer: {sha} message carries a machine mark; the push runs");
                 crate::memory_port::record_label("commit-message-warning", &detail, "labelled");
-                eprintln!("ljos: label commit-message-warning: {detail}");
+                say!("ljos: label commit-message-warning: {detail}");
             }
         }
     }
@@ -1031,9 +1031,9 @@ fn gate(name: &str, refs: &str) -> Result<()> {
     };
     // A sitting that has not settled is a label. The push or commit runs.
     // The cloud seat push rule is judged on the shell line, not here.
-    eprintln!("ljos: sitting-gate: {refused:#}");
+    say!("ljos: sitting-gate: {refused:#}");
     if let Some(why) = dropped_refusal(name) {
-        eprintln!("ljos: {why}");
+        say!("ljos: {why}");
     }
     Ok(())
 }
@@ -1067,9 +1067,9 @@ fn gate_runner(name: &str, refs: &str) -> Result<()> {
             let named = crate::sitting_gate::open_or_name_sitting().unwrap_or_default();
             if crate::push_slow() {
                 if named.is_empty() {
-                    eprintln!("{}", crate::push_slow_line());
+                    say!("{}", crate::push_slow_line());
                 } else {
-                    eprintln!("{}; sitting {named}", crate::push_slow_line());
+                    say!("{}; sitting {named}", crate::push_slow_line());
                 }
             }
             named
@@ -1199,7 +1199,7 @@ fn book_commit(hook: &str) -> Result<()> {
             );
         } else if crate::unseated_subagent() {
             // Stdout: the installed hook shows that line and drops stderr.
-            println!(
+            tell!(
                 "ljos: commit {} not booked, and this subagent has no seat and the parent's seat books it, so run `export LJOS_SEAT=<your seat>`.",
                 &head[..head.len().min(12)]
             );
@@ -1212,7 +1212,7 @@ fn book_commit(hook: &str) -> Result<()> {
         if tracker {
             refuse_tracker_commit(&head, &format!("{e:#}"));
         } else {
-            println!(
+            tell!(
                 "ljos: commit {} not booked: {e:#}",
                 &head[..head.len().min(12)]
             );
@@ -1229,7 +1229,7 @@ fn book_commit(hook: &str) -> Result<()> {
         return Ok(());
     }
     let subject = git_line(&["log", "-1", "--format=%s"]).unwrap_or_default();
-    println!(
+    tell!(
         "{}",
         crate::bookkeep::note_after_commit(&repo, &head, &subject)
     );
@@ -1270,7 +1270,7 @@ fn refuse_tracker_commit(head: &str, why: &str) {
         "ljos: tracker commit {} was not made by a seat that may write the tracker: {why}",
         &head[..head.len().min(12)]
     );
-    println!("{line}");
+    tell!("{line}");
     crate::bookkeep::log_line(&format!("git-hooks: {line}"));
 }
 

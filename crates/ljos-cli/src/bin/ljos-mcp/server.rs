@@ -14,6 +14,7 @@ use std::sync::{
 };
 
 use anyhow::Context as _;
+use ljos_cli::output_wrap::Width;
 
 use ljos_cli::{
     age_of, announce_seat, atom_label, brief, bump_plan, calibrate, cards, claim, complete,
@@ -39,6 +40,10 @@ use serde::{Deserialize, Serialize};
 use crate::shapes::{
     shaped, ForgetOut, HabitOut, PersonaOut, PredictOut, PreferOut, RuleOut, Shaped, TrustOut,
 };
+
+/// The width of the text a tool returns. It goes into a JSON-RPC reply and
+/// is never printed to a terminal.
+const TOOL_WIDTH: Width = Width::FIXED;
 
 /// The scheme the cards are addressable under.
 const SCHEME: &str = "ljos";
@@ -2867,15 +2872,15 @@ impl LjosServer {
         // The same answer as `ljos recall`: the tracker's working set, then
         // the memories on the issue, then code context when a graphify
         // graph is present. `LJOS_GRAPHIFY=off` leaves that section out.
-        let mut said = ljos_cli::tracker_recall(&args.issue)
+        let mut said = ljos_cli::tracker_recall(&args.issue, TOOL_WIDTH)
             .map(said)
             .map_err(refused)?;
         said.0
             .text
-            .push_str(&ljos_cli::recall_for_command(&args.issue).map_err(refused)?);
+            .push_str(&ljos_cli::recall_for_command(&args.issue, TOOL_WIDTH).map_err(refused)?);
         said.0
             .text
-            .push_str(&ljos_cli::graphify::recall_section(&args.issue));
+            .push_str(&ljos_cli::graphify::recall_section(&args.issue, TOOL_WIDTH));
         Ok(said)
     }
 
@@ -2891,7 +2896,8 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<ShowArgs>,
     ) -> Result<Json<Said>, McpError> {
-        let text = ljos_cli::show_issue(&args.issue, args.all.unwrap_or(false)).map_err(refused)?;
+        let text = ljos_cli::show_issue(&args.issue, args.all.unwrap_or(false), TOOL_WIDTH)
+            .map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
 
@@ -2913,8 +2919,9 @@ impl LjosServer {
                 "ready: pass limit or all, not both"
             )));
         }
-        let text = ljos_cli::ready_view(args.project.as_deref(), false, args.limit, all)
-            .map_err(refused)?;
+        let text =
+            ljos_cli::ready_view(args.project.as_deref(), false, args.limit, all, TOOL_WIDTH)
+                .map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
 
@@ -2931,7 +2938,7 @@ impl LjosServer {
         Parameters(args): Parameters<IssueArgs>,
     ) -> Result<Json<Said>, McpError> {
         ljos_cli::panel_gate::note_tracker_read(&args.issue);
-        let text = timeline(&args.issue, 60).map_err(refused)?;
+        let text = timeline(&args.issue, 60, TOOL_WIDTH).map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
 
@@ -3271,6 +3278,7 @@ impl LjosServer {
             args.gen,
             false,
             false,
+            TOOL_WIDTH,
         ) {
             Ok(text) => text,
             Err(err) => {
@@ -3437,7 +3445,7 @@ impl LjosServer {
         let ballots = ljos_cli::ballot_rows(&args.issue);
         ljos_cli::require_ballots(&args.issue, &ballots).map_err(refused)?;
         if let Some(msg) = ljos_cli::panel_gate::settle_refusal(&args.issue) {
-            eprintln!("ljos: session-authored: {msg}");
+            ljos_cli::say!("ljos: session-authored: {msg}");
         }
         let anchors = ljos_cli::settle_anchors(&personas, &ljos_cli::voters_of(&ballots));
         // As the CLI: the model crate's settle, and the tracker's only on
@@ -6773,7 +6781,7 @@ mod tests {
     #[tokio::test]
     async fn guard_check_asks_policyd_what_the_hook_asks() {
         if !ljos_cli::tool_installed("ljos-policyd") {
-            eprintln!("skipped: ljos-policyd is not installed");
+            ljos_cli::say!("skipped: ljos-policyd is not installed");
             return;
         }
         let _env_lock = ENV_TEST_LOCK.lock().await;

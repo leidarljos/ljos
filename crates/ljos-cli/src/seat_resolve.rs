@@ -78,7 +78,7 @@ fn say_unknown(seat: &str) {
     if hint_recorded() {
         return;
     }
-    eprintln!("{}", notice(seat));
+    say!("{}", notice(seat));
     record_hint();
 }
 

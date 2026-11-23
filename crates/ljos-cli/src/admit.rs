@@ -577,7 +577,7 @@ pub fn satisfy_text(text: &str) {
         // later `ljos accept` reposts it. Name the log and the error, not the
         // proposal's text, which a row could carry a secret in.
         if let Err(e) = append(&rec) {
-            eprintln!(
+            say!(
                 "ljos: a satisfied proposal was not recorded in {}: {e:#}",
                 proposals_path().display()
             );

@@ -154,7 +154,7 @@ pub fn refresh_installed() -> bool {
     let all = match crate::harnesses_with_shipped(&crate::harnesses_path()) {
         Ok(all) => all,
         Err(err) => {
-            eprintln!("ljos: runner skills were not refreshed: {err:#}");
+            say!("ljos: runner skills were not refreshed: {err:#}");
             return true;
         }
     };
@@ -180,15 +180,15 @@ pub fn refresh_installed() -> bool {
             }
             SkillKind::StaleOwned => match write_skill_file(&skill, &want) {
                 Ok(()) => {
-                    eprintln!("ljos: refreshed {}: {}", harness.name, skill.display());
+                    say!("ljos: refreshed {}: {}", harness.name, skill.display());
                 }
                 Err(err) => {
-                    eprintln!("ljos: {}: {err}", skill.display());
+                    say!("ljos: {}: {err}", skill.display());
                     held = false;
                 }
             },
             SkillKind::HandEdited => {
-                eprintln!("ljos: {}: {}{EDITED_MARK}", harness.name, skill.display());
+                say!("ljos: {}: {}{EDITED_MARK}", harness.name, skill.display());
             }
         }
     }

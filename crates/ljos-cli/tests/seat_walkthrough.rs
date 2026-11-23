@@ -13,6 +13,11 @@
 //! missing the test prints one line and returns, and
 //! `LJOS_TEST_REQUIRE_TOOLS=1` fails it instead.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 #[path = "common/boot.rs"]
 mod boot;
 #[path = "common/tools.rs"]

@@ -630,6 +630,10 @@ fn rename_at(
     Ok(())
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "owns a descriptor this function opened, never stdout or stderr"
+)]
 fn open_subdir(dir: &std::fs::File, name: &std::ffi::CStr) -> Result<std::fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd};
     // SAFETY: dir is an open directory fd and name is NUL-terminated.
@@ -752,6 +756,10 @@ fn copy_scratch(scratch: &Path, parent: &std::fs::File, staged: &std::ffi::CStr)
     Ok(())
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "owns a descriptor this function opened, never stdout or stderr"
+)]
 fn copy_children(from: &Path, dest: &std::fs::File) -> Result<()> {
     use std::io::Write;
     use std::os::fd::{AsRawFd, FromRawFd};
