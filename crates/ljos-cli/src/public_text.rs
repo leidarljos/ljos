@@ -29,7 +29,7 @@
 //! and [`classify_id`] are thin cases of it, so an item check and the check
 //! of the text that is finally written cannot disagree.
 
-use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::text_canon::{self, canonical, Canon, Mark};
 pub use crate::text_canon::{allowed, detection_copy, PUBLIC_EXTRA};
@@ -2965,7 +2965,7 @@ fn address_hit(prep: &Prep) -> bool {
         .iter()
         .map(|c| c.to_lowercase().next().unwrap_or(*c))
         .collect();
-    ipv4_hit(&net) || dashed_hit(&net) || ipv6_hit(&net, &fold) || private_host(&net)
+    ipv4_hit(&net) || dashed_hit(&net) || ipv6_hit(&fold) || private_host(&net)
 }
 
 /// `[.]`, `(.)`, `{.}`, `\.`, `[dot]` and ` dot ` between digits read as `.`.
@@ -3014,28 +3014,15 @@ fn digits_at(chars: &[char], start: usize) -> usize {
         .count()
 }
 
-/// A number starts at a digit. Dots immediately before it are skipped, so
-/// `...10.0.0.5` and `e.g.10.0.0.1` are read. A digit before those dots is a
-/// version (`1.10.0.0.5`) and is not a start. Only a `v` glued to the first
-/// digit is version context (`v10.0.0.5`). Any other letter leaves the
-/// number visible (`x10.0.0.1`).
+/// A number starts at a digit with no digit before it, past any dots, so
+/// `...10.0.0.5`, `e.g.10.0.0.1` and `v10.0.0.1` are read and `1.10.0.0.5`
+/// is one five-part run.
 fn number_start(chars: &[char], start: usize) -> bool {
-    if !chars.get(start).is_some_and(char::is_ascii_digit) {
-        return false;
-    }
-    let dots = chars[..start]
-        .iter()
-        .rev()
-        .take_while(|c| **c == '.')
-        .count();
-    if start == dots {
-        return true;
-    }
-    let before = chars[start - dots - 1];
-    if before.is_ascii_digit() {
-        return false;
-    }
-    dots > 0 || before != 'v'
+    chars.get(start).is_some_and(char::is_ascii_digit)
+        && !chars[..start]
+            .iter()
+            .rfind(|c| **c != '.')
+            .is_some_and(char::is_ascii_digit)
 }
 
 /// Reads `text` as `inet_aton` does: one to four parts split by dots, each a
@@ -3140,21 +3127,68 @@ fn port_follows(chars: &[char], at: usize) -> bool {
         && digits_at(chars, at + 1) <= 5
 }
 
-fn private_set(value: u32) -> bool {
-    let a = value >> 24;
-    let b = (value >> 16) & 0xff;
-    a == 10
-        || a == 127
-        || (a == 169 && b == 254)
-        || (a == 172 && (16..=31).contains(&b))
-        || (a == 192 && b == 168)
-        || (a == 100 && (64..=127).contains(&b))
+/// Loopback, unspecified, private, link-local, documentation, benchmarking,
+/// carrier-grade NAT, multicast, and the same ranges written as IPv4-mapped
+/// or IPv4-compatible addresses. A Rust path, a version word or Title Case
+/// words may spare only an address for which this is false.
+fn non_public(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => non_public_v4(v4),
+        IpAddr::V6(v6) => non_public_v6(v6),
+    }
 }
 
-/// A number `inet_aton` reads. Four dot-separated parts are an address unless
-/// the quad is a decimal resolver, netmask or version. One to three parts, or
-/// a bare integer, are an address when the value is private and an address
-/// word, a port, `//` or `@` sits on either side of the number.
+fn non_public_v4(addr: Ipv4Addr) -> bool {
+    let [a, b, c, _] = addr.octets();
+    addr.is_unspecified()
+        || a == 127
+        || a == 10
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 168)
+        || (a == 169 && b == 254)
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 192 && b == 0 && c == 2)
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || (a == 198 && matches!(b, 18 | 19))
+        || (224..240).contains(&a)
+}
+
+fn non_public_v6(addr: Ipv6Addr) -> bool {
+    if addr.is_unspecified() || addr.is_loopback() {
+        return true;
+    }
+    if let Some(v4) = addr.to_ipv4_mapped() {
+        return non_public_v4(v4);
+    }
+    let seg = addr.segments();
+    if seg[..6] == [0, 0, 0, 0, 0, 0] {
+        if let Some(v4) = addr.to_ipv4() {
+            if non_public_v4(v4) {
+                return true;
+            }
+        }
+    }
+    let [first, second, third, ..] = seg;
+    first & 0xffc0 == 0xfe80
+        || first & 0xfe00 == 0xfc00
+        || first & 0xffc0 == 0xfec0
+        || first & 0xff00 == 0xff00
+        || (first == 0x2001 && second == 0x0db8)
+        || (first == 0x2001 && second == 2 && third == 0)
+}
+
+/// A contiguous mask (ones, then zeros) or a public resolver.
+fn fixed_exempt(value: u32) -> bool {
+    let octets = value.to_be_bytes().map(u32::from);
+    value.leading_ones() + value.trailing_zeros() == 32 || PUBLIC_RESOLVERS.contains(&octets)
+}
+
+/// A number `inet_aton` reads. A non-public quad is an address. A non-public
+/// number of one to three parts, or a bare integer, is an address when an
+/// address word, a port, `//` or `@` sits on either side of it. A public quad
+/// is an address unless it is a decimal resolver, netmask or version. A
+/// version word does not spare a non-public value. `0.0.0.0` is a netmask.
 fn ipv4_hit(chars: &[char]) -> bool {
     (0..chars.len())
         .filter(|&start| number_start(chars, start))
@@ -3164,26 +3198,30 @@ fn ipv4_hit(chars: &[char]) -> bool {
             let Some(value) = inet_aton(&text) else {
                 return false;
             };
-            let parts = text.split('.').count();
-            if parts == 4 {
-                let decimal = text
-                    .split('.')
-                    .all(|part| part.len() == 1 || !part.starts_with('0'));
-                return !(decimal && ipv4_exempt(value, chars, start, end));
+            let quad = text.split('.').count() == 4;
+            let decimal = text
+                .split('.')
+                .all(|part| part.len() == 1 || !part.starts_with('0'));
+            if non_public_v4(Ipv4Addr::from(value)) {
+                if quad && decimal && fixed_exempt(value) {
+                    return false;
+                }
+                // `inet_aton` of a short `0` is `0.0.0.0`. That mask is not a
+                // short private number, so a look-alike dot stays a character.
+                if !quad && value == 0 {
+                    return false;
+                }
+                return quad || port_follows(chars, end) || address_context(chars, start, end, 2);
             }
-            private_set(value)
-                && (port_follows(chars, end) || address_context(chars, start, end, 2))
+            quad && !(decimal && public_exempt(value, chars, start, end))
         })
 }
 
-/// A plain public dotted quad that reads as a mask, a resolver or a version.
-/// A mask is contiguous: ones, then zeros.
-fn ipv4_exempt(value: u32, chars: &[char], start: usize, end: usize) -> bool {
-    if private_set(value) {
-        return false;
-    }
-    let octets = value.to_be_bytes().map(u32::from);
-    if value.leading_ones() + value.trailing_zeros() == 32 || PUBLIC_RESOLVERS.contains(&octets) {
+/// A public quad that reads as a mask, a resolver or a version. A version
+/// word may be glued to the number, as the `v` of `v1.10.0.0` is. This does
+/// not spare a non-public value; [`ipv4_hit`] asks [`non_public_v4`] first.
+fn public_exempt(value: u32, chars: &[char], start: usize, end: usize) -> bool {
+    if fixed_exempt(value) {
         return true;
     }
     let before = words_before(chars, start, 2);
@@ -3249,7 +3287,7 @@ fn private_host(chars: &[char]) -> bool {
 const MAX_ADDRESS: usize = 45;
 
 fn ipv6_char(c: char) -> bool {
-    c.is_ascii_hexdigit() || matches!(c, ':' | '.')
+    c.is_ascii_hexdigit() || matches!(c, ':' | '.' | '%')
 }
 
 /// A letter or digit. `_` is a boundary, as it is for an IPv4 literal.
@@ -3257,25 +3295,18 @@ fn word_char(c: char) -> bool {
     c.is_alphanumeric()
 }
 
-/// Whether the text contains an IPv6 address, with or without a zone, brackets
-/// or a port.
+/// Whether the text contains an IPv6 address, with or without a zone.
 ///
-/// A run of hex digits, colons and dots is parsed with
-/// [`std::net::Ipv6Addr`], from the start of the run and from after each
-/// single colon. A literal never starts in the middle of a word, so the
-/// `::add` of `std::ops::Add` and the `::1` of `Foo::1` are paths. An
-/// underscore is a boundary, as it is for an IPv4 literal, so
-/// `_2001:db8::1_` is an address and `foo_bar` stays a word. A literal
-/// with a digit is an address. One without a digit is an address when it
-/// opens or closes with `::` (`::`, `::a`, `::ffff`) or when every group is
-/// four or more digits (`dead::beef`). A capitalised name before `::` is a
-/// path, and so is `Name::<`, `Name::{` and `::new()` after that name
-/// (`Face::<T>::new()`, `Face::Fade`). A run never starts at a dot, so the
-/// `::a` of `x.::a` is read after it.
-fn ipv6_hit(chars: &[char], fold: &[char]) -> bool {
+/// Each maximal run of hex digits, colons, dots and `%` is scanned. A
+/// candidate starts at the run, unless that is inside a word, and after
+/// every non-hex mark in the run: a `.`, a `%`, or a single `:`. A zone
+/// suffix is stripped before parsing. Letter case does not change the
+/// parse. [`non_public`] is refused with no path exemption. A Rust path or
+/// Title Case words spare only an address that is not in that range.
+fn ipv6_hit(chars: &[char]) -> bool {
     let mut index = 0;
     while index < chars.len() {
-        if !ipv6_char(chars[index]) || chars[index] == '.' {
+        if !ipv6_char(chars[index]) {
             index += 1;
             continue;
         }
@@ -3283,29 +3314,31 @@ fn ipv6_hit(chars: &[char], fold: &[char]) -> bool {
         while index < chars.len() && ipv6_char(chars[index]) {
             index += 1;
         }
-        if run_is_ipv6(chars, fold, start, index) {
+        if window_is_ipv6(chars, start, index) {
             return true;
         }
     }
     false
 }
 
-fn run_is_ipv6(chars: &[char], fold: &[char], start: usize, end: usize) -> bool {
-    for at in start..end {
-        if at > start && (chars[at - 1] != ':' || (at - 1 > start && chars[at - 2] == ':')) {
-            continue;
-        }
-        if at == start && at > 0 && word_char(chars[at - 1]) {
-            continue;
-        }
-        if candidate_is_ipv6(chars, fold, at, end) {
-            return true;
-        }
-    }
-    false
+fn window_is_ipv6(chars: &[char], start: usize, end: usize) -> bool {
+    (start..end).any(|at| candidate_at(chars, start, at) && candidate_is_ipv6(chars, at, end))
 }
 
-fn candidate_is_ipv6(chars: &[char], fold: &[char], at: usize, end: usize) -> bool {
+/// The run start, outside a word, and the character after `.`, `%` or a
+/// single colon.
+fn candidate_at(chars: &[char], start: usize, at: usize) -> bool {
+    if at == start {
+        return at == 0 || !word_char(chars[at - 1]);
+    }
+    match chars[at - 1] {
+        '.' | '%' => true,
+        ':' => at.checked_sub(2).and_then(|index| chars.get(index)) != Some(&':'),
+        _ => false,
+    }
+}
+
+fn candidate_is_ipv6(chars: &[char], at: usize, end: usize) -> bool {
     for stop in at + 2..=end.min(at + MAX_ADDRESS) {
         if stop == end {
             if !ipv6_end_ok(chars, stop) {
@@ -3315,50 +3348,84 @@ fn candidate_is_ipv6(chars: &[char], fold: &[char], at: usize, end: usize) -> bo
             if chars.get(stop + 1) == Some(&':') {
                 continue;
             }
-        } else if chars[stop] != '.' {
+        } else if chars[stop] != '.' && chars[stop] != '%' {
             continue;
         }
-        let text: String = chars[at..stop].iter().collect();
-        // `::` between other text is a separator (`term :: description`,
-        // `Foo::bar`). Alone on the line it is the unspecified address.
-        if text == "::" && fold.iter().any(|c| !(*c == ':' || c.is_whitespace())) {
+        let raw: String = chars[at..stop].iter().collect();
+        let bare = raw.split('%').next().unwrap_or(raw.as_str());
+        if bare.matches(':').count() < 2 {
             continue;
         }
-        if text.matches(':').count() < 2 || text.parse::<Ipv6Addr>().is_err() {
+        let Ok(address) = bare.parse::<Ipv6Addr>() else {
+            continue;
+        };
+        if bare == "::" && (lone_double_colon(chars, at) || rust_path(&chars[at + 2..])) {
             continue;
         }
-        if !text.chars().any(|c| c.is_ascii_digit()) {
-            let original: String = fold[at..stop].iter().collect();
-            if !digit_free_address(&original, fold.get(stop).copied()) {
-                continue;
-            }
+        if non_public(IpAddr::V6(address)) {
+            return true;
         }
-        return true;
+        if title_case_path(bare) {
+            continue;
+        }
+        let bare_end = at + bare.chars().count();
+        if bare.chars().any(|c| c.is_ascii_digit()) || digit_free_address(chars, at, bare_end) {
+            return true;
+        }
     }
     false
 }
 
-fn digit_free_address(original: &str, next: Option<char>) -> bool {
-    let groups: Vec<&str> = original
-        .split(':')
-        .filter(|group| !group.is_empty())
-        .collect();
-    let capital = groups.iter().any(|group| {
-        let mut chars = group.chars();
-        chars.next().is_some_and(|c| c.is_ascii_uppercase())
-            && chars.any(|c| c.is_ascii_lowercase())
-    });
-    if capital {
+/// A `::` with no hex digit on either side inside the same token is not an
+/// address (`term :: description`, `` `::` ``). `=::` is unspecified.
+fn lone_double_colon(chars: &[char], at: usize) -> bool {
+    if at > 0 && chars[at - 1] == '=' {
         return false;
     }
-    if original.ends_with("::")
-        && next.is_some_and(|c| c.is_alphanumeric() || matches!(c, '<' | '{'))
-    {
+    let mut left = at;
+    while left > 0 && !chars[left - 1].is_whitespace() {
+        left -= 1;
+    }
+    let mut right = at + 2;
+    while right < chars.len() && !chars[right].is_whitespace() {
+        right += 1;
+    }
+    !chars[left..right].iter().any(|c| c.is_ascii_hexdigit())
+}
+
+fn title_case_path(text: &str) -> bool {
+    text.split_once("::").is_some_and(|(left, right)| {
+        [left, right].into_iter().all(|word| {
+            word.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+                && word.as_bytes()[1..].iter().all(u8::is_ascii_lowercase)
+        })
+    })
+}
+
+/// A literal with no digit is an address when it opens or closes with `::`
+/// or every group is four or more digits (`dead::beef`). An edge `::` before
+/// `<`, `{` or a name and `(` is a Rust path, and a lone `::` between spaces
+/// is a separator (`term :: description`). Any other edge `::` is an address.
+fn digit_free_address(chars: &[char], at: usize, stop: usize) -> bool {
+    let text: String = chars[at..stop].iter().collect();
+    let spaced = at > 0 && chars[at - 1] == ' ' && chars.get(stop) == Some(&' ');
+    if text == "::" && spaced {
         return false;
     }
-    original.starts_with("::")
-        || original.ends_with("::")
+    let edge = |colons: usize| !rust_path(&chars[colons + 2..]);
+    let groups: Vec<&str> = text.split(':').filter(|group| !group.is_empty()).collect();
+    (text.starts_with("::") && edge(at))
+        || (text.ends_with("::") && edge(stop - 2))
         || (groups.len() >= 2 && groups.iter().all(|group| group.len() >= 4))
+}
+
+fn rust_path(after: &[char]) -> bool {
+    let name = after.iter().take_while(|c| ident_char(**c)).count();
+    match after.get(name) {
+        Some('<' | '{') => name == 0,
+        Some('(') => name > 0,
+        _ => false,
+    }
 }
 
 fn ipv6_end_ok(chars: &[char], stop: usize) -> bool {
@@ -3921,7 +3988,6 @@ mod tests {
         let screen = bare();
         for text in [
             "8.8.8.8",
-            "release v10.0.0.5",
             "0x1ffffffff",
             "ping 0x1ffffffff",
             "0x10000000a.0.0.1",
@@ -3938,10 +4004,16 @@ mod tests {
             "10.0",
             "$10.05",
             "at 10.05",
-            "v10.0.0.5",
             "Face::<T>::new()",
             "use Face::{A, B};",
             "Face::Fade",
+            "::",
+            "term :: description",
+            "- term ::",
+            "- Abc ::",
+            "Notes ::",
+            "`::`",
+            "f :: Int",
         ] {
             assert_eq!(classify(text, &screen), None, "{text:?}");
             assert!(crate::scrub::scan_body(text, 1).is_empty(), "{text:?}");
@@ -3952,7 +4024,6 @@ mod tests {
             "ip 10.1",
             "e.g.10.0.0.1",
             "x.10.0.0.1",
-            "::",
             "fe80::1",
             "1[.]2 ::a",
         ] {
@@ -3967,11 +4038,245 @@ mod tests {
             "version=x10.0.0.1",
             "10.1@",
             "10.1//",
-            "::",
             "fe80::1",
             "1[.]2 ::a",
         ] {
             assert_eq!(classify(text, &screen), Some(Class::Address), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_private_quad_after_a_glued_v_is_refused() {
+        for text in [
+            "v10.0.0.1",
+            "V127.0.0.1",
+            "release v10.0.0.5",
+            "v192.168.1.20",
+        ] {
+            assert_all_screens_refuse(text);
+        }
+        let screen = bare();
+        for text in ["v1.10.0.0", "V1.10.0.0", "rev1.2.3.4"] {
+            assert_eq!(classify(text, &screen), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_capitalised_hex_group_does_not_hide_an_address() {
+        for text in [
+            "fd00:Beef::1",
+            "fc00:Beef::1",
+            "fe80::Beef",
+            "fd00:Be::1",
+            "2001:db8::Dead",
+            "2001:db8:Cafe::1",
+            "`fd00:Beef::1`",
+            "2001:Cafe::1",
+            "Fcaa::Beef",
+            "fd00:beef::1",
+            "fc00:beef::1",
+            "fe80::beef",
+            "fd00:be::1",
+            "2001:db8::dead",
+            "2001:db8:cafe::1",
+            "`fd00:beef::1`",
+            "2001:cafe::1",
+            "FD00:BEEF::1",
+            "FC00:BEEF::1",
+            "FE80::BEEF",
+            "FD00:BE::1",
+            "2001:DB8::DEAD",
+            "2001:DB8:CAFE::1",
+            "`FD00:BEEF::1`",
+            "2001:CAFE::1",
+        ] {
+            assert_all_screens_refuse(text);
+        }
+        let screen = bare();
+        for text in [
+            "Face::Fade",
+            "Dead::Beef",
+            "Face::<T>::new()",
+            "use Face::{A, B};",
+            "std::fmt",
+            "Foo::<T>",
+            "Foo::{a}",
+            "Foo::new(",
+        ] {
+            assert_eq!(classify(text, &screen), None, "{text:?}");
+            assert!(crate::scrub::scan_body(text, 1).is_empty(), "{text:?}");
+            assert!(crate::scrub::scan_public(text).is_empty(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn an_edge_double_colon_after_any_other_character_is_refused() {
+        for text in ["addr=::", "ip=::", "addr=::1", "::bad", "`::a`"] {
+            assert_all_screens_refuse(text);
+        }
+        let screen = bare();
+        for text in [
+            "term :: description",
+            "- term ::",
+            "- Abc ::",
+            "Notes ::",
+            "`::`",
+            "(::)",
+            "'::'",
+            "\"::\"",
+            "x ::",
+            ":: x",
+            "ends with ::",
+            "f :: Int",
+            "- =--json= :: print JSON",
+            "Vec::<u8>::new()",
+            "Self::new()",
+            "<T>::bad()",
+            "::{A, B}",
+            "a.b::c",
+        ] {
+            assert_eq!(classify(text, &screen), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn every_non_public_range_is_refused_in_any_case_and_after_any_separator() {
+        let spellings = [
+            "127.0.0.1",
+            "::1",
+            "::ffff:127.0.0.1",
+            "::7f00:1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.1.1",
+            "fe80::1",
+            "FE80::1",
+            "Fe80::1",
+            "Fead::Beef",
+            "fead::beef",
+            "FEAD::BEEF",
+            "Febe::Cafe",
+            "febe::cafe",
+            "FEBE::CAFE",
+            "Feab::Dead",
+            "feab::dead",
+            "FEAB::DEAD",
+            "Febf::Face",
+            "febf::face",
+            "FEBF::FACE",
+            "Fead::Beef%eth0",
+            "fd00::1",
+            "FD00::1",
+            "fc00::1",
+            "FC00::1",
+            "fd00:Beef::1",
+            "fd00:beef::1",
+            "FD00:BEEF::1",
+            "fd00::",
+            "FD00::",
+            "fec0::1",
+            "FEC0::1",
+            "Fece::Face",
+            "fece::face",
+            "FECE::FACE",
+            "Feed::Beef",
+            "feed::beef",
+            "FEED::BEEF",
+            "224.0.0.1",
+            "ff02::1",
+            "FF02::1",
+            "Ffee::Beef",
+            "ffee::beef",
+            "FFEE::BEEF",
+            "192.0.2.1",
+            "198.51.100.1",
+            "203.0.113.1",
+            "2001:db8::1",
+            "2001:DB8::1",
+            "2001:db8::Dead",
+            "2001:db8::dead",
+            "2001:DB8::DEAD",
+            "198.18.0.1",
+            "198.19.1.1",
+            "2001:2::1",
+            "2001:2::DEAD",
+            "100.64.0.1",
+            "100.127.255.1",
+            "::ffff:10.0.0.1",
+            "::ffff:a00:1",
+            "::ffff:A00:1",
+            "::FFFF:A00:1",
+            "::a00:1",
+            "::A00:1",
+        ];
+        let prefixes = ["", " ", "a.", "x.", "=", "(", "`"];
+        for spelling in spellings {
+            let dotted = spelling.split('.').count() == 4 && !spelling.contains(':');
+            let with_digit_prefix = if dotted {
+                &prefixes[..]
+            } else {
+                &["", " ", "a.", "x.", "1.", "=", "(", "`"][..]
+            };
+            for prefix in with_digit_prefix {
+                assert_all_screens_refuse(&format!("{prefix}{spelling}"));
+            }
+        }
+        for text in [
+            "a.fe80::1",
+            "cafe.fd00::1",
+            "see db.fe80::1 now",
+            "1.fe80::1",
+            "a.::1",
+            "c.::ffff:a00:1",
+            "a.fd00::",
+            "add.fe80::1%eth0",
+            "v10.0.0.1",
+            "V127.0.0.1",
+            "release v10.0.0.5",
+            "v192.168.1.20",
+            "addr=::",
+            "ip=::",
+            "addr=::1",
+            "x10.0.0.1",
+            "10.1@",
+            "10.1//",
+            "127.1 host",
+            "e.g.10.0.0.1",
+            "x.10.0.0.1",
+            "`::a`",
+            "255.0.255.0",
+        ] {
+            assert_all_screens_refuse(text);
+        }
+        let screen = bare();
+        for text in [
+            "v1.10.0.0",
+            "Ubuntu 10.04 LTS",
+            "$10.05",
+            "at 10.05",
+            "10.00",
+            "Ubuntu 10.04.1",
+            "1.10.0.0.5",
+            "term :: description",
+            "- term ::",
+            "- Abc ::",
+            "Notes ::",
+            "`::`",
+            "f :: Int",
+            "std::fmt",
+            "Foo::<T>",
+            "Foo::{a}",
+            "Foo::new(",
+            "Face::<T>::new()",
+            "use Face::{A, B};",
+            "std::vector<int>",
+            "Face::Fade",
+            "Dead::Beef",
+        ] {
+            assert_eq!(classify(text, &screen), None, "{text:?}");
+            assert!(crate::scrub::scan_body(text, 1).is_empty(), "{text:?}");
+            assert!(crate::scrub::scan_public(text).is_empty(), "{text:?}");
         }
     }
 
@@ -4080,7 +4385,7 @@ mod tests {
             "10 0 0 5",
             "width=20",
             "résumé",
-            "release v10.0.0.5",
+            "release v1.10.0.0",
         ] {
             assert_eq!(classify(text, &screen), None, "{text:?}");
             assert!(crate::scrub::scan_body(text, 1).is_empty(), "{text:?}");

@@ -111,7 +111,6 @@ pub const LEAKS: &[&str] = &[
     "addr=\u{ff12}\u{ff10}\u{ff10}\u{ff11}:db8::1",
     "ip:\u{ff12}\u{ff10}\u{ff10}\u{ff11}:db8::1",
     "(\u{ff12}\u{ff10}\u{ff10}\u{ff11}:db8::1)",
-    "::",
     "::a",
     "The box answers on ::a today.",
     "Reach ::a.",
@@ -159,6 +158,7 @@ pub const LEAKS: &[&str] = &[
     "version=x10.0.0.1",
     "10.1@",
     "10.1//",
+    "v10.0.0.5",
 ];
 
 pub const BENIGN: &[&str] = &[
@@ -193,7 +193,6 @@ pub const BENIGN: &[&str] = &[
     "the `std::fs::read` call",
     "ratio 3:1:2",
     ":tag: and :other:",
-    "ends with ::",
     "127.1",
     "169.254.7",
     "172.16.5",
@@ -206,7 +205,13 @@ pub const BENIGN: &[&str] = &[
     "10.00",
     "Ubuntu 10.04.1",
     "at 10.05",
-    "v10.0.0.5",
     "Face::<T>::new()",
     "use Face::{A, B};",
+    "::",
+    "ends with ::",
+    "- term ::",
+    "- Abc ::",
+    "Notes ::",
+    "`::`",
+    "f :: Int",
 ];

@@ -5,5 +5,5 @@ A `_` beside a number or an IPv6 address does not hide it, as in `_10.0.0.5_` or
 The screen reads a numeric internet address as the C library's `inet_aton` does.
 Each part may be hex, octal or decimal, of any length, so `00012.0.0.1` and `0x0000000a.0.0.1` are refused.
 A private number of one to three parts, or a bare integer, is refused only beside an address word, a port, `//` or `@`, as in `ip 10.1` and `ping 167772161`.
-`//` and `@` count on either side of that number, and a letter other than `v` directly before a dotted quad does not hide it.
+`//` and `@` count on either side of that number, and a letter directly before a private dotted quad does not hide it.
 A handbook line is bookkeeping only when it is a state change of the form `State "DONE" from "TODO"`, a `CLOCK:` line with an org time, or a noted, claimed or finished line that names one seat.

@@ -206,11 +206,11 @@ characters or more that looks random. The export and the prompt excerpt that
 refuses a word that starts with a vendor key prefix (the prefixes of a code
 host token, a chat token and a cloud key id), also when quotes, brackets or
 Org marks wrap it, an assignment of a value to a name such as ``token`` or
-``secret`` with a value after it (also with a doubled mark or a ``::``), and a
+``secret`` with a value after it (also with a doubled mark or a double colon), and a
 run of 24 or more letters and digits with both kinds in it. A run that ``-``,
 ``.`` or ``_`` cut into pieces counts when one piece is itself a mixed run of 8
 or more, and a run cut by a line break counts when neither half is 24 long
-alone. A capitalised name before ``::``, as in a Rust path, is a path. The
+alone. A capitalised name before a double colon, as in a Rust path, is a path. The
 excerpt also redacts a marker with nothing after it, and a word that dashes
 cut into short pieces. The export reads those as prose, and so it does a
 hex run of 32 or more digits, which the hash rule below decides. A hex run of 32 or more is a key,
@@ -227,31 +227,47 @@ and folders ljos names for itself are not private. Banned product and vendor
 terms are refused in any case and with any spacing. The words of ljos itself,
 such as ``seat``, ``hook`` and ``mcp``, are refused because the page is public.
 
-An IPv6 address is refused when the text parses as one, so ``::``, ``::a``,
-``dead::beef`` and ``2001:db8::1:abcde`` are addresses. A capitalised name
-before ``::`` is a Rust path, including ``Name::<``, ``Name::{`` and ``::new()``
-after that name, so ``Face::<T>::new()`` and ``Face::Fade`` stay. A backtick
-or verbatim span does not hide an address, and a literal may start after
-a dot, so ``::a`` between backticks and ``x.::a`` are refused. An IPv4
+One range test decides a non-public address: loopback, unspecified,
+private IPv4, link-local IPv4, IPv6 link-local ``fe80::/10``, unique local
+``fc00::/7``, site-local ``fec0::/10``, multicast, the documentation ranges
+192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 and ``2001:db8::/32``,
+benchmarking, carrier-grade NAT ``100.64.0.0/10``, and the IPv4-mapped or
+IPv4-compatible form of any of those. A zone suffix after ``%`` is stripped
+before the address is read. A Rust path, a version string or Title Case
+words spare a candidate only when that test is false, so ``Face::Fade`` and
+``Dead::Beef`` stay, and ``fd00:Beef::1``, ``fe80::1`` and ``2001:db8::Dead`` are
+refused. Letter case does not change the parse.
+A candidate starts at the beginning of a run of hex digits, colons, dots
+and a zone mark, and after every separator in that run: a dot, a single
+colon, a slash, an equals sign, an at sign, a parenthesis, a bracket or a
+backtick. So ``a.fe80::1``, ``cafe.fd00::1`` and ``add.fe80::1%eth0`` are refused.
+A literal does not start inside a word, so ``std::fmt`` and ``Foo::1`` are Rust
+paths. A double colon directly before ``<``, ``{`` or a name and ``(`` is a Rust
+path too, so ``Face::<T>::new()`` and ``use Face::{A, B}`` stay.
+A lone ``::`` with no hex digit on either side inside the same token is not
+an address, so ``- term ::``, ``Notes ::``, the :literal:`\`::\`` token and
+``term :: description`` stay. ``addr=::``, ``ip=::``, ``::a`` between backticks and
+``addr=::1`` are refused. An IPv4
 address is read as the C library's ``inet_aton`` reads it: one to four parts,
 each hex after ``0x``, octal after a leading zero, or decimal, of any length,
-with the last part filling the bytes left. Every dotted quad is refused,
-except a public resolver, a netmask or a version-context quad written in
-decimal. A netmask is ones then zeros, as in 255.255.240.0, so
-255.0.255.0 is refused. Version context is a ``v`` before the number, a digit before the
-dots, or a version word. A private dotted quad is refused even beside a
-version word. A private number of one to three parts, or a bare integer,
+with the last part filling the bytes left. Every private dotted quad is
+refused. A public dotted quad is refused unless it is a resolver, a netmask
+or a version-context quad written in decimal. A netmask is ones then zeros,
+as in 255.255.240.0, so 255.0.255.0 is refused. Version context is a
+version word before or after the quad, or a ``v`` glued to it, as in
+``v1.10.0.0``. A private dotted quad is refused even in version context, so
+``v10.0.0.1`` is refused. A private number of one to three parts, or a bare integer,
 is an address only beside an address word, a port, ``//`` or ``@``, as in
 ``ip 10.1``, ``ping 167772161`` or ``127.1 host``. The address word, ``//`` and ``@``
 may come before or after the number, so ``10.1@`` and ``10.1//`` are refused.
-A letter other than ``v`` directly before a dotted quad does not hide it, so
+A letter directly before a private dotted quad does not hide it, so
 ``x10.0.0.1`` is refused. A leading zero does not make it an address,
 so ``10.05``, ``10.00`` and ``Ubuntu 10.04 LTS`` stay. A number may start after
-a dot that follows a letter, so ``e.g.10.0.0.1`` is refused. A digit before
-the dots is a version, so ``1.10.0.0.5`` and ``v10.0.0.5`` stay.
-Addresses are found within one line. An address broken across lines on
-purpose is not caught. An email address is refused, and so is one spelled
-so the at sign is not a character, with words, brackets or parentheses.
+a dot that follows a letter, so ``e.g.10.0.0.1`` is refused. A run of five
+dotted numbers, such as ``1.10.0.0.5``, is a version and not an address. Addresses are
+found within one line. An address broken across lines on purpose is not
+caught. An email address is refused, and so is one written with the at sign
+spelled out in words, brackets or parentheses.
 ``GitHub`` is a forge name, not a vendor of models or agent tools, and it
 stays.
 
