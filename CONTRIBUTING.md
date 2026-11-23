@@ -35,15 +35,9 @@ Run the suite from a shell with no `LJOS_OFF` set and outside an agent runner.
 
 ## Commit identity
 
-CI checks only the commits a push or a pull request adds. A push
-uses `before..sha`. A new branch, whose `before` is all zeros, uses
-the commits that are not on any other remote branch. A pull request
-uses `base..head`. `scripts/identity-gate.sh` checks that range and
-fails when an author is not Rohit Goswami <rgoswami@ieee.org>, a
-committer is neither that identity nor GitHub <noreply@github.com>, or
-a message has a Co-authored-by or Signed-off-by trailer, a
-generated-with line, or the machine-account text named in the script.
-Commit dates are not read. Commits already on the base are outside the
-range. `scripts/identity-gate-test.sh` covers a clean range, a wrong
-author, a wrong committer, the GitHub web-flow committer, a differing
-committer date, a foreign commit and a trailer.
+A push, a tag push or a pull request checks every commit reachable from that commit, and skips none.
+GitHub starts no run for a `[skip ci]` push, so the next push, tag or release run catches its commits.
+The check fails when an author is not Rohit Goswami <rgoswami@ieee.org>, a committer is neither that identity nor GitHub <noreply@github.com>, or a message has a Co-authored-by or Signed-off-by trailer, a generated-with line, or the machine-account text named in the identity script.
+Commit dates are not read.
+A git error fails the check.
+The identity test covers a clean range, a wrong author, a wrong committer, the GitHub web-flow committer, a differing committer date, a foreign commit, a trailer, no exclusion list, a bad commit that is never skipped, a bad commit on a branch, a tag and a pull request, a later push after a `[skip ci]` bad commit, a re-run after the branches are deleted and created again, a release merge, and one push of a bad commit to main and develop.
