@@ -13,8 +13,10 @@ mod sibling;
 use std::ffi::CString;
 use std::io::Read as _;
 use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 const NO_READY_TICKET: &str =
     "claim: no ticket is ready on this seat, so file one with `ljos file \"TITLE\" -p PROJECT`";
@@ -161,6 +163,60 @@ fn fifo(path: &Path) {
     );
 }
 
+/// How long the race test waits for a seat at each step before it fails.
+const RACE_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Kill `child` and everything it started. Each seat runs in a process
+/// group of its own, so the gated claimdag shim goes with it.
+fn kill_group(child: &Child) {
+    let group = libc::pid_t::try_from(child.id()).unwrap();
+    // SAFETY: a negative pid names the process group the child leads.
+    unsafe {
+        libc::kill(-group, libc::SIGKILL);
+    }
+}
+
+/// The output of `child`, or a failure naming `what` when it has not
+/// exited by `deadline`.
+fn finish(mut child: Child, deadline: Instant, what: &str) -> Output {
+    let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = drain(child.stderr.take().map(|p| Box::new(p) as _));
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            kill_group(&child);
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let stdout = stdout.join().unwrap();
+    let stderr = stderr.join().unwrap();
+    let Some(status) = status else {
+        panic!(
+            "{what} did not exit within {RACE_DEADLINE:?}:\n{}{}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+    };
+    Output {
+        status,
+        stdout,
+        stderr,
+    }
+}
+
 #[test]
 fn simultaneous_bare_claims_pass_over_a_node_claimed_during_mint() {
     let world = World::new(&[("demo-aa01", None), ("demo-bb02", None)]);
@@ -202,6 +258,7 @@ exit "$rc"
             .env("RACE_NODE", &race_node)
             .env("WAITING_FIFO", &waiting_fifo)
             .env("RELEASE_FIFO", &release_fifo)
+            .process_group(0)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
     };
@@ -217,15 +274,45 @@ exit "$rc"
         .unwrap();
     let mut slow_cmd = world.cmd(Path::new(env!("CARGO_BIN_EXE_ljos")), "seat0");
     configure(&mut slow_cmd);
-    let slow = slow_cmd.spawn().unwrap();
-    let mut signal = [0u8; 1];
-    waiting.read_exact(&mut signal).unwrap();
+    let mut slow = slow_cmd.spawn().unwrap();
+    let (gate_tx, gate_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut signal = [0u8; 1];
+        let _ = gate_tx.send(waiting.read_exact(&mut signal));
+    });
+    let gate_deadline = Instant::now() + RACE_DEADLINE;
+    loop {
+        match gate_rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(read) => {
+                read.unwrap();
+                break;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(err) => panic!("the gate reader stopped: {err}"),
+        }
+        if slow.try_wait().unwrap().is_some() {
+            let out = finish(slow, Instant::now() + RACE_DEADLINE, "seat0");
+            panic!(
+                "seat0 exited before it reached the upsert gate:\n{}",
+                said(&out)
+            );
+        }
+        if Instant::now() >= gate_deadline {
+            kill_group(&slow);
+            let out = finish(slow, Instant::now() + RACE_DEADLINE, "seat0");
+            panic!(
+                "seat0 did not reach the upsert gate within {RACE_DEADLINE:?}:\n{}",
+                said(&out)
+            );
+        }
+    }
 
     let mut fast_cmd = world.cmd(Path::new(env!("CARGO_BIN_EXE_ljos")), "seat1");
     configure(&mut fast_cmd);
     let fast = fast_cmd.spawn().unwrap();
-    let fast = fast.wait_with_output().unwrap();
-    let slow = slow.wait_with_output().unwrap();
+    let deadline = Instant::now() + RACE_DEADLINE;
+    let fast = finish(fast, deadline, "seat1");
+    let slow = finish(slow, deadline, "seat0");
     assert_eq!(claimed(&fast), "demo-aa01", "{}", said(&fast));
     assert_eq!(claimed(&slow), "demo-bb02", "{}", said(&slow));
 }
