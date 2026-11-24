@@ -10462,8 +10462,9 @@ pub fn tool_error(input: &str) -> String {
 /// which of them a ballot keeps at its cut is arbitrary. The floor is the
 /// lexical match of the hits that
 /// pass those tests, not the fused score: the pack decays that score by
-/// age, and age only ranks. What passes is read most relevant first, see
-/// [`sort_by_relevance`]. One handed over earlier in the session is left
+/// age, and age only ranks. What passes is read highest score first, so
+/// the list order, which carries that age, does not put a lower score
+/// ahead of a higher one. One handed over earlier in the session is left
 /// out. Calls that worked are not searched.
 #[must_use]
 pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<String>) {
@@ -10501,7 +10502,13 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
         .filter(|(_, ok)| **ok)
         .map(|(h, _)| h)
         .collect();
-    sort_by_relevance(&mut rows, &subject);
+    let mine = seat_name();
+    rows.sort_by(|a, b| {
+        u8::from(foreign_memory(a, &mine))
+            .cmp(&u8::from(foreign_memory(b, &mine)))
+            .then(b.score.total_cmp(&a.score))
+            .then(a.id.cmp(&b.id))
+    });
     let matched = rows.len();
     rows.truncate(limit);
     if rows.is_empty() {
@@ -52117,7 +52124,7 @@ fn held_a_write_in(root: &Path) {
                     let said = flush_held_tracker_writes_in(&root);
                     let failed = exit_flush_failures(&said);
                     if !failed.is_empty() {
-                        eprint!("{failed}");
+                        say_raw!("{failed}");
                     }
                 }
             });
