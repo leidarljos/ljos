@@ -655,7 +655,9 @@ enum Cmd {
         /// Print a warning when a sentence is over 29 words. The memory is still stored.
         #[arg(long)]
         verbose: bool,
-        /// Print the stored lesson as JSON. The grade, the aim and the sentence that raised the grade are fields on it.
+        /// Print one JSON document with a `claims` array, for one claim and for several.
+        /// The grade, the aim and the sentence that raised the grade are fields on each claim.
+        /// A lesson the pack already stores is in that array. A later chunk that fails is listed under `failed`.
         #[arg(long)]
         json: bool,
         /// The day (YYYY-MM-DD) the claim starts to hold in the world. `ljos search --valid-at` leaves it out before then.
@@ -5644,12 +5646,15 @@ fn run_command() -> Result<()> {
                 ljos_cli::say!("{}", ljos_cli::remember_split_line(chunks.len()));
             }
             let mut stored: Vec<(String, String)> = Vec::new();
+            let mut json_bodies: Vec<serde_json::Value> = Vec::new();
+            let mut failed: Vec<serde_json::Value> = Vec::new();
+            let mut hard: Option<anyhow::Error> = None;
             for text in chunks {
                 // A person at the terminal, and words from their latest
                 // prompt, are their lesson. Any other text is a standing
                 // lesson too, sitting or not, labelled agent-derived.
                 // A busy pack queues the lesson and this command exits 0.
-                let body = ljos_cli::remember_with_retry(&text, || {
+                let body = match ljos_cli::remember_with_retry(&text, || {
                     if ljos_cli::person_present() {
                         let horizon = ljos_cli::remember_horizon(transient, standing, false);
                         packset_write_as("Remember", &text, as_persona.as_deref(), horizon)
@@ -5670,11 +5675,33 @@ fn run_command() -> Result<()> {
                             horizon,
                         )
                     }
-                })?;
+                }) {
+                    Ok(body) => body,
+                    Err(err) => {
+                        // One document names what was stored and the chunk
+                        // that failed. Later chunks are not written.
+                        if json {
+                            failed.push(serde_json::json!({
+                                "text": text,
+                                "error": format!("{err:#}"),
+                            }));
+                        }
+                        hard = Some(err);
+                        break;
+                    }
+                };
                 let duplicate = body["duplicate"].as_bool() == Some(true);
                 let queued = body["queued"].as_bool() == Some(true);
                 if split && (duplicate || !queued) {
                     stored.push(stored_claim(&body, &text));
+                }
+                if json {
+                    if let Some(note) = ljos_cli::prose_warning_shown(&body, verbose) {
+                        ljos_cli::say!("{note}");
+                    }
+                    let mut printed = body.clone();
+                    ljos_cli::readability::attach(&mut printed);
+                    json_bodies.push(printed);
                 }
                 if duplicate {
                     continue;
@@ -5683,14 +5710,7 @@ fn run_command() -> Result<()> {
                     ljos_cli::tell!("{}", ljos_cli::REMEMBER_QUEUED_LINE);
                     continue;
                 }
-                if json {
-                    if let Some(note) = ljos_cli::prose_warning_shown(&body, verbose) {
-                        ljos_cli::say!("{note}");
-                    }
-                    let mut printed = body.clone();
-                    ljos_cli::readability::attach(&mut printed);
-                    ljos_cli::emit!("{}", serde_json::to_string_pretty(&printed)?);
-                } else if !split {
+                if !json && !split {
                     ljos_cli::tell!("{}", write_ack(&body, verbose));
                 }
                 ljos_cli::say!("{}", ljos_cli::remember_note(&body));
@@ -5713,8 +5733,16 @@ fn run_command() -> Result<()> {
                     );
                 }
             }
-            if split && !json && !stored.is_empty() {
+            if json {
+                ljos_cli::emit!(
+                    "{}",
+                    ljos_cli::remember_json_page(&json_bodies, &failed)?
+                );
+            } else if split && !stored.is_empty() {
                 ljos_cli::tell_raw!("{}", split_claims_page(split_n, &stored));
+            }
+            if let Some(err) = hard {
+                return Err(err);
             }
         }
         Cmd::Prefer {

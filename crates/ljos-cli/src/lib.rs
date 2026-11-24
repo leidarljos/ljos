@@ -25833,6 +25833,23 @@ pub fn remember_split_line(n: usize) -> String {
     )
 }
 
+/// One JSON document for `ljos remember --json`.
+///
+/// `claims` lists every chunk the pack accepted, including a duplicate.
+/// `failed` is present when a later chunk was refused, and names that text.
+///
+/// # Errors
+///
+/// The document could not be encoded.
+pub fn remember_json_page(claims: &[Value], failed: &[Value]) -> Result<String> {
+    let mut page = serde_json::Map::new();
+    page.insert("claims".into(), Value::Array(claims.to_vec()));
+    if !failed.is_empty() {
+        page.insert("failed".into(), Value::Array(failed.to_vec()));
+    }
+    Ok(serde_json::to_string_pretty(&Value::Object(page))?)
+}
+
 pub fn packset_write(label: &str, text: &str) -> Result<Value> {
     packset_write_as(label, text, None, None)
 }
