@@ -1063,7 +1063,7 @@ fn negative_zero_reaches_every_documented_numeric_flag() {
             &["panel", "demo-kiln", "--designers", "-0", "--dry-run"],
             true,
         ),
-        (&["claim", "demo-kiln", "--slack", "-0"], true),
+        (&["claim", "--next", "--slack", "-0"], true),
         (
             &["learn", "demo-kiln", "--outcome", "keep", "--beta", "-0"],
             false,

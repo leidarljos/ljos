@@ -145,6 +145,10 @@ pub fn peek_env_token() -> Option<String> {
 }
 
 /// Read `XDG_ACTIVATION_TOKEN` and unset it and `DESKTOP_STARTUP_ID`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "activation tokens are single-use process state"
+)]
 pub fn take_env_token() -> Option<String> {
     let raw = std::env::var("XDG_ACTIVATION_TOKEN").ok();
     #[allow(unused_unsafe)]
@@ -490,8 +494,8 @@ mod tests {
         let _guard = crate::env_lock();
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-xyz");
-            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
+            crate::test_env_guards::set_var_unchecked("XDG_ACTIVATION_TOKEN", "tok-xyz");
+            crate::test_env_guards::set_var_unchecked("DESKTOP_STARTUP_ID", "startup");
         }
         let tok = take_env_token();
         assert_eq!(tok.as_deref(), Some("tok-xyz"));
@@ -504,8 +508,8 @@ mod tests {
         let _guard = crate::env_lock();
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-peek");
-            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
+            crate::test_env_guards::set_var_unchecked("XDG_ACTIVATION_TOKEN", "tok-peek");
+            crate::test_env_guards::set_var_unchecked("DESKTOP_STARTUP_ID", "startup");
         }
         assert_eq!(peek_env_token().as_deref(), Some("tok-peek"));
         assert_eq!(
@@ -518,8 +522,8 @@ mod tests {
         );
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::remove_var("XDG_ACTIVATION_TOKEN");
-            std::env::remove_var("DESKTOP_STARTUP_ID");
+            crate::test_env_guards::remove_var_unchecked("XDG_ACTIVATION_TOKEN");
+            crate::test_env_guards::remove_var_unchecked("DESKTOP_STARTUP_ID");
         }
     }
 
@@ -531,9 +535,9 @@ mod tests {
         let path = dir.path().join("miss-show.sock");
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var(SOCKET_ENV, &path);
-            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-keep");
-            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
+            crate::test_env_guards::set_var_unchecked(SOCKET_ENV, &path);
+            crate::test_env_guards::set_var_unchecked("XDG_ACTIVATION_TOKEN", "tok-keep");
+            crate::test_env_guards::set_var_unchecked("DESKTOP_STARTUP_ID", "startup");
         }
         let err = send_command(SummonAction::Show).unwrap_err();
         assert!(is_summon_miss(&err));
@@ -543,9 +547,9 @@ mod tests {
         );
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::remove_var(SOCKET_ENV);
-            std::env::remove_var("XDG_ACTIVATION_TOKEN");
-            std::env::remove_var("DESKTOP_STARTUP_ID");
+            crate::test_env_guards::remove_var_unchecked(SOCKET_ENV);
+            crate::test_env_guards::remove_var_unchecked("XDG_ACTIVATION_TOKEN");
+            crate::test_env_guards::remove_var_unchecked("DESKTOP_STARTUP_ID");
         }
     }
 
@@ -557,9 +561,9 @@ mod tests {
         let path = dir.path().join("miss-hide.sock");
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var(SOCKET_ENV, &path);
-            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-hide");
-            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
+            crate::test_env_guards::set_var_unchecked(SOCKET_ENV, &path);
+            crate::test_env_guards::set_var_unchecked("XDG_ACTIVATION_TOKEN", "tok-hide");
+            crate::test_env_guards::set_var_unchecked("DESKTOP_STARTUP_ID", "startup");
         }
         let err = send_command(SummonAction::Hide).unwrap_err();
         assert!(is_summon_miss(&err));
@@ -567,7 +571,7 @@ mod tests {
         assert!(std::env::var("DESKTOP_STARTUP_ID").is_err());
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::remove_var(SOCKET_ENV);
+            crate::test_env_guards::remove_var_unchecked(SOCKET_ENV);
         }
     }
 
@@ -598,7 +602,7 @@ mod tests {
         let _guard = crate::env_lock();
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::remove_var(SOCKET_ENV);
+            crate::test_env_guards::remove_var_unchecked(SOCKET_ENV);
         }
         let path = default_socket_path();
         assert_eq!(path.file_name().unwrap(), "hud.sock");
@@ -609,9 +613,9 @@ mod tests {
         let _guard = crate::env_lock();
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::remove_var(SOCKET_ENV);
-            std::env::remove_var("XDG_RUNTIME_DIR");
-            std::env::set_var("HOME", "/home/ada");
+            crate::test_env_guards::remove_var_unchecked(SOCKET_ENV);
+            crate::test_env_guards::remove_var_unchecked("XDG_RUNTIME_DIR");
+            crate::test_env_guards::set_var_unchecked("HOME", "/home/ada");
         }
         assert_eq!(
             default_socket_path(),

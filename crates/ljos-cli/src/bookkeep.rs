@@ -664,9 +664,9 @@ mod temp_path_tests {
         let home = root.path().join("home\nrun-this");
         std::fs::create_dir_all(&home).unwrap();
         crate::with_env_mutation(|| unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::remove_var("LJOS_OFF");
-            std::env::remove_var("LJOS_GUARD");
+            crate::test_env_guards::set_var_unchecked("HOME", &home);
+            crate::test_env_guards::remove_var_unchecked("LJOS_OFF");
+            crate::test_env_guards::remove_var_unchecked("LJOS_GUARD");
         });
         let reason = guard_off_reason().unwrap();
         assert!(!reason.contains('\n'), "{reason:?}");

@@ -5739,12 +5739,15 @@ mod tests {
             "LJOS_HOLD",
         ]);
         unsafe {
-            std::env::set_var("HOME", dir.path());
-            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
-            std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
-            std::env::remove_var("LJOS_SEAT");
-            std::env::remove_var("VISSUE_AGENT");
-            std::env::remove_var("LJOS_HOLD");
+            ljos_cli::test_env_guards::set_var_unchecked("HOME", dir.path());
+            ljos_cli::test_env_guards::set_var_unchecked(
+                "XDG_CONFIG_HOME",
+                dir.path().join("config"),
+            );
+            ljos_cli::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", dir.path().join("run"));
+            ljos_cli::test_env_guards::remove_var_unchecked("LJOS_SEAT");
+            ljos_cli::test_env_guards::remove_var_unchecked("VISSUE_AGENT");
+            ljos_cli::test_env_guards::remove_var_unchecked("LJOS_HOLD");
         }
         let seat_file = dir
             .path()
@@ -5780,8 +5783,8 @@ mod tests {
             },
         );
         unsafe {
-            std::env::remove_var("CURSOR_CONVERSATION_ID");
-            std::env::set_var("LJOS_SEAT", "saddle");
+            ljos_cli::test_env_guards::remove_var_unchecked("CURSOR_CONVERSATION_ID");
+            ljos_cli::test_env_guards::set_var_unchecked("LJOS_SEAT", "saddle");
         }
         reset_connected_client();
         note_connected_client(Some("Codex"));
@@ -5814,6 +5817,11 @@ mod tests {
                     .collect(),
             }
         }
+
+        fn set(&self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+            assert!(self.pairs.iter().any(|(saved, _)| saved == key));
+            ljos_cli::test_env_guards::set_var(key, value);
+        }
     }
 
     impl Drop for RestoreEnv {
@@ -5821,8 +5829,8 @@ mod tests {
             for (key, value) in &self.pairs {
                 unsafe {
                     match value {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
+                        Some(value) => ljos_cli::test_env_guards::set_var_unchecked(key, value),
+                        None => ljos_cli::test_env_guards::remove_var_unchecked(key),
                     }
                 }
             }
@@ -6606,7 +6614,7 @@ mod tests {
         let cards = tempfile::tempdir().unwrap();
         let server = LjosServer::at(cards.path().to_path_buf());
         let missing = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("PATH", missing.path()) };
+        _saved.set("PATH", missing.path());
         let Err(err) = server
             .ljos_evidence(Parameters(AccessionArgs {
                 accession: "deed-file-nobody-minted-this".into(),
@@ -6622,7 +6630,7 @@ mod tests {
         let program = bin.path().join("deedar");
         ljos_cli::install_executable(&program, "#!/bin/sh\necho no such deed >&2\nexit 1\n")
             .unwrap();
-        unsafe { std::env::set_var("PATH", bin.path()) };
+        _saved.set("PATH", bin.path());
         let Err(err) = server
             .ljos_evidence(Parameters(AccessionArgs {
                 accession: "deed-file-nobody-minted-this".into(),
@@ -6671,8 +6679,8 @@ mod tests {
         // suspends the guard. This check is about the command, so keep it on.
         let _saved = RestoreEnv::new(&["LJOS_GUARD", "LJOS_OFF"]);
         unsafe {
-            std::env::set_var("LJOS_GUARD", "on");
-            std::env::remove_var("LJOS_OFF");
+            ljos_cli::test_env_guards::set_var_unchecked("LJOS_GUARD", "on");
+            ljos_cli::test_env_guards::remove_var_unchecked("LJOS_OFF");
         }
         let server = LjosServer::at(std::env::temp_dir());
         let allow = server
@@ -6715,9 +6723,9 @@ mod tests {
         )
         .expect("policyd");
         unsafe {
-            std::env::set_var("POLICYD_BIN", &bin);
-            std::env::set_var("LJOS_GUARD", "on");
-            std::env::remove_var("LJOS_OFF");
+            ljos_cli::test_env_guards::set_var_unchecked("POLICYD_BIN", &bin);
+            ljos_cli::test_env_guards::set_var_unchecked("LJOS_GUARD", "on");
+            ljos_cli::test_env_guards::remove_var_unchecked("LJOS_OFF");
         }
         let server = LjosServer::at(std::env::temp_dir());
         let plain = server
@@ -6771,10 +6779,10 @@ mod tests {
         )
         .expect("policyd");
         unsafe {
-            std::env::set_var("POLICYD_BIN", &bin);
-            std::env::set_var("LJOS_GUARD", "on");
-            std::env::remove_var("LJOS_OFF");
-            std::env::set_var("HOME", home.path());
+            ljos_cli::test_env_guards::set_var_unchecked("POLICYD_BIN", &bin);
+            ljos_cli::test_env_guards::set_var_unchecked("LJOS_GUARD", "on");
+            ljos_cli::test_env_guards::remove_var_unchecked("LJOS_OFF");
+            ljos_cli::test_env_guards::set_var_unchecked("HOME", home.path());
         }
         let server = LjosServer::at(std::env::temp_dir());
         let warned = server
@@ -6838,11 +6846,14 @@ mod tests {
         )]
         std::os::unix::fs::symlink(&cursor, project.join("seat")).expect("seat link");
         unsafe {
-            std::env::set_var("POLICYD_BIN", &bin);
-            std::env::set_var("LJOS_GUARD", "on");
-            std::env::remove_var("LJOS_OFF");
-            std::env::set_var("HOME", home.path());
-            std::env::set_var("PHRONESIS_STATE_DIR", home.path().join("policyd"));
+            ljos_cli::test_env_guards::set_var_unchecked("POLICYD_BIN", &bin);
+            ljos_cli::test_env_guards::set_var_unchecked("LJOS_GUARD", "on");
+            ljos_cli::test_env_guards::remove_var_unchecked("LJOS_OFF");
+            ljos_cli::test_env_guards::set_var_unchecked("HOME", home.path());
+            ljos_cli::test_env_guards::set_var_unchecked(
+                "PHRONESIS_STATE_DIR",
+                home.path().join("policyd"),
+            );
         }
         let server = LjosServer::at(std::env::temp_dir());
         let check = |command: &str| {

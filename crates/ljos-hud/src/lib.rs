@@ -11,6 +11,8 @@ pub mod install_desktop;
 pub mod log;
 pub mod place;
 pub mod summon;
+#[doc(hidden)]
+pub mod test_env_guards;
 pub mod theme;
 pub mod tray;
 pub mod view;
@@ -38,7 +40,7 @@ impl Drop for EnvLock {
         for (key, value) in &self.snapshot {
             #[allow(unused_unsafe)]
             unsafe {
-                std::env::set_var(key, value);
+                crate::test_env_guards::set_var_unchecked(key, value);
             }
         }
         let added: Vec<std::ffi::OsString> = std::env::vars_os()
@@ -48,7 +50,7 @@ impl Drop for EnvLock {
         for key in added {
             #[allow(unused_unsafe)]
             unsafe {
-                std::env::remove_var(key);
+                crate::test_env_guards::remove_var_unchecked(key);
             }
         }
         let _ = self.runtime.path();
@@ -65,7 +67,7 @@ pub(crate) fn env_lock() -> EnvLock {
     let runtime = tempfile::tempdir().expect("private runtime dir");
     #[allow(unused_unsafe)]
     unsafe {
-        std::env::set_var("XDG_RUNTIME_DIR", runtime.path());
+        crate::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", runtime.path());
     }
     EnvLock {
         _guard: guard,

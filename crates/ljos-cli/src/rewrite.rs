@@ -742,13 +742,13 @@ esac
         ];
         let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
         unsafe {
-            std::env::set_var("HOME", home.path());
-            std::env::set_var("POLICYD_BIN", &bin);
-            std::env::set_var("PACKSET_URL", "off");
-            std::env::set_var("LJOS_OFF", "0");
-            std::env::set_var("LJOS_GUARD", "on");
-            std::env::remove_var("POLICYD_REQUIRED");
-            std::env::remove_var("LJOS_GUARD_FAIL_OPEN");
+            crate::test_env_guards::set_var_unchecked("HOME", home.path());
+            crate::test_env_guards::set_var_unchecked("POLICYD_BIN", &bin);
+            crate::test_env_guards::set_var_unchecked("PACKSET_URL", "off");
+            crate::test_env_guards::set_var_unchecked("LJOS_OFF", "0");
+            crate::test_env_guards::set_var_unchecked("LJOS_GUARD", "on");
+            crate::test_env_guards::remove_var_unchecked("POLICYD_REQUIRED");
+            crate::test_env_guards::remove_var_unchecked("LJOS_GUARD_FAIL_OPEN");
         }
         let dir = Some(home.path());
         let judge = |line: &str| crate::tcb_verdict_in(line, dir);
@@ -765,8 +765,8 @@ esac
         unsafe {
             for (k, v) in saved {
                 match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
+                    Some(v) => crate::test_env_guards::set_var_unchecked(k, v),
+                    None => crate::test_env_guards::remove_var_unchecked(k),
                 }
             }
         }
@@ -816,15 +816,18 @@ esac
         // SAFETY: under the lock every environment-reading test takes,
         // which puts each name back when it drops.
         unsafe {
-            std::env::set_var("HOME", home.path());
-            std::env::set_var("XDG_DATA_HOME", home.path().join("data"));
-            std::env::set_var("XDG_CONFIG_HOME", home.path().join("config"));
-            std::env::set_var("POLICYD_BIN", &bin);
-            std::env::set_var("PACKSET_URL", "off");
-            std::env::set_var("LJOS_OFF", "0");
-            std::env::set_var("LJOS_GUARD", "on");
+            crate::test_env_guards::set_var_unchecked("HOME", home.path());
+            crate::test_env_guards::set_var_unchecked("XDG_DATA_HOME", home.path().join("data"));
+            crate::test_env_guards::set_var_unchecked(
+                "XDG_CONFIG_HOME",
+                home.path().join("config"),
+            );
+            crate::test_env_guards::set_var_unchecked("POLICYD_BIN", &bin);
+            crate::test_env_guards::set_var_unchecked("PACKSET_URL", "off");
+            crate::test_env_guards::set_var_unchecked("LJOS_OFF", "0");
+            crate::test_env_guards::set_var_unchecked("LJOS_GUARD", "on");
             for key in ["POLICYD_REQUIRED", "LJOS_GUARD_FAIL_OPEN", "LJOS_CONFIG"] {
-                std::env::remove_var(key);
+                crate::test_env_guards::remove_var_unchecked(key);
             }
         }
         let dir = Some(repo.as_path());

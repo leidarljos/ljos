@@ -2012,7 +2012,7 @@ mod tests {
         let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
         // Safety: the test sets and clears this for itself.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
+        unsafe { crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", dir.path()) };
         assert!(config().is_none(), "no file, no call");
         std::fs::create_dir_all(dir.path().join("ljos")).unwrap();
         let key = dir.path().join("key");
@@ -2044,7 +2044,7 @@ mod tests {
         assert_eq!(k, "sk-or-test");
         assert_eq!(cfg.budget_ms, 2000);
         assert_eq!(cfg.min_candidates, 2);
-        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        unsafe { crate::test_env_guards::remove_var_unchecked("XDG_CONFIG_HOME") };
     }
 
     #[test]
@@ -2279,7 +2279,7 @@ mod tests {
         let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
         // Safety: the test sets and clears this for itself.
-        unsafe { std::env::set_var("XDG_CACHE_HOME", dir.path()) };
+        unsafe { crate::test_env_guards::set_var_unchecked("XDG_CACHE_HOME", dir.path()) };
         let reply = serde_json::json!({"answers": {"x": {"noul": 0.9}}});
         assert!(cached("req-a", 7).is_none(), "nothing kept yet");
         keep("req-a", &reply);
@@ -2304,7 +2304,7 @@ mod tests {
             dir_mode, 0o700,
             "cache directory is mode 0700, got {dir_mode:o}"
         );
-        unsafe { std::env::remove_var("XDG_CACHE_HOME") };
+        unsafe { crate::test_env_guards::remove_var_unchecked("XDG_CACHE_HOME") };
     }
 
     #[test]
@@ -2442,9 +2442,9 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", cfg_dir.path());
-            std::env::set_var("XDG_STATE_HOME", state.path());
-            std::env::set_var("XDG_CACHE_HOME", cache.path());
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", cfg_dir.path());
+            crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", state.path());
+            crate::test_env_guards::set_var_unchecked("XDG_CACHE_HOME", cache.path());
         }
         std::fs::create_dir_all(cfg_dir.path().join("ljos")).unwrap();
         #[expect(
@@ -2486,9 +2486,9 @@ mod tests {
         let log = std::fs::read_to_string(state.path().join("ljos/jev-log.jsonl")).unwrap();
         assert!(log.contains("\"status\":\"error\""), "{log}");
         unsafe {
-            std::env::remove_var("XDG_CONFIG_HOME");
-            std::env::remove_var("XDG_STATE_HOME");
-            std::env::remove_var("XDG_CACHE_HOME");
+            crate::test_env_guards::remove_var_unchecked("XDG_CONFIG_HOME");
+            crate::test_env_guards::remove_var_unchecked("XDG_STATE_HOME");
+            crate::test_env_guards::remove_var_unchecked("XDG_CACHE_HOME");
         }
     }
 
@@ -2498,7 +2498,7 @@ mod tests {
     fn a_torn_last_answer_leaves_the_rest_of_the_log() {
         let _lock = env_lock();
         let state = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("XDG_STATE_HOME", state.path()) };
+        unsafe { crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", state.path()) };
         let dir = state.path().join("ljos");
         std::fs::create_dir_all(&dir).unwrap();
         let mut bytes =
@@ -2521,7 +2521,7 @@ mod tests {
     fn concurrent_log_rows_each_parse() {
         let _lock = env_lock();
         let state = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("XDG_STATE_HOME", state.path()) };
+        unsafe { crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", state.path()) };
         const THREADS: usize = 32;
         const EACH: usize = 8;
         let mut handles = Vec::with_capacity(THREADS);

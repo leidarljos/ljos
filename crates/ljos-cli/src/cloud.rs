@@ -80,6 +80,10 @@ pub fn up(force: bool) -> Result<String> {
 /// # Errors
 ///
 /// As [`up`]. A second repository is left unrecorded when `repoint` is false.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "cloud setup exports the environment it writes for later steps"
+)]
 pub fn up_at(force: bool, repoint: bool) -> Result<String> {
     let home = crate::home().context("cloud up: HOME is unset")?;
     let bin_dir = bin_dir(&home);
@@ -3650,6 +3654,10 @@ fn ensure_path_file(path: &Path, bin_dir: &Path, before_interactive_guard: bool)
 
 /// Put `bin_dir` first on this process's PATH and drop a later copy.
 /// Presence is not enough: an earlier directory hides this install.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "cloud setup must use the installed binaries in later steps"
+)]
 fn ensure_process_path(bin_dir: &Path) -> String {
     let dir = bin_dir.display().to_string();
     let current = std::env::var("PATH").unwrap_or_default();
@@ -4438,13 +4446,13 @@ mod tests {
             fs::create_dir_all(&home).unwrap();
             fs::create_dir_all(&run).unwrap();
             unsafe {
-                std::env::set_var("HOME", &home);
-                std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
-                std::env::set_var("XDG_RUNTIME_DIR", &run);
-                std::env::set_var("VISSUE_ROOT", &tracker);
-                std::env::set_var("ISSUE_ROOT", &tracker);
-                std::env::set_var("VISSUE_NO_ROUTE", "1");
-                std::env::set_var("LJOS_TRACKER_GIT", "push");
+                crate::test_env_guards::set_var_unchecked("HOME", &home);
+                crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", home.join(".config"));
+                crate::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", &run);
+                crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", &tracker);
+                crate::test_env_guards::set_var_unchecked("ISSUE_ROOT", &tracker);
+                crate::test_env_guards::set_var_unchecked("VISSUE_NO_ROUTE", "1");
+                crate::test_env_guards::set_var_unchecked("LJOS_TRACKER_GIT", "push");
             }
 
             let layout = vissue_core::Layout::new(&tracker, "Software");
@@ -4485,8 +4493,8 @@ mod tests {
             unsafe {
                 for (key, value) in saved {
                     match value {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
+                        Some(value) => crate::test_env_guards::set_var_unchecked(key, value),
+                        None => crate::test_env_guards::remove_var_unchecked(key),
                     }
                 }
             }
@@ -5012,8 +5020,11 @@ mod tests {
         crate::with_env_mutation(|| {
             // SAFETY: this test has the process environment lock.
             unsafe {
-                std::env::set_var("LJOS_WAKE_INKY_URL", "https://example.org/hooks/inky");
-                std::env::set_var("LJOS_WAKE_INKY_KEY", "secret");
+                crate::test_env_guards::set_var_unchecked(
+                    "LJOS_WAKE_INKY_URL",
+                    "https://example.org/hooks/inky",
+                );
+                crate::test_env_guards::set_var_unchecked("LJOS_WAKE_INKY_KEY", "secret");
             }
         });
         let lines = ensure_wakes().unwrap();

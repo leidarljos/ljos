@@ -1800,7 +1800,7 @@ mod tests {
     /// [`crate::lexical_match_scores`] on the body alone.
     fn old_search_orders(rows: &[Mem], asks: &[Ask]) -> Vec<Vec<usize>> {
         let _env = crate::test_env_lock();
-        unsafe { std::env::set_var("LJOS_SEAT", "ada") };
+        unsafe { crate::test_env_guards::set_var_unchecked("LJOS_SEAT", "ada") };
         asks.iter()
             .map(|ask| {
                 let hits: Vec<Hit> = rows
@@ -2149,7 +2149,7 @@ mod tests {
     #[test]
     fn a_cross_seat_meaning_hit_needs_a_distinctive_term_or_a_high_cosine() {
         let _env = crate::test_env_lock();
-        unsafe { std::env::set_var("LJOS_SEAT", "ada") };
+        unsafe { crate::test_env_guards::set_var_unchecked("LJOS_SEAT", "ada") };
         let query = "webdav drain delete safety";
         let travel = "travel weighs safety at 1.000.";
         let mut weak = lesson(travel, 71.0);

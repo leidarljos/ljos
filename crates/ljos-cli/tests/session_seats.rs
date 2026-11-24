@@ -125,11 +125,11 @@ fn a_parent_session_id_does_not_name_this_process() {
     let id = "0199a1b2-claude-parent-only";
     let forbidden = format!("claude-{}", ljos_cli::session_tag(id));
     let previous = std::env::var_os("CLAUDE_CODE_SESSION_ID");
-    std::env::set_var("CLAUDE_CODE_SESSION_ID", id);
+    ljos_cli::test_env_guards::set_var("CLAUDE_CODE_SESSION_ID", id);
     let out = world.ljos(&["seat"], &[]);
     match previous {
-        Some(value) => std::env::set_var("CLAUDE_CODE_SESSION_ID", value),
-        None => std::env::remove_var("CLAUDE_CODE_SESSION_ID"),
+        Some(value) => ljos_cli::test_env_guards::set_var("CLAUDE_CODE_SESSION_ID", value),
+        None => ljos_cli::test_env_guards::remove_var("CLAUDE_CODE_SESSION_ID"),
     }
     let text = said(&out);
     assert!(out.status.success(), "{text}");
