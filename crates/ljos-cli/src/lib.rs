@@ -93250,13 +93250,8 @@ lesson, due yesterday, seat ada
     }
 
     /// A writer that answers a plain search at once and holds a reranked
-    /// one, as packsetd does while it fetches its cross-encoder.
-    fn serve_slow_rerank() -> String {
-        serve_slow_rerank_until(None)
-    }
-
-    /// [`serve_slow_rerank`], and `finished` is set once the held rerank
-    /// has slept. The hook returns before that.
+    /// one, as packsetd does while it fetches its cross-encoder. `finished`
+    /// is set once the held rerank has slept.
     fn serve_slow_rerank_until(
         finished: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> String {
@@ -93296,13 +93291,77 @@ lesson, due yesterday, seat ada
         url
     }
 
+    type RerankRelease = std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>;
+
+    struct ReleaseRerank(RerankRelease);
+
+    impl Drop for ReleaseRerank {
+        fn drop(&mut self) {
+            let (lock, ready) = &*self.0;
+            *lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            ready.notify_all();
+        }
+    }
+
+    /// A writer whose rerank stays blocked until the test releases it.
+    fn serve_blocked_rerank() -> (String, std::sync::mpsc::Receiver<()>, RerankRelease) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let release =
+            std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let server_release = std::sync::Arc::clone(&release);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let started_tx = started_tx.clone();
+                let release = std::sync::Arc::clone(&server_release);
+                std::thread::spawn(move || {
+                    let req = read_http(&mut s);
+                    let first = req.lines().next().unwrap_or("").to_string();
+                    let held = r#"{"id":"p1","text":"Tag a release with git push origin TAG; --follow-tags leaves v-tags behind.","score":2.0,"kind":"preference","ts":"2026-10-10T18:00:00.000Z","entities":[],"origin":"user-declared","source":{"basis":"person"},"ballots":3,"of":3}"#;
+                    let (status, body) = if !stub_showed_token(&req) {
+                        ("401 Unauthorized", r#"{"error":"token"}"#.to_string())
+                    } else if first.contains("/v1/search") {
+                        if first.contains("rerank=1") {
+                            let _ = started_tx.send(());
+                            let (lock, ready) = &*release;
+                            let mut released = lock
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            while !*released {
+                                released = ready
+                                    .wait(released)
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            }
+                        }
+                        ("200 OK", format!(r#"{{"hits":[{held}]}}"#))
+                    } else if first.starts_with("GET /v1/atoms") {
+                        ("200 OK", format!(r#"{{"atoms":[{held}]}}"#))
+                    } else {
+                        ("404 Not Found", r#"{"error":"not here"}"#.to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = s.write_all(resp.as_bytes());
+                });
+            }
+        });
+        (url, started_rx, release)
+    }
+
     #[test]
     fn a_slow_rerank_leaves_the_prompt_its_memory() {
         let _env_read = crate::test_env_read_lock();
         let _env = env_guard();
         let home = tempfile::tempdir().unwrap();
         let _home = HoldEnv::set(&[("HOME", home.path().to_str().unwrap())]);
-        let url = serve_slow_rerank();
+        let (url, rerank_started, release) = serve_blocked_rerank();
+        let _release = ReleaseRerank(release);
         let _held = PackUrl::set(&url);
         let call = HookCall {
             event: "UserPromptSubmit".into(),
@@ -93310,14 +93369,11 @@ lesson, due yesterday, seat ada
             session: None,
             shape: HookShape::default(),
         };
-        let started = std::time::Instant::now();
         let (note, _) = hook_note(&call, 5);
-        let took = started.elapsed();
+        rerank_started
+            .recv_timeout(std::time::Duration::from_millis(HOOK_DEADLINE_MS))
+            .expect("the rerank request did not start within the hook deadline");
         assert!(note.contains("Tag a release"), "{note:?}");
-        assert!(
-            took < std::time::Duration::from_millis(HOOK_DEADLINE_MS - 2000),
-            "the prompt waited {took:?} on a rerank"
-        );
     }
 
     /// A judge that never answers (a route that does not complete a
