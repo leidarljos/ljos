@@ -465,11 +465,15 @@ pub fn parse_older_than(raw: &str) -> Result<u64> {
         anyhow::anyhow!("release: --older-than wants a duration such as 900, 15m, 6h or 2d")
     })?;
     let secs = match unit {
-        "" | "s" => n,
-        "m" => n.saturating_mul(60),
-        "h" => n.saturating_mul(3600),
-        "d" => n.saturating_mul(86_400),
+        "" | "s" => Some(n),
+        "m" => n.checked_mul(60),
+        "h" => n.checked_mul(3_600),
+        "d" => n.checked_mul(86_400),
         _ => bail!("release: --older-than wants a duration such as 900, 15m, 6h or 2d"),
+    };
+    // The same cast as `reap --idle`: a saturated u64 becomes -1 as i64.
+    let Some(secs) = secs.filter(|secs| i64::try_from(*secs).is_ok()) else {
+        bail!("release: --older-than {raw:?} does not fit in a timestamp");
     };
     if secs == 0 {
         bail!("release: --older-than wants a duration longer than 0");
@@ -884,6 +888,15 @@ mod duration_tests {
         assert!(parse_older_than("0").is_err());
         assert!(parse_older_than("6x").is_err());
         assert!(parse_older_than("h").is_err());
+    }
+
+    #[test]
+    fn a_huge_older_than_does_not_fit_in_a_timestamp() {
+        let err = parse_older_than("18446744073709551615h")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not fit in a timestamp"), "{err}");
+        assert!(parse_older_than("18446744073709551615s").is_err());
     }
 
     #[test]
