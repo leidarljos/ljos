@@ -117,7 +117,7 @@ fn a_note_with_no_id_goes_on_the_held_issue() {
     assert!(out.status.success(), "ljos note failed: {stdout}{stderr}");
     assert!(
         hab.calls()
-            .contains("vissue note proj-aaaa the parser kept the hyphen"),
+            .contains("vissue note proj-aaaa -- the parser kept the hyphen"),
         "the note did not reach the held issue:\n{}",
         hab.calls()
     );
@@ -138,7 +138,7 @@ fn an_id_shaped_first_word_selects_that_issue() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "ljos note failed: {stdout}{stderr}");
     assert!(
-        hab.calls().contains("vissue note proj-bbbb some text"),
+        hab.calls().contains("vissue note proj-bbbb -- some text"),
         "the named id was not the one noted:\n{}",
         hab.calls()
     );
@@ -161,7 +161,7 @@ fn a_hyphenated_word_shorter_than_a_minted_id_stays_text() {
     assert!(out.status.success(), "ljos note failed: {stdout}{stderr}");
     assert!(
         hab.calls()
-            .contains("vissue note proj-aaaa ljos-hud kept the hyphen"),
+            .contains("vissue note proj-aaaa -- ljos-hud kept the hyphen"),
         "ljos-hud was taken for an id:\n{}",
         hab.calls()
     );
@@ -250,7 +250,7 @@ fn a_blank_mcp_note_goes_on_the_held_issue() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "ljos-mcp failed: {stdout}{stderr}");
     assert!(
-        hab.calls().contains("vissue note proj-aaaa x"),
+        hab.calls().contains("vissue note proj-aaaa -- x"),
         "ljos_note did not note on the hold:\ncalls:\n{}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         hab.calls()
     );

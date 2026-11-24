@@ -2705,28 +2705,28 @@ impl LjosServer {
                 return Ok(Json(Said { text, aside: None }));
             }
         }
-        let mut argv: Vec<String> = vec!["file".into(), args.title];
+        let mut argv: Vec<String> = vec!["file".into()];
         if args.top {
             argv.push("--top".into());
         }
         for (flag, value) in [
             ("--parent", args.parent),
-            ("-p", args.project),
-            ("-t", args.kind),
+            ("--project", args.project),
+            ("--type", args.kind),
             ("--tags", args.tags),
             ("--priority", args.priority),
             ("--body", args.body),
         ] {
             if let Some(v) = value {
-                argv.push(flag.into());
-                argv.push(v);
+                argv.push(format!("{flag}={v}"));
             }
         }
         if !args.options.is_empty() {
             ljos_cli::options_line(&args.options).map_err(refused)?;
-            argv.push("--options".into());
-            argv.push(args.options.join(","));
+            argv.push(format!("--options={}", args.options.join(",")));
         }
+        argv.push("--".into());
+        argv.push(args.title);
         let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         habitat("ljos", &refs).map_err(|e| {
             if e.message.contains("no project: name one with -p") {
@@ -2813,7 +2813,7 @@ impl LjosServer {
     ) -> Result<Json<Said>, McpError> {
         ljos_cli::options_line(&args.options).map_err(refused)?;
         let joined = args.options.join(",");
-        habitat("ljos", &["options", &args.issue, &joined])
+        habitat("ljos", &["options", &args.issue, "--", &joined])
     }
 
     #[tool(
@@ -2856,7 +2856,7 @@ impl LjosServer {
         .map_err(|e| McpError::internal_error(format!("note: {e}"), None))?
         .map_err(|e| refused(anyhow::anyhow!(e)))?;
         match issue {
-            Some(issue) => habitat("ljos", &["note", &issue, &note]),
+            Some(issue) => habitat("ljos", &["note", &issue, "--", &note]),
             None => Ok(Json(Said {
                 text: format!("label unattached-note: {}\n", ljos_cli::NOTE_WITHOUT_TICKET),
                 aside: None,
@@ -3002,14 +3002,11 @@ impl LjosServer {
                 let mut argv = vec![
                     "vote".to_string(),
                     args.issue.clone(),
-                    "--for".into(),
-                    c.clone(),
-                    "--used".into(),
-                    used.to_string(),
+                    format!("--for={c}"),
+                    format!("--used={used}"),
                 ];
                 if let Some(p) = args.confidence {
-                    argv.push("--confidence".into());
-                    argv.push(format!("{p}"));
+                    argv.push(format!("--confidence={p}"));
                 }
                 let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                 let mut said = habitat_as("vissue", &refs, Some(&who))?;

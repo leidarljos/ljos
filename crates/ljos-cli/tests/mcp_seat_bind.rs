@@ -63,7 +63,7 @@ fn two_seats_keep_their_notes_and_a_seatless_write_is_refused() {
     script(
         &bin,
         "vissue",
-        &format!("#!/bin/sh\nif [ \"$1\" = note ]; then printf '%s\\n' \"- $3\" >> '{board}'; fi\nexit 0\n"),
+        &format!("#!/bin/sh\nif [ \"$1\" = note ]; then printf '%s\\n' \"- $4\" >> '{board}'; fi\nexit 0\n"),
     );
     script(&bin, "claimdag", "#!/bin/sh\nexit 1\n");
     #[expect(
