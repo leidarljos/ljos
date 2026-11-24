@@ -8941,22 +8941,21 @@ fn hook_events_of(h: &Harness) -> Vec<String> {
     }
 }
 
-fn seat_hook_program(command: &str) -> Option<&str> {
+fn hook_word_path(program: &str) -> Option<String> {
+    let words = shell_words(program);
+    let [path] = words.as_slice() else {
+        return None;
+    };
+    (path.starts_with('/') && path.ends_with("/ljos")).then(|| path.clone())
+}
+
+fn seat_hook_program(command: &str) -> Option<String> {
     let program = command.strip_suffix(" hook")?;
-    if program == "ljos" || (program.starts_with('/') && program.ends_with("/ljos")) {
-        return Some(program);
+    if program == "ljos" {
+        return Some(program.to_string());
     }
-    for quote in ['\'', '"'] {
-        if let Some(program) = program
-            .strip_prefix(quote)
-            .and_then(|program| program.strip_suffix(quote))
-        {
-            if program.starts_with('/') && program.ends_with("/ljos") {
-                return Some(program);
-            }
-        }
-    }
-    None
+    let path = hook_word_path(program)?;
+    (tools::sh_word(&path) == program).then_some(path)
 }
 
 fn is_seat_hook(h: &Value) -> bool {
@@ -8971,10 +8970,12 @@ fn repaired_seat_hook_command(command: &str, wanted: &str) -> Option<String> {
         return Some(wanted.to_string());
     }
     let program = command.strip_suffix(" hook")?;
-    if !program.starts_with('/') || !program.ends_with("/ljos") {
-        return None;
-    }
-    let fixed = format!("{} hook", tools::sh_word(program));
+    let path = if program.starts_with('/') && program.ends_with("/ljos") {
+        program.to_string()
+    } else {
+        hook_word_path(program)?
+    };
+    let fixed = format!("{} hook", tools::sh_word(&path));
     (fixed != command).then_some(fixed)
 }
 
@@ -9067,6 +9068,17 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
         let mut freed = false;
         let mut grew = false;
         for group in groups.iter_mut() {
+            if let Some(hooks) = group["hooks"].as_array_mut() {
+                for hook in hooks {
+                    if let Some(fixed) = hook["command"]
+                        .as_str()
+                        .and_then(|old| repaired_seat_hook_command(old, &command))
+                    {
+                        hook["command"] = fixed.into();
+                        repaired.push(event.clone());
+                    }
+                }
+            }
             let seat = group["hooks"]
                 .as_array()
                 .is_some_and(|hs| hs.iter().any(is_seat_hook));
@@ -9093,13 +9105,6 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
                 continue;
             };
             for hook in hooks.iter_mut().filter(|h| is_seat_hook(h)) {
-                if let Some(fixed) = hook["command"]
-                    .as_str()
-                    .and_then(|old| repaired_seat_hook_command(old, &command))
-                {
-                    hook["command"] = fixed.into();
-                    repaired.push(event.clone());
-                }
                 if hook
                     .as_object_mut()
                     .is_some_and(|h| h.remove("onFailure").is_some())
@@ -60909,6 +60914,44 @@ mod tests {
             let fixed = repaired_seat_hook_command(&old, "ljos hook")
                 .unwrap_or_else(|| panic!("shell metacharacters stayed unquoted: {old}"));
             assert_eq!(fixed, format!("{} hook", tools::sh_word(program)));
+        }
+    }
+
+    #[test]
+    fn reonboard_requotes_noncanonical_owned_hook_words() {
+        let _env = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let empty_path = dir.path().join("empty-bin");
+        std::fs::create_dir_all(&empty_path).unwrap();
+        let _path = crate::set_path(&empty_path);
+        let path = "/opt/ljos$(echo)/bin/ljos";
+        let wanted = format!("{} hook", tools::sh_word(path));
+        for (name, old) in [
+            ("double", format!("\"{path}\" hook")),
+            ("breakout", "'/opt/ljos'$(echo)'/bin/ljos' hook".to_string()),
+        ] {
+            let file = dir.path().join(format!("{name}.json"));
+            crate::write_file(
+                &file,
+                serde_json::json!({
+                    "hooks": {
+                        "PreToolUse": [{
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": old, "timeout": 20}]
+                        }]
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let step = hook_step(&file, &["PreToolUse".to_string()], false);
+            assert!(step.detail.contains("repaired the command"), "{step:?}");
+            let value: Value =
+                serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            assert_eq!(
+                value["hooks"]["PreToolUse"][0]["hooks"][0]["command"], wanted,
+                "{name}"
+            );
         }
     }
 
