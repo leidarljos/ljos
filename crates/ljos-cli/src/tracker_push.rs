@@ -795,6 +795,75 @@ fn rebase_in_progress(dir: &Path) -> bool {
     false
 }
 
+/// Files git keeps in `rebase-merge/` while a rebase still has commits to
+/// replay or a branch to return to. None of them survives a rebase that
+/// finished replaying.
+const LIVE_REBASE_FILES: &[&str] = &[
+    "head-name",
+    "onto",
+    "orig-head",
+    "git-rebase-todo",
+    "done",
+    "interactive",
+];
+
+/// How long `rebase-merge/` must sit untouched before it counts as left
+/// behind rather than driven by another process.
+const FINISHED_REBASE_AGE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Clear a rebase that finished replaying but died before git put its
+/// autostash back.
+///
+/// `git rebase --autostash` removes its state last, after it restores the
+/// stash. A process killed in between (a runner's command timeout, a closed
+/// terminal) leaves `rebase-merge/` holding only `autostash`. Every later git
+/// command then reports a rebase in progress, and tracker commits defer
+/// behind it until someone clears it by hand.
+///
+/// `git rebase --quit` removes that state without touching `HEAD` or the
+/// work tree, and saves the autostash to the stash list, so nothing is
+/// dropped. A directory that still names a branch or a todo list is a live
+/// rebase, and one touched within `min_age` may belong to another process;
+/// both are left alone. Returns whether a rebase was cleared.
+fn clear_finished_rebase(dir: &Path, min_age: std::time::Duration) -> bool {
+    let out = git(dir, &["rev-parse", "--git-path", "rebase-merge"]);
+    if !out.status.success() {
+        return false;
+    }
+    let rel = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if rel.is_empty() {
+        return false;
+    }
+    let state = if Path::new(&rel).is_absolute() {
+        PathBuf::from(&rel)
+    } else {
+        dir.join(&rel)
+    };
+    if !state.join("autostash").is_file()
+        || LIVE_REBASE_FILES.iter().any(|f| state.join(f).exists())
+        || has_unmerged(dir)
+    {
+        return false;
+    }
+    let untouched = std::fs::metadata(&state)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age >= min_age);
+    if !untouched {
+        return false;
+    }
+    let quit = git(dir, &["rebase", "--quit"]);
+    if !quit.status.success() || rebase_in_progress(dir) {
+        return false;
+    }
+    say!(
+        "ljos: cleared a finished rebase whose autostash was never restored; \
+         that autostash is now in `git stash list`"
+    );
+    true
+}
+
 fn abort_rebase(dir: &Path) -> Result<(), String> {
     if !rebase_in_progress(dir) {
         return Ok(());
@@ -900,6 +969,9 @@ pub(crate) fn prepare_tracker(root: &Path, init: bool, commit: bool) -> Result<(
         init_repo(root)?;
     }
     let _held = crate::tracker_commit_lock(root);
+    // The lock can time out or fail to open; the live-file and mtime checks
+    // below are what protect a rebase another process is still driving.
+    clear_finished_rebase(root, FINISHED_REBASE_AGE);
     write_attributes(root)?;
     register_driver(root)?;
     if commit {
@@ -1486,6 +1558,89 @@ mod tests {
 
     fn heading(id: &str, title: &str) -> String {
         format!("* TODO [#C] {title}\n:PROPERTIES:\n:ID:         {id}\n:END:\n")
+    }
+
+    /// A checkout left the way a killed `git rebase --autostash` leaves it:
+    /// the replay is done and `rebase-merge/` holds only `autostash`, naming
+    /// a stash of an edit that is no longer in the work tree.
+    fn checkout_with_finished_rebase() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let run = |args: &[&str]| {
+            let out = crate::git_at(repo).args(args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        run(&["init", "-q", "-b", "main"]);
+        for (key, value) in [
+            ("user.email", "seat@example.invalid"),
+            ("user.name", "seat"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run(&["config", key, value]);
+        }
+        crate::write_file(repo.join("issues.org"), "#+TITLE: probe\n").unwrap();
+        run(&["add", "issues.org"]);
+        run(&["commit", "-q", "-m", "seed"]);
+        crate::write_file(repo.join("issues.org"), "#+TITLE: probe\nedited\n").unwrap();
+        let stash = run(&["stash", "create"]);
+        assert!(!stash.is_empty());
+        run(&["checkout", "--", "issues.org"]);
+        let state = repo.join(".git/rebase-merge");
+        std::fs::create_dir(&state).unwrap();
+        crate::write_file(state.join("autostash"), format!("{stash}\n")).unwrap();
+        (dir, stash)
+    }
+
+    #[test]
+    fn a_finished_rebase_left_with_only_an_autostash_is_cleared() {
+        let _env = crate::test_env_lock();
+        let (dir, stash) = checkout_with_finished_rebase();
+        let repo = dir.path();
+        assert!(rebase_in_progress(repo));
+        assert!(clear_finished_rebase(repo, std::time::Duration::ZERO));
+        assert!(!rebase_in_progress(repo));
+        // HEAD and the work tree are untouched; the edit waits in the stash.
+        assert_eq!(
+            std::fs::read_to_string(repo.join("issues.org")).unwrap(),
+            "#+TITLE: probe\n"
+        );
+        let list = git(repo, &["stash", "list", "--format=%H"]);
+        assert!(
+            String::from_utf8_lossy(&list.stdout).contains(&stash),
+            "autostash {stash} was not saved to the stash list"
+        );
+    }
+
+    #[test]
+    fn a_rebase_that_still_names_its_branch_is_left_alone() {
+        let _env = crate::test_env_lock();
+        let (dir, _) = checkout_with_finished_rebase();
+        let repo = dir.path();
+        crate::write_file(
+            repo.join(".git/rebase-merge/head-name"),
+            "refs/heads/main\n",
+        )
+        .unwrap();
+        assert!(!clear_finished_rebase(repo, std::time::Duration::ZERO));
+        assert!(rebase_in_progress(repo));
+    }
+
+    #[test]
+    fn a_rebase_touched_recently_is_left_alone() {
+        let _env = crate::test_env_lock();
+        let (dir, _) = checkout_with_finished_rebase();
+        let repo = dir.path();
+        assert!(!clear_finished_rebase(
+            repo,
+            std::time::Duration::from_secs(3600)
+        ));
+        assert!(rebase_in_progress(repo));
     }
 
     #[test]
