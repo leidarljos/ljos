@@ -76,6 +76,8 @@ disallowed-methods = [
     { path = "rustix::fs::linkat", reason = "use ljos_cli::install_executable" },
     { path = "nix::sys::stat::fchmod", reason = "change modes only in the publication module", allow-invalid = true },
     { path = "nix::sys::stat::fchmodat", reason = "change modes only in the publication module", allow-invalid = true },
+    { path = "std::env::set_var", reason = "use the test env guards" },
+    { path = "std::env::remove_var", reason = "use the test env guards" },
 ]
 
 disallowed-types = [

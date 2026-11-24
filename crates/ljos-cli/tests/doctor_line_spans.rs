@@ -24,7 +24,7 @@ fn no_text_closes_its_code_span_on_the_doctor_name() {
         "README.md",
         "crates/ljos-cli/doc/protocol.md",
         "skills/ljos/SKILL.md",
-        "crates/ljos-cli/src/main.rs",
+        "crates/ljos-cli/src/main_impl.rs",
     ] {
         let text = std::fs::read_to_string(root().join(file)).unwrap();
         for (n, line) in text.lines().enumerate() {

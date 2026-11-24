@@ -564,7 +564,7 @@ mod tests {
         let dest = dir.path().join("dest");
         checkout(&dest, "/elsewhere/product.git", &[boards]);
         let before = std::env::var_os("LJOS_TRACKER_SEARCH");
-        std::env::set_var("LJOS_TRACKER_SEARCH", &workspace);
+        crate::test_env_guards::set_var("LJOS_TRACKER_SEARCH", &workspace);
         let refused = find(None, &dest);
         checkout(
             &workspace.join("tracker"),
@@ -573,8 +573,8 @@ mod tests {
         );
         let found = find(None, &dest).map(|remote| remote.shown);
         match before {
-            Some(v) => std::env::set_var("LJOS_TRACKER_SEARCH", v),
-            None => std::env::remove_var("LJOS_TRACKER_SEARCH"),
+            Some(v) => crate::test_env_guards::set_var("LJOS_TRACKER_SEARCH", v),
+            None => crate::test_env_guards::remove_var("LJOS_TRACKER_SEARCH"),
         }
         assert_eq!(refused, None);
         assert_eq!(found.as_deref(), Some("/elsewhere/tracker.git"));

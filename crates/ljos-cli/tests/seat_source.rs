@@ -161,27 +161,27 @@ fn only_a_named_seat_or_a_call_argument_names_the_seat() {
     ljos_cli::write_file(&intruder, "intruder\nintruder\n").unwrap();
     unsafe {
         for (key, _) in &saved {
-            std::env::remove_var(key);
+            ljos_cli::test_env_guards::remove_var_unchecked(key);
         }
-        std::env::remove_var("VISSUE_AGENT");
-        std::env::remove_var("LJOS_HOLD");
-        std::env::set_var("HOME", &config);
-        std::env::set_var("XDG_CONFIG_HOME", &config);
-        std::env::set_var("XDG_STATE_HOME", &state);
-        std::env::set_var("XDG_RUNTIME_DIR", &runtime);
-        std::env::set_var("VISSUE_ROOT", &tracker);
-        std::env::set_var("ISSUE_ROOT", &tracker);
+        ljos_cli::test_env_guards::remove_var_unchecked("VISSUE_AGENT");
+        ljos_cli::test_env_guards::remove_var_unchecked("LJOS_HOLD");
+        ljos_cli::test_env_guards::set_var_unchecked("HOME", &config);
+        ljos_cli::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", &config);
+        ljos_cli::test_env_guards::set_var_unchecked("XDG_STATE_HOME", &state);
+        ljos_cli::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", &runtime);
+        ljos_cli::test_env_guards::set_var_unchecked("VISSUE_ROOT", &tracker);
+        ljos_cli::test_env_guards::set_var_unchecked("ISSUE_ROOT", &tracker);
     }
     let missing = ljos_cli::resolve_call_seat(None);
     let from_arg = ljos_cli::resolve_call_seat(Some("inky"));
-    unsafe { std::env::set_var("LJOS_SEAT", "saddle") };
+    unsafe { ljos_cli::test_env_guards::set_var_unchecked("LJOS_SEAT", "saddle") };
     let from_env = ljos_cli::resolve_call_seat(None);
     let explicit = ljos_cli::resolve_call_seat(Some("inky"));
     unsafe {
         for (key, value) in saved {
             match value {
-                Some(value) => std::env::set_var(&key, value),
-                None => std::env::remove_var(&key),
+                Some(value) => ljos_cli::test_env_guards::set_var_unchecked(&key, value),
+                None => ljos_cli::test_env_guards::remove_var_unchecked(&key),
             }
         }
     }

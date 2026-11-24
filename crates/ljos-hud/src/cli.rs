@@ -59,6 +59,10 @@ pub fn run_cli() -> anyhow::Result<i32> {
 }
 
 /// Run already-parsed flags: bounce off a live HUD, detach, or own the loop.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the selected HUD socket must reach the owner process"
+)]
 pub fn run_with(cli: HudCli) -> anyhow::Result<i32> {
     if cli.install_desktop {
         crate::install_desktop::run_cli()?;
@@ -142,7 +146,7 @@ mod tests {
         let path = dir.path().join("none.sock");
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var(summon::SOCKET_ENV, &path);
+            crate::test_env_guards::set_var_unchecked(summon::SOCKET_ENV, &path);
         }
         let code = run_with(HudCli {
             socket: None,
@@ -156,7 +160,7 @@ mod tests {
         assert_eq!(code, 0);
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::remove_var(summon::SOCKET_ENV);
+            crate::test_env_guards::remove_var_unchecked(summon::SOCKET_ENV);
         }
     }
 }

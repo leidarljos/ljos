@@ -276,12 +276,12 @@ mod tests {
         let _lock = crate::env_lock();
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var("SWAYSOCK", "");
+            crate::test_env_guards::set_var_unchecked("SWAYSOCK", "");
         }
         assert!(!sway_available());
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::remove_var("SWAYSOCK");
+            crate::test_env_guards::remove_var_unchecked("SWAYSOCK");
         }
         // Unset may still be unavailable; empty was the case under test.
     }

@@ -125,9 +125,8 @@ mod tests {
     fn missing_bin_is_127() {
         let _env = hud_env();
         let missing = missing_hud();
-        #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var(HUD_BIN_ENV, &missing);
+            crate::test_env_guards::set_var_unchecked(HUD_BIN_ENV, &missing);
         }
         let code = run(HudLaunch {
             foreground: true,
@@ -141,9 +140,8 @@ mod tests {
     fn hide_without_binary_is_zero() {
         let _env = hud_env();
         let missing = missing_hud();
-        #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var(HUD_BIN_ENV, &missing);
+            crate::test_env_guards::set_var_unchecked(HUD_BIN_ENV, &missing);
         }
         let code = run(HudLaunch {
             hide: true,
@@ -154,7 +152,7 @@ mod tests {
 
     #[test]
     fn launcher_lives_in_the_cli() {
-        let src = include_str!("main.rs");
+        let src = include_str!("main_impl.rs");
         assert!(src.contains("Cmd::Hud"));
         assert!(src.contains("ljos-hud"));
         assert!(src.contains("install_desktop"));
@@ -168,9 +166,8 @@ mod tests {
     fn resolve_honors_override() {
         let _env = hud_env();
         let path = missing_hud();
-        #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var(HUD_BIN_ENV, path.to_str().unwrap());
+            crate::test_env_guards::set_var_unchecked(HUD_BIN_ENV, path.to_str().unwrap());
         }
         assert_eq!(resolve_hud_bin(), Some(path));
     }

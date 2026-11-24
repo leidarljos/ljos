@@ -24,6 +24,12 @@ impl fmt::Display for PolicyLabel {
 
 impl std::error::Error for PolicyLabel {}
 
+/// Store `detail` under `label` and return it as a policy result.
+/// Callers that use `?` stop before the effect. The CLI prints the label.
+pub fn labelled(label: &'static str, detail: impl Into<String>) -> anyhow::Error {
+    refused(label, detail, 0)
+}
+
 /// Store `detail` under `label` and return it with `status`.
 /// The CLI prints the label and exits with that status.
 pub fn refused(label: &'static str, detail: impl Into<String>, status: u8) -> anyhow::Error {
@@ -226,17 +232,12 @@ mod tests {
         assert!(!dot.exists(), "the package already holds {}", dot.display());
 
         let write = |xdg: Option<&std::ffi::OsStr>| {
-            crate::with_env_mutation(|| {
-                // SAFETY: test_env_lock is held and puts the process environment back.
-                unsafe {
-                    match xdg {
-                        Some(value) => std::env::set_var("XDG_STATE_HOME", value),
-                        None => std::env::remove_var("XDG_STATE_HOME"),
-                    }
-                    std::env::remove_var("HOME");
-                    std::env::remove_var("VISSUE_ROOT");
-                }
-            });
+            match xdg {
+                Some(value) => crate::test_env_guards::set_var("XDG_STATE_HOME", value),
+                None => crate::test_env_guards::remove_var("XDG_STATE_HOME"),
+            }
+            crate::test_env_guards::remove_var("HOME");
+            crate::test_env_guards::remove_var("VISSUE_ROOT");
             let _ = labelled("input-warning", "state stays out of the package directory");
             crate::memories::bump_recalls(&["state-tree".to_string()]);
             let dir = crate::state_base_dir();

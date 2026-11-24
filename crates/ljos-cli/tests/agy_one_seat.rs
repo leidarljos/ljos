@@ -30,9 +30,9 @@ fn tracker(seats: &str) -> tempfile::TempDir {
     git(&["config", "user.email", "ada@example.invalid"]);
     git(&["config", "user.name", "ada"]);
     git(&["commit", "-q", "-m", "roster"]);
-    std::env::set_var("VISSUE_ROOT", dir.path());
-    std::env::set_var("ISSUE_ROOT", dir.path());
-    std::env::set_var("VISSUE_NO_ROUTE", "1");
+    ljos_cli::test_env_guards::set_var("VISSUE_ROOT", dir.path());
+    ljos_cli::test_env_guards::set_var("ISSUE_ROOT", dir.path());
+    ljos_cli::test_env_guards::set_var("VISSUE_NO_ROUTE", "1");
     dir
 }
 
@@ -52,15 +52,15 @@ fn harness_ids_follow_the_vissue_roster() {
         fn drop(&mut self) {
             for (key, value) in &self.0 {
                 match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
+                    Some(value) => ljos_cli::test_env_guards::set_var(key, value),
+                    None => ljos_cli::test_env_guards::remove_var(key),
                 }
             }
         }
     }
     let _restore = PutBack(saved);
     let _listed = tracker("seats = [\"antigravity\", \"free-agy\"]\n");
-    std::env::set_var("LJOS_SEAT", "antigravity");
+    ljos_cli::test_env_guards::set_var("LJOS_SEAT", "antigravity");
     assert_eq!(
         seat_of(),
         "antigravity",
@@ -68,13 +68,13 @@ fn harness_ids_follow_the_vissue_roster() {
     );
 
     let _mapped = tracker("seats = [\"free-agy\", \"claude-reviewer\"]\n");
-    std::env::set_var("LJOS_SEAT", "antigravity");
+    ljos_cli::test_env_guards::set_var("LJOS_SEAT", "antigravity");
     assert_eq!(
         seat_of(),
         "free-agy",
         "an unlisted harness id sits as its roster seat"
     );
-    std::env::set_var("LJOS_SEAT", "claude");
+    ljos_cli::test_env_guards::set_var("LJOS_SEAT", "claude");
     let claude = seat_of();
     assert_ne!(
         claude, "claude-reviewer",

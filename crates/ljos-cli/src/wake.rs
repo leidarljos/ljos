@@ -1201,8 +1201,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("home");
         // SAFETY: test_env_lock holds the environment and restores it.
         unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
-            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", dir.path().join("config"));
+            crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", dir.path().join("state"));
         }
         (lock, dir)
     }
@@ -1292,7 +1292,9 @@ mod tests {
         let broad = format!("http://127.0.0.1:{broad_port}/hook");
         let exact = format!("http://127.0.0.1:{exact_port}/hook");
         // SAFETY: test_env_lock holds the environment and restores it.
-        unsafe { std::env::set_var("LJOS_WAKE_LAUNCHER_KEY", "test-token") };
+        unsafe {
+            crate::test_env_guards::set_var_unchecked("LJOS_WAKE_LAUNCHER_KEY", "test-token")
+        };
 
         let set = set_webhook(
             "ljosbot-review-",
@@ -1444,8 +1446,8 @@ mod tests {
         .expect("script");
         // SAFETY: test_env_lock holds the environment and restores it.
         unsafe {
-            std::env::set_var("LJOS_WAKE_BIN", &script);
-            std::env::set_var("WAKE_RECORD", &marker);
+            crate::test_env_guards::set_var_unchecked("LJOS_WAKE_BIN", &script);
+            crate::test_env_guards::set_var_unchecked("WAKE_RECORD", &marker);
         }
         set_webhook("ljosbot-review-", "http://127.0.0.1:9/hook", None, None).expect("prefix");
         set_webhook("inky", "http://127.0.0.1:9/inky", None, None).expect("exact");

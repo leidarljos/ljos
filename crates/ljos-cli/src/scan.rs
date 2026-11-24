@@ -1443,9 +1443,9 @@ mod tests {
     #[test]
     fn no_color_strips_ansi_and_a_tty_without_it_keeps_color() {
         let _guard = COLOR_ENV.lock().unwrap_or_else(|err| err.into_inner());
-        std::env::set_var("NO_COLOR", "1");
+        crate::test_env_guards::set_var("NO_COLOR", "1");
         assert!(!color_allowed(true));
-        std::env::remove_var("NO_COLOR");
+        crate::test_env_guards::remove_var("NO_COLOR");
         assert!(color_allowed(true));
         assert!(!color_allowed(false));
         let colored = "\u{1b}[31mKiln\u{1b}[0m";

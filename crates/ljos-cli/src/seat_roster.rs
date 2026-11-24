@@ -814,9 +814,9 @@ via = \"bea\"
         std::fs::write(root.join("vissue.toml"), &on_head).unwrap();
         git(root, &["add", "vissue.toml"]);
         git(root, &["commit", "-q", "-m", "record grant"]);
-        std::env::set_var("VISSUE_ROOT", root);
-        std::env::set_var("ISSUE_ROOT", root);
-        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        crate::test_env_guards::set_var("VISSUE_ROOT", root);
+        crate::test_env_guards::set_var("ISSUE_ROOT", root);
+        crate::test_env_guards::set_var("VISSUE_NO_ROUTE", "1");
         assert!(honored_grant("ada").is_some());
 
         let orphan = git(
@@ -862,10 +862,10 @@ via = \"bea\"
         git(root, &["config", "user.email", "ada@example.invalid"]);
         git(root, &["config", "user.name", "ada"]);
         git(root, &["config", "commit.gpgsign", "false"]);
-        std::env::set_var("VISSUE_ROOT", root);
-        std::env::set_var("ISSUE_ROOT", root);
-        std::env::set_var("VISSUE_NO_ROUTE", "1");
-        std::env::set_var("LJOS_SEAT", "alice");
+        crate::test_env_guards::set_var("VISSUE_ROOT", root);
+        crate::test_env_guards::set_var("ISSUE_ROOT", root);
+        crate::test_env_guards::set_var("VISSUE_NO_ROUTE", "1");
+        crate::test_env_guards::set_var("LJOS_SEAT", "alice");
         let said = super::add("carol").unwrap();
         assert!(said.contains("added carol"), "{said}");
         assert!(said.contains("`ljos seat add alice`"), "{said}");
@@ -888,12 +888,12 @@ via = \"bea\"
         git(root, &["config", "user.email", "ada@example.invalid"]);
         git(root, &["config", "user.name", "ada"]);
         git(root, &["config", "commit.gpgsign", "false"]);
-        std::env::set_var("VISSUE_ROOT", root);
-        std::env::set_var("ISSUE_ROOT", root);
-        std::env::set_var("VISSUE_NO_ROUTE", "1");
-        std::env::set_var("LJOS_SEAT", "alice");
+        crate::test_env_guards::set_var("VISSUE_ROOT", root);
+        crate::test_env_guards::set_var("ISSUE_ROOT", root);
+        crate::test_env_guards::set_var("VISSUE_NO_ROUTE", "1");
+        crate::test_env_guards::set_var("LJOS_SEAT", "alice");
         super::add("alice").unwrap();
-        std::env::set_var("LJOS_SEAT", "bob");
+        crate::test_env_guards::set_var("LJOS_SEAT", "bob");
         let err = super::add("dave").unwrap_err();
         let label = crate::policy_label::as_policy(&err).expect("a roster refusal is a label");
         assert_eq!(label.label, "seat-unlisted");
