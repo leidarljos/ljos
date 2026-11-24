@@ -11,6 +11,12 @@
 //! counts the fixture's word groups gives the pack a dense ballot where
 //! the model is not installed.
 //!
+//! The pack's fused order decays each hit by its age on packsetd's own
+//! clock, so an order worked out at one hour does not stay true at a later
+//! one. The fixture's stamps are written as of its `now`, and the seat
+//! moves every stamp by the pack's clock less that instant, so each lesson
+//! has the same age at every hour the test runs.
+//!
 //! Each way a hook can go wrong has a broken hook here: the real one
 //! behind a proxy that changes the pack's search answers, or with its
 //! output rewritten. The fixture fails every one.
@@ -30,11 +36,13 @@ use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Deserialize)]
 struct Fixture {
+    now: String,
     encoder: Encoder,
     lessons: Vec<Lesson>,
     cases: Vec<Case>,
@@ -71,6 +79,17 @@ struct Failure {
 fn fixture() -> Fixture {
     serde_json::from_str(include_str!("fixtures/hook_relevance.json")).expect("fixture")
 }
+
+fn instant(stamp: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(stamp)
+        .unwrap_or_else(|e| panic!("stamp {stamp}: {e}"))
+        .with_timezone(&Utc)
+}
+
+/// The workspace the seat writes its clock probe to. packsetd scores a
+/// search over the asked workspace's atoms alone, so the probe is not in
+/// the seat's ranking.
+const CLOCK_WORKSPACE: &str = "hook-relevance-clock";
 
 /// packset-embed's line protocol over the groups in the file beside the
 /// script. An argument asks for the reranker or another stage this
@@ -129,7 +148,30 @@ impl Seat {
             .unwrap_or_else(|e| panic!("GET {path}: {e}"))
     }
 
-    fn lesson(&self, lesson: &Lesson) {
+    /// The instant packsetd's clock reads, as the write it stamps says.
+    fn pack_clock(&self) -> DateTime<Utc> {
+        let written: Value = ureq::post(&self.url("/v1/atoms"))
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .timeout(Duration::from_secs(10))
+            .send_json(serde_json::json!({
+                "schema": "inside.atom/v1",
+                "kind": "lesson",
+                "level": "explicit",
+                "text": "The clock probe asks the writer what time it reads.",
+                "workspace": CLOCK_WORKSPACE,
+            }))
+            .unwrap_or_else(|e| panic!("clock probe: {e}"))
+            .into_json()
+            .unwrap_or_else(|e| panic!("clock probe: {e}"));
+        let stamp = written["updated"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the clock probe has no write stamp: {written}"));
+        instant(stamp)
+    }
+
+    /// Posts `lesson` with its stamp moved by `shift`.
+    fn lesson(&self, lesson: &Lesson, shift: TimeDelta) {
+        let ts = (instant(&lesson.ts) + shift).to_rfc3339_opts(SecondsFormat::Millis, true);
         let posted = ureq::post(&self.url("/v1/atoms"))
             .set("Authorization", &format!("Bearer {}", self.token))
             .timeout(Duration::from_secs(10))
@@ -140,7 +182,7 @@ impl Seat {
                 "text": lesson.text,
                 "workspace": ljos_cli::SEAT_WORKSPACE,
                 "entities": ["horizon:standing"],
-                "ts": lesson.ts,
+                "ts": ts,
                 "id": lesson.id,
             }));
         assert!(posted.is_ok(), "post {}: {posted:?}", lesson.name);
@@ -277,8 +319,9 @@ fn seat(fixture: &Fixture) -> Option<Seat> {
         token,
         _daemon: daemon,
     };
+    let shift = seat.pack_clock() - instant(&fixture.now);
     for lesson in &fixture.lessons {
-        seat.lesson(lesson);
+        seat.lesson(lesson, shift);
     }
     let listed = seat.get(&format!("/v1/atoms?workspace={}", ljos_cli::SEAT_WORKSPACE));
     let live = listed["atoms"].as_array().map_or(0, Vec::len);
