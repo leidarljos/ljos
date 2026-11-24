@@ -138,7 +138,7 @@ fn bare_ljos_prints_the_first_commands() {
     for line in [
         "Memory, a work tracker and a command guard for coding runners.",
         "No seat is set. Reads use every seat, so run `export LJOS_SEAT=NAME`.",
-        "sh install.sh --no-embed",
+        ljos_cli::RELEASE_INSTALL_COMMAND,
         "ljos doctor",
         "ljos remember TEXT",
         "ljos search QUERY",

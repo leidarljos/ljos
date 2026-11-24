@@ -40,7 +40,8 @@ pub const SEAT_PROGRAMS: &[&str] = &[
 
 /// The stub left where `ljos` was. `scripts/uninstall.sh` writes the same
 /// text; a test keeps the two equal.
-pub const STUB: &str = r#"#!/bin/sh
+pub const STUB: &str = concat!(
+    r#"#!/bin/sh
 # ljos was uninstalled. This stub stands where the program was, so a
 # runner that loaded its hook list while ljos was installed still gets
 # an answer: every hook call is allowed. Remove it with
@@ -55,9 +56,12 @@ case "$1" in
     ;;
   git-hook|hookd) exit 0 ;;
 esac
-printf '%s\n' "ljos is uninstalled; $0 is the stub that answers hooks. Reinstall: curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh" >&2
+printf '%s\n' "ljos is uninstalled; $0 is the stub that answers hooks. Reinstall: "#,
+    release_install_command!(),
+    r#"" >&2
 exit 1
-"#;
+"#
+);
 
 /// What `uninstall` does beyond offboarding.
 #[derive(Debug, Clone, Default)]

@@ -920,9 +920,10 @@ fn expect_documented(command: &str, output: &str) {
             "{command}\nencoder row is not between the seat and the gate:\n{output}"
         );
         assert!(
-            output.contains(
-                "not installed. Search matches words, so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`."
-            ),
+            output.contains(&format!(
+                "not installed. Search matches words, so run `{}`.",
+                ljos_cli::RELEASE_INSTALL_COMMAND
+            )),
             "{command}\n{output}"
         );
         assert!(

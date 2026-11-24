@@ -4042,7 +4042,7 @@ const DOCS_URL: &str = "https://leidarljos.github.io/ljos/reference-commands.htm
 
 /// The first commands, in the order the getting-started page runs them.
 const FIRST_COMMANDS: &[(&str, &str)] = &[
-    ("sh install.sh --no-embed", "install ljos"),
+    (ljos_cli::RELEASE_INSTALL_COMMAND, "install ljos"),
     ("ljos doctor", "check that ljos is ready"),
     ("ljos remember TEXT", "store one lesson"),
     ("ljos search QUERY", "find what is stored"),
@@ -4068,7 +4068,7 @@ fn opening_screen() -> String {
     let commands_src: Vec<(&str, &str)> = FIRST_COMMANDS
         .iter()
         .copied()
-        .filter(|(cmd, _)| *cmd != "sh install.sh --no-embed" || !installed_ljos())
+        .filter(|(cmd, _)| *cmd != ljos_cli::RELEASE_INSTALL_COMMAND || !installed_ljos())
         .collect();
     let width = commands_src
         .iter()

@@ -22,6 +22,28 @@ pub use exe_publish::{
 pub use exe_publish::{publish_link, Moved};
 pub use pack_link::PacksetClient;
 
+/// Where the release installer is published. A literal, so the install
+/// command and the uninstall stub can be built from it with `concat!`.
+macro_rules! release_install_url {
+    () => {
+        "https://github.com/leidarljos/ljos/releases/latest/download/install.sh"
+    };
+}
+
+/// The README install, including the encoder and its model.
+macro_rules! release_install_command {
+    () => {
+        concat!("curl -fsSLO ", release_install_url!(), " && sh install.sh")
+    };
+}
+
+/// Where the release installer is published.
+pub const RELEASE_INSTALL_URL: &str = release_install_url!();
+
+/// The README install. Every line that tells a person to install ljos or
+/// a sibling `install.sh` installs prints this.
+pub const RELEASE_INSTALL_COMMAND: &str = release_install_command!();
+
 /// `eprintln!` for a person: the line wraps to the terminal stderr is on,
 /// and stays byte for byte when stderr is a pipe or a file.
 #[macro_export]
@@ -15475,11 +15497,9 @@ pub fn encoder_install_command() -> String {
         return "cargo install --locked packset-embed".to_string();
     }
     if on_path("curl") {
-        return "curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh"
-            .to_string();
+        return RELEASE_INSTALL_COMMAND.to_string();
     }
-    "wget https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh"
-        .to_string()
+    concat!("wget ", release_install_url!(), " && sh install.sh").to_string()
 }
 
 /// The encoder row opens with this when the last dense call did not answer.
