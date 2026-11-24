@@ -24162,8 +24162,9 @@ fn store_agent_atom(client: &PacksetClient, atom: Value, prefix: &str) -> Result
     }
 }
 
-/// Queue a lesson the writer did not take. A refusal is not queued. The
-/// error keeps the words that say the copy is waiting.
+/// Queue a lesson the writer did not take. A refusal is not queued, and
+/// neither is a public lesson. The error keeps the words that say the copy
+/// is waiting.
 fn queue_waiting_lesson(atom: &Value, err: anyhow::Error, prefix: &str) -> anyhow::Error {
     // A busy pack did not take the lesson. Remember says so and exits.
     // Queueing it would store a copy the command says was not stored.
@@ -24175,7 +24176,7 @@ fn queue_waiting_lesson(atom: &Value, err: anyhow::Error, prefix: &str) -> anyho
     } else {
         with_post_failure(prefix, err)
     };
-    if atom["kind"].as_str() != Some("lesson") || !note_can_wait(&err) {
+    if atom["kind"].as_str() != Some("lesson") || lesson_is_public() || !note_can_wait(&err) {
         return err;
     }
     if let Some(line) = sandbox_memory_off() {
@@ -24208,8 +24209,9 @@ fn with_queue_outcome(err: anyhow::Error, queued: Result<Option<bool>>) -> anyho
     }
 }
 
-/// The pack client, or a queued lesson when the pack is off. `supersedes`
-/// is the atoms that lesson closes. A note passes none.
+/// The pack client, or a queued lesson when the pack is off. A public
+/// lesson is not queued. `supersedes` is the atoms that lesson closes. A
+/// note passes none.
 fn client_or_queue(
     prefix: &str,
     kind: &str,
@@ -24219,7 +24221,7 @@ fn client_or_queue(
 ) -> Result<PacksetClient> {
     match pack() {
         Ok(client) => Ok(client),
-        Err(e) if kind == "lesson" && note_can_wait(&e) => {
+        Err(e) if kind == "lesson" && !lesson_is_public() && note_can_wait(&e) => {
             if let Some(line) = sandbox_memory_off() {
                 return Err(anyhow::Error::msg(line));
             }
@@ -25026,6 +25028,10 @@ pub fn user_fault_for(err: &anyhow::Error, again: &str) -> String {
         return busy_queue_line()
             .unwrap_or("pack busy, try again")
             .to_string();
+    }
+    // A file the person named with `--out` is not the store.
+    if top.contains("--out ") {
+        return top;
     }
     if let Some(line) = storage_line(err, again) {
         return line;
@@ -27493,7 +27499,16 @@ pub(crate) fn workflow_child(
 /// An unknown workflow, a parent under another workflow, or the tracker
 /// refusing a write.
 pub fn workflow_start(parent: &str, name: &str, width: Width) -> Result<String> {
+    let parent = parent.trim();
     let name = parse_workflow_name(name)?;
+    let v = tracker_show_json(parent)?;
+    if let Some(have) = workflow_skel::bound_skeleton(&v) {
+        return Err(policy_label::labelled(
+            "workflow-warning",
+            format!("workflow: {parent} already runs the {have} skeleton; nothing was written"),
+        ));
+    }
+    let _lock = workflow_skel::acquire_run_lock(parent)?;
     let v = tracker_show_json(parent)?;
     if let Some(have) = workflow_skel::bound_skeleton(&v) {
         return Err(policy_label::labelled(
@@ -49400,6 +49415,9 @@ pub fn finish(
     verbose: bool,
     width: Width,
 ) -> Result<String> {
+    // A signoff step stays open until its workflow gates pass, even when it
+    // is also a checklist item.
+    workflow_skel::signoff_block(issue)?;
     if let Some(mut ticked) = plan::tick_checklist(issue, width)? {
         if let Some(text) = lesson.map(str::trim).filter(|text| !text.is_empty()) {
             for claim in lesson_claims(text) {
@@ -49408,9 +49426,6 @@ pub fn finish(
         }
         return Ok(ticked);
     }
-    // Before the person check, so a signoff that is still missing work
-    // names that work. The same check runs for a finish that does not close.
-    workflow_skel::signoff_block(issue)?;
     // A close asks whether a person is present, before any write. A
     // runner with no terminal is refused unless a standing grant covers
     // this seat and this ticket. The sitting can still end. A pending
@@ -91830,6 +91845,53 @@ lesson, due yesterday, seat ada
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_read_only_out_file_is_named_not_the_store() {
+        let err =
+            anyhow::anyhow!("workflow: cannot write --out /mnt/ro/page.org: Read-only file system");
+        assert_eq!(
+            super::user_fault_for(&err, "ljos workflow render"),
+            "workflow: cannot write --out /mnt/ro/page.org: Read-only file system"
+        );
+    }
+
+    #[test]
+    fn a_public_lesson_a_reachable_pack_did_not_take_is_not_queued() {
+        let _lock = super::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let _env = HoldEnv::set(&[
+            ("HOME", dir.path().to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ("PACKSET_URL", "http://127.0.0.1:9"),
+        ]);
+        let queue = state.join("ljos/note-queue.jsonl");
+        let atom = |text: &str| serde_json::json!({"kind": "lesson", "text": text, "issue": "", "workspace": "hand"});
+        let down = || anyhow::anyhow!("connection refused");
+        {
+            let _public = super::RememberPublic::set(true);
+            let err = super::queue_waiting_lesson(
+                &atom("Oil the east hinge every week."),
+                down(),
+                "remember",
+            );
+            assert!(!format!("{err:#}").contains("queued"), "{err:#}");
+        }
+        let rows = std::fs::read_to_string(&queue).unwrap_or_default();
+        assert!(
+            !rows.contains("east hinge"),
+            "a public lesson was queued:\n{rows}"
+        );
+        let err =
+            super::queue_waiting_lesson(&atom("Sweep the west bench daily."), down(), "remember");
+        assert!(format!("{err:#}").contains("queued"), "{err:#}");
+        let rows = std::fs::read_to_string(&queue).unwrap_or_default();
+        assert!(
+            rows.contains("west bench"),
+            "the private control was not queued:\n{rows}"
+        );
     }
 
     /// A proposal row as an older ljos wrote it to `proposals.jsonl`.

@@ -1335,10 +1335,9 @@ fn project_ok(entities: &[String], project: &str) -> bool {
         .iter()
         .filter_map(|entity| entity.strip_prefix("project:"))
         .collect();
-    !projects.is_empty()
-        && projects
-            .iter()
-            .all(|name| name.eq_ignore_ascii_case(project))
+    projects
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(project))
 }
 
 fn tags_ok(entities: &[String], tags: &[String]) -> bool {
@@ -1441,7 +1440,11 @@ fn seat_act(lower: &str) -> bool {
         let Some(seat) = rest.split_whitespace().next() else {
             return false;
         };
-        if seat.is_empty() {
+        if seat.is_empty()
+            || !seat
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
+        {
             return false;
         }
         let tail = rest[seat.len()..].trim();
@@ -1468,6 +1471,8 @@ fn org_time(text: &str) -> bool {
         && bytes[..4].iter().all(u8::is_ascii_digit)
         && bytes[5..7].iter().all(u8::is_ascii_digit)
         && bytes[8..10].iter().all(u8::is_ascii_digit)
+        && bytes.last() == Some(&b']')
+        && !bytes[..bytes.len() - 1].contains(&b']')
 }
 
 fn timestamp_line(bare: &str) -> bool {
@@ -2325,7 +2330,7 @@ mod tests {
         assert!(body.contains("Publish the signed archive."));
         assert!(!body.contains("Bare tag only."));
         assert!(!body.contains("Other project."));
-        assert!(!body.contains("Both projects."));
+        assert!(body.contains("Both projects."));
         assert!(!body.contains("No tag here."));
     }
 
@@ -2349,6 +2354,16 @@ mod tests {
                 "Publish the signed archive.\nNoted by saddle\nCLOCK: [2026-01-02 Fri 09:00]",
                 &["project:Software"],
             ),
+            lesson(
+                "author-finished",
+                "Finished by Friday.",
+                &["project:Software"],
+            ),
+            lesson(
+                "author-date",
+                "[2026-11-24] Rotated the release key.",
+                &["project:Software"],
+            ),
         ];
         let mut options = options();
         options.trees.clear();
@@ -2358,6 +2373,11 @@ mod tests {
         assert!(!text.contains("Noted by"));
         assert!(!text.contains("CLOCK"));
         assert!(!text.contains("2026-01-02"));
+        assert!(text.contains("Finished by Friday."), "{text}");
+        assert!(
+            text.contains("[2026-11-24] Rotated the release key."),
+            "{text}"
+        );
         let state_lesson = lesson(
             "state-line",
             "State requirements clearly.\nThen check them.",

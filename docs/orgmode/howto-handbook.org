@@ -162,11 +162,11 @@ found. The screen is no defence against an author who deliberately obfuscates
 text. Nested encodings, homoglyph spellings of banned words, escapes split
 across lines and addresses broken across lines are outside its threat model.
 
-The screen splits the text into tokens first (words, paths, links, numbers
-with a unit, versions, Rust paths) and then classifies each token, so a
-version such as =3.12.3= or a number such as =139.1= is a number and not an
-address. It reads the text through one canonical function, the same one
-=ljos workflow render= uses. One layer of percent, HTML (numeric and named),
+Class-specific scanners read words, paths, links, numbers and punctuation
+directly from one canonical copy of the text. Their context checks distinguish
+a version such as =3.12.3= or a number such as =139.1= from an address. This
+is the same canonical reading that =ljos workflow render= uses. One layer of
+percent, HTML (numeric and named),
 =\u=, =\x= and quoted-printable escapes is decoded. The decoded text is put
 through NFKD, zero-width and bidi controls are removed, every Unicode line
 break is read as a line break and every space separator as a space. The screen
@@ -203,8 +203,7 @@ run of 24 or more letters and digits with both kinds in it. A run that =-=,
 or more, and a run cut by a line break counts when neither half is 24 long
 alone. A capitalised name before a double colon, as in a Rust path, is a path. The
 excerpt also redacts a marker with nothing after it, and a word that dashes
-cut into short pieces. The export reads those as prose, and so it does a
-hex run of 32 or more digits, which the hash rule below decides. A hex run of 32 or more is a key,
+cut into short pieces. The export reads those as prose. A hex run of 32 or more is a key,
 except a lowercase one of exactly 40 or 64 digits, or one that follows a hash
 name such as =sha256=. A PEM private key is refused with every line between
 its =BEGIN= and =END= markers. A word that Org shows as verbatim, such as
@@ -229,12 +228,12 @@ words spare a candidate only when that test is false, so =Face::Fade= and
 =Dead::Beef= stay, and =fd00:Beef::1=, =fe80::1= and =2001:db8::Dead= are
 refused. Letter case does not change the parse.
 A candidate starts at the beginning of a run of hex digits, colons, dots
-and a zone mark, and after every separator in that run: a dot, a single
-colon, a slash, an equals sign, an at sign, a parenthesis, a bracket or a
-backtick. So =a.fe80::1=, =cafe.fd00::1= and =add.fe80::1%eth0= are refused.
-A literal does not start inside a word, so =std::fmt= and =Foo::1= are Rust
-paths. A double colon directly before =<=, ={= or a name and =(= is a Rust
-path too, so =Face::<T>::new()= and =use Face::{A, B}= stay.
+and a zone mark, and after every separator in that run. So =a.fe80::1=,
+=cafe.fd00::1=, =crate::fd00::1= and =add.fe80::1%eth0= are refused.
+A non-public address is refused before a word-edge or path exemption is
+considered. A double colon directly before =<=, ={= or a name and =(= is a
+Rust path when the parsed address is public, so =Face::<T>::new()=,
+=use Face::{A, B}= and =use bb8::{Pool}= stay.
 A lone ~::~ with no hex digit on either side inside the same token is not
 an address, so =- term ::=, =Notes ::=, the =`::`= token and
 =term :: description= stay. ~addr=::~, ~ip=::~, =::a= between backticks and

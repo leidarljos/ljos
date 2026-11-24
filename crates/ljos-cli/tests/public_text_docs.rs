@@ -209,3 +209,36 @@ fn every_non_ascii_character_in_the_docs_is_on_the_public_allowlist() {
     }
     assert!(missing.is_empty(), "{missing:#?}");
 }
+
+#[test]
+fn address_and_workflow_trust_docs_match_the_rules() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+    let handbook = std::fs::read_to_string(root.join("orgmode/howto-handbook.org")).unwrap();
+    let handbook_rst = std::fs::read_to_string(root.join("source/howto-handbook.rst")).unwrap();
+    let workflow = std::fs::read_to_string(root.join("orgmode/howto-workflow.org")).unwrap();
+    let workflow_rst = std::fs::read_to_string(root.join("source/howto-workflow.rst")).unwrap();
+    assert!(
+        handbook.contains(
+            "A run longer than 64 characters with a\nhex digit and either two colons or three dots"
+        ),
+        "{handbook}"
+    );
+    assert!(
+        handbook_rst.contains(
+            "A run longer than 64 characters with a\nhex digit and either two colons or three dots"
+        ),
+        "{handbook_rst}"
+    );
+    assert!(
+        workflow.contains("The gate reads only the index"),
+        "{workflow}"
+    );
+    assert!(
+        workflow.contains("notes on the parent are a human-readable mirror only"),
+        "{workflow}"
+    );
+    assert!(
+        workflow_rst.contains("The gate reads only the index"),
+        "{workflow_rst}"
+    );
+}

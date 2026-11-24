@@ -297,6 +297,9 @@ fn memories_cmd(cmd: MemCmd) -> Result<()> {
             if project.is_some() && public.is_empty() {
                 anyhow::bail!("memories: -p belongs with --public");
             }
+            if !public.is_empty() {
+                ljos_cli::refuse_public_under_a_runner("memories", true)?;
+            }
             let project = match project {
                 Some(name) => Some(ljos_cli::require_known_project(&name)?),
                 None => None,
@@ -4148,8 +4151,9 @@ fn main() {
             // A seat that was not resolved or is not on the roster, and
             // an unseen mail recipient, are failed commands. 2 is the
             // status a bad invocation already uses, so a script that
-            // checks the status sees the failure. Other labels are notes
-            // and still exit 0.
+            // checks the status sees the failure. Every workflow warning,
+            // a passed round and a Hold included, wrote nothing and exits
+            // 1. Other labels are notes and still exit 0.
             if matches!(
                 label.label,
                 "seat-unresolved" | "seat-unlisted" | "recipient-unseen"
@@ -4157,6 +4161,9 @@ fn main() {
                 && label.detail.contains("name different seats"))
             {
                 std::process::exit(USAGE_STATUS);
+            }
+            if label.label == "workflow-warning" {
+                std::process::exit(1);
             }
             return;
         }
@@ -8582,6 +8589,14 @@ fn run_workflow_cmd(action: WorkflowCmd) -> Result<()> {
     Ok(())
 }
 
+/// A failed read or write of the `--out` file, naming that file. The line
+/// carries no I/O error, so it is not read as the store being unwritable.
+fn out_error(verb: &str, path: &Path, err: &std::io::Error) -> anyhow::Error {
+    let words = err.to_string();
+    let words = words.split(" (os error ").next().unwrap_or(&words);
+    anyhow::anyhow!("workflow: cannot {verb} --out {}: {words}", path.display())
+}
+
 fn render_workflow(
     name: &str,
     file: Option<&Path>,
@@ -8599,8 +8614,7 @@ fn render_workflow(
         let Some(path) = out else {
             bail!("workflow: `--check` compares the file named with `--out`");
         };
-        let have = std::fs::read_to_string(path)
-            .with_context(|| format!("workflow: read {}", path.display()))?;
+        let have = std::fs::read_to_string(path).map_err(|err| out_error("read", path, &err))?;
         let mut why = Vec::new();
         if have != page {
             why.push("the file differs from a fresh render".to_string());
@@ -8622,16 +8636,27 @@ fn render_workflow(
         Some(path) => {
             if let Some(dir) = path.parent() {
                 if !dir.as_os_str().is_empty() {
-                    std::fs::create_dir_all(dir)
-                        .with_context(|| format!("workflow: create {}", dir.display()))?;
+                    std::fs::create_dir_all(dir).map_err(|err| out_error("write", path, &err))?;
                 }
             }
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "writes a file that is not a git hook"
-            )]
-            std::fs::write(path, &page)
-                .with_context(|| format!("workflow: write {}", path.display()))?;
+            match std::fs::symlink_metadata(path) {
+                Ok(meta) if !meta.file_type().is_file() => {
+                    bail!(
+                        "workflow: cannot write --out {}: it is not a regular file",
+                        path.display()
+                    );
+                }
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(out_error("write", path, &err));
+                }
+                _ => {}
+            }
+            ljos_cli::publish(
+                path,
+                ljos_cli::Content::Bytes(page.as_bytes()),
+                ljos_cli::Mode::Exactly(0o644),
+            )
+            .map_err(|err| out_error("write", path, &err))?;
             ljos_cli::tell!("wrote {}", path.display());
         }
         None => ljos_cli::emit_raw!("{page}"),

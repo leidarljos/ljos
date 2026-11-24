@@ -37,7 +37,7 @@ $ ljos block STEP --on OTHER
 
 * Sign off
 
-The sign-off step stays open until every other step is done, no blocker of any step is open, =ljos consensus STEP --quorum 2= settles ship, and at least one deed named on the step passes =ljos evidence=. The quorum is the =:QUORUM:= property, and 2 when the skeleton omits it. =:DEED: yes= is what asks for the deed. The kind, the dependencies, the quorum and the deed are read from the ticket tags the start command writes. A later note does not change them. =ljos complete= and =ljos finish= both refuse, exit 1, and list what is still missing.
+The sign-off step stays open until every other step is done, no blocker of any step is open, =ljos consensus STEP --quorum 2= settles ship, and at least one deed named on the step passes =ljos evidence=. The quorum is the =:QUORUM:= property, and 2 when the skeleton omits it. =:DEED: yes= is what asks for the deed. Under the run lock, the start command records the skeleton name and sha in the skeleton index before it writes to the tracker, the step it is about to file, and each step ticket id as soon as that ticket carries its =step:= note, so a start that was cut short is finished by the next start on the same parent. Before each create the index also records a random token, and the new ticket carries it as a =filing-= tag. If the cut came after the create and before the id, the next start takes the one child of the parent that carries that token instead of filing a second ticket, and refuses when there is more than one. A child with the same step tags or =step:= note and no token is not taken, so a create that never ran files a fresh ticket. The index refuses a skeleton body whose sha256 does not match. The =skeleton-sha:= and =skeleton-steps:= notes on the parent are a human-readable mirror only. The gate reads only the index, requires each recorded ticket to remain a child of the run parent whose first =step:= note matches the key, and reads kind, dependencies, quorum and deed from the pinned skeleton version. Later metadata notes and retagged or moved tickets therefore cannot change the gate. Only =workflow revise --apply= after consensus settles revise can append a new pinned version to the index. A run absent from the index fails closed and must be restarted on a new parent. =ljos complete= and =ljos finish= both refuse, exit 1, and list what is still missing.
 
 #+begin_src console
 $ ljos consensus SIGNOFF --quorum 2
@@ -47,7 +47,7 @@ $ ljos evidence ACCESSION
 
 * Revise the skeleton
 
-Notes and blockers from a finished run become a proposal. The proposal is a decision whose options are keep and revise. After =ljos consensus= settles revise, applying a file stores the next version, notes the proposal and closes it. Applying the same body again does not store another version.
+Notes and blockers from a finished run become a proposal. The proposal is a decision whose options are keep and revise. After =ljos consensus= settles revise, applying a file stores the next version, notes the proposal and closes it. The skeleton index records the run the proposal was filed from and the sha that run pinned then, and only that run moves, only while it still pins that sha. The proposal ticket's parent is never read for this, so moving the proposal under another parent or applying it again moves no other run. Applying the same body again does not store another version.
 
 #+begin_src console
 $ ljos workflow revise release --from PARENT

@@ -175,6 +175,10 @@ impl World {
             "entities": entities,
             "source": {"seat": "saddle", "basis": "person"}
         });
+        self.post_atom(&body);
+    }
+
+    pub fn post_atom(&self, body: &serde_json::Value) {
         let file = self.home.path().join("atom.json");
         #[expect(
             clippy::disallowed_methods,
@@ -201,7 +205,7 @@ impl World {
             ])
             .output()
             .expect("curl");
-        assert!(out.status.success(), "post lesson: {}", dump(&out));
+        assert!(out.status.success(), "post atom: {}", dump(&out));
     }
 
     /// Create a ticket in the tracker. `tags` are heading tags.

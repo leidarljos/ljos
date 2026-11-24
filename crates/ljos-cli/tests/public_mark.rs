@@ -177,6 +177,55 @@ fn a_review_marks_an_existing_lesson_and_an_edit_takes_the_mark_off() {
 }
 
 #[test]
+fn a_public_mark_preserves_the_stored_claim_fields() {
+    if ready().is_none() {
+        return;
+    }
+    let world = World::open();
+    let text = "Turn the kiln down after the last shelf.";
+    world.post_atom(&serde_json::json!({
+        "schema": "inside.atom/v1",
+        "kind": "lesson",
+        "level": "explicit",
+        "text": text,
+        "workspace": "hand",
+        "issue": "kiln-42",
+        "valid_to": "2027-01-02T03:04:05Z",
+        "entities": [
+            "project:kiln",
+            "issue:kiln-42",
+            "valid_to:2027-01-02T03:04:05Z",
+            "horizon:transient"
+        ],
+        "source": {
+            "seat": "saddle",
+            "basis": "person",
+            "host": "wheel",
+            "session": "night"
+        }
+    }));
+    let before = world.atom("lesson", text).expect("stored");
+    let id = before["id"].as_str().unwrap();
+    world.ok(&["memories", "review", "--public", id]);
+    let after = world.atom("lesson", text).expect("marked");
+    for field in ["issue", "valid_to"] {
+        assert_eq!(after[field], before[field], "{field}: {after}");
+    }
+    assert_eq!(after["source"]["host"], "wheel", "{after}");
+    assert_eq!(after["source"]["session"], "night", "{after}");
+    for entity in [
+        "project:kiln",
+        "issue:kiln-42",
+        "valid_to:2027-01-02T03:04:05Z",
+        "horizon:transient",
+        MARK,
+    ] {
+        assert!(has(&after, entity), "missing {entity}: {after}");
+    }
+    assert!(!has(&after, "horizon:standing"), "{after}");
+}
+
+#[test]
 fn a_runner_cannot_mark_a_memory_public() {
     if ready().is_none() {
         return;
@@ -201,6 +250,27 @@ fn a_runner_cannot_mark_a_memory_public() {
         .atom("lesson", "Hang the apron by the door.")
         .expect("still stored");
     assert!(!has(&still, MARK), "{still}");
+
+    world.ok(&["remember", "-p", "kiln", "Fold the spare apron."]);
+    let drop_id = world
+        .atom("lesson", "Fold the spare apron.")
+        .expect("drop candidate")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let public_id = still["id"].as_str().unwrap();
+    let out = world.ljos_with(
+        &[
+            "memories", "review", "--drop", &drop_id, "--public", public_id,
+        ],
+        &[("CLAUDECODE", "1")],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", dump(&out));
+    assert!(
+        world.atom("lesson", "Fold the spare apron.").is_some(),
+        "the drop ran before the public refusal: {}",
+        dump(&out)
+    );
 }
 
 #[test]
@@ -312,6 +382,91 @@ fn remember_public_marks_a_private_repeat() {
     assert_eq!(live, 1, "the private row stayed live");
 }
 
+/// The marked row says the public repeat's words, and no live row marked
+/// public says the private wording.
+fn published_as(world: &World, public: &str, private: &str) {
+    let marked = world.atom("lesson", public).expect("marked");
+    assert!(has(&marked, MARK), "{marked}");
+    assert!(has(&marked, "project:kiln"), "{marked}");
+    let leaked: Vec<_> = world
+        .atoms()
+        .into_iter()
+        .filter(|atom| atom["tombstone"] != true && has(atom, MARK))
+        .filter(|atom| atom.to_string().contains(private))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "the private wording is public: {leaked:?}"
+    );
+}
+
+#[test]
+fn a_public_near_repeat_publishes_its_own_words() {
+    if ready().is_none() {
+        return;
+    }
+    let world = World::open();
+    let private = "Always run all of the database migrations before you start the server.";
+    let public = "Run the database migrations before the server starts.";
+    assert!(ljos_cli::memories::same_lesson(public, private));
+    world.ok(&["remember", "-p", "kiln", private]);
+    let said = world.ok(&["remember", "-p", "kiln", "--public", public]);
+    assert!(!said.contains("reinforced"), "{said}");
+    published_as(&world, public, private);
+}
+
+#[test]
+fn a_public_alias_repeat_publishes_its_own_words() {
+    if ready().is_none() {
+        return;
+    }
+    let world = World::open();
+    let private = "Lock the glaze book in the office drawer.";
+    let public = "Keep the glaze notes written down.";
+    assert!(!ljos_cli::memories::same_lesson(public, private));
+    world.post_atom(&serde_json::json!({
+        "schema": "inside.atom/v1",
+        "kind": "lesson",
+        "level": "explicit",
+        "text": private,
+        "aliases": [public],
+        "workspace": "hand",
+        "entities": ["project:kiln"],
+        "source": {"seat": "saddle", "basis": "person"}
+    }));
+    let held = world.atom("lesson", private).expect("stored");
+    assert_eq!(held["aliases"], serde_json::json!([public]), "{held}");
+    let said = world.ok(&["remember", "-p", "kiln", "--public", public]);
+    assert!(!said.contains("reinforced"), "{said}");
+    published_as(&world, public, private);
+}
+
+#[test]
+fn a_public_repeat_for_another_project_is_refused_and_leaves_the_row() {
+    if ready().is_none() {
+        return;
+    }
+    let world = World::open();
+    world.ticket("other", "other-seed", "Seed the other project", None, "");
+    let text = "Keep the north vent clear.";
+    world.ok(&["remember", "-p", "kiln", text]);
+    let out = world.ljos(&["remember", "-p", "other", "--public", text]);
+    assert!(!out.status.success(), "{}", dump(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("already names a project, so leave -p off"),
+        "{}",
+        dump(&out)
+    );
+    let row = world.atom("lesson", text).expect("row");
+    assert!(!has(&row, MARK), "{row}");
+    assert!(has(&row, "project:kiln"), "{row}");
+    assert!(!has(&row, "project:other"), "{row}");
+    let said = world.ok(&["remember", "-p", "kiln", "--public", text]);
+    assert!(!said.contains("reinforced"), "{said}");
+    let marked = world.atom("lesson", text).expect("marked");
+    assert!(has(&marked, MARK), "{marked}");
+}
+
 #[test]
 fn review_public_records_a_project_when_the_row_names_none() {
     if ready().is_none() {
@@ -377,11 +532,14 @@ fn agent_public_repeat_child() {
         return;
     };
     let text = std::env::var("LJOS_AGENT_REPEAT_TEXT").expect("text");
-    let _public = ljos_cli::RememberPublic::set(true);
+    let _public = ljos_cli::RememberPublic::set(which != "person-private");
     let _project = ljos_cli::RememberProject::set(Some("kiln".to_string()));
     let body = match which.as_str() {
         "agent" => ljos_cli::packset_write_agent("Remember", &text, None, Some(false)),
         "mcp" => ljos_cli::packset_write_mcp("Remember", &text, None, Some(false)),
+        "person" | "person-private" => {
+            ljos_cli::packset_write_as("Remember", &text, None, Some(false))
+        }
         other => panic!("unknown path {other}"),
     }
     .unwrap_or_else(|err| panic!("{which}: {err:#}"));
@@ -395,16 +553,12 @@ fn agent_writes_mark_a_private_repeat_public() {
     }
     let world = World::open();
     let home = world.home.path();
-    for (which, text) in [
-        ("agent", "Keep the north latch oiled."),
-        ("mcp", "Keep the south latch oiled."),
-    ] {
-        world.ok(&["remember", "-p", "kiln", text]);
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "starts a program outside git hook code"
-        )]
-        let out = Command::new(std::env::current_exe().expect("test bin"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let run_child = |which: &str, text: &str| {
+        Command::new(std::env::current_exe().expect("test bin"))
             .args(["agent_public_repeat_child", "--exact", "--test-threads=1"])
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
@@ -430,7 +584,24 @@ fn agent_writes_mark_a_private_repeat_public() {
             .env("LJOS_AGENT_REPEAT_TEXT", text)
             .current_dir(&world.root)
             .output()
-            .expect("spawn repeat child");
+            .expect("spawn repeat child")
+    };
+    for (which, text) in [
+        ("agent", "Keep the north latch oiled."),
+        ("mcp", "Keep the south latch oiled."),
+        ("person", "Keep the west latch oiled."),
+    ] {
+        if which == "person" {
+            let private = run_child("person-private", text);
+            assert!(
+                private.status.success(),
+                "private person: {}",
+                dump(&private)
+            );
+        } else {
+            world.ok(&["remember", "-p", "kiln", text]);
+        }
+        let out = run_child(which, text);
         assert!(out.status.success(), "{which}: {}", dump(&out));
         let said = String::from_utf8_lossy(&out.stdout);
         assert!(!said.contains("reinforced"), "{which}: {said}");
@@ -446,4 +617,45 @@ fn agent_writes_mark_a_private_repeat_public() {
             .count();
         assert_eq!(live, 1, "{which}: the private row stayed live");
     }
+}
+
+#[test]
+fn a_public_lesson_the_pack_did_not_take_is_not_queued() {
+    if ready().is_none() {
+        return;
+    }
+    let world = World::open();
+    let down = [("PACKSET_URL", "http://127.0.0.1:9"), ("PACKSET_PORT", "9")];
+    let queue = world.home.path().join(".local/state/ljos/note-queue.jsonl");
+    let out = world.ljos_with(
+        &[
+            "remember",
+            "-p",
+            "kiln",
+            "--public",
+            "Oil the east hinge every week.",
+        ],
+        &down,
+    );
+    assert!(!out.status.success(), "{}", dump(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not queued"),
+        "{}",
+        dump(&out)
+    );
+    let rows = std::fs::read_to_string(&queue).unwrap_or_default();
+    assert!(
+        !rows.contains("east hinge"),
+        "a public lesson was queued:\n{rows}"
+    );
+    world.ljos_with(
+        &["remember", "-p", "kiln", "Sweep the west bench daily."],
+        &down,
+    );
+    let rows = std::fs::read_to_string(&queue).unwrap_or_default();
+    assert!(
+        rows.contains("west bench"),
+        "the private control was not queued:\n{rows}"
+    );
+    assert!(!rows.contains("east hinge"), "{rows}");
 }

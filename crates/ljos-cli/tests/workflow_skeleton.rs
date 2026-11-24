@@ -8,6 +8,8 @@ mod sibling;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+use sha2::Digest;
+
 const SKEL: &str = "\
 #+title: Release
 #+version: 1
@@ -164,6 +166,69 @@ impl Board {
         let layout = vissue_core::Layout::new(&self.root, "Software");
         vissue_core::ops::update(&layout, id, Some("DONE"), None, None, None).unwrap();
     }
+
+    fn remove_note_containing(&self, needle: &str) {
+        let path = vissue_core::Layout::new(&self.root, "Software").project_issues_path("demo");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let kept = text
+            .lines()
+            .filter(|line| !line.contains(needle))
+            .collect::<Vec<_>>()
+            .join("\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(path, format!("{kept}\n")).unwrap();
+    }
+
+    fn remove_run_index(&self, name: &str) {
+        let path = self
+            .home
+            .join(".state/ljos/workflows")
+            .join(format!("{name}.json"));
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        doc["runs"] = serde_json::json!([]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+    }
+
+    fn set_parent(&self, id: &str, parent: &str) {
+        let path = vissue_core::Layout::new(&self.root, "Software").project_issues_path("demo");
+        let mut lines: Vec<String> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let id_line = lines
+            .iter()
+            .position(|line| line.split_whitespace().last() == Some(id))
+            .unwrap_or_else(|| panic!("{id} has no ID property"));
+        let start = lines[..=id_line]
+            .iter()
+            .rposition(|line| line.trim() == ":PROPERTIES:")
+            .unwrap();
+        let end = lines[start..]
+            .iter()
+            .position(|line| line.trim() == ":END:")
+            .map(|at| start + at)
+            .unwrap();
+        let parent_line = lines[start..end]
+            .iter()
+            .position(|line| line.trim_start().starts_with(":PARENT:"))
+            .map(|at| start + at)
+            .unwrap();
+        lines[parent_line] = format!(":PARENT:     {parent}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
+    }
 }
 
 fn text(out: &Output) -> String {
@@ -228,7 +293,8 @@ fn define_names_the_line_and_a_repeat_is_a_no_op() {
     );
     let err = board.fail(&["workflow", "define", bad.to_str().unwrap()]);
     assert!(err.contains("does not depend on two"), "{err}");
-    assert!(err.contains("bad.org:"), "{err}");
+    assert!(err.contains("<file>:"), "{err}");
+    assert!(!err.contains(bad.to_str().unwrap()), "{err}");
 
     let cycle = board.write_skel(
         "cycle.org",
@@ -257,7 +323,8 @@ fn define_names_the_line_and_a_repeat_is_a_no_op() {
     );
     let err = board.fail(&["workflow", "define", cycle.to_str().unwrap()]);
     assert!(err.contains("cycle through"), "{err}");
-    assert!(err.contains("cycle.org:"), "{err}");
+    assert!(err.contains("<file>:"), "{err}");
+    assert!(!err.contains(cycle.to_str().unwrap()), "{err}");
 
     let path = board.write_skel("release.org", SKEL);
     let stored = board.ok(&["workflow", "define", path.to_str().unwrap()]);
@@ -273,7 +340,8 @@ fn define_names_the_line_and_a_repeat_is_a_no_op() {
     let path2 = board.write_skel("release.org", &changed);
     let err = board.fail(&["workflow", "define", path2.to_str().unwrap()]);
     assert!(err.contains("bump #+version"), "{err}");
-    assert!(err.contains("release.org:2:"), "{err}");
+    assert!(err.contains("<file>:2:"), "{err}");
+    assert!(!err.contains(path2.to_str().unwrap()), "{err}");
 }
 
 #[test]
@@ -365,13 +433,26 @@ fn signoff_refuses_until_the_run_the_votes_and_the_deed_are_in() {
     let version = filed(&started, "version");
     let signoff = filed(&started, "signoff");
 
+    let layout = vissue_core::Layout::new(&board.root, "Software");
+    vissue_core::ops::retag(&layout, &signoff, &["checklist".to_string()], &[]).unwrap();
     let early = board.fail(&["finish", &signoff]);
     assert!(early.contains("changelog is TODO"), "{early}");
     assert!(early.contains("consensus has 0 of 2 ballots"), "{early}");
     assert!(early.contains("no deed is named"), "{early}");
     assert!(!early.contains("a person closes"), "{early}");
+    assert_eq!(board.heading(&signoff).state, "TODO");
 
     board.mark_done(&changelog);
+    vissue_core::ops::retag(&layout, &version, &[], &["step-version".to_string()]).unwrap();
+    board.ok(&[
+        "note",
+        &parent,
+        &format!("skeleton-steps: version={changelog}"),
+    ]);
+    let hidden = board.fail(&["complete", &signoff]);
+    assert!(hidden.contains("version is TODO"), "{hidden}");
+    assert!(!hidden.contains("missing from the pinned"), "{hidden}");
+    vissue_core::ops::retag(&layout, &version, &["step-version".to_string()], &[]).unwrap();
     board.mark_done(&version);
     board.ok_as(
         "alice",
@@ -382,6 +463,262 @@ fn signoff_refuses_until_the_run_the_votes_and_the_deed_are_in() {
     assert!(
         held.contains("settled hold, not ship") || held.contains("consensus has 1 of 2"),
         "{held}"
+    );
+}
+
+fn start_release(board: &Board) -> (String, String, String, String) {
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Release 1.2.0", "--top", "-p", "demo"]));
+    let started = board.ok(&[
+        "workflow",
+        "--start",
+        "release",
+        &parent,
+        "--var",
+        "version=1.2.0",
+    ]);
+    let changelog = filed(&started, "changelog");
+    let version = filed(&started, "version");
+    let signoff = filed(&started, "signoff");
+    (parent, changelog, version, signoff)
+}
+
+#[test]
+fn retagging_the_signoff_kind_away_does_not_skip_the_gate() {
+    let board = Board::new();
+    let (_, _, _, signoff) = start_release(&board);
+    let layout = vissue_core::Layout::new(&board.root, "Software");
+    vissue_core::ops::retag(
+        &layout,
+        &signoff,
+        &["kind-do".to_string()],
+        &["kind-signoff".to_string()],
+    )
+    .unwrap();
+    board.ok(&["note", &signoff, "kind: do"]);
+    let completed = board.fail(&["complete", &signoff]);
+    assert!(completed.contains("signoff:"), "{completed}");
+    assert!(completed.contains("changelog is TODO"), "{completed}");
+    assert!(completed.contains("version is TODO"), "{completed}");
+    let finished = board.fail(&["finish", &signoff]);
+    assert!(finished.contains("changelog is TODO"), "{finished}");
+    assert!(!finished.contains("is not claimed"), "{finished}");
+    assert_eq!(board.heading(&signoff).state, "TODO");
+}
+
+#[test]
+fn retagging_the_quorum_and_deed_does_not_lower_the_pinned_bar() {
+    let board = Board::new();
+    let (_, changelog, version, signoff) = start_release(&board);
+    board.mark_done(&changelog);
+    board.mark_done(&version);
+    let layout = vissue_core::Layout::new(&board.root, "Software");
+    vissue_core::ops::retag(
+        &layout,
+        &signoff,
+        &["quorum-1".to_string()],
+        &["quorum-2".to_string(), "deed-yes".to_string()],
+    )
+    .unwrap();
+    board.ok(&["note", &signoff, "quorum: 1"]);
+    board.ok(&["note", &signoff, "deed: no"]);
+    board.ok_as(
+        "alice",
+        &["vote", &signoff, "--for", "ship", "--used", "none"],
+    );
+    let one = board.fail(&["complete", &signoff]);
+    assert!(one.contains("consensus has 1 of 2 ballots"), "{one}");
+    assert!(one.contains("no deed is named"), "{one}");
+    board.ok_as(
+        "bob",
+        &["vote", &signoff, "--for", "ship", "--used", "none"],
+    );
+    let nodeed = board.fail(&["finish", &signoff]);
+    assert!(nodeed.contains("no deed is named"), "{nodeed}");
+    assert!(!nodeed.contains("is not claimed"), "{nodeed}");
+}
+
+#[test]
+fn a_later_sha_note_cannot_replace_the_skeleton_pinned_at_start() {
+    let board = Board::new();
+    let (parent, _, _, signoff) = start_release(&board);
+    let weaker = "\
+#+title: Release
+#+version: 2
+
+* Sign off
+:PROPERTIES:
+:STEP: signoff
+:DEPENDS:
+:KIND: signoff
+:QUORUM: 1
+:END:
+
+Options: ship, hold
+";
+    let path = board.write_skel("release.org", weaker);
+    let stored = board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let weaker_sha = stored
+        .lines()
+        .find_map(|line| line.strip_prefix("sha "))
+        .unwrap();
+    board.ok(&["note", &parent, &format!("skeleton-sha: {weaker_sha}")]);
+    board.ok_as(
+        "alice",
+        &["vote", &signoff, "--for", "ship", "--used", "none"],
+    );
+
+    let refused = board.fail(&["finish", &signoff]);
+    assert!(refused.contains("changelog is TODO"), "{refused}");
+    assert!(refused.contains("version is TODO"), "{refused}");
+    assert!(
+        refused.contains("consensus has 1 of 2 ballots"),
+        "{refused}"
+    );
+    assert!(refused.contains("no deed is named"), "{refused}");
+}
+
+#[test]
+fn settled_votes_and_forged_notes_cannot_impersonate_revise_apply() {
+    let board = Board::new();
+    let (parent, _, _, signoff) = start_release(&board);
+    let weaker = "\
+#+title: Release
+#+version: 2
+
+* Sign off
+:PROPERTIES:
+:STEP: signoff
+:DEPENDS:
+:KIND: signoff
+:QUORUM: 1
+:END:
+
+Options: ship, hold
+";
+    let path = board.write_skel("release.org", weaker);
+    let stored = board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let deed = stored
+        .lines()
+        .find_map(|line| line.strip_prefix("deed "))
+        .unwrap();
+    let sha = stored
+        .lines()
+        .find_map(|line| line.strip_prefix("sha "))
+        .unwrap();
+    let proposal_out = board.ok(&["workflow", "revise", "release", "--from", &parent]);
+    let proposal = proposal_out
+        .lines()
+        .find_map(|line| line.strip_prefix("filed proposal "))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    board.ok_as(
+        "alice",
+        &["vote", &proposal, "--for", "revise", "--used", "none"],
+    );
+    board.ok_as(
+        "bob",
+        &["vote", &proposal, "--for", "revise", "--used", "none"],
+    );
+    board.mark_done(&proposal);
+    let forged = format!("skeleton-revision: {proposal} 2 {sha} {deed}");
+    board.ok(&["note", &proposal, &forged]);
+    board.ok(&["note", &parent, &forged]);
+
+    let refused = board.fail(&["finish", &signoff]);
+    assert!(refused.contains("changelog is TODO"), "{refused}");
+    assert!(refused.contains("version is TODO"), "{refused}");
+    assert!(
+        refused.contains("consensus has 0 of 2 ballots"),
+        "{refused}"
+    );
+    assert!(refused.contains("no deed is named"), "{refused}");
+}
+
+#[test]
+fn a_run_without_an_index_entry_fails_closed_despite_forged_step_notes() {
+    let board = Board::new();
+    let (parent, changelog, version, signoff) = start_release(&board);
+    board.remove_run_index("release");
+    board.ok(&[
+        "note",
+        &parent,
+        &format!("skeleton-steps: changelog={changelog} version={version} signoff={signoff}"),
+    ]);
+
+    let restarted = board.fail(&["workflow", "--start", "release", &parent]);
+    assert!(
+        restarted.contains("no run in the skeleton index"),
+        "{restarted}"
+    );
+    assert!(restarted.contains("NEW_PARENT"), "{restarted}");
+    let refused = board.fail(&["finish", &signoff]);
+    assert!(
+        refused.contains("no run in the skeleton index"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn a_decoy_child_cannot_replace_a_pinned_step_with_a_removed_note() {
+    let board = Board::new();
+    let (parent, _, _, signoff) = start_release(&board);
+    board.remove_note_containing("skeleton-steps:");
+    board.remove_note_containing("step: changelog");
+    let duplicate = first_id(&board.ok(&["file", "Duplicate changelog", "--parent", &parent]));
+    board.ok(&["note", &duplicate, "step: changelog"]);
+    board.mark_done(&duplicate);
+
+    let restarted = board.ok(&["workflow", "--start", "release", &parent]);
+    assert!(
+        restarted.contains("already runs release version 1"),
+        "{restarted}"
+    );
+    assert!(restarted.contains("nothing new"), "{restarted}");
+    let refused = board.fail(&["finish", &signoff]);
+    assert!(
+        refused.contains("changelog is missing from the pinned skeleton run"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn a_recorded_step_without_its_first_step_note_is_missing() {
+    let board = Board::new();
+    let (_, changelog, version, signoff) = start_release(&board);
+    board.mark_done(&changelog);
+    board.mark_done(&version);
+    board.remove_note_containing("step: version");
+
+    let refused = board.fail(&["finish", &signoff]);
+    assert!(
+        refused.contains("version is missing from the pinned skeleton run"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn recorded_steps_moved_to_another_parent_are_missing_even_without_edges() {
+    let board = Board::new();
+    let (parent, changelog, version, signoff) = start_release(&board);
+    let other = first_id(&board.ok(&["file", "Other run", "--top", "-p", "demo"]));
+    board.ok(&["block", &version, "--off", &changelog]);
+    board.ok(&["block", &signoff, "--off", &version]);
+    board.set_parent(&changelog, &other);
+    board.set_parent(&version, &other);
+    board.mark_done(&changelog);
+    board.mark_done(&version);
+
+    let refused = board.fail(&["finish", &signoff]);
+    assert!(refused.contains("changelog is missing"), "{refused}");
+    assert!(refused.contains("version is missing"), "{refused}");
+    assert!(
+        !refused.contains(&format!("{parent} is missing")),
+        "{refused}"
     );
 }
 
@@ -531,6 +868,651 @@ fn revise_stores_the_next_version_after_the_proposal_settles() {
 }
 
 #[test]
+fn a_later_steps_note_cannot_bind_a_step_added_by_a_revision() {
+    let board = Board::new();
+    let (parent, _, _, _) = start_release(&board);
+    let revised = SKEL
+        .replace(
+            "* Sign off",
+            "* Audit the release\n:PROPERTIES:\n:STEP: audit\n:DEPENDS: version\n:KIND: review\n:END:\n\n* Sign off",
+        )
+        .replace(
+            ":STEP: signoff\n:DEPENDS: version",
+            ":STEP: signoff\n:DEPENDS: audit",
+        );
+    let path = board.write_skel("release.org", &revised);
+    let proposal_out = board.ok(&["workflow", "revise", "release", "--from", &parent]);
+    let proposal = proposal_out
+        .lines()
+        .find_map(|line| line.strip_prefix("filed proposal "))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    board.ok_as(
+        "alice",
+        &["vote", &proposal, "--for", "revise", "--used", "none"],
+    );
+    board.ok_as(
+        "bob",
+        &["vote", &proposal, "--for", "revise", "--used", "none"],
+    );
+    board.ok(&[
+        "workflow",
+        "revise",
+        "release",
+        "--apply",
+        path.to_str().unwrap(),
+    ]);
+    let decoy = first_id(&board.ok(&["file", "Unrelated audit", "--top", "-p", "demo"]));
+    board.mark_done(&decoy);
+    board.ok(&["note", &parent, &format!("skeleton-steps: audit={decoy}")]);
+
+    let restarted = board.ok(&[
+        "workflow",
+        "--start",
+        "release",
+        &parent,
+        "--var",
+        "version=1.2.0",
+    ]);
+    let audit = filed(&restarted, "audit");
+    assert_ne!(audit, decoy, "{restarted}");
+    assert!(!restarted.contains(&format!("repaired SIGNOFF waits on {decoy}")));
+    assert_eq!(board.heading(&audit).parent(), Some(parent.as_str()));
+}
+
+#[test]
+fn revise_apply_repairs_notes_and_closure_after_an_interrupted_apply() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Release 1.2.0", "--top", "-p", "demo"]));
+    board.ok(&[
+        "workflow",
+        "--start",
+        "release",
+        &parent,
+        "--var",
+        "version=1.2.0",
+    ]);
+    let filed = board.ok(&["workflow", "revise", "release", "--from", &parent]);
+    let proposal = filed
+        .lines()
+        .find_map(|line| line.strip_prefix("filed proposal "))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    board.ok_as(
+        "alice",
+        &["vote", &proposal, "--for", "revise", "--used", "none"],
+    );
+    board.ok_as(
+        "bob",
+        &["vote", &proposal, "--for", "revise", "--used", "none"],
+    );
+    board.ok(&[
+        "workflow",
+        "revise",
+        "release",
+        "--apply",
+        path.to_str().unwrap(),
+    ]);
+    board.remove_note_containing("skeleton-revision:");
+    let layout = vissue_core::Layout::new(&board.root, "Software");
+    vissue_core::ops::update(&layout, &proposal, Some("TODO"), None, None, None).unwrap();
+    let interrupted = board.ok(&["workflow", &parent]);
+    assert!(interrupted.contains("version 2"), "{interrupted}");
+
+    let retried = board.ok(&[
+        "workflow",
+        "revise",
+        "release",
+        "--apply",
+        path.to_str().unwrap(),
+    ]);
+    assert!(retried.contains("already applied"), "{retried}");
+    assert_eq!(board.heading(&proposal).state, "DONE");
+    let repaired = board.ok(&["workflow", &parent]);
+    assert!(repaired.contains("version 2"), "{repaired}");
+}
+
+fn start_another_release(board: &Board) -> (String, String) {
+    let parent = first_id(&board.ok(&["file", "Release 1.3.0", "--top", "-p", "demo"]));
+    let started = board.ok(&[
+        "workflow",
+        "--start",
+        "release",
+        &parent,
+        "--var",
+        "version=1.3.0",
+    ]);
+    (parent, filed(&started, "signoff"))
+}
+
+fn settled_proposal(board: &Board, parent: &str) -> String {
+    let filed = board.ok(&["workflow", "revise", "release", "--from", parent]);
+    let proposal = filed
+        .lines()
+        .find_map(|line| line.strip_prefix("filed proposal "))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    for seat in ["alice", "bob"] {
+        board.ok_as(
+            seat,
+            &["vote", &proposal, "--for", "revise", "--used", "none"],
+        );
+    }
+    proposal
+}
+
+fn weaker_release(board: &Board) -> PathBuf {
+    let weaker = SKEL
+        .replace(":QUORUM: 2\n", ":QUORUM: 1\n")
+        .replace(":DEED: yes\n", "");
+    board.write_skel("release-weaker.org", &weaker)
+}
+
+fn assert_on_version_one(board: &Board, parent: &str, signoff: &str) {
+    let status = board.ok(&["workflow", parent]);
+    assert!(status.contains("release version 1 "), "{status}");
+    board.ok_as(
+        "alice",
+        &["vote", signoff, "--for", "ship", "--used", "none"],
+    );
+    let refused = board.fail(&["complete", signoff]);
+    assert!(refused.contains("changelog is TODO"), "{refused}");
+    assert!(
+        refused.contains("consensus has 1 of 2 ballots"),
+        "{refused}"
+    );
+    assert!(refused.contains("no deed is named"), "{refused}");
+}
+
+#[test]
+fn a_proposal_moved_under_another_run_moves_only_the_run_it_was_filed_from() {
+    let board = Board::new();
+    let (filed_from, _, _, _) = start_release(&board);
+    let (other, other_signoff) = start_another_release(&board);
+    let proposal = settled_proposal(&board, &filed_from);
+    board.ok(&["parent", &proposal, &other]);
+
+    let applied = board.ok(&[
+        "workflow",
+        "revise",
+        "release",
+        "--apply",
+        weaker_release(&board).to_str().unwrap(),
+    ]);
+    assert!(applied.contains("stored release version 2"), "{applied}");
+    assert!(
+        applied.contains(&format!("{filed_from} now runs release version 2")),
+        "{applied}"
+    );
+    assert!(!applied.contains(&other), "{applied}");
+    let moved = board.ok(&["workflow", &filed_from]);
+    assert!(moved.contains("release version 2 "), "{moved}");
+    assert_on_version_one(&board, &other, &other_signoff);
+}
+
+#[test]
+fn a_replayed_apply_never_moves_another_run() {
+    let board = Board::new();
+    let (filed_from, _, _, _) = start_release(&board);
+    let (other, other_signoff) = start_another_release(&board);
+    let proposal = settled_proposal(&board, &filed_from);
+    let weaker = weaker_release(&board);
+    let applied = board.ok(&[
+        "workflow",
+        "revise",
+        "release",
+        "--apply",
+        weaker.to_str().unwrap(),
+    ]);
+    assert!(
+        applied.contains(&format!("{filed_from} now runs release version 2")),
+        "{applied}"
+    );
+    board.ok(&["parent", &proposal, &other]);
+
+    let replayed = board.ok(&[
+        "workflow",
+        "revise",
+        "release",
+        "--apply",
+        weaker.to_str().unwrap(),
+    ]);
+    assert!(replayed.contains("already applied"), "{replayed}");
+    assert!(
+        replayed.contains(&format!("{filed_from} already runs release version 2")),
+        "{replayed}"
+    );
+    assert!(!replayed.contains(&other), "{replayed}");
+    assert_on_version_one(&board, &other, &other_signoff);
+}
+
+#[test]
+fn an_apply_leaves_a_run_that_no_longer_pins_the_sha_the_proposal_was_filed_against() {
+    let board = Board::new();
+    let (filed_from, _, _, signoff) = start_release(&board);
+    settled_proposal(&board, &filed_from);
+    let index = board.home.join(".state/ljos/workflows/release.json");
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&index).unwrap()).unwrap();
+    doc["proposal_runs"][0]["sha256"] = serde_json::Value::String("0".repeat(64));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(&index, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    let applied = board.ok(&[
+        "workflow",
+        "revise",
+        "release",
+        "--apply",
+        weaker_release(&board).to_str().unwrap(),
+    ]);
+    assert!(applied.contains("stored release version 2"), "{applied}");
+    assert!(
+        applied.contains(&format!("{filed_from} no longer runs")),
+        "{applied}"
+    );
+    assert!(!applied.contains("now runs"), "{applied}");
+    assert_on_version_one(&board, &filed_from, &signoff);
+}
+
+#[test]
+fn a_start_cut_short_is_finished_by_the_next_start() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Release 1.2.0", "--top", "-p", "demo"]));
+    let real = sibling::require("vissue").unwrap_or_else(|line| panic!("{line}"));
+    let shim = board.dir.path().join("shim");
+    std::fs::create_dir_all(&shim).unwrap();
+    let mark = board.dir.path().join("fail-once");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(&mark, "").unwrap();
+    let script = shim.join("vissue");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = note ] && [ \"$3\" = 'kind: do' ] && [ -e '{mark}' ]; then\n  rm -f '{mark}'\n  echo 'cut short' >&2\n  exit 1\nfi\nexec '{real}' \"$@\"\n",
+            mark = mark.display(),
+            real = real.display(),
+        ),
+    )
+    .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let start = |board: &Board| {
+        board
+            .cmd_as(
+                "saddle",
+                &[
+                    "workflow",
+                    "--start",
+                    "release",
+                    &parent,
+                    "--var",
+                    "version=1.2.0",
+                ],
+            )
+            .env("PATH", format!("{}:{}", shim.display(), board.path))
+            .output()
+            .unwrap()
+    };
+    let cut = start(&board);
+    assert!(!cut.status.success(), "{}", text(&cut));
+    assert!(text(&cut).contains("cut short"), "{}", text(&cut));
+    assert!(!mark.exists());
+
+    let resumed = start(&board);
+    assert!(resumed.status.success(), "{}", text(&resumed));
+    let resumed = String::from_utf8_lossy(&resumed.stdout).into_owned();
+    assert!(!resumed.contains("filed changelog"), "{resumed}");
+    let signoff = filed(&resumed, "signoff");
+    filed(&resumed, "version");
+    let refused = board.fail(&["finish", &signoff]);
+    assert!(refused.contains("changelog is TODO"), "{refused}");
+    assert!(refused.contains("version is TODO"), "{refused}");
+    assert!(!refused.contains("missing from"), "{refused}");
+}
+
+#[test]
+fn a_start_cut_between_a_step_note_and_the_index_files_no_second_ticket() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Release 1.2.0", "--top", "-p", "demo"]));
+    let real = sibling::require("vissue").unwrap_or_else(|line| panic!("{line}"));
+    let index = board.home.join(".state/ljos/workflows/release.json");
+    let held = board.dir.path().join("release.json.held");
+    let shim = board.dir.path().join("shim");
+    std::fs::create_dir_all(&shim).unwrap();
+    let mark = board.dir.path().join("cut-once");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(&mark, "").unwrap();
+    let script = shim.join("vissue");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = note ] && [ \"$3\" = 'step: version' ] && [ -e '{mark}' ]; then\n  rm -f '{mark}'\n  '{real}' \"$@\" || exit 1\n  mv '{index}' '{held}' && ln -s '{held}' '{index}'\n  exit 0\nfi\nexec '{real}' \"$@\"\n",
+            mark = mark.display(),
+            real = real.display(),
+            index = index.display(),
+            held = held.display(),
+        ),
+    )
+    .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let start = |board: &Board| {
+        board
+            .cmd_as(
+                "saddle",
+                &[
+                    "workflow",
+                    "--start",
+                    "release",
+                    &parent,
+                    "--var",
+                    "version=1.2.0",
+                ],
+            )
+            .env("PATH", format!("{}:{}", shim.display(), board.path))
+            .output()
+            .unwrap()
+    };
+    let cut = start(&board);
+    assert!(!cut.status.success(), "{}", text(&cut));
+    assert!(text(&cut).contains("is a symlink"), "{}", text(&cut));
+    std::fs::remove_file(&index).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
+    std::fs::rename(&held, &index).unwrap();
+
+    let resumed = start(&board);
+    assert!(resumed.status.success(), "{}", text(&resumed));
+    let resumed = String::from_utf8_lossy(&resumed.stdout).into_owned();
+    assert!(!resumed.contains("filed version"), "{resumed}");
+    assert!(resumed.contains("adopted version"), "{resumed}");
+    let layout = vissue_core::Layout::new(&board.root, "Software");
+    let doc =
+        vissue_core::IssueDoc::parse_file("demo", &layout.project_issues_path("demo")).unwrap();
+    let bumps: Vec<String> = doc
+        .headings
+        .iter()
+        .filter(|h| h.title == "Bump the version")
+        .map(|h| h.id.clone())
+        .collect();
+    assert_eq!(bumps.len(), 1, "{bumps:?}\n{resumed}");
+    let stored = std::fs::read_to_string(&index).unwrap();
+    assert!(
+        stored.contains(&format!("\"version\": \"{}\"", bumps[0])),
+        "{stored}"
+    );
+}
+
+#[test]
+fn a_start_cut_at_the_first_step_note_files_no_second_ticket() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Release 1.2.0", "--top", "-p", "demo"]));
+    let real = sibling::require("vissue").unwrap_or_else(|line| panic!("{line}"));
+    let shim = board.dir.path().join("shim");
+    std::fs::create_dir_all(&shim).unwrap();
+    let mark = board.dir.path().join("cut-once");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(&mark, "").unwrap();
+    let script = shim.join("vissue");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = note ] && [ \"$3\" = 'step: version' ] && [ -e '{mark}' ]; then\n  rm -f '{mark}'\n  echo 'cut short' >&2\n  exit 1\nfi\nexec '{real}' \"$@\"\n",
+            mark = mark.display(),
+            real = real.display(),
+        ),
+    )
+    .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let start = |board: &Board| {
+        board
+            .cmd_as(
+                "saddle",
+                &[
+                    "workflow",
+                    "--start",
+                    "release",
+                    &parent,
+                    "--var",
+                    "version=1.2.0",
+                ],
+            )
+            .env("PATH", format!("{}:{}", shim.display(), board.path))
+            .output()
+            .unwrap()
+    };
+    let cut = start(&board);
+    assert!(!cut.status.success(), "{}", text(&cut));
+    assert!(text(&cut).contains("cut short"), "{}", text(&cut));
+    assert!(!mark.exists());
+
+    let resumed = start(&board);
+    assert!(resumed.status.success(), "{}", text(&resumed));
+    let resumed = String::from_utf8_lossy(&resumed.stdout).into_owned();
+    assert!(!resumed.contains("filed version"), "{resumed}");
+    assert!(resumed.contains("adopted version"), "{resumed}");
+    let layout = vissue_core::Layout::new(&board.root, "Software");
+    let doc =
+        vissue_core::IssueDoc::parse_file("demo", &layout.project_issues_path("demo")).unwrap();
+    let bumps: Vec<String> = doc
+        .headings
+        .iter()
+        .filter(|h| h.title == "Bump the version")
+        .map(|h| h.id.clone())
+        .collect();
+    assert_eq!(bumps.len(), 1, "{bumps:?}\n{resumed}");
+    let issues = std::fs::read_to_string(layout.project_issues_path("demo")).unwrap();
+    assert!(issues.contains("step: version"), "{issues}");
+    let signoff = filed(&resumed, "signoff");
+    let refused = board.fail(&["finish", &signoff]);
+    assert!(refused.contains("version is TODO"), "{refused}");
+    assert!(!refused.contains("missing from"), "{refused}");
+}
+
+#[test]
+fn a_start_cut_before_the_create_does_not_adopt_a_stranger_with_the_same_tags() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Release 1.2.0", "--top", "-p", "demo"]));
+    let stranger = first_id(&board.ok(&["file", "Unrelated work", "--parent", &parent]));
+    let layout = vissue_core::Layout::new(&board.root, "Software");
+    vissue_core::ops::retag(
+        &layout,
+        &stranger,
+        &[
+            "step-version".to_string(),
+            "kind-do".to_string(),
+            "depends-changelog".to_string(),
+        ],
+        &[],
+    )
+    .unwrap();
+    let real = sibling::require("vissue").unwrap_or_else(|line| panic!("{line}"));
+    let shim = board.dir.path().join("shim");
+    std::fs::create_dir_all(&shim).unwrap();
+    let mark = board.dir.path().join("cut-once");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(&mark, "").unwrap();
+    let script = shim.join("vissue");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = create ] && [ -e '{mark}' ]; then\n  case \"$*\" in *step-version*)\n    rm -f '{mark}'\n    echo 'cut short' >&2\n    exit 1\n  esac\nfi\nexec '{real}' \"$@\"\n",
+            mark = mark.display(),
+            real = real.display(),
+        ),
+    )
+    .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let start = |board: &Board| {
+        board
+            .cmd_as(
+                "saddle",
+                &[
+                    "workflow",
+                    "--start",
+                    "release",
+                    &parent,
+                    "--var",
+                    "version=1.2.0",
+                ],
+            )
+            .env("PATH", format!("{}:{}", shim.display(), board.path))
+            .output()
+            .unwrap()
+    };
+    let cut = start(&board);
+    assert!(!cut.status.success(), "{}", text(&cut));
+    assert!(text(&cut).contains("cut short"), "{}", text(&cut));
+    assert!(!mark.exists());
+
+    let resumed = start(&board);
+    assert!(resumed.status.success(), "{}", text(&resumed));
+    let resumed = String::from_utf8_lossy(&resumed.stdout).into_owned();
+    assert!(!resumed.contains("adopted version"), "{resumed}");
+    let version = filed(&resumed, "version");
+    assert_ne!(version, stranger, "{resumed}");
+    let index =
+        std::fs::read_to_string(board.home.join(".state/ljos/workflows/release.json")).unwrap();
+    assert!(!index.contains(stranger.as_str()), "{index}");
+    let shown = board.ok(&["show", &stranger]);
+    assert!(!shown.contains("step: version"), "{shown}");
+}
+
+#[test]
+fn an_index_body_edited_without_its_sha_is_refused() {
+    let board = Board::new();
+    let (_, changelog, version, signoff) = start_release(&board);
+    board.mark_done(&changelog);
+    board.mark_done(&version);
+    board.ok_as(
+        "alice",
+        &["vote", &signoff, "--for", "ship", "--used", "none"],
+    );
+    let index = board.home.join(".state/ljos/workflows/release.json");
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&index).unwrap()).unwrap();
+    let body = doc["body"].as_str().unwrap().to_string();
+    let lowered = body
+        .replace(":QUORUM: 2\n", ":QUORUM: 1\n")
+        .replace(":DEED: yes\n", "");
+    assert_ne!(body, lowered);
+    doc["body"] = serde_json::Value::String(lowered);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(&index, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    let refused = board.fail(&["finish", &signoff]);
+    assert!(refused.contains("does not match its sha256"), "{refused}");
+    assert!(!refused.contains("is not claimed"), "{refused}");
+    let refused = board.fail(&["complete", &signoff]);
+    assert!(refused.contains("does not match its sha256"), "{refused}");
+}
+
+#[test]
+fn decoy_step_tags_never_bind_a_step_of_the_run() {
+    let board = Board::new();
+    let (parent, changelog, version, signoff) = start_release(&board);
+    let layout = vissue_core::Layout::new(&board.root, "Software");
+    for (id, key) in [
+        (&changelog, "changelog"),
+        (&version, "version"),
+        (&signoff, "signoff"),
+    ] {
+        vissue_core::ops::retag(&layout, id, &[], &[format!("step-{key}")]).unwrap();
+    }
+    board.remove_note_containing("skeleton-steps:");
+    let mut decoys = Vec::new();
+    for key in ["changelog", "version", "signoff"] {
+        let decoy = first_id(&board.ok(&["file", &format!("Decoy {key}"), "--parent", &parent]));
+        vissue_core::ops::retag(&layout, &decoy, &[format!("step-{key}")], &[]).unwrap();
+        board.mark_done(&decoy);
+        decoys.push(decoy);
+    }
+
+    let restarted = board.ok(&["workflow", "--start", "release", &parent]);
+    assert!(restarted.contains("nothing new"), "{restarted}");
+    for decoy in &decoys {
+        assert!(!restarted.contains(decoy.as_str()), "{restarted}");
+    }
+    let index =
+        std::fs::read_to_string(board.home.join(".state/ljos/workflows/release.json")).unwrap();
+    for decoy in &decoys {
+        assert!(!index.contains(decoy.as_str()), "{index}");
+    }
+    let refused = board.fail(&["finish", &signoff]);
+    assert!(refused.contains("changelog is TODO"), "{refused}");
+    assert!(refused.contains("version is TODO"), "{refused}");
+}
+
+#[test]
 fn render_refuses_a_secret_split_across_lines() {
     let board = Board::new();
     let skel = SKEL.replace("Notes for {{version}}.", "gh\np_1234567890abcdef1234");
@@ -641,6 +1623,72 @@ fn render_is_deterministic_and_check_rejects_a_drift() {
         err.contains("differs") || err.contains("local path"),
         "{err}"
     );
+}
+
+#[test]
+fn render_out_never_writes_through_a_symlink_or_a_non_file() {
+    let board = Board::new();
+    let path = board.write_skel("plain.org", SKEL);
+    let victim = board.dir.path().join("victim.txt");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(&victim, "keep me\n").unwrap();
+    let link = board.dir.path().join("page.org");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "plants the symlink the render must not follow"
+    )]
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    let render = |out: &std::path::Path| {
+        board.ljos(&[
+            "workflow",
+            "render",
+            "plain",
+            "--file",
+            path.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+    };
+    let refused = render(&link);
+    assert!(!refused.status.success(), "{}", text(&refused));
+    assert!(
+        text(&refused).contains("not a regular file"),
+        "{}",
+        text(&refused)
+    );
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me\n");
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+
+    let dir = board.dir.path().join("a-dir");
+    std::fs::create_dir(&dir).unwrap();
+    let refused = render(&dir);
+    assert!(!refused.status.success(), "{}", text(&refused));
+    assert!(
+        text(&refused).contains("not a regular file"),
+        "{}",
+        text(&refused)
+    );
+
+    let page = board.dir.path().join("plain-public.org");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(&page, "old page\n").unwrap();
+    let held = std::fs::File::open(&page).unwrap();
+    let wrote = render(&page);
+    assert!(wrote.status.success(), "{}", text(&wrote));
+    let fresh = std::fs::read_to_string(&page).unwrap();
+    assert!(fresh.contains("changelog -> version"), "{fresh}");
+    let mut before = String::new();
+    std::io::Read::read_to_string(&mut &held, &mut before).unwrap();
+    assert_eq!(before, "old page\n", "the page was rewritten in place");
 }
 
 #[test]
@@ -793,7 +1841,7 @@ seat belt.
 add::fee.
 key=value.
 'the token is in the vault' (no value).
-Cargo.toml, v1.2.3, e.g., i.e., std::fs::read, =std::fs::read=, Vec::new, 12:30, 1:02:03, TCP/IP.
+Cargo.toml, v1.2.3, e.g., i.e., use bb8::{Pool}, =f64::E=, Vec::new, 12:30, 1:02:03, TCP/IP.
 [[https://example.com][link]]
 /dev/null
 $npm_package_version
@@ -917,10 +1965,81 @@ fn a_skeleton_name_cannot_leave_the_store() {
     std::fs::write(&outside, "{\"name\":\"escaped\"}").unwrap();
     let err = board.fail(&["workflow", "render", "../outside"]);
     assert!(err.contains("is not a skeleton name"), "{err}");
+    assert!(!err.contains("../outside"), "{err}");
     assert_eq!(
         std::fs::read_to_string(&outside).unwrap(),
         "{\"name\":\"escaped\"}"
     );
+}
+
+#[test]
+fn render_names_the_out_file_it_cannot_write() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    let locked = board.dir.path().join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    if std::fs::write(locked.join("probe"), "").is_ok() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+    let out = locked.join("sub").join("page.org");
+    let err = board.fail(&[
+        "workflow",
+        "render",
+        "release",
+        "--file",
+        path.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--var",
+        "version=1.2.0",
+    ]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        err.contains(&format!("workflow: cannot write --out {}", out.display())),
+        "{err}"
+    );
+    assert!(!err.contains("store is not writable"), "{err}");
+}
+
+#[test]
+fn workflow_usage_errors_do_not_echo_a_typed_file_path() {
+    let board = Board::new();
+    let path = board.write_skel("sk-SECRETKEY.org", "#+title: Broken\n");
+    let err = board.fail(&[
+        "workflow",
+        "render",
+        "release",
+        "--file",
+        path.to_str().unwrap(),
+    ]);
+    assert!(err.contains("--file <value>"), "{err}");
+    assert!(!err.contains("SECRETKEY"), "{err}");
+    assert!(!err.contains(path.to_str().unwrap()), "{err}");
+
+    let token = concat!("ghp_", "0123456789abcdefghijklmnopqrstuvwxyz");
+    let parent = first_id(&board.ok(&["file", "Release 1.2.0", "--top", "-p", "demo"]));
+    let err = board.fail(&["workflow", "--start", token, &parent]);
+    assert!(err.contains("workflow: <value> is not stored"), "{err}");
+    assert!(!err.contains(token), "{err}");
 }
 
 #[test]
@@ -1736,6 +2855,97 @@ fn start_lock_times_out_with_a_clear_error() {
 }
 
 #[test]
+fn feature_start_uses_the_same_parent_lock() {
+    use std::os::fd::AsRawFd;
+
+    let board = Board::new();
+    let parent = first_id(&board.ok(&["file", "Locked feature", "--top", "-p", "demo"]));
+    let lock_dir = board.root.join(".ljos-locks");
+    std::fs::create_dir_all(&lock_dir).unwrap();
+    let lock_path = lock_dir.join(format!("workflow-start-{parent}.lock"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&lock_path)
+        .unwrap();
+    // SAFETY: `held` owns this descriptor through the command.
+    assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let out = board
+        .cmd_as("saddle", &["workflow", "--start", "feature", &parent])
+        .env("LJOS_WORKFLOW_LOCK_WAIT", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("timed out waiting for the run lock"),
+        "{}",
+        text(&out)
+    );
+}
+
+#[test]
+fn a_refused_start_does_not_create_a_parent_lock() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Bad variable", "--top", "-p", "demo"]));
+    let err = board.fail(&[
+        "workflow",
+        "--start",
+        "release",
+        &parent,
+        "--var",
+        "version=1.2.0",
+        "--var",
+        "unused=value",
+    ]);
+    assert!(err.contains("does not use"), "{err}");
+    assert!(
+        !board
+            .root
+            .join(".ljos-locks")
+            .join(format!("workflow-start-{parent}.lock"))
+            .exists(),
+        "a refused start created its lock"
+    );
+}
+
+#[test]
+fn whitespace_around_a_parent_does_not_choose_another_lock_or_run() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Trim parent", "--top", "-p", "demo"]));
+    let padded = format!("  {parent}  ");
+    board.ok(&[
+        "workflow",
+        "--start",
+        "release",
+        &padded,
+        "--var",
+        "version=1.2.0",
+    ]);
+    let again = board.ok(&[
+        "workflow",
+        "--start",
+        "release",
+        &parent,
+        "--var",
+        "version=1.2.0",
+    ]);
+    assert!(again.contains("already runs"), "{again}");
+    assert!(!board
+        .root
+        .join(".ljos-locks")
+        .join(format!("workflow-start-{padded}.lock"))
+        .exists());
+}
+
+#[test]
 fn the_start_lock_follows_the_tracker_git_dir_not_an_exported_one() {
     let board = Board::new();
     let path = board.write_skel("release.org", SKEL);
@@ -2156,7 +3366,9 @@ fn feature_start_refuses_a_parent_that_runs_a_skeleton() {
         "--var",
         "version=1.2.0",
     ]);
-    let refused = text(&board.ljos(&["workflow", "--start", "feature", &parent]));
+    let out = board.ljos(&["workflow", "--start", "feature", &parent]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let refused = text(&out);
     assert!(refused.contains("already runs"), "{refused}");
     assert!(refused.contains("skeleton"), "{refused}");
     assert!(refused.contains("nothing was written"), "{refused}");
@@ -2248,8 +3460,22 @@ fn a_duplicate_dependency_is_refused_before_the_parent_is_bound() {
         clippy::disallowed_methods,
         reason = "writes a file that is not a git hook"
     )]
-    std::fs::write(&index, broken).unwrap();
+    std::fs::write(&index, &broken).unwrap();
     let parent = first_id(&board.ok(&["file", "Release 1.2.0", "--top", "-p", "demo"]));
+    let err = board.fail(&["workflow", "--start", "release", &parent]);
+    assert!(err.contains("does not match its sha256"), "{err}");
+    let mut doc: serde_json::Value = serde_json::from_str(&broken).unwrap();
+    let sha = sha2::Sha256::digest(doc["body"].as_str().unwrap().as_bytes());
+    doc["sha256"] = serde_json::Value::String(
+        sha.iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(&index, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
     let err = board.fail(&[
         "workflow",
         "--start",

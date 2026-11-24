@@ -9,13 +9,12 @@
 //! character that is not ASCII. Both readings it gives, with no escape
 //! decoded and with one escape layer decoded, are classified. A line that a
 //! decoded `%0A` or a line break other than `\n` cuts in two is read piece
-//! by piece and then joined. The copy is cut into tokens (words, CamelCase
-//! pieces, paths, URLs, numbers with their units, versions, Rust paths,
-//! `name@semver`) and each token is classified, so an ordinary version or a
-//! `std::ops::Add` is a token of its own kind before any rule for addresses
-//! or secrets sees it. Adjacent lines are also read as one string, glued
-//! and with a space between them. The path, mailbox, secret, seat and term
-//! scans run on that string, so those split by a line break are still
+//! by piece and then joined. Class-specific scanners read words, paths,
+//! mailboxes, numbers and punctuation directly from that canonical text.
+//! Their context checks distinguish ordinary versions, units and Rust paths
+//! from addresses and secrets. Adjacent lines are also read as one string,
+//! glued and with a space between them. The path, mailbox, secret, seat and
+//! term scans run on that string, so those split by a line break are still
 //! found. Addresses are found within one line. An address broken across
 //! lines on purpose is not caught.
 //!
@@ -3302,8 +3301,8 @@ fn word_char(c: char) -> bool {
 /// Whether the text contains an IPv6 address, with or without a zone.
 ///
 /// Each maximal run of hex digits, colons, dots and `%` is scanned. A
-/// candidate starts at the run, unless that is inside a word, and after
-/// every non-hex mark in the run: a `.`, a `%`, or a single `:`. A zone
+/// candidate starts at the run and after every non-hex mark in it: a `.`,
+/// a `%`, or a `:`. A zone
 /// suffix is stripped before parsing. Letter case does not change the
 /// parse. [`non_public`] is refused with no path exemption. A Rust path or
 /// Title Case words spare only an address that is not in that range.
@@ -3434,11 +3433,31 @@ fn rust_path_literal(chars: &[char], at: usize, stop: usize) -> bool {
     if chars.get(stop.saturating_sub(2)..stop) == Some(&[':', ':']) && rust_path(&chars[stop..]) {
         return true;
     }
+    if rust_path_token(chars, at, stop) {
+        return true;
+    }
     let text: String = chars[at..stop].iter().collect();
     text.split_once("::").is_some_and(|(left, right)| {
         left.chars().any(|c| c.is_ascii_digit())
             && right.chars().next().is_some_and(|c| c.is_ascii_uppercase())
     })
+}
+
+fn rust_path_token(chars: &[char], at: usize, stop: usize) -> bool {
+    let mut left = at;
+    while left > 0 && (ident_char(chars[left - 1]) || chars[left - 1] == ':') {
+        left -= 1;
+    }
+    let mut right = stop;
+    while right < chars.len() && (ident_char(chars[right]) || chars[right] == ':') {
+        right += 1;
+    }
+    let text: String = chars[left..right].iter().collect();
+    let parts: Vec<&str> = text.split("::").collect();
+    parts.len() >= 2
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(ident_char))
 }
 
 fn ipv6_end_ok(chars: &[char], stop: usize) -> bool {

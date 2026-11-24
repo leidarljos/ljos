@@ -22,6 +22,38 @@ const VERSION_NOTE: &str = "skeleton-version: ";
 const SHA_NOTE: &str = "skeleton-sha: ";
 const DEED_ID_NOTE: &str = "skeleton-deed: ";
 const PROPOSAL_NOTE: &str = "skeleton-proposal: ";
+const STEPS_NOTE: &str = "skeleton-steps: ";
+const REVISION_NOTE: &str = "skeleton-revision: ";
+
+#[derive(Debug, Clone)]
+struct RunState {
+    name: String,
+    version: Option<String>,
+    sha: Option<String>,
+    steps: BTreeMap<String, String>,
+    filing: Option<Filing>,
+}
+
+#[derive(Debug, Clone)]
+struct StoredRun {
+    parent: String,
+    name: String,
+    sha256: String,
+    steps: BTreeMap<String, String>,
+    /// The step a start was filing when it wrote this record.
+    filing: Option<Filing>,
+}
+
+/// A step a start was about to file, and the token written to the index
+/// before the create and tagged on the ticket it files. Only a child that
+/// carries this token is that ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Filing {
+    step: String,
+    token: String,
+}
+
+const FILING_TAG: &str = "filing-";
 
 /// A step's kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +123,8 @@ pub struct Skeleton {
 ///
 /// # Errors
 ///
-/// A pair has no `=`, or the key is empty.
+/// A pair has no `=`, the key is not a variable name, a key is repeated, or
+/// a value has a line break or control character.
 pub fn parse_vars(pairs: &[String]) -> Result<BTreeMap<String, String>> {
     let mut map = BTreeMap::new();
     for pair in pairs {
@@ -101,8 +134,14 @@ pub fn parse_vars(pairs: &[String]) -> Result<BTreeMap<String, String>> {
         if key.is_empty() {
             bail!("workflow: `--var` has an empty variable name");
         }
+        if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            bail!("workflow: `--var` has a variable name with unsupported characters");
+        }
         if value_has_break_or_control(value) {
-            bail!("workflow: `--var` value for `{key}` contains a line break or control character");
+            bail!("workflow: a `--var` value contains a line break or control character");
+        }
+        if map.contains_key(key) {
+            bail!("workflow: `--var` repeats a variable name");
         }
         map.insert(key.to_string(), value.to_string());
     }
@@ -133,12 +172,45 @@ pub fn parse_skeleton(text: &str, source: &str) -> Result<Skeleton> {
 ///
 /// A placeholder is unclosed or names a key that was not passed.
 pub fn fill_vars(skel: &Skeleton, vars: &BTreeMap<String, String>) -> Result<Skeleton> {
+    check_vars_used(skel, vars)?;
     let mut out = skel.clone();
+    out.title = fill_text(&skel.title, vars, skel.title_line, &skel.source)?;
     for step in &mut out.steps {
         step.title = fill_text(&step.title, vars, step.line, &skel.source)?;
         step.body = fill_text(&step.body, vars, step.line, &skel.source)?;
     }
     Ok(out)
+}
+
+fn check_vars_used(skel: &Skeleton, vars: &BTreeMap<String, String>) -> Result<()> {
+    let mut used = BTreeSet::new();
+    used.extend(variable_names(&skel.title, skel.title_line, &skel.source)?);
+    for step in &skel.steps {
+        used.extend(variable_names(&step.title, step.line, &skel.source)?);
+        used.extend(variable_names(&step.body, step.body_line, &skel.source)?);
+    }
+    if vars.keys().any(|key| !used.contains(key)) {
+        bail!("workflow: `--var` names a variable the skeleton does not use");
+    }
+    Ok(())
+}
+
+fn variable_names(text: &str, line: usize, source: &str) -> Result<BTreeSet<String>> {
+    let mut names = BTreeSet::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            bail!("workflow: {source}:{line}: an unclosed placeholder starts near {start}");
+        };
+        let key = after[..end].trim();
+        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            bail!("workflow: {source}:{line}: placeholder {key:?} is not a variable name");
+        }
+        names.insert(key.to_string());
+        rest = &after[end + 2..];
+    }
+    Ok(names)
 }
 
 /// Deterministic public Org with steps in topological order.
@@ -163,10 +235,9 @@ pub fn render_skeleton(skel: &Skeleton) -> Result<String> {
 /// The file is not a skeleton, the version was not bumped, or the deed store
 /// did not accept the file.
 pub fn define_file(path: &Path) -> Result<String> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("workflow: read {}", path.display()))?;
+    let text = std::fs::read_to_string(path).context("workflow: read <file>")?;
     let name = skeleton_name(path)?;
-    define_named(&name, &text, &path.display().to_string(), None)
+    define_named(&name, &text, "<file>", None)
 }
 
 fn run_lock_dir(root: &Path) -> PathBuf {
@@ -197,7 +268,7 @@ fn run_lock_dir(root: &Path) -> PathBuf {
     root.join(".ljos-locks")
 }
 
-fn acquire_run_lock(parent: &str) -> Result<crate::CommitLock> {
+pub(crate) fn acquire_run_lock(parent: &str) -> Result<crate::CommitLock> {
     let layout = vissue_core::Layout::resolve(None, None)?;
     layout.require_tracker()?;
     let slug: String = parent
@@ -244,7 +315,10 @@ fn run_lock_wait() -> std::time::Duration {
 /// File the steps of `name` under `parent`.
 ///
 /// The run keeps the skeleton version from the first start. A later start
-/// uses that copy, files a missing step and restores a missing edge.
+/// uses that copy, files a missing step and restores a missing edge. The
+/// index records the run before the first tracker write and each step id as
+/// soon as its `step:` note is written, so the next start finishes a start
+/// that was cut short.
 ///
 /// # Errors
 ///
@@ -256,47 +330,54 @@ pub fn start_run(
     vars: &BTreeMap<String, String>,
     file: Option<&Path>,
 ) -> Result<String> {
+    let parent = parent.trim();
+    if parent.is_empty() {
+        bail!("workflow: pass a parent ticket");
+    }
+    validate_start(parent, name, vars, file)?;
+    let _skeleton_lock = acquire_skeleton_lock(name)?;
     let _lock = acquire_run_lock(parent)?;
-    let latest = require_stored(name)?;
+    let mut latest = require_stored(name)?;
     let parent_card = crate::tracker_show_json(parent)
         .with_context(|| format!("workflow: {parent} is not a ticket"))?;
     if crate::workflow_name_from_issue(&parent_card).is_some() {
         bail!("workflow: {parent} already runs the feature workflow");
     }
-    let already = match note_rest(&parent_card, NAME_NOTE) {
-        Some(have) if have != name => {
-            bail!("workflow: {parent} already runs the {have} skeleton");
+    let state = run_state(parent, &parent_card)?;
+    let already = match state.as_ref() {
+        Some(state) if state.name != name => {
+            bail!(
+                "workflow: {parent} already runs the {} skeleton",
+                state.name
+            );
         }
         Some(_) => true,
         None => false,
     };
     let using = if already {
-        match note_rest(&parent_card, SHA_NOTE) {
-            Some(sha) => pinned_stored(&latest, &sha, parent, name)?,
+        match state.as_ref().and_then(|state| state.sha.as_deref()) {
+            Some(sha) => pinned_stored(&latest, sha, parent, name)?,
             None => latest.clone(),
         }
     } else {
-        latest
+        latest.clone()
     };
     if let Some(path) = file {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("workflow: read {}", path.display()))?;
+        let text = std::fs::read_to_string(path).context("workflow: read --file <value>")?;
         let sha = sha256_hex(text.as_bytes());
         if sha != using.sha256 {
-            bail!(
-                "workflow: {} does not match the stored {name} skeleton {}",
-                path.display(),
-                using.sha256
-            );
+            bail!("workflow: --file <value> does not match the stored skeleton");
         }
     }
     let skel = parse_skeleton(&using.body, &format!("stored:{name}"))?;
+    check_vars_used(&skel, vars)?;
     let recs = tracker_recs()?;
     let existing = step_rows(&recs, parent)?;
-    let mut ids: BTreeMap<String, String> = existing
-        .iter()
-        .map(|row| (row.key.clone(), row.id.clone()))
-        .collect();
+    let recorded = state
+        .as_ref()
+        .map(|state| state.steps.clone())
+        .unwrap_or_default();
+    let mut ids = recorded.clone();
     let prepared = if skel.steps.iter().any(|step| !ids.contains_key(&step.key)) {
         let filled = fill_vars(&skel, vars)?;
         let order = topo(&filled)?;
@@ -311,15 +392,35 @@ pub fn start_run(
         None
     };
     let mut out = String::new();
+    let interrupted = state.as_ref().and_then(|state| state.filing.clone());
+    let record = |latest: &mut Stored, ids: &BTreeMap<String, String>, filing: Option<&Filing>| {
+        append_run(
+            latest,
+            StoredRun {
+                parent: parent.to_string(),
+                name: name.to_string(),
+                sha256: using.sha256.clone(),
+                steps: ids.clone(),
+                filing: filing.cloned(),
+            },
+        );
+        write_stored(latest)
+    };
     if !already {
-        write_note(parent, &format!("{NAME_NOTE}{name}"))?;
-        write_note(parent, &format!("{VERSION_NOTE}{}", using.version))?;
-        write_note(parent, &format!("{SHA_NOTE}{}", using.sha256))?;
-        write_note(parent, &format!("{DEED_ID_NOTE}{}", using.accession))?;
+        record(&mut latest, &ids, None)?;
         out.push_str(&format!(
             "{parent} runs {name} version {}\nsha {}\n",
             using.version, using.sha256
         ));
+    }
+    if !ordered_notes(&parent_card)
+        .iter()
+        .any(|note| note.starts_with(NAME_NOTE))
+    {
+        write_note(parent, &format!("{NAME_NOTE}{name}"))?;
+        write_note(parent, &format!("{VERSION_NOTE}{}", using.version))?;
+        write_note(parent, &format!("{SHA_NOTE}{}", using.sha256))?;
+        write_note(parent, &format!("{DEED_ID_NOTE}{}", using.accession))?;
     }
     let mut filed_any = false;
     if let Some((filled, order, project)) = &prepared {
@@ -332,11 +433,43 @@ pub fn start_run(
                 .iter()
                 .find(|step| step.key == *key)
                 .expect("topo key");
-            let id = file_step(parent, project, step)?;
+            let adopted = match &interrupted {
+                Some(filing) if filing.step == *key => {
+                    interrupted_step(&recs, parent, key, &filing.token, &ids)?
+                }
+                _ => None,
+            };
+            let id = match &adopted {
+                Some(id) => id.clone(),
+                None => {
+                    let filing = Filing {
+                        step: key.clone(),
+                        token: filing_token()?,
+                    };
+                    record(&mut latest, &ids, Some(&filing))?;
+                    file_step(parent, project, step, &filing.token)?
+                }
+            };
             ids.insert(step.key.clone(), id.clone());
-            out.push_str(&format!("filed {} {id}\n", step.key));
+            record(&mut latest, &ids, None)?;
+            write_step_notes(&id, step)?;
+            let verb = if adopted.is_some() {
+                "adopted"
+            } else {
+                "filed"
+            };
+            out.push_str(&format!("{verb} {} {id}\n", step.key));
             filed_any = true;
         }
+    }
+    let unrecorded: Vec<String> = ids
+        .iter()
+        .filter(|(key, _)| !recorded.contains_key(*key))
+        .filter(|(key, _)| skel.steps.iter().any(|step| step.key == **key))
+        .map(|(key, id)| format!("{key}={id}"))
+        .collect();
+    if !unrecorded.is_empty() {
+        write_note(parent, &format!("{STEPS_NOTE}{}", unrecorded.join(" ")))?;
     }
     let mut repaired = false;
     for step in &skel.steps {
@@ -385,6 +518,54 @@ pub fn start_run(
     Ok(out)
 }
 
+fn validate_start(
+    parent: &str,
+    name: &str,
+    vars: &BTreeMap<String, String>,
+    file: Option<&Path>,
+) -> Result<()> {
+    let latest = require_stored(name)?;
+    let parent_card = crate::tracker_show_json(parent)
+        .with_context(|| format!("workflow: {parent} is not a ticket"))?;
+    if crate::workflow_name_from_issue(&parent_card).is_some() {
+        bail!("workflow: {parent} already runs the feature workflow");
+    }
+    let state = run_state(parent, &parent_card)?;
+    let using = match state.as_ref() {
+        Some(state) if state.name != name => {
+            bail!(
+                "workflow: {parent} already runs the {} skeleton",
+                state.name
+            );
+        }
+        Some(state) => match state.sha.as_deref() {
+            Some(sha) => pinned_stored(&latest, sha, parent, name)?,
+            None => latest,
+        },
+        None => latest,
+    };
+    if let Some(path) = file {
+        let text = std::fs::read_to_string(path).context("workflow: read --file <value>")?;
+        if sha256_hex(text.as_bytes()) != using.sha256 {
+            bail!("workflow: the file does not match the stored skeleton");
+        }
+    }
+    let skeleton = parse_skeleton(&using.body, &format!("stored:{name}"))?;
+    check_vars_used(&skeleton, vars)?;
+    let recorded = state
+        .as_ref()
+        .map(|state| state.steps.clone())
+        .unwrap_or_default();
+    if skeleton
+        .steps
+        .iter()
+        .any(|step| !recorded.contains_key(&step.key))
+    {
+        fill_vars(&skeleton, vars)?;
+    }
+    Ok(())
+}
+
 /// The DAG, ready steps, open blockers and what the signoff still needs.
 ///
 /// `None` when `parent` carries no skeleton.
@@ -394,14 +575,14 @@ pub fn start_run(
 /// The tracker cannot be read.
 pub fn status_report(parent: &str) -> Result<Option<String>> {
     let card = crate::tracker_show_json(parent)?;
-    let Some(name) = note_rest(&card, NAME_NOTE) else {
+    let Some(state) = run_state(parent, &card)? else {
         return Ok(None);
     };
-    let version = note_rest(&card, VERSION_NOTE).unwrap_or_else(|| "?".into());
-    let sha = note_rest(&card, SHA_NOTE).unwrap_or_else(|| "?".into());
+    let version = state.version.as_deref().unwrap_or("?");
+    let sha = state.sha.as_deref().unwrap_or("?");
     let recs = tracker_recs()?;
     let rows = step_rows(&recs, parent)?;
-    let mut out = format!("{name} version {version} sha {sha} on {parent}\n");
+    let mut out = format!("{} version {version} sha {sha} on {parent}\n", state.name);
     let by_key: BTreeMap<&str, &RunStep> = rows.iter().map(|row| (row.key.as_str(), row)).collect();
     for row in &rows {
         out.push_str(&format!(
@@ -454,10 +635,20 @@ pub fn status_report(parent: &str) -> Result<Option<String>> {
         }
     }
     out.push_str("signoff needs:\n");
-    match rows.iter().find(|row| row.kind == "signoff") {
+    let pinned = match pinned_skeleton(parent, &card) {
+        Ok(pinned) => pinned,
+        Err(err) => {
+            out.push_str(&format!(
+                "  the pinned skeleton could not be read: {err:#}\n"
+            ));
+            return Ok(Some(out));
+        }
+    };
+    let recorded = state.steps;
+    match pinned.steps.iter().find(|step| step.kind == Kind::Signoff) {
         None => out.push_str("  no signoff step\n"),
         Some(sign) => {
-            let missing = signoff_lines(&recs, &rows, sign)?;
+            let missing = signoff_missing(&recs, parent, &pinned, &recorded, &sign.key)?;
             if missing.is_empty() {
                 out.push_str("  nothing\n");
             } else {
@@ -472,8 +663,12 @@ pub fn status_report(parent: &str) -> Result<Option<String>> {
 
 /// Refuse to complete or finish a signoff step that is still missing work.
 ///
-/// A ticket that is not a signoff step is left alone. A tracker that cannot
-/// be read is left alone, so a claim id that is not a ticket still completes.
+/// The pinned skeleton decides. The step is found by the ticket id the start
+/// command recorded on the parent, and its kind, quorum and deed come from
+/// the pinned step, never from tags or notes on the ticket. A ticket that is
+/// not a recorded step is left alone, unless it was filed as a signoff step.
+/// A tracker that cannot be read is left alone, so a claim id that is not a
+/// ticket still completes.
 ///
 /// # Errors
 ///
@@ -483,20 +678,39 @@ pub fn signoff_block(issue: &str) -> Result<()> {
     let Ok(card) = crate::tracker_show_json(issue) else {
         return Ok(());
     };
-    if step_kind_of(&card).as_deref() != Some("signoff") {
-        return Ok(());
-    }
-    let parent = card["parent"]
+    let filed_as_signoff = notes_of(&card)
+        .iter()
+        .any(|note| note.strip_prefix(KIND_NOTE) == Some(Kind::Signoff.word()));
+    let run_parent = card["parent"]
         .as_str()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("signoff: {issue} has no parent run"))?;
-    let recs = tracker_recs()?;
-    let rows = step_rows(&recs, parent)?;
-    let Some(sign) = rows.iter().find(|row| row.id == issue) else {
-        bail!("signoff: {issue} is not a step of {parent}");
+        .filter(|parent| !parent.is_empty());
+    let run = if let Some(parent) = run_parent {
+        let parent_card = crate::tracker_show_json(parent)?;
+        run_state(parent, &parent_card)?.and_then(|state| {
+            let key = state.steps.into_iter().find(|(_, id)| id == issue)?.0;
+            Some((parent.to_string(), parent_card, key))
+        })
+    } else {
+        None
     };
-    let missing = signoff_lines(&recs, &rows, sign)?;
+    let Some((parent, parent_card, key)) = run else {
+        if filed_as_signoff {
+            bail!("signoff: {issue} is not a recorded step of a skeleton run");
+        }
+        return Ok(());
+    };
+    let pinned = pinned_skeleton(&parent, &parent_card)?;
+    let Some(step) = pinned.steps.iter().find(|step| step.key == key) else {
+        bail!("signoff: {key} is not a step of the skeleton {parent} pinned");
+    };
+    if step.kind != Kind::Signoff {
+        return Ok(());
+    }
+    let recs = tracker_recs()?;
+    let state = run_state(&parent, &parent_card)?
+        .ok_or_else(|| anyhow::anyhow!("signoff: {parent} has no pinned skeleton"))?;
+    let missing = signoff_missing(&recs, &parent, &pinned, &state.steps, &key)?;
     if missing.is_empty() {
         return Ok(());
     }
@@ -506,6 +720,153 @@ pub fn signoff_block(issue: &str) -> Result<()> {
         msg.push('\n');
     }
     bail!("{msg}");
+}
+
+/// The skeleton version a run pinned at start.
+fn pinned_skeleton(parent: &str, parent_card: &Value) -> Result<Skeleton> {
+    let state = run_state(parent, parent_card)?
+        .ok_or_else(|| anyhow::anyhow!("signoff: {parent} has no pinned skeleton name"))?;
+    let sha = state
+        .sha
+        .ok_or_else(|| anyhow::anyhow!("signoff: {parent} has no pinned skeleton sha"))?;
+    let latest = require_stored(&state.name)?;
+    let pinned = pinned_stored(&latest, &sha, parent, &state.name)?;
+    parse_skeleton(&pinned.body, &format!("stored:{}", state.name))
+}
+
+/// The latest immutable index record for this run.
+///
+/// Tracker notes mirror these fields for people. They are never read as run
+/// state.
+fn run_state(parent: &str, card: &Value) -> Result<Option<RunState>> {
+    let Some(run) = read_run(parent)? else {
+        if ordered_notes(card)
+            .iter()
+            .any(|note| note.starts_with(NAME_NOTE))
+        {
+            bail!(
+                "workflow: {parent} has no run in the skeleton index; restart the workflow on a new parent with `ljos workflow --start NAME NEW_PARENT`"
+            );
+        }
+        return Ok(None);
+    };
+    let stored = require_stored(&run.name)?;
+    let pinned = pinned_stored(&stored, &run.sha256, parent, &run.name)?;
+    Ok(Some(RunState {
+        name: run.name,
+        version: Some(pinned.version.to_string()),
+        sha: Some(run.sha256),
+        steps: run.steps,
+        filing: run.filing,
+    }))
+}
+
+fn append_run(stored: &mut Stored, run: StoredRun) {
+    if stored.runs.last().is_none_or(|last| {
+        last.parent != run.parent
+            || last.name != run.name
+            || last.sha256 != run.sha256
+            || last.steps != run.steps
+            || last.filing != run.filing
+    }) {
+        stored.runs.push(run);
+    }
+}
+
+fn ordered_notes(card: &Value) -> Vec<String> {
+    let mut notes: Vec<(String, usize, String)> = card["logbook"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let note = entry["note"].as_str()?.trim();
+            if note.is_empty() {
+                return None;
+            }
+            let stamp = entry["timestamp"].as_str().unwrap_or("").to_string();
+            Some((stamp, index, note.to_string()))
+        })
+        .collect();
+    // The logbook lists the newest note first.
+    notes.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    notes.into_iter().map(|(_, _, note)| note).collect()
+}
+
+fn first_note_value(notes: &[String], prefix: &str) -> Option<String> {
+    notes
+        .iter()
+        .find_map(|note| note.strip_prefix(prefix))
+        .map(str::trim)
+        .filter(|rest| !rest.is_empty())
+        .map(str::to_string)
+}
+
+fn revision_text(revision: &AppliedRevision) -> String {
+    format!(
+        "{REVISION_NOTE}{} {} {} {}",
+        revision.proposal, revision.version, revision.sha256, revision.accession
+    )
+}
+
+/// What the signoff step `sign_key` of a pinned run still needs.
+fn signoff_missing(
+    recs: &[vissue_core::views::IssueRec],
+    parent: &str,
+    pinned: &Skeleton,
+    recorded: &BTreeMap<String, String>,
+    sign_key: &str,
+) -> Result<Vec<String>> {
+    let (rows, mut missing) = missing_pinned_steps(recs, parent, pinned, recorded);
+    let Some(sign) = rows.iter().find(|row| row.key == sign_key) else {
+        return Ok(missing);
+    };
+    missing.extend(signoff_lines(recs, &rows, sign)?);
+    Ok(missing)
+}
+
+/// The rows of a pinned run, one for each step whose recorded ticket is in
+/// the tracker, with kind, depends, quorum and deed from the pinned step and
+/// the state from the ticket. A step with no recorded id, or whose recorded
+/// ticket is gone, is a missing line instead.
+fn missing_pinned_steps(
+    recs: &[vissue_core::views::IssueRec],
+    parent: &str,
+    pinned: &Skeleton,
+    recorded: &BTreeMap<String, String>,
+) -> (Vec<RunStep>, Vec<String>) {
+    let mut rows = Vec::new();
+    let mut missing = Vec::new();
+    for step in &pinned.steps {
+        let rec = recorded
+            .get(&step.key)
+            .and_then(|id| recs.iter().find(|rec| rec.heading.id == *id))
+            .filter(|rec| rec.heading.parent().map(str::trim) == Some(parent))
+            .filter(|rec| {
+                crate::tracker_show_json(&rec.heading.id)
+                    .ok()
+                    .and_then(|card| step_key_of(&card))
+                    .as_deref()
+                    == Some(step.key.as_str())
+            });
+        let Some(rec) = rec else {
+            missing.push(format!(
+                "{} is missing from the pinned skeleton run",
+                step.key
+            ));
+            continue;
+        };
+        rows.push(RunStep {
+            key: step.key.clone(),
+            id: rec.heading.id.clone(),
+            state: rec.heading.state.clone(),
+            kind: step.kind.word().to_string(),
+            depends: step.depends.clone(),
+            quorum: step.quorum.unwrap_or(2),
+            deed: step.deed == Some(true),
+        });
+    }
+    (order_rows(rows), missing)
 }
 
 /// File a proposal ticket whose options are `keep` and `revise`.
@@ -519,11 +880,18 @@ pub fn revise_from(name: &str, parent: &str) -> Result<String> {
     let mut stored = require_stored(name)?;
     let card = crate::tracker_show_json(parent)
         .with_context(|| format!("workflow: {parent} is not a ticket"))?;
-    if note_rest(&card, NAME_NOTE).as_deref() != Some(name) {
+    let Some(state) = run_state(parent, &card)? else {
+        bail!("workflow: {parent} is not a run of {name}");
+    };
+    if state.name != name {
         bail!("workflow: {parent} is not a run of {name}");
     }
-    if let Some(id) = note_rest(&card, PROPOSAL_NOTE) {
-        if let Ok(prop) = crate::tracker_show_json(&id) {
+    let pinned_sha = state
+        .sha
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("workflow: {parent} has no pinned skeleton sha"))?;
+    if let Some(id) = stored.proposal.as_deref() {
+        if let Ok(prop) = crate::tracker_show_json(id) {
             let state = prop["state"].as_str().unwrap_or("");
             if !is_closed(state) {
                 return Ok(format!("proposal {id} is already open for {name}\n"));
@@ -533,7 +901,7 @@ pub fn revise_from(name: &str, parent: &str) -> Result<String> {
     let recs = tracker_recs()?;
     let rows = step_rows(&recs, parent)?;
     let mut body = String::from("Options: keep, revise\n\n");
-    let version = note_rest(&card, VERSION_NOTE).unwrap_or_else(|| "?".into());
+    let version = state.version.as_deref().unwrap_or("?");
     body.push_str(&format!(
         "Proposal for {name} version {version}, from {parent}.\n"
     ));
@@ -601,9 +969,14 @@ pub fn revise_from(name: &str, parent: &str) -> Result<String> {
     if id.is_empty() {
         bail!("workflow: the proposal ticket was not filed");
     }
-    write_note(parent, &format!("{PROPOSAL_NOTE}{id}"))?;
     stored.proposal = Some(id.clone());
+    stored.proposal_runs.push(ProposalRun {
+        proposal: id.clone(),
+        parent: parent.to_string(),
+        sha256: pinned_sha,
+    });
     write_stored(&stored)?;
+    write_note(parent, &format!("{PROPOSAL_NOTE}{id}"))?;
     let _ = crate::persist_tracker(&id, "filed a proposal");
     Ok(format!(
         "filed proposal {id} for {name} on {parent}\nOptions: keep, revise\n"
@@ -612,24 +985,50 @@ pub fn revise_from(name: &str, parent: &str) -> Result<String> {
 
 /// Store `file` as version + 1 after consensus on the proposal settles `revise`.
 ///
-/// The run that filed the proposal moves to that version. `--start` does not.
+/// The run the index recorded for the proposal moves to that version, and
+/// only while it still pins the sha the proposal was filed against.
+/// `--start` does not move a run.
 ///
 /// # Errors
 ///
-/// There is no proposal, consensus did not settle `revise`, or the file is
-/// not a skeleton.
+/// There is no proposal, the index recorded no run for it, consensus did
+/// not settle `revise`, or the file is not a skeleton.
 pub fn revise_apply(name: &str, file: &Path) -> Result<String> {
     let _lock = acquire_skeleton_lock(name)?;
-    let stored = require_stored(name)?;
+    let mut stored = require_stored(name)?;
     let Some(proposal) = stored.proposal.clone() else {
         bail!(
             "workflow: {name} has no proposal; `ljos workflow revise {name} --from PARENT` files one"
         );
     };
+    let Some(filed_from) = proposal_run(&stored, &proposal) else {
+        bail!(
+            "workflow: the skeleton index records no run for proposal {proposal}; `ljos workflow revise {name} --from PARENT` files a new one"
+        );
+    };
+    if let Some(revision) = applied_revision(&stored, &proposal) {
+        return finish_revision(
+            name,
+            &filed_from,
+            &revision,
+            format!("proposal {proposal} for {name} is already applied\n"),
+        );
+    }
     if stored.applied.as_deref() == Some(proposal.as_str()) {
-        return Ok(format!(
-            "proposal {proposal} for {name} is already applied\n"
-        ));
+        let revision = current_revision(&stored, &proposal);
+        stored.revisions.push(AppliedRevision {
+            proposal: proposal.clone(),
+            version: stored.version,
+            sha256: stored.sha256.clone(),
+            accession: stored.accession.clone(),
+        });
+        write_stored(&stored)?;
+        return finish_revision(
+            name,
+            &filed_from,
+            &revision,
+            format!("proposal {proposal} for {name} is already applied\n"),
+        );
     }
     match crate::reap::gate_quorum(&proposal, 2, None)? {
         crate::reap::QuorumGate::Met { .. } => {}
@@ -643,8 +1042,7 @@ pub fn revise_apply(name: &str, file: &Path) -> Result<String> {
         let got = choice.unwrap_or_else(|| "nothing".into());
         bail!("workflow: consensus on {proposal} settled {got}, so {name} was not changed");
     }
-    let text = std::fs::read_to_string(file)
-        .with_context(|| format!("workflow: read {}", file.display()))?;
+    let text = std::fs::read_to_string(file).context("workflow: read --file <value>")?;
     let file_version = version_of(&text).unwrap_or(0);
     let incoming = body_without_version(&text);
     let already_stored =
@@ -660,28 +1058,93 @@ pub fn revise_apply(name: &str, file: &Path) -> Result<String> {
         ));
     }
     let next = stored.version + 1;
-    let bumped = set_version(&text, next, file)?;
-    let mut out = define_locked(name, &bumped, &file.display().to_string(), Some(&proposal))?;
+    let bumped = set_version(&text, next)?;
+    let out = define_locked(name, &bumped, "--file <value>", Some(&proposal))?;
+    let stored = require_stored(name)?;
+    let revision = applied_revision(&stored, &proposal)
+        .ok_or_else(|| anyhow::anyhow!("workflow: the applied revision was not recorded"))?;
+    finish_revision(name, &filed_from, &revision, out)
+}
+
+fn proposal_run(stored: &Stored, proposal: &str) -> Option<ProposalRun> {
+    stored
+        .proposal_runs
+        .iter()
+        .find(|row| row.proposal == proposal)
+        .cloned()
+}
+
+fn current_revision(stored: &Stored, proposal: &str) -> AppliedRevision {
+    AppliedRevision {
+        proposal: proposal.to_string(),
+        version: stored.version,
+        sha256: stored.sha256.clone(),
+        accession: stored.accession.clone(),
+    }
+}
+
+fn applied_revision(stored: &Stored, proposal: &str) -> Option<AppliedRevision> {
+    let row = stored
+        .revisions
+        .iter()
+        .find(|row| row.proposal == proposal)?;
+    Some(row.clone())
+}
+
+/// Move the run recorded for the proposal to `revision`, under its run lock.
+///
+/// The run moves only while it still pins the sha the proposal was filed
+/// against, so applying again never moves it twice or moves another run.
+fn finish_revision(
+    name: &str,
+    filed_from: &ProposalRun,
+    revision: &AppliedRevision,
+    mut out: String,
+) -> Result<String> {
+    let proposal = filed_from.proposal.as_str();
+    let run = filed_from.parent.as_str();
+    let version = revision.version;
+    let _ = write_note(proposal, &format!("revised {name} to version {version}"));
+    let _run_lock = acquire_run_lock(run)?;
     let mut stored = require_stored(name)?;
-    stored.applied = Some(proposal.clone());
-    write_stored(&stored)?;
-    let _ = write_note(&proposal, &format!("revised {name} to version {next}"));
-    if let Some(run) = proposal_parent(&proposal) {
-        if let Ok(card) = crate::tracker_show_json(&run) {
-            if note_rest(&card, NAME_NOTE).as_deref() == Some(name) {
-                let stored = require_stored(name)?;
-                write_note(&run, &format!("{VERSION_NOTE}{}", stored.version))?;
-                write_note(&run, &format!("{SHA_NOTE}{}", stored.sha256))?;
-                write_note(&run, &format!("{DEED_ID_NOTE}{}", stored.accession))?;
-                out.push_str(&format!(
-                    "{run} now runs {name} version {}\n",
-                    stored.version
-                ));
-            }
+    let current = stored
+        .runs
+        .iter()
+        .rev()
+        .find(|row| row.parent == run && row.name == name)
+        .cloned();
+    match current {
+        Some(current) if current.sha256 == filed_from.sha256 => {
+            append_run(
+                &mut stored,
+                StoredRun {
+                    parent: run.to_string(),
+                    name: name.to_string(),
+                    sha256: revision.sha256.clone(),
+                    steps: current.steps,
+                    filing: None,
+                },
+            );
+            write_stored(&stored)?;
+            let revision_note = revision_text(revision);
+            write_note(proposal, &revision_note)?;
+            write_note(run, &format!("{VERSION_NOTE}{version}"))?;
+            write_note(run, &format!("{SHA_NOTE}{}", revision.sha256))?;
+            write_note(run, &format!("{DEED_ID_NOTE}{}", revision.accession))?;
+            write_note(run, &revision_note)?;
+            out.push_str(&format!("{run} now runs {name} version {version}\n"));
+        }
+        Some(current) if current.sha256 == revision.sha256 => {
+            out.push_str(&format!("{run} already runs {name} version {version}\n"));
+        }
+        _ => {
+            out.push_str(&format!(
+                "{run} no longer runs the {name} version proposal {proposal} was filed against, so it stays\n"
+            ));
         }
     }
     out.push_str(&format!("noted the proposal {proposal}\n"));
-    close_proposal(&proposal)?;
+    close_proposal(proposal)?;
     Ok(out)
 }
 
@@ -716,16 +1179,6 @@ fn body_without_version(text: &str) -> String {
     sha256_hex(kept.as_bytes())
 }
 
-fn proposal_parent(id: &str) -> Option<String> {
-    let card = crate::tracker_show_json(id).ok()?;
-    let parent = card["parent"].as_str()?.trim();
-    if parent.is_empty() {
-        None
-    } else {
-        Some(parent.to_string())
-    }
-}
-
 /// Load a skeleton for `render`.
 ///
 /// `file` wins, then the stored deed, then `.ljos/workflows/NAME.org`.
@@ -735,23 +1188,18 @@ fn proposal_parent(id: &str) -> Option<String> {
 /// No copy of the skeleton can be read, or the Org does not validate.
 pub fn load_skeleton(name: &str, file: Option<&Path>) -> Result<Skeleton> {
     if let Some(path) = file {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("workflow: read {}", path.display()))?;
-        return parse_skeleton(&text, &path.display().to_string());
+        let text = std::fs::read_to_string(path).context("workflow: read --file <value>")?;
+        return parse_skeleton(&text, "--file <value>");
     }
     if let Some(stored) = read_stored(name)? {
-        return parse_skeleton(&stored.body, &format!("stored:{name}"));
+        return parse_skeleton(&stored.body, "stored skeleton");
     }
     let path = default_path(name);
     if path.is_file() {
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("workflow: read {}", path.display()))?;
-        return parse_skeleton(&text, &path.display().to_string());
+        let text = std::fs::read_to_string(&path).context("workflow: read the default skeleton")?;
+        return parse_skeleton(&text, "default skeleton");
     }
-    bail!(
-        "workflow: {name} is not stored and {} is not a file",
-        path.display()
-    );
+    bail!("workflow: <value> is not stored and its default skeleton is not a file");
 }
 
 fn default_path(name: &str) -> PathBuf {
@@ -771,10 +1219,7 @@ fn skeleton_name(path: &Path) -> Result<String> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        bail!(
-            "workflow: {} needs a file name of letters, digits, hyphens or underscores",
-            path.display()
-        );
+        bail!("workflow: <file> needs a name of letters, digits, hyphens or underscores");
     }
     Ok(name.to_string())
 }
@@ -788,6 +1233,22 @@ struct StoredVer {
 }
 
 #[derive(Debug, Clone)]
+struct AppliedRevision {
+    proposal: String,
+    version: i64,
+    sha256: String,
+    accession: String,
+}
+
+/// The run a proposal was filed from and the sha that run had pinned then.
+#[derive(Debug, Clone)]
+struct ProposalRun {
+    proposal: String,
+    parent: String,
+    sha256: String,
+}
+
+#[derive(Debug, Clone)]
 struct Stored {
     name: String,
     version: i64,
@@ -797,6 +1258,9 @@ struct Stored {
     proposal: Option<String>,
     applied: Option<String>,
     versions: Vec<StoredVer>,
+    revisions: Vec<AppliedRevision>,
+    proposal_runs: Vec<ProposalRun>,
+    runs: Vec<StoredRun>,
 }
 
 fn check_skeleton_name(name: &str) -> Result<()> {
@@ -811,11 +1275,15 @@ fn check_skeleton_name(name: &str) -> Result<()> {
     {
         return Ok(());
     }
-    bail!("workflow: `{name}` is not a skeleton name");
+    bail!("workflow: <value> is not a skeleton name");
 }
 
 fn index_path(name: &str) -> Result<PathBuf> {
     check_skeleton_name(name)?;
+    Ok(index_dir()?.join(format!("{name}.json")))
+}
+
+fn index_dir() -> Result<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| {
@@ -824,10 +1292,43 @@ fn index_path(name: &str) -> Result<PathBuf> {
         .ok_or_else(|| {
             anyhow::anyhow!("workflow: set HOME so the skeleton index has a directory")
         })?;
-    Ok(base
-        .join("ljos")
-        .join("workflows")
-        .join(format!("{name}.json")))
+    Ok(base.join("ljos").join("workflows"))
+}
+
+fn read_run(parent: &str) -> Result<Option<StoredRun>> {
+    let dir = index_dir()?;
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(None);
+    };
+    let mut found = None;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("workflow: read {}", dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        check_skeleton_name(name)?;
+        let Some(stored) = read_stored(name)? else {
+            continue;
+        };
+        let Some(run) = stored
+            .runs
+            .iter()
+            .rev()
+            .find(|run| run.parent == parent)
+            .cloned()
+        else {
+            continue;
+        };
+        if found.is_some() {
+            bail!("workflow: {parent} has more than one run in the skeleton index");
+        }
+        found = Some(run);
+    }
+    Ok(found)
 }
 
 fn read_stored(name: &str) -> Result<Option<Stored>> {
@@ -835,10 +1336,11 @@ fn read_stored(name: &str) -> Result<Option<Stored>> {
     if !path.is_file() {
         return Ok(None);
     }
+    let dir = path.parent().unwrap_or(&path).display().to_string();
     let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("workflow: read {}", path.display()))?;
-    let v: Value =
-        serde_json::from_str(&text).with_context(|| format!("workflow: {}", path.display()))?;
+        .with_context(|| format!("workflow: read the index of <value> in {dir}"))?;
+    let v: Value = serde_json::from_str(&text)
+        .with_context(|| format!("workflow: the index of <value> in {dir}"))?;
     let versions = v["versions"]
         .as_array()
         .map(|rows| {
@@ -854,7 +1356,83 @@ fn read_stored(name: &str) -> Result<Option<Stored>> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(Some(Stored {
+    let revisions = v["revisions"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    Some(AppliedRevision {
+                        proposal: row["proposal"].as_str()?.to_string(),
+                        version: row["version"].as_i64()?,
+                        sha256: row["sha256"].as_str()?.to_string(),
+                        accession: row["accession"].as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let runs = v["runs"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    let parent = row["parent"]
+                        .as_str()
+                        .filter(|value| !value.trim().is_empty())
+                        .context("workflow: a run in the skeleton index has no parent")?;
+                    let run_name = row["name"]
+                        .as_str()
+                        .filter(|value| !value.trim().is_empty())
+                        .context("workflow: a run in the skeleton index has no name")?;
+                    let sha256 = row["sha256"]
+                        .as_str()
+                        .filter(|value| !value.trim().is_empty())
+                        .context("workflow: a run in the skeleton index has no sha256")?;
+                    let object = row["steps"]
+                        .as_object()
+                        .context("workflow: a run in the skeleton index has no steps")?;
+                    let mut steps = BTreeMap::new();
+                    for (key, value) in object {
+                        let id = value
+                            .as_str()
+                            .filter(|value| !value.trim().is_empty())
+                            .context("workflow: a run step in the skeleton index has no ticket")?;
+                        steps.insert(key.clone(), id.to_string());
+                    }
+                    Ok(StoredRun {
+                        parent: parent.to_string(),
+                        name: run_name.to_string(),
+                        sha256: sha256.to_string(),
+                        steps,
+                        filing: stored_filing(&row["filing"]),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let proposal_runs = v["proposal_runs"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let field = |key: &str| {
+                        row[key]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string)
+                    };
+                    Some(ProposalRun {
+                        proposal: field("proposal")?,
+                        parent: field("parent")?,
+                        sha256: field("sha256")?,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let stored = Stored {
         name: v["name"].as_str().unwrap_or(name).to_string(),
         version: v["version"].as_i64().unwrap_or(0),
         sha256: v["sha256"].as_str().unwrap_or("").to_string(),
@@ -863,7 +1441,53 @@ fn read_stored(name: &str) -> Result<Option<Stored>> {
         proposal: v["proposal"].as_str().map(str::to_string),
         applied: v["applied"].as_str().map(str::to_string),
         versions,
-    }))
+        revisions,
+        proposal_runs,
+        runs,
+    };
+    let matches = |body: &str, sha: &str| sha256_hex(body.as_bytes()) == sha;
+    if !matches(&stored.body, &stored.sha256)
+        || stored
+            .versions
+            .iter()
+            .any(|row| !matches(&row.body, &row.sha256))
+    {
+        bail!(
+            "workflow: a skeleton body in the index of <value> in {dir} does not match its sha256"
+        );
+    }
+    Ok(Some(stored))
+}
+
+/// A `filing` record with a step and a token. Anything else, such as a
+/// bare step key, names no ticket, so the next start files a fresh one.
+fn stored_filing(row: &Value) -> Option<Filing> {
+    let field = |key: &str| {
+        row[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let token = field("token").filter(|token| is_filing_token(token))?;
+    Some(Filing {
+        step: field("step")?,
+        token,
+    })
+}
+
+fn is_filing_token(token: &str) -> bool {
+    token.len() == 32
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn filing_token() -> Result<String> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random)
+        .map_err(|err| anyhow::anyhow!("workflow: get a random filing token: {err}"))?;
+    Ok(hex::encode(random))
 }
 
 fn pinned_stored(latest: &Stored, sha: &str, parent: &str, name: &str) -> Result<Stored> {
@@ -882,13 +1506,16 @@ fn pinned_stored(latest: &Stored, sha: &str, parent: &str, name: &str) -> Result
         proposal: latest.proposal.clone(),
         applied: latest.applied.clone(),
         versions: Vec::new(),
+        revisions: latest.revisions.clone(),
+        proposal_runs: latest.proposal_runs.clone(),
+        runs: latest.runs.clone(),
     })
 }
 
 fn require_stored(name: &str) -> Result<Stored> {
     read_stored(name)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "workflow: {name} is not stored; `ljos workflow define` stores the skeleton first"
+            "workflow: <value> is not stored; `ljos workflow define` stores the skeleton first"
         )
     })
 }
@@ -911,6 +1538,45 @@ fn write_stored(stored: &Stored) -> Result<()> {
             })
         })
         .collect();
+    let revisions: Vec<Value> = stored
+        .revisions
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "proposal": row.proposal,
+                "version": row.version,
+                "sha256": row.sha256,
+                "accession": row.accession,
+            })
+        })
+        .collect();
+    let proposal_runs: Vec<Value> = stored
+        .proposal_runs
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "proposal": row.proposal,
+                "parent": row.parent,
+                "sha256": row.sha256,
+            })
+        })
+        .collect();
+    let runs: Vec<Value> = stored
+        .runs
+        .iter()
+        .map(|run| {
+            serde_json::json!({
+                "parent": run.parent,
+                "name": run.name,
+                "sha256": run.sha256,
+                "steps": run.steps,
+                "filing": run.filing.as_ref().map(|filing| serde_json::json!({
+                    "step": filing.step,
+                    "token": filing.token,
+                })),
+            })
+        })
+        .collect();
     let doc = serde_json::json!({
         "name": stored.name,
         "version": stored.version,
@@ -920,6 +1586,9 @@ fn write_stored(stored: &Stored) -> Result<()> {
         "proposal": stored.proposal,
         "applied": stored.applied,
         "versions": versions,
+        "revisions": revisions,
+        "proposal_runs": proposal_runs,
+        "runs": runs,
     });
     let bytes = serde_json::to_string_pretty(&doc)?;
     write_index_atomic(&path, bytes.as_bytes())?;
@@ -1068,6 +1737,9 @@ fn define_locked(name: &str, text: &str, source: &str, proposal: Option<&str>) -
     let mut versions = Vec::new();
     let mut kept_proposal = None;
     let mut kept_applied = None;
+    let mut revisions = Vec::new();
+    let mut proposal_runs = Vec::new();
+    let mut runs = Vec::new();
     if let Some(prev) = prev {
         versions = prev.versions;
         if !versions.iter().any(|row| row.sha256 == prev.sha256) {
@@ -1080,6 +1752,17 @@ fn define_locked(name: &str, text: &str, source: &str, proposal: Option<&str>) -
         }
         kept_proposal = prev.proposal;
         kept_applied = prev.applied;
+        revisions = prev.revisions;
+        proposal_runs = prev.proposal_runs;
+        runs = prev.runs;
+    }
+    if let Some(proposal) = proposal {
+        revisions.push(AppliedRevision {
+            proposal: proposal.to_string(),
+            version: skel.version,
+            sha256: sha.clone(),
+            accession: accession.clone(),
+        });
     }
     let stored = Stored {
         name: name.to_string(),
@@ -1088,8 +1771,11 @@ fn define_locked(name: &str, text: &str, source: &str, proposal: Option<&str>) -
         accession: accession.clone(),
         body: text.to_string(),
         proposal: proposal.map(str::to_string).or(kept_proposal),
-        applied: kept_applied,
+        applied: proposal.map(str::to_string).or(kept_applied),
         versions,
+        revisions,
+        proposal_runs,
+        runs,
     };
     write_stored(&stored)?;
     Ok(format!(
@@ -1227,14 +1913,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(dig)
 }
 
-fn set_version(text: &str, version: i64, path: &Path) -> Result<String> {
+fn set_version(text: &str, version: i64) -> Result<String> {
     let mut found = false;
     let mut out = String::new();
     for line in split_keep(text) {
         let (body, nl) = split_nl(line);
         if keyword(body).is_some_and(|(key, _)| key.eq_ignore_ascii_case("version")) {
             if found {
-                bail!("workflow: {} has more than one #+version", path.display());
+                bail!("workflow: --file <value> has more than one #+version");
             }
             found = true;
             out.push_str(&format!("#+version: {version}"));
@@ -1246,7 +1932,7 @@ fn set_version(text: &str, version: i64, path: &Path) -> Result<String> {
         out.push_str(line);
     }
     if !found {
-        bail!("workflow: {} has no #+version", path.display());
+        bail!("workflow: --file <value> has no #+version");
     }
     Ok(out)
 }
@@ -1666,22 +2352,25 @@ fn public_hits(skel: &Skeleton) -> Vec<String> {
 fn public_hits_with_screen(skel: &Skeleton, screen: &crate::public_text::Screen) -> Vec<String> {
     let mut hits = crate::scrub::scan_body_with_screen(&skel.title, skel.title_line, screen);
     for step in &skel.steps {
-        hits.extend(crate::scrub::scan_body_with_screen(
-            &step.title,
-            step.line,
-            screen,
-        ));
+        let title_hits = crate::scrub::scan_body_with_screen(&step.title, step.line, screen);
+        hits.extend(title_hits.iter().cloned());
         if let (Some(role), Some(line)) = (&step.role, step.role_line) {
             hits.extend(crate::scrub::scan_role_with_screen(role, line, screen));
         }
         if !step.body.is_empty() {
-            hits.extend(crate::scrub::scan_body_with_screen(
-                &step.body,
-                step.body_line,
-                screen,
-            ));
+            let body_hits = crate::scrub::scan_body_with_screen(&step.body, step.body_line, screen);
+            if title_hits.is_empty() && body_hits.is_empty() {
+                hits.extend(crate::scrub::scan_body_with_screen(
+                    &format!("{}{}", step.title, step.body),
+                    step.line,
+                    screen,
+                ));
+            }
+            hits.extend(body_hits);
         }
     }
+    hits.sort();
+    hits.dedup();
     hits
 }
 
@@ -1949,8 +2638,61 @@ fn step_tags(step: &Step) -> String {
     tags.join(",")
 }
 
-fn file_step(parent: &str, project: &str, step: &Step) -> Result<String> {
-    let tags = step_tags(step);
+/// The ticket a start cut short filed for step `key` before it recorded the
+/// id: the one child of `parent` that no recorded step names and that
+/// carries the `filing-` tag with `token`, which the index held before the
+/// create. Step tags and `step:` notes are not proof, since a ticket filed
+/// by hand can carry the same ones. A child with no `step:` note gets it
+/// here; a child noted for another step is not taken.
+///
+/// # Errors
+///
+/// More than one such child, or the tracker cannot be read or noted.
+fn interrupted_step(
+    recs: &[vissue_core::views::IssueRec],
+    parent: &str,
+    key: &str,
+    token: &str,
+    ids: &BTreeMap<String, String>,
+) -> Result<Option<String>> {
+    let tag = format!("{FILING_TAG}{token}");
+    let mut found = Vec::new();
+    for rec in recs {
+        if rec.heading.parent().map(str::trim) != Some(parent)
+            || ids.values().any(|id| *id == rec.heading.id)
+        {
+            continue;
+        }
+        let card = crate::tracker_show_json(&rec.heading.id)?;
+        if !meta_tags(&card).contains(&tag) {
+            continue;
+        }
+        match step_key_of(&card) {
+            Some(noted) if noted == key => found.push((rec.heading.id.clone(), false)),
+            None => found.push((rec.heading.id.clone(), true)),
+            Some(_) => {}
+        }
+    }
+    if found.len() > 1 {
+        bail!(
+            "workflow: {parent} has {} children filed for step {key}; close all but one and start again",
+            found.len()
+        );
+    }
+    let Some((id, unnoted)) = found.pop() else {
+        return Ok(None);
+    };
+    if unnoted {
+        write_note(&id, &format!("{STEP_NOTE}{key}"))?;
+    }
+    Ok(Some(id))
+}
+
+/// File the ticket of `step` under `parent` with the `step:` note that binds
+/// it and the `filing-` tag that names this attempt. The caller records the
+/// id in the index before [`write_step_notes`].
+fn file_step(parent: &str, project: &str, step: &Step, token: &str) -> Result<String> {
+    let tags = format!("{},{FILING_TAG}{token}", step_tags(step));
     let body = if step.body.is_empty() {
         None
     } else {
@@ -1972,33 +2714,33 @@ fn file_step(parent: &str, project: &str, step: &Step) -> Result<String> {
         bail!("workflow: vissue filed no id for {}", step.key);
     }
     write_note(&id, &format!("{STEP_NOTE}{}", step.key))?;
-    write_note(&id, &format!("{KIND_NOTE}{}", step.kind.word()))?;
-    write_note(&id, &format!("depends: {}", step.depends.join(" ")))?;
+    Ok(id)
+}
+
+fn write_step_notes(id: &str, step: &Step) -> Result<()> {
+    write_note(id, &format!("{KIND_NOTE}{}", step.kind.word()))?;
+    write_note(id, &format!("depends: {}", step.depends.join(" ")))?;
     if let Some(role) = &step.role {
-        write_note(&id, &format!("{ROLE_NOTE}{role}"))?;
+        write_note(id, &format!("{ROLE_NOTE}{role}"))?;
     }
     if let Some(n) = step.quorum {
-        write_note(&id, &format!("{QUORUM_NOTE}{n}"))?;
+        write_note(id, &format!("{QUORUM_NOTE}{n}"))?;
     } else if step.kind == Kind::Signoff {
-        write_note(&id, &format!("{QUORUM_NOTE}2"))?;
+        write_note(id, &format!("{QUORUM_NOTE}2"))?;
     }
     if let Some(yes) = step.deed {
         write_note(
-            &id,
+            id,
             &format!("{DEED_NOTE}{}", if yes { "yes" } else { "no" }),
         )?;
     }
-    Ok(id)
+    Ok(())
 }
 
 fn write_note(id: &str, text: &str) -> Result<()> {
     crate::run_captured("vissue", &["note", id, text])
         .with_context(|| format!("workflow: note on {id}"))?;
     Ok(())
-}
-
-fn note_rest(card: &Value, prefix: &str) -> Option<String> {
-    crate::latest_note_value(card, prefix)
 }
 
 fn notes_of(card: &Value) -> Vec<String> {
@@ -2023,7 +2765,7 @@ fn is_internal_note(note: &str) -> bool {
 /// The skeleton name on a parent, from the note the start command writes.
 #[must_use]
 pub fn bound_skeleton(card: &Value) -> Option<String> {
-    note_rest(card, NAME_NOTE).filter(|name| !name.is_empty())
+    first_note_value(&ordered_notes(card), NAME_NOTE)
 }
 
 /// Tags in file order, case preserved. `tags` comes before `org_tags`.
@@ -2065,7 +2807,7 @@ fn tag_rests(card: &Value, prefix: &str) -> Vec<String> {
 }
 
 fn step_key_of(card: &Value) -> Option<String> {
-    tag_rests(card, "step-").into_iter().next()
+    first_note_value(&ordered_notes(card), STEP_NOTE)
 }
 
 fn step_kind_of(card: &Value) -> Option<String> {
@@ -2506,6 +3248,23 @@ Options: ship, hold
     }
 
     #[test]
+    fn a_secret_split_between_a_step_heading_and_body_is_refused() {
+        let screen = fixed_public_screen();
+        let (title, body) = ("Set the api_key", "= Zq8vRt3wPx9Lm2Kd");
+        for alone in [title, body] {
+            assert!(
+                crate::scrub::scan_body_with_screen(alone, 1, &screen).is_empty(),
+                "{alone:?} is refused alone, so it does not test the join"
+            );
+        }
+        let mut split = skel(OK).unwrap();
+        split.steps[0].title = title.to_string();
+        split.steps[0].body = body.to_string();
+        let hits = public_hits_with_screen(&split, &screen);
+        assert!(hits.iter().any(|hit| hit.contains("secret")), "{hits:#?}");
+    }
+
+    #[test]
     fn a_valid_skeleton_parses_and_fills() {
         let parsed = skel(OK).unwrap();
         assert_eq!(parsed.version, 1);
@@ -2527,6 +3286,24 @@ Options: ship, hold
         assert!(err.contains("sample.org:"), "{err}");
         assert!(err.contains("version"), "{err}");
         assert!(err.contains("--var"), "{err}");
+    }
+
+    #[test]
+    fn a_title_only_placeholder_is_filled() {
+        let titled = OK.replace("{{version}}", "the release").replacen(
+            "#+title: ",
+            "#+title: {{version}} ",
+            1,
+        );
+        let parsed = skel(&titled).unwrap();
+        assert!(parsed.title.contains("{{version}}"), "{}", parsed.title);
+        let mut vars = BTreeMap::new();
+        vars.insert("version".into(), "1.2.0".into());
+        let filled = fill_vars(&parsed, &vars).unwrap();
+        assert!(filled.title.starts_with("1.2.0 "), "{}", filled.title);
+        assert!(!filled.title.contains("{{"), "{}", filled.title);
+        let page = render_skeleton(&filled).unwrap();
+        assert!(!page.contains("{{version}}"), "{page}");
     }
 
     #[test]
@@ -2663,6 +3440,43 @@ Options: ship, hold
     }
 
     #[test]
+    fn var_errors_never_echo_a_typed_key_or_value() {
+        for pair in [
+            "bad-key=hunter2",
+            "k\u{1b}[31mRED=hunter2",
+            "sk-SECRETKEY=a\nb",
+            "SECRETKEY=hunter2\nb",
+            "SECRETKEY=hunter2\u{1b}[31m",
+        ] {
+            let err = parse_vars(&[pair.into()]).unwrap_err().to_string();
+            assert!(!err.contains("bad-key"), "{err:?}");
+            assert!(!err.contains("RED"), "{err:?}");
+            assert!(!err.contains("SECRETKEY"), "{err:?}");
+            assert!(!err.contains("hunter2"), "{err:?}");
+        }
+
+        let err = parse_vars(&["safe=first".into(), "safe=second".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("repeats a variable name"), "{err}");
+        assert!(!err.contains("safe"), "{err}");
+
+        let parsed = skel(OK).unwrap();
+        let err = fill_vars(
+            &parsed,
+            &BTreeMap::from([
+                ("version".to_string(), "1".to_string()),
+                ("SECRETKEY".to_string(), "hunter2".to_string()),
+            ]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("does not use"), "{err}");
+        assert!(!err.contains("SECRETKEY"), "{err}");
+        assert!(!err.contains("hunter2"), "{err}");
+    }
+
+    #[test]
     fn a_dependency_listed_twice_is_refused() {
         let text = "\
 #+title: Build
@@ -2687,7 +3501,7 @@ Options: ship, hold
     }
 
     #[test]
-    fn step_kind_comes_from_tags_and_a_note_cannot_change_it() {
+    fn step_identity_comes_from_its_first_note_and_attributes_come_from_tags() {
         let tagged = serde_json::json!({
             "tags": ["step-signoff", "kind-signoff", "kind-do", "quorum-1", "quorum-3", "deed-yes", "depends-Build"],
             "logbook": [
@@ -2697,7 +3511,7 @@ Options: ship, hold
             ]
         });
         assert_eq!(step_kind_of(&tagged).as_deref(), Some("signoff"));
-        assert_eq!(step_key_of(&tagged).as_deref(), Some("signoff"));
+        assert_eq!(step_key_of(&tagged), None);
         assert_eq!(quorum_of(&tagged), 3);
         assert!(deed_of(&tagged));
         assert_eq!(depends_of(&tagged), ["Build"]);
@@ -2705,6 +3519,6 @@ Options: ship, hold
             "logbook": [{"note": "kind: signoff"}, {"note": "step: signoff"}]
         });
         assert_eq!(step_kind_of(&note_only), None);
-        assert_eq!(step_key_of(&note_only), None);
+        assert_eq!(step_key_of(&note_only).as_deref(), Some("signoff"));
     }
 }

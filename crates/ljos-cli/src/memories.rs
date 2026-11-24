@@ -79,6 +79,9 @@ pub struct Memory {
     /// The atom's entities. Not part of the JSON listing.
     #[serde(skip)]
     pub entities: Vec<String>,
+    /// The stored atom, retained so a public mark can preserve its fields.
+    #[serde(skip)]
+    atom: Value,
 }
 
 fn s(v: &Value) -> String {
@@ -154,6 +157,7 @@ impl Memory {
                         .map(str::to_string)
                 })
             }),
+            atom: atom.clone(),
         })
     }
 
@@ -570,7 +574,7 @@ pub fn mark_public(id: &str, all: &[Memory], project: Option<&str>) -> Result<St
     }
     let extra = project_to_add(m, project)?;
     let client = crate::pack()?;
-    let posted = write_marked(&client, m, &extra)?;
+    let posted = write_marked(&client, m, &extra, &m.text)?;
     let new_id = s(&posted["id"]);
     let short_new = new_id.get(..8).unwrap_or(&new_id);
     Ok(format!(
@@ -610,52 +614,94 @@ fn project_to_add(memory: &Memory, project: Option<&str>) -> Result<Vec<String>>
     bail!("memories: --public needs a project, so pass -p");
 }
 
-fn scoped_carry(memory: &Memory, extra: &[String]) -> Vec<String> {
-    let mut carry: Vec<String> = memory
-        .entities
-        .iter()
-        .filter(|entity| {
-            ["project:", "tag:", "issue:"]
-                .iter()
-                .any(|prefix| entity.starts_with(prefix))
-        })
-        .cloned()
-        .collect();
-    for entity in extra {
-        if !carry.iter().any(|have| have.eq_ignore_ascii_case(entity)) {
-            carry.push(entity.clone());
-        }
-    }
-    carry
-}
-
 /// The pack keeps one live row for a text, so the unmarked row is retired
 /// first and the marked one written after it. A write that fails puts the
 /// unmarked row back, so the memory is not lost.
+///
+/// The marked row says `text`, the words the person approved. The row
+/// written back says the memory's own text, which may be private.
 fn write_marked(
     client: &crate::pack_link::PacksetClient,
     memory: &Memory,
     extra: &[String],
+    text: &str,
 ) -> Result<Value> {
-    let mut carry = scoped_carry(memory, extra);
-    let plain = replacement(client, &[memory], memory.text.trim(), &carry);
-    carry.push(crate::PUBLIC_ENTITY.to_string());
-    let marked = replacement(client, &[memory], memory.text.trim(), &carry);
+    let (marked, plain) = marked_and_plain(
+        &replacement(client, &[memory], text.trim(), &[]),
+        &replacement(client, &[memory], memory.text.trim(), &[]),
+        memory,
+        extra,
+    );
     record(&memory.id, "marked", None)?;
     crate::packset_forget(&memory.id, None)?;
-    let posted = match post_replacement(client, memory, marked) {
-        Ok(posted) => posted,
-        Err(err) => {
-            let _ = post_replacement(client, memory, plain);
-            return Err(err.context("memories: the pack did not take the marked row, and the unmarked one was written back"));
-        }
-    };
+    let posted =
+        post_mark_with_restore(marked, plain, |atom| post_replacement(client, memory, atom))?;
     let new_id = s(&posted["id"]);
     record(&memory.id, "marked", Some(&new_id))?;
     if !new_id.is_empty() {
         record(&new_id, "keep", None)?;
     }
     Ok(posted)
+}
+
+fn post_mark_with_restore<F>(marked: Value, plain: Value, mut post: F) -> Result<Value>
+where
+    F: FnMut(Value) -> Result<Value>,
+{
+    match post(marked) {
+        Ok(posted) => Ok(posted),
+        Err(mark_err) => match post(plain) {
+            Ok(_) => Err(mark_err.context(
+                "memories: the pack did not take the marked row, and the unmarked one was written back",
+            )),
+            Err(restore_err) => Err(mark_err.context(format!(
+                "memories: the pack did not take the marked row; writing the unmarked row back also failed: {restore_err:#}"
+            ))),
+        },
+    }
+}
+
+/// The marked row and the unmarked row written back if the marked one is
+/// refused. Only the marked row carries the public mark.
+fn marked_and_plain(
+    marked: &Value,
+    plain: &Value,
+    memory: &Memory,
+    extra: &[String],
+) -> (Value, Value) {
+    (
+        preserve_public_fields(marked.clone(), memory, extra, true),
+        preserve_public_fields(plain.clone(), memory, extra, false),
+    )
+}
+
+fn preserve_public_fields(
+    mut atom: Value,
+    memory: &Memory,
+    extra: &[String],
+    marked: bool,
+) -> Value {
+    atom["source"] = memory.atom["source"].clone();
+    atom["source"]["reviewed_by"] = Value::String(crate::seat_name());
+    atom["source"]["replaces"] = Value::Array(vec![Value::String(memory.id.clone())]);
+    for field in ["set", "valid_from", "valid_to", "issue"] {
+        if let Some(value) = memory.atom.get(field) {
+            atom[field] = value.clone();
+        }
+    }
+    atom["entities"] = Value::Array(
+        memory
+            .entities
+            .iter()
+            .chain(extra)
+            .cloned()
+            .chain(marked.then(|| crate::PUBLIC_ENTITY.to_string()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(Value::String)
+            .collect(),
+    );
+    atom
 }
 
 /// Merge memories into one. Without `text` the merged text is theirs,
@@ -1005,15 +1051,18 @@ fn matching_held(client: &crate::pack_link::PacksetClient, atom: &Value) -> Opti
 }
 
 /// A public repeat of a private lesson marks that row public instead of
-/// reinforcing it. An atom with no public mark, a row that is already
+/// reinforcing it. The marked row says the repeat's words, not the row's:
+/// a near match or an alias may hold wording the person did not approve.
+/// An atom with no public mark, a row that is already
 /// public, and a pack that does not answer return `Ok(None)`, so the
 /// caller reinforces or posts as before. The posted row is not marked
 /// reinforced.
 ///
 /// # Errors
 ///
-/// The pack refuses the marked row after the unmarked one was retired.
-/// The unmarked row is written back first.
+/// The row names a project and the repeat names another, as `memories
+/// review --public` refuses it. The pack refuses the marked row after the
+/// unmarked one was retired; the unmarked row is written back first.
 pub fn publish_repeat(
     client: &crate::pack_link::PacksetClient,
     atom: &Value,
@@ -1030,7 +1079,22 @@ pub fn publish_repeat(
     let Some(memory) = Memory::of(&found) else {
         return Ok(None);
     };
-    let extra = if project_names(&memory).is_empty() {
+    let existing = project_names(&memory);
+    let asked: Vec<String> = entity_strs(atom)
+        .into_iter()
+        .filter_map(|entity| entity.strip_prefix("project:").map(str::to_string))
+        .collect();
+    if !existing.is_empty()
+        && asked
+            .iter()
+            .any(|name| !existing.iter().any(|have| have.eq_ignore_ascii_case(name)))
+    {
+        bail!(
+            "memories: {} already names a project, so leave -p off",
+            memory.short_id()
+        );
+    }
+    let extra = if existing.is_empty() {
         entity_strs(atom)
             .into_iter()
             .filter(|entity| entity.starts_with("project:"))
@@ -1038,7 +1102,8 @@ pub fn publish_repeat(
     } else {
         Vec::new()
     };
-    Ok(Some(write_marked(client, &memory, &extra)?))
+    let text = atom["text"].as_str().unwrap_or_default();
+    Ok(Some(write_marked(client, &memory, &extra, text)?))
 }
 
 /// The live memory `atom` says again, reinforced in its place: graded
@@ -2002,6 +2067,7 @@ mod tests {
             aliases: Vec::new(),
             ticket: None,
             entities: Vec::new(),
+            atom: Value::Null,
         };
         let wide = describe(&m, Width::columns(200));
         assert!(
@@ -2013,5 +2079,108 @@ mod tests {
         assert!(narrow.contains(&format!("\n{body}\n")), "{narrow}");
         let fixed = describe(&m, Width::FIXED);
         assert!(!fixed.lines().any(|line| line.contains(text)), "{fixed}");
+    }
+
+    #[test]
+    fn a_failed_public_restore_reports_both_pack_failures() {
+        let mut calls = 0;
+        let err = post_mark_with_restore(Value::Null, Value::Null, |_| {
+            calls += 1;
+            if calls == 1 {
+                bail!("marked write failed")
+            } else {
+                bail!("restore failed")
+            }
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("marked row"), "{err}");
+        assert!(err.contains("restore failed"), "{err}");
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn the_row_written_back_after_a_refused_mark_is_not_public() {
+        let stored = serde_json::json!({
+            "id": "abcd1234",
+            "kind": "lesson",
+            "text": "Keep the kiln level.",
+            "entities": ["project:kiln"],
+            "source": {"seat": "saddle", "basis": "person"}
+        });
+        let memory = Memory::of(&stored).unwrap();
+        let base = serde_json::json!({"source": {}, "entities": []});
+        let (marked, plain) = marked_and_plain(&base, &base, &memory, &[]);
+        let mut posted = Vec::new();
+        let err = post_mark_with_restore(marked, plain, |atom| {
+            posted.push(atom.clone());
+            if posted.len() == 1 {
+                bail!("marked write failed")
+            }
+            Ok(atom)
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("written back"), "{err:#}");
+        let public = |atom: &Value| {
+            atom["entities"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row == crate::PUBLIC_ENTITY))
+        };
+        assert_eq!(posted.len(), 2);
+        assert!(public(&posted[0]), "{}", posted[0]);
+        assert!(
+            !public(&posted[1]),
+            "the restored row is marked: {}",
+            posted[1]
+        );
+        assert!(
+            posted[1]["entities"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row == "project:kiln")),
+            "{}",
+            posted[1]
+        );
+    }
+
+    #[test]
+    fn public_fields_keep_a_persona_set_and_validity() {
+        let stored = serde_json::json!({
+            "id": "abcd1234",
+            "kind": "lesson",
+            "text": "Keep the kiln level.",
+            "origin": "user-declared",
+            "set": "persona:firer",
+            "issue": "kiln-42",
+            "valid_to": "2027-01-02T03:04:05Z",
+            "entities": ["horizon:transient", "valid_to:2027-01-02T03:04:05Z"],
+            "source": {"seat": "saddle", "basis": "person", "host": "wheel"}
+        });
+        let memory = Memory::of(&stored).unwrap();
+        let marked = preserve_public_fields(
+            serde_json::json!({"source": {}, "entities": ["horizon:standing"]}),
+            &memory,
+            &[],
+            true,
+        );
+        assert_eq!(marked["set"], "persona:firer");
+        assert_eq!(marked["issue"], "kiln-42");
+        assert_eq!(marked["valid_to"], "2027-01-02T03:04:05Z");
+        assert_eq!(marked["source"]["host"], "wheel");
+        assert!(
+            marked["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entity| entity == "horizon:transient"),
+            "{marked}"
+        );
+        assert!(
+            marked["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entity| entity == crate::PUBLIC_ENTITY),
+            "{marked}"
+        );
     }
 }

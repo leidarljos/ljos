@@ -1,0 +1,2 @@
+A skeleton start that was cut short no longer leaves the parent unusable: the index records the run before the first tracker write and each step as it is filed, and the next start files the rest. A ticket filed just before the cut is taken up, not filed twice.
+A start cut short after the create takes up only the ticket that carries the token the index held before that create, and writes its step note. A ticket with the same step tags and no token is left alone.
