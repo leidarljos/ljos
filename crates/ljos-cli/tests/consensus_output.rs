@@ -13,10 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 /// Fakes for the tracker and the model crate. `vissue vote ID --json`
@@ -62,7 +60,11 @@ fn ljos_on(dir: &Path, home: &Path, args: &[&str], pack: &str) -> Output {
         dir.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .current_dir(dir)
         .env_clear()
@@ -79,7 +81,7 @@ fn ljos_on(dir: &Path, home: &Path, args: &[&str], pack: &str) -> Output {
         // shape of the JSON, and signed ballots have their own suite.
         .env("LJOS_UNSIGNED_BALLOTS", "allow")
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 #[test]
@@ -167,6 +169,10 @@ fn the_reading_says_whether_a_protected_push_clears() {
 
     let config = home.join(".config").join("ljos");
     std::fs::create_dir_all(&config).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(config.join("ljos.toml"), "[gates]\nquorum = 3\n").unwrap();
     let out = consensus_on(dir.path(), &home, &["proj-v0te"], &pack);
     assert!(out.status.success(), "{out:?}");
@@ -288,6 +294,10 @@ fn the_tracker_settle_page_wraps_on_a_tty() {
         dir.path().display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(["consensus", "proj-v0te", "--no-file"])
         .current_dir(dir.path())

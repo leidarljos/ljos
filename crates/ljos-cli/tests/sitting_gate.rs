@@ -22,9 +22,7 @@ const SESSION: &str = "5b0c2a71-9d1e-4f3a-8c6b-2e7f1a0d9c43";
 const ISSUE: &str = "proj-gate";
 
 fn script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 fn text_of(out: &Output) -> String {
@@ -96,6 +94,10 @@ impl Seat {
                 ballots.display()
             ),
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let init = Command::new("git")
             .args(["init", "-q"])
             .current_dir(&repo)
@@ -114,6 +116,10 @@ impl Seat {
     }
 
     fn command(&self, program: &str, args: &[&str]) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(program);
         cmd.args(args)
             .env_clear()
@@ -225,6 +231,10 @@ impl Seat {
     /// to read and the sitting check still sees `develop`.
     fn same_commit_refs(&self) -> String {
         let git = |args: &[&str]| {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let out = Command::new("git")
                 .args(args)
                 .current_dir(&self.repo)
@@ -237,6 +247,10 @@ impl Seat {
         git(&["config", "user.name", "t"]);
         git(&["config", "commit.gpgsign", "false"]);
         git(&["config", "core.hooksPath", "/dev/null"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let head = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&self.repo)
@@ -250,6 +264,10 @@ impl Seat {
     }
 
     fn card(&self, state: &str, by: &str) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &self.card,
             serde_json::json!({"id": ISSUE, "state": state, "claimed_by": by}).to_string(),
@@ -262,6 +280,10 @@ impl Seat {
             .iter()
             .map(|(agent, choice)| serde_json::json!({"agent": agent, "choice": choice}))
             .collect();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&self.ballots, serde_json::Value::from(rows).to_string()).unwrap();
     }
 
@@ -384,6 +406,10 @@ fn a_runner_pushes_onto_develop_or_main_once_the_seats_clear_it() {
     seat.vote(&[("inky", "approve"), ("flint", "approve")]);
     let config = seat.home.join(".config/ljos");
     std::fs::create_dir_all(&config).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         config.join("ljos.toml"),
         "[gates]\nquorum = 3\nconsensus_branches = [\"release\"]\n",
@@ -394,6 +420,10 @@ fn a_runner_pushes_onto_develop_or_main_once_the_seats_clear_it() {
         "a push onto release",
     );
     not_refused(&seat.policy(develop, &env), "develop, no longer named");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(config.join("ljos.toml"), "quorum = 0\n").unwrap();
     let said = seat.policy(develop, &env);
     assert!(said.contains("sitting-gate"), "{said}");
@@ -428,6 +458,10 @@ fn the_doctor_says_whether_the_gate_holds_this_seat() {
 
     let config = seat.home.join(".config/ljos");
     std::fs::create_dir_all(&config).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(config.join("ljos.toml"), "quorum = 0\n").unwrap();
     let line = gate_row(&seat.runner(&["doctor"], &[]));
     assert!(line.starts_with("warn\t"), "{line}");
@@ -443,6 +477,10 @@ fn the_doctor_says_whether_the_gate_holds_this_seat() {
 fn cloud_mark(seat: &Seat) {
     let dir = seat.home.join(".config/ljos");
     std::fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.join("push-allow"), "").unwrap();
 }
 
@@ -459,10 +497,18 @@ fn write_allow(seat: &Seat, origin: &Path) {
         "# ljos cloud push allowlist\ncode\t{}\nbranch\tdevelop\nbranch\tmain\n",
         allow_key(origin)
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, body).unwrap();
 }
 
 fn git_ok(repo: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .args(args)
         .current_dir(repo)
@@ -546,6 +592,10 @@ fn a_cloud_seat_warns_on_a_protected_push_when_no_seat_has_voted() {
 
     let seats = seat.home.join(".config/ljos/seats/inky");
     std::fs::create_dir_all(&seats).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(seats.join("ljos.toml"), "[cloud]\nbranches = [\"main\"]\n").unwrap();
     let main = seat.policy("git push origin main", &env);
     asks_for_consensus(&main, "git push origin main");
@@ -563,12 +613,20 @@ fn a_solo_seat_clears_policy_and_the_git_hook() {
     let seat = Seat::new();
     let tracker = seat.home.join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let init = Command::new("git")
         .args(["init", "-q"])
         .current_dir(&tracker)
         .output()
         .unwrap();
     assert!(init.status.success(), "{}", text_of(&init));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"inky\"]\n").unwrap();
     let root = tracker.to_str().unwrap();
     let env = [
@@ -599,12 +657,20 @@ fn two_unslotted_seats_clear_a_protected_push() {
     let seat = Seat::new();
     let tracker = seat.home.join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let init = Command::new("git")
         .args(["init", "-q"])
         .current_dir(&tracker)
         .output()
         .unwrap();
     assert!(init.status.success(), "{}", text_of(&init));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         tracker.join("vissue.toml"),
         "seats = [\"moss\", \"fern\"]\n",
@@ -645,6 +711,10 @@ fn two_unslotted_seats_clear_a_protected_push() {
 fn a_gates_file_that_does_not_parse_warns_and_holds_the_git_hook() {
     let seat = Seat::new();
     std::fs::create_dir_all(seat.repo.join(".ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(seat.repo.join(".ljos/gates.toml"), "quorum = [\n").unwrap();
     let develop = "git push origin develop";
     let said = seat.policy(develop, &[]);
@@ -684,20 +754,22 @@ fn a_commit_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
     );
     let runtime = seat.run.join("ljos");
     std::fs::create_dir_all(&runtime).unwrap();
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(runtime.join("hold-adopt.lock"))
-        .unwrap();
+    let lock_path = runtime.join("hold-adopt.lock");
+    ljos_cli::write_file(&lock_path, "").unwrap();
+    let lock_file = std::fs::File::open(&lock_path).unwrap();
     assert_eq!(
         unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) },
         0
     );
     let fake = seat.bin.join("ljos-mcp");
-    std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
-    let mut sleeper = Command::new(&fake).arg("300").spawn().unwrap();
+    ljos_cli::copy_executable(Path::new("/bin/sleep"), &fake).unwrap();
+    let mut sleeper = ljos_cli::program(&fake)
+        .unwrap()
+        .arg("300")
+        .spawn()
+        .unwrap();
     let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
-    std::fs::write(
+    ljos_cli::write_file(
         runtime.join(format!("hold-{bare}")),
         format!(
             "inky\ninky\n{}\nljos-mcp\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n",
@@ -778,12 +850,20 @@ fn a_stalled_tracker_refuses_a_protected_push_and_passes_another() {
     let seat = Seat::new();
     let tracker = seat.home.join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let init = Command::new("git")
         .args(["init", "-q"])
         .current_dir(&tracker)
         .output()
         .unwrap();
     assert!(init.status.success(), "{}", text_of(&init));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         tracker.join("vissue.toml"),
         "seats = [\"inky\", \"flint\"]\n",
@@ -801,7 +881,15 @@ fn a_stalled_tracker_refuses_a_protected_push_and_passes_another() {
     let runtime = seat.run.join("ljos");
     std::fs::create_dir_all(&runtime).unwrap();
     let fake = seat.bin.join("ljos-mcp");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut sleeper = Command::new(&fake)
         .arg("300")
         .stdout(Stdio::null())
@@ -809,6 +897,10 @@ fn a_stalled_tracker_refuses_a_protected_push_and_passes_another() {
         .spawn()
         .unwrap();
     let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         runtime.join(format!("hold-{bare}")),
         format!(
@@ -818,6 +910,10 @@ fn a_stalled_tracker_refuses_a_protected_push_and_passes_another() {
     )
     .unwrap();
     let tagged = ljos_cli::work_id(&format!("{holder}:{ISSUE}"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         runtime.join(format!("hold-{tagged}")),
         format!(
@@ -904,25 +1000,24 @@ fn a_push_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
     );
     let runtime = seat.run.join("ljos");
     std::fs::create_dir_all(&runtime).unwrap();
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(runtime.join("hold-adopt.lock"))
-        .unwrap();
+    let lock_path = runtime.join("hold-adopt.lock");
+    ljos_cli::write_file(&lock_path, "").unwrap();
+    let lock_file = std::fs::File::open(&lock_path).unwrap();
     assert_eq!(
         unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) },
         0
     );
     let fake = seat.bin.join("ljos-mcp");
-    std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
-    let mut sleeper = Command::new(&fake)
+    ljos_cli::copy_executable(Path::new("/bin/sleep"), &fake).unwrap();
+    let mut sleeper = ljos_cli::program(&fake)
+        .unwrap()
         .arg("300")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
     let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
-    std::fs::write(
+    ljos_cli::write_file(
         runtime.join(format!("hold-{bare}")),
         format!(
             "inky\ninky\n{}\nljos-mcp\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n",
@@ -932,7 +1027,7 @@ fn a_push_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
     .unwrap();
     let holder = format!("inky@{}", ljos_cli::session_tag(SESSION));
     let tagged = ljos_cli::work_id(&format!("{holder}:{ISSUE}"));
-    std::fs::write(
+    ljos_cli::write_file(
         runtime.join(format!("hold-{tagged}")),
         format!(
             "{holder}\ninky\n{}\nljos-mcp\n2026-10-25T00:00:01Z\n{ISSUE}\n-\n",

@@ -74,6 +74,10 @@ fn the_health_wait_and_the_search_wait_share_one_budget() {
         }
     });
     let root = home.path();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["search", "kiln"])
         .current_dir(root)

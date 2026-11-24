@@ -45,6 +45,10 @@ impl World {
             home.display(),
             run.display(),
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new("bash");
         seat_env::clear(&mut cmd);
         cmd.args(["--noprofile", "--norc", "-c", &body])
@@ -78,6 +82,10 @@ fn a_parent_cursor_id_and_its_session_record_do_not_name_this_ljos() {
     let forbidden = format!("cursor-{}", ljos_cli::session_tag(parent_id));
     let tag = ljos_cli::session_tag(parent_id);
     let record = world.run().join(format!("session-{tag}"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&record, format!("mcp-seat\nmcp-holder\nids\t{parent_id}\n")).unwrap();
     let bin = env!("CARGO_BIN_EXE_ljos");
     let seat = world.under_parent(parent_id, &format!("{bin} seat"));
@@ -104,6 +112,10 @@ fn a_parent_cursor_id_in_another_home_does_not_leak_after_a_write_without_xdg_ru
     let child_home = child_root.path().join("home");
     std::fs::create_dir_all(child_home.join(".config/ljos")).unwrap();
     std::fs::create_dir_all(child_home.join(".local/state/ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         child_home.join(".local/state/ljos/seat-writes.log"),
         "2026-11-18T19:00:00.000Z\tada\tbox\n",
@@ -114,12 +126,7 @@ fn a_parent_cursor_id_in_another_home_does_not_leak_after_a_write_without_xdg_ru
     let stub = child_root.path().join("bin");
     std::fs::create_dir_all(&stub).unwrap();
     let curl = stub.join("curl");
-    std::fs::write(&curl, "#!/bin/sh\nexit 1\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    ljos_cli::install_executable(&curl, "#!/bin/sh\nexit 1\n").unwrap();
     let script = format!(
         "unset XDG_RUNTIME_DIR CURSOR_CONVERSATION_ID CURSOR_AGENT LJOS_SEAT; \
          export HOME='{}' XDG_CONFIG_HOME='{}/.config' XDG_STATE_HOME='{}/.local/state' \
@@ -131,6 +138,10 @@ fn a_parent_cursor_id_in_another_home_does_not_leak_after_a_write_without_xdg_ru
         child_home.display(),
         stub.display(),
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new("bash");
     seat_env::clear(&mut cmd);
     cmd.args(["--noprofile", "--norc", "-c", &script])

@@ -109,12 +109,20 @@ fn write_job(raw: &str, call: &crate::HookCall) {
         .map_or(0, |d| d.as_nanos());
     let name = format!("{stamp:024}-{:010}.job", std::process::id());
     let tmp = dir.join(format!(".{name}.tmp"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let written = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .mode(0o600)
         .open(&tmp)
         .and_then(|mut f| f.write_all(&body));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     if written.is_err() || std::fs::rename(&tmp, dir.join(&name)).is_err() {
         let _ = std::fs::remove_file(&tmp);
         crate::bookkeep::log_line("book queue: a job could not be written; nothing booked");
@@ -179,12 +187,16 @@ fn head_now(dir: &Path) -> Option<String> {
 }
 
 fn open_lock(path: &Path) -> Option<std::fs::File> {
-    std::fs::OpenOptions::new()
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
+    return std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
         .open(path)
-        .ok()
+        .ok();
 }
 
 fn flock(file: &std::fs::File, wait: bool) -> bool {
@@ -216,6 +228,10 @@ fn kick() {
     let Some(exe) = ljos_exe() else {
         return;
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = std::process::Command::new(exe);
     cmd.args(["hook", "--drain", "--no-wait"])
         .stdin(std::process::Stdio::null())
@@ -434,6 +450,10 @@ fn run_batch(head: &Job, batch: &[PathBuf]) -> bool {
     } else {
         PathBuf::from("/")
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("hook")
         .arg("--apply-book")

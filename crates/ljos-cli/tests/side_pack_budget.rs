@@ -45,8 +45,7 @@ fn hab(name: &str) -> Hab {
     for dir in [&hab.home, &hab.run, &hab.repo] {
         std::fs::create_dir_all(dir).unwrap();
     }
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&hab.run, std::fs::Permissions::from_mode(0o700)).unwrap();
+    ljos_cli::change_mode(&hab.run, 0o700).unwrap();
     hab
 }
 
@@ -139,6 +138,10 @@ fn session(url: &str, hab: &Hab) -> String {
         "session_id": "c-probe",
     })
     .to_string();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook")
         .env_clear()

@@ -607,6 +607,10 @@ pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> i3
     let raw = raw_event(input);
     let text = match std::env::current_exe() {
         Ok(exe) => {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let mut cmd = std::process::Command::new(exe);
             cmd.arg("hook").arg("--limit").arg(limit.to_string());
             cmd.env(crate::rewrite::RELAY_VAR, runner);
@@ -650,6 +654,10 @@ fn first_prompt_start_line(runner: &str, raw: &str, input: &str) -> Option<Strin
         return None;
     }
     let _ = mark.parent().map(std::fs::create_dir_all);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let _ = std::fs::write(&mark, "");
     Some(crate::session_start_for(Some(&sid)))
 }
@@ -942,16 +950,24 @@ pub fn hook_step(runner: &str, file: &Path, base_command: &str, dry: bool) -> St
             ok: true,
         };
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let written = file
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
         .and_then(|()| serde_json::to_string_pretty(&root).map_err(std::io::Error::other))
         .and_then(|text| std::fs::write(file, text + "\n"))
         .and_then(|()| match &script {
-            Some(p) => std::fs::write(p, &script_text).and_then(|()| set_executable(p)),
+            Some(p) => crate::install_executable(p, script_text),
             None => Ok(()),
         })
         .and_then(|()| match &manifest {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             Some(m) if manifest_missing => std::fs::write(
                 m,
                 "{\n  \"name\": \"ljos\",\n  \"version\": \"1.0.0\",\n  \"description\": \
@@ -1011,9 +1027,8 @@ fn cline_step(dir: &Path, command: &str, dry: bool) -> Step {
         };
     }
     for path in &todo {
-        let written = std::fs::create_dir_all(dir)
-            .and_then(|()| std::fs::write(path, &text))
-            .and_then(|()| set_executable(path));
+        let written =
+            std::fs::create_dir_all(dir).and_then(|()| crate::install_executable(path, &text));
         if let Err(e) = written {
             return Step {
                 what,
@@ -1027,17 +1042,6 @@ fn cline_step(dir: &Path, command: &str, dry: bool) -> Step {
         detail: format!("wrote the seat's cline hooks to {}", dir.display()),
         ok: true,
     }
-}
-
-#[cfg(unix)]
-fn set_executable(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-}
-
-#[cfg(not(unix))]
-fn set_executable(_path: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1265,6 +1269,10 @@ mod tests {
 
     #[cfg(unix)]
     fn sh(script: &str) -> std::process::Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = std::process::Command::new("sh");
         cmd.arg("-c").arg(script);
         cmd
@@ -1333,6 +1341,10 @@ mod tests {
             allows_fault(&fault_output("PreToolUse", why), why);
         }
         allows_fault(&inner("exit 3", 30_000), "exited with status 3");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let missing = run_inner(
             std::process::Command::new("/nonexistent/ljos"),
             "{}",
@@ -1455,7 +1467,7 @@ mod tests {
             };
             if *runner == "gemini" {
                 // A settings file with entries of its own keeps them.
-                std::fs::write(&file, r#"{"mcpServers":{"x":{}},"hooks":{"BeforeTool":[{"matcher":"x","hooks":[]}]}}"#).unwrap();
+                #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(&file, r#"{"mcpServers":{"x":{}},"hooks":{"BeforeTool":[{"matcher":"x","hooks":[]}]}}"#).unwrap();
             }
             let first = hook_step(runner, &file, base, false);
             assert!(first.ok, "{runner}: {}", first.detail);
@@ -1549,6 +1561,10 @@ mod tests {
         }
         let foreign = dir.join("foreign-cline");
         std::fs::create_dir_all(&foreign).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(foreign.join("PreToolUse"), "#!/bin/sh\necho mine\n").unwrap();
         let step = hook_step("cline", &foreign, base, false);
         assert!(
@@ -1615,6 +1631,10 @@ mod tests {
         for (runner, name) in [("auggie", "settings.json"), ("amp", "settings.json")] {
             let dir = tempfile::tempdir().unwrap();
             let file = dir.path().join(name);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(
                 &file,
                 r#"{"keep": 1, "amp.permissions": [{"tool": "Read", "action": "allow"}]}"#,

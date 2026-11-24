@@ -49,6 +49,10 @@ impl World {
         ] {
             std::fs::create_dir_all(d).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
         let mut org = String::from(
             "#+TITLE: demo\n#+VISSUE: 1\n#+CATEGORY: demo\n#+TODO: TODO STARTED | DONE CANCELLED\n\n",
@@ -63,6 +67,10 @@ impl World {
                 )),
             }
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(tracker.join("Software/demo/issues.org"), org).unwrap();
         let path = format!("{}:/usr/bin:/bin", siblings.display());
         World {
@@ -81,6 +89,10 @@ impl World {
     }
 
     fn cmd(&self, home: &Path, runtime: &Path, seat: &str, extra: &[(&str, &str)]) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.env_clear()
             .env("PATH", &self.path)
@@ -122,6 +134,10 @@ impl World {
     }
 
     fn bob_mcp(&self, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.env_clear()
             .env("PATH", &self.path)
@@ -145,6 +161,10 @@ impl World {
         let pid = child.id();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(30));
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new("kill").arg(pid.to_string()).status();
         });
         let mut stdin = child.stdin.take().unwrap();
@@ -176,6 +196,10 @@ impl World {
     fn hold_record(&self, name: &str, pid: u32, comm: &str, node: &str) {
         let dir = self.bob_run.join("ljos");
         std::fs::create_dir_all(&dir).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.join(format!("hold-{name}")),
             format!("alice\nalice\n{pid}\n{comm}\n2026-01-01T00:00:00.000Z\n{node}\n-\n\n\n"),
@@ -193,6 +217,10 @@ fn said(out: &Output) -> String {
 }
 
 fn comm_of(pid: u32) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .output()
@@ -202,13 +230,17 @@ fn comm_of(pid: u32) -> String {
 }
 
 fn sleeper() -> Child {
-    Command::new("sleep")
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new("sleep")
         .arg("120")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .unwrap()
+        .unwrap();
 }
 
 #[test]
@@ -243,6 +275,10 @@ fn a_stale_holder_is_named_as_stale_and_taken_over_with_a_note() {
 #[test]
 fn a_dead_recorded_holder_on_this_host_is_taken_over_too() {
     let world = World::new(&[("demo-tk02", Some(("alice", STALE)))]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut gone = Command::new("true").spawn().unwrap();
     let pid = gone.id();
     let comm = "true";
@@ -407,6 +443,10 @@ fn a_sitting_on_a_stale_ticket_names_the_takeover_and_then_opens() {
 #[test]
 fn ljos_mcp_claim_describes_takeover() {
     let world = World::new(&[("demo-tk10", None)]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
         .env("PATH", &world.path)

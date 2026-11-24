@@ -188,6 +188,10 @@ fn look(path: &OsStr, tool: Tool) -> Result<(), String> {
 }
 
 fn version_of(bin: &Path, path: &OsStr) -> Option<String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let output = Command::new(bin)
         .arg("--version")
         .env("PATH", path)
@@ -242,33 +246,9 @@ mod tests {
     use super::*;
 
     fn stand_in(dir: &std::path::Path, name: &str, body: &str) {
-        use std::io::Write;
         let path = dir.join(name);
-        let tmp = dir.join(format!(".{name}.new"));
-        let mut child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg("/bin/cat > \"$1\" && /bin/chmod 755 \"$1\"")
-            .arg("stand-in")
-            .arg(&tmp)
-            .stdin(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-        let mut stdin = child.stdin.take().expect("stdin");
-        stdin
-            .write_all(body.as_bytes())
-            .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-        drop(stdin);
-        let out = child
-            .wait_with_output()
-            .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-        assert!(
-            out.status.success(),
-            "write {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        std::fs::rename(&tmp, &path).unwrap_or_else(|e| panic!("install {}: {e}", path.display()));
+        ljos_cli::install_executable(&path, body)
+            .unwrap_or_else(|e| panic!("install {}: {e}", path.display()));
     }
 
     fn skip_line(tool: Tool) -> String {

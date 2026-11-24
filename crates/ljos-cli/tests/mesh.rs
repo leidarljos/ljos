@@ -91,14 +91,9 @@ logout)
 esac
 "#;
 
-/// Write the script, sync it, and close the handle before anything execs it.
+/// Publish the script through [`ljos_cli::install_executable_mode`].
 fn write_program(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    let mut file = std::fs::File::create(path).unwrap();
-    file.write_all(body.as_bytes()).unwrap();
-    file.sync_all().unwrap();
-    drop(file);
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    ljos_cli::install_executable_mode(path, body, 0o700).unwrap();
 }
 
 struct World {
@@ -113,9 +108,21 @@ impl World {
         }
         write_program(&root.path().join("bin/tailscaled"), TAILSCALED);
         write_program(&root.path().join("bin/tailscale"), TAILSCALE);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.path().join("home/.config/ljos/mesh.toml"), EXAMPLE).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.path().join("home/mesh.key"), KEY).unwrap();
         use std::os::unix::fs::PermissionsExt;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "sets the mode of a path that is not a git hook"
+        )]
         std::fs::set_permissions(
             root.path().join("home/mesh.key"),
             std::fs::Permissions::from_mode(0o600),
@@ -137,6 +144,10 @@ impl World {
     }
 
     fn ljos(&self, args: &[&str]) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(self.path("home"))
@@ -415,6 +426,10 @@ struct Bystander(std::process::Child);
 impl Bystander {
     fn start() -> Self {
         use std::os::unix::process::CommandExt;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let child = Command::new("cat")
             .process_group(0)
             .stdin(Stdio::piped())
@@ -447,6 +462,10 @@ fn a_stale_pid_file_signals_nothing_on_up_or_down() {
     let state = world.state();
     let stale = |contents: String| {
         std::fs::create_dir_all(&state).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(state.join("tailscaled.pid"), contents).unwrap();
     };
     let named = format!("tailscaled.pid named pid {pid}");
@@ -503,6 +522,10 @@ fn up_notes_a_pid_file_in_the_old_format_when_already_up() {
     let file = world.state().join("tailscaled.pid");
     let current = std::fs::read_to_string(&file).unwrap();
     let pid = world.daemon_pid().expect("the daemon recorded its pid");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&file, format!("{pid}\n")).unwrap();
     let again = one_line(&world.up(), "up over an old pid file");
     assert!(
@@ -513,6 +536,10 @@ fn up_notes_a_pid_file_in_the_old_format_when_already_up() {
             && again.contains("no source.mesh label"),
         "{again}"
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&file, current).unwrap();
 }
 
@@ -733,6 +760,10 @@ fn login_server_and_key_file_come_from_the_environment() {
 #[test]
 fn hostname_defaults_to_the_system_hostname() {
     let world = World::new();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let expected = Command::new("hostname").output().unwrap();
     let expected = String::from_utf8_lossy(&expected.stdout).trim().to_string();
     assert!(!expected.is_empty(), "this machine has no hostname");
@@ -797,12 +828,20 @@ fn git_config_is_byte_identical_after_up_and_down() {
     let world = World::new();
     let repo = world.path("home/checkout");
     std::fs::create_dir_all(&repo).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.path("home/.gitconfig"),
         "[user]\n\tname = Someone\n[core]\n\thooksPath = /nowhere/hooks\n",
     )
     .unwrap();
     let git = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("git")
             .args(args)
             .current_dir(&repo)
@@ -925,6 +964,10 @@ fn a_write_on_the_mesh_carries_the_node_and_the_seat_it_claims() {
 
     one_line(&world.up(), "up again");
     let pid = world.daemon_pid().expect("the daemon recorded its pid");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let killed = Command::new("kill").args(["-9", &pid]).status().unwrap();
     assert!(killed.success(), "kill -9 {pid}");
     // Up to the `-k 5` grace a sitting gets. ljos reads a zombie that
@@ -944,6 +987,10 @@ fn mesh_status_shows_a_tagged_broker_from_the_status_document() {
     let world = World::new();
     one_line(&world.up(), "up");
     let fixture = include_str!("../../../examples/mesh-status.json");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(world.path("fake/status.json"), fixture).unwrap();
     let out = world.ljos(&["mesh", "status"]).output().unwrap();
     let said = text_of(&out);

@@ -47,6 +47,10 @@ impl Seat {
 
     fn command(&self, bin: &str, args: &[&str]) -> Command {
         let path = format!("{}:/usr/bin:/bin", self.home.path().join("bin").display());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(bin);
         cmd.args(args)
             .current_dir(self.home.path())

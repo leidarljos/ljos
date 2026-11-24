@@ -233,6 +233,10 @@ impl Seat {
     }
 
     fn command(&self, bin: &str, args: &[&str]) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(bin);
         let path = format!("{}:/usr/bin:/bin", self.home.path().join("bin").display());
         cmd.args(args)
@@ -481,6 +485,10 @@ fn a_promoted_agent_lesson_is_not_a_user_rule() {
     ]});
     let dir = seat.home.path().join(".config/ljos");
     std::fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.join("user-rules.json"), rules.to_string()).unwrap();
     let note = seat.prompt("tidy the changelog fragments");
     assert!(note.contains("Never force-push a shared branch"), "{note}");
@@ -627,6 +635,10 @@ fn promoted_rule(seat: &Seat, lesson: &serde_json::Value) {
     }]});
     let dir = seat.home.path().join(".config/ljos");
     std::fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.join("user-rules.json"), rules.to_string()).unwrap();
 }
 
@@ -833,6 +845,10 @@ fn an_unconfirmed_promoted_deny_still_warns_as_unverified() {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         rules["rules"][0]["pattern"] = serde_json::json!("git status*");
         rules["rules"][0]["verdict"] = serde_json::json!("deny");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, rules.to_string()).unwrap();
         let out = seat.hook_with(
             serde_json::json!({
@@ -876,12 +892,11 @@ fn an_unconfirmed_promoted_deny_still_warns_as_unverified() {
 /// A `vissue` that answers every call with `body`, so a brief reads a
 /// tracker without one.
 fn stub_vissue(seat: &Seat, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let bin = seat.home.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let path = bin.join("vissue");
-    std::fs::write(&path, format!("#!/bin/sh\ncat <<'BODY'\n{body}\nBODY\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, format!("#!/bin/sh\ncat <<'BODY'\n{body}\nBODY\n"))
+        .unwrap();
 }
 
 /// A persona's own working notes do not read as what it established in
@@ -1152,6 +1167,10 @@ fn the_note_tool_text_matches_the_read_side() {
 fn pack(open: bool) -> ljos_test_boot::Packsetd {
     let mut started = ljos_test_boot::Packsetd::build();
     let home = started.home_path().to_path_buf();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(home.join("token"), format!("{TOKEN}\n")).unwrap();
     let command = started.command();
     command.env_remove("PACKSET_AUTH");
@@ -2032,7 +2051,7 @@ fn an_unproven_island_is_not_a_timeline_memory() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("Software/sample");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         project.join("issues.org"),
         "#+TITLE: sample issues\n#+VISSUE: 1\n#+CATEGORY: sample\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#B] Ship the deploy form\n:PROPERTIES:\n:ID:         sample-f3nc\n:CREATED:    [2026-09-20 Sat]\n:END:\n",
     )

@@ -70,10 +70,7 @@ struct Tracker {
 }
 
 fn script(dir: &std::path::Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&dir.join(name), body).unwrap();
 }
 
 fn tracker() -> Tracker {
@@ -122,6 +119,10 @@ impl Session {
             Some(t) => format!("{}:/usr/bin:/bin", t.dir.path().display()),
             None => "/usr/bin:/bin".to_string(),
         };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut command = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         command
             .env_clear()

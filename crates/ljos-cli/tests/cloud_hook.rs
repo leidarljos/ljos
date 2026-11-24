@@ -46,13 +46,17 @@ impl Drop for Guard {
 }
 
 fn sh_at(dir: &Path, script: &str) -> std::process::Output {
-    Command::new("sh")
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new("sh")
         .current_dir(dir)
         .arg("-c")
         .arg(script)
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
-        .unwrap_or_else(|e| panic!("sh -c in {}: {e}", dir.display()))
+        .unwrap_or_else(|e| panic!("sh -c in {}: {e}", dir.display()));
 }
 
 fn text_of(out: &std::process::Output) -> String {
@@ -75,6 +79,10 @@ fn sh_ok(dir: &Path, script: &str) -> String {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -93,6 +101,10 @@ fn git(dir: &Path, args: &[&str]) -> String {
 
 fn isolate_git(root: &Path) {
     let cfg = root.join("gitconfig");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&cfg, b"").unwrap();
     std::env::set_var("GIT_CONFIG_GLOBAL", &cfg);
     std::env::set_var("GIT_CONFIG_SYSTEM", &cfg);
@@ -101,9 +113,7 @@ fn isolate_git(root: &Path) {
 }
 
 fn executable(path: &Path, body: &str) {
-    fs::write(path, body).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 fn seat_env(root: &Path) -> (PathBuf, PathBuf) {
@@ -118,6 +128,10 @@ fn seat_env(root: &Path) -> (PathBuf, PathBuf) {
     }
     let mut sums = String::new();
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("sha256sum")
             .arg(rel.join(name))
             .output()
@@ -134,6 +148,10 @@ fn seat_env(root: &Path) -> (PathBuf, PathBuf) {
         sums.push_str(name);
         sums.push('\n');
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join("SHA256SUMS"), sums).unwrap();
     isolate_git(root);
     std::env::set_var("HOME", &home);
@@ -230,6 +248,10 @@ fn bare_repo(root: &Path, name: &str) -> (PathBuf, PathBuf) {
 }
 
 fn has_ref(origin: &Path, name: &str) -> bool {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(origin)
@@ -244,6 +266,10 @@ fn has_ref(origin: &Path, name: &str) -> bool {
 /// Every `core.hooksPath` git reads in `dir`, one `origin<TAB>value` line
 /// each. `scope` is `--system`, `--global` or `--local`, or `None` for all.
 fn hooks_paths(dir: &Path, scope: Option<&str>) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -311,7 +337,7 @@ fn cloud_up_sets_no_hooks_path() {
     // The global level is the home's own `.gitconfig`, as on a fresh machine.
     std::env::remove_var("GIT_CONFIG_GLOBAL");
     let system = root.path().join("system-gitconfig");
-    fs::write(&system, b"").unwrap();
+    ljos_cli::write_file(&system, b"").unwrap();
     std::env::set_var("GIT_CONFIG_SYSTEM", &system);
     let (_origin, repo) = bare_repo(root.path(), "seat");
     std::env::set_current_dir(&repo).unwrap();
@@ -324,7 +350,7 @@ fn cloud_up_sets_no_hooks_path() {
 
     let mine = root.path().join("my-hooks");
     let gitconfig = format!("[core]\n\thooksPath = {}\n", mine.display());
-    fs::write(home.join(".gitconfig"), &gitconfig).unwrap();
+    ljos_cli::write_file(home.join(".gitconfig"), &gitconfig).unwrap();
 
     let booked = root.path().join("booked-hooks");
     fs::create_dir_all(&booked).unwrap();
@@ -646,6 +672,10 @@ fn the_hook_allows_a_hooks_change_and_prints_the_warning() {
         "tool_input": { "command": "git config --global core.hooksPath /tmp/x" },
         "cwd": repo,
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .current_dir(&repo)
         .arg("hook")
@@ -782,11 +812,11 @@ fn a_write_to_the_git_hooks_directory_runs_named_like_a_runner_hook() {
     std::env::remove_var("LJOS_GIT_HOOKS");
 
     let cfg = root.path().join("gitconfig");
-    fs::write(&cfg, "[core]\n\thooksPath = /tmp/not-the-ljos-hooks\n").unwrap();
+    ljos_cli::write_file(&cfg, "[core]\n\thooksPath = /tmp/not-the-ljos-hooks\n").unwrap();
     allow("touch /tmp/not-the-ljos-hooks/pre-push");
     allow("mkdir -p /tmp/not-the-ljos-hooks/x");
     let booked = root.path().join("booked/ljos/git-hooks");
-    fs::write(
+    ljos_cli::write_file(
         &cfg,
         format!("[core]\n\thooksPath = {}\n", booked.display()),
     )
@@ -794,7 +824,7 @@ fn a_write_to_the_git_hooks_directory_runs_named_like_a_runner_hook() {
     named(&format!("touch {}", booked.join("pre-push").display()));
     named(&format!("mkdir -p {}", booked.join("x").display()));
     allow("touch /tmp/not-the-ljos-hooks/pre-push");
-    fs::write(&cfg, "").unwrap();
+    ljos_cli::write_file(&cfg, "").unwrap();
 
     std::env::set_var("LJOS_SEAT", "probe");
     ljos_cli::cloud::up(false).unwrap();
@@ -888,7 +918,8 @@ fn send_pack_checks_the_destination_repository() {
 
 fn hook_push(repo: &Path, local: &str, remote: &str) -> std::process::Output {
     let refs = format!("refs/heads/develop {local} refs/heads/develop {remote}\n");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let mut child = ljos_cli::program(env!("CARGO_BIN_EXE_ljos"))
+        .unwrap()
         .current_dir(repo)
         .args(["git-hook", "pre-push", "origin", "origin"])
         .stdin(std::process::Stdio::piped())
@@ -1047,7 +1078,8 @@ fn a_pre_push_line_that_is_not_a_ref_is_refused() {
     let (_home, _xdg) = seat_env(root.path());
     clear_ids();
     let (_origin, repo) = bare_repo(root.path(), "seat");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let mut child = ljos_cli::program(env!("CARGO_BIN_EXE_ljos"))
+        .unwrap()
         .current_dir(&repo)
         .args(["git-hook", "pre-push"])
         .stdin(std::process::Stdio::piped())

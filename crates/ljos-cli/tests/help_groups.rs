@@ -4,11 +4,15 @@ ljos_test_boot::harness!();
 use std::process::Command;
 
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env("LJOS_OFF", "1")
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 fn text(out: &std::process::Output) -> String {

@@ -1795,7 +1795,8 @@ enum Cmd {
     /// The ljos archive is checked against its sha256, then each other seat
     /// program comes from the repository that publishes it. A missing release
     /// or a bad download is a warning and the rest still move. The old binary
-    /// is kept as NAME.bak-pre-VERSION.
+    /// is kept as NAME.bak-pre-VERSION, or NAME.bak-pre-VERSION.N when that
+    /// name is taken.
     ///
     /// Example: `ljos upgrade`
     Upgrade {
@@ -6210,6 +6211,10 @@ fn run_command() -> Result<()> {
                 let read = ljos_cli::deed_bytes::read_deed(&accession)?;
                 match out {
                     Some(path) => {
+                        #[expect(
+                            clippy::disallowed_methods,
+                            reason = "writes a file that is not a git hook"
+                        )]
                         std::fs::write(&path, &read.bytes)
                             .with_context(|| format!("deed: could not write {}", path.display()))?;
                         ljos_cli::tell!(
@@ -8329,6 +8334,10 @@ fn prompt_as_text(limit: usize) -> Result<()> {
     use std::io::{Read, Write};
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = std::process::Command::new(std::env::current_exe()?)
         .args(["hook", "--prompt", "--limit", &limit.to_string()])
         .stdin(std::process::Stdio::piped())

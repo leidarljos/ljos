@@ -92,12 +92,20 @@ fn pack() -> Pack {
 }
 
 fn keygen(path: &Path) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let made = Command::new("age-keygen")
         .arg("-o")
         .arg(path)
         .output()
         .expect("age-keygen must be installed");
     assert!(made.status.success(), "age-keygen");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let public = Command::new("age-keygen")
         .arg("-y")
         .arg(path)
@@ -108,6 +116,10 @@ fn keygen(path: &Path) -> String {
 }
 
 fn git(cwd: &Path, args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -144,7 +156,6 @@ struct World {
 /// The `age` in [`World::shim`]. A refused `-d` says no identity
 /// matched, as age does for a file sealed to a key this home lost.
 fn age_shim(dir: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
     let real = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
@@ -153,7 +164,7 @@ fn age_shim(dir: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/usr/bin/age"));
     std::fs::create_dir_all(dir).unwrap();
     let age = dir.join("age");
-    std::fs::write(
+    ljos_cli::install_executable(
         &age,
         format!(
             "#!/bin/sh\ncase \" $* \" in *\" -d \"*) if [ -e \"$0.kill\" ]; then rm -f \"$0.kill\"; kill -9 \"$PPID\"; exit 1; fi; if [ -e \"$0.fail\" ]; then echo 'age: error: no identity matched any of the recipients' >&2; exit 1; fi;; esac\nexec '{}' \"$@\"\n",
@@ -161,7 +172,6 @@ fn age_shim(dir: &Path) -> PathBuf {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&age, std::fs::Permissions::from_mode(0o755)).unwrap();
     dir.to_path_buf()
 }
 
@@ -186,6 +196,10 @@ fn world() -> World {
     ] {
         git(&repo, &["config", key, value]);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         repo.join(".ljos/sync.toml"),
         format!("name = \"probe\"\nrecipients = [\"{public}\"]\n"),
@@ -198,6 +212,10 @@ fn world() -> World {
         &["remote", "add", "origin", origin.to_str().unwrap()],
     );
     git(&repo, &["push", "-q", "-u", "origin", "main"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         config.join("ljos/sync.toml"),
         format!("repos = [\"{}\"]\n", repo.display()),
@@ -223,7 +241,11 @@ impl World {
     /// `ljos` as the machine named `host`, with this world's home and key.
     fn ljos_as(&self, host: &str, args: &[&str]) -> Output {
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("PATH", format!("{}:{path}", self.shim.display()))
@@ -239,7 +261,7 @@ impl World {
             .current_dir(&self.repo)
             .stdin(Stdio::null())
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     /// `ljos sync`, which must succeed. Returns what it printed.
@@ -313,6 +335,10 @@ impl World {
     fn fail_opens(&self, on: bool) {
         let flag = self.shim.join("age.fail");
         if on {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(flag, "").unwrap();
         } else {
             let _ = std::fs::remove_file(flag);
@@ -321,11 +347,19 @@ impl World {
 
     /// Kill the next `ljos` that runs `age -d`, from inside that decrypt.
     fn kill_at_next_open(&self) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(self.shim.join("age.kill"), "").unwrap();
     }
 
     /// The plaintext of `rel` in the checkout, opened with this home's key.
     fn opened(&self, rel: &str) -> String {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("age")
             .arg("-d")
             .arg("-i")
@@ -339,6 +373,10 @@ impl World {
 
     /// Seal `plain` to this machine's key at `rel` in the checkout.
     fn seal_to_me(&self, rel: &str, plain: &str) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut seal = Command::new("age")
             .args(["-r", &self.public, "-o"])
             .arg(self.repo.join(rel))
@@ -547,6 +585,10 @@ fn a_single_file_log_from_before_chunks_imports_every_atom() {
         plain.push_str(&format!("{atom}\n"));
     }
     std::fs::create_dir_all(w.repo.join(".ljos/atoms")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut seal = Command::new("age")
         .args(["-r", &w.public, "-o"])
         .arg(w.repo.join(".ljos/atoms/peer.jsonl.age"))
@@ -559,6 +601,10 @@ fn a_single_file_log_from_before_chunks_imports_every_atom() {
         .write_all(plain.as_bytes())
         .unwrap();
     assert!(seal.wait().unwrap().success(), "age seal");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         w.repo.join(".ljos/atoms/peer.digest"),
         "0123456789abcdef0123456789abcdef 0123456789abcdef0123456789abcdef\n",
@@ -699,6 +745,10 @@ fn a_compaction_over_a_log_this_machine_cannot_open_removes_nothing() {
     }
     let (w, atoms, _) = sealed_log();
     let other = keygen(&w.home.join("other.key"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         w.repo.join(".ljos/sync.toml"),
         format!("name = \"probe\"\nrecipients = [\"{other}\"]\n"),
@@ -894,6 +944,10 @@ fn a_temp_file_left_by_a_cut_write_is_not_committed() {
     }
     let (w, atoms, _) = sealed_log();
     let stray = w.repo.join(".ljos/atoms/me/.seg-9-0000.jsonl.age.tmp-1");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&stray, b"half a seal").unwrap();
     let head = w.head();
     let said = w.sync();
@@ -919,7 +973,7 @@ fn the_kept_plaintexts_are_this_users_alone_and_not_committed() {
     }
     let (w, atoms, _) = sealed_log();
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-    std::fs::set_permissions(w.opened_dir(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::change_mode(w.opened_dir(), 0o755).unwrap();
     w.add(lesson(atoms.len(), LINE));
     let said = w.sync();
     assert!(said.contains("1 changed"), "{said}");
@@ -950,6 +1004,10 @@ impl World {
                 continue;
             };
             if text.starts_with(first) {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "writes a file that is not a git hook"
+                )]
                 std::fs::write(&path, format!("{tag}\n{}", edit(text))).unwrap();
                 changed += 1;
             }
@@ -1014,6 +1072,10 @@ impl World {
     /// Seal this tracker's scope to `recipients` from the next sync on.
     fn recipients(&self, recipients: &[&str]) {
         let list: Vec<String> = recipients.iter().map(|r| format!("\"{r}\"")).collect();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             self.repo.join(".ljos/sync.toml"),
             format!("name = \"probe\"\nrecipients = [{}]\n", list.join(", ")),
@@ -1069,6 +1131,10 @@ impl World {
     }
 
     fn forge_plain_hash(&self, line: &str) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(self.repo.join(".ljos/atoms/me/plain.sha256"), line).unwrap();
     }
 
@@ -1132,6 +1198,10 @@ fn a_sync_does_not_commit_a_changed_or_removed_sealed_piece() {
     let mut bytes = std::fs::read(&path).unwrap();
     let last = bytes.len() - 1;
     bytes[last] ^= 0x5a;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, &bytes).unwrap();
     let said = w.sync();
     sealed_since(&w, &before, &w.pieces(), &said);
@@ -1295,6 +1365,10 @@ fn a_committed_snapshot_age_cannot_authenticate_is_sealed_over_once() {
     let mut bytes = std::fs::read(&path).unwrap();
     let last = bytes.len() - 1;
     bytes[last] ^= 0x5a;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, &bytes).unwrap();
     git(&w.repo, &["commit", "-q", "-am", "a damaged snapshot"]);
     git(&w.repo, &["push", "-q"]);
@@ -1340,6 +1414,10 @@ impl World {
         let mut bytes = std::fs::read(&path).unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0x5a;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, &bytes).unwrap();
     }
 

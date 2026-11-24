@@ -5,14 +5,12 @@
 
 ljos_test_boot::harness!();
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 fn script(dir: &Path, name: &str, body: &str) {
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 #[test]
@@ -21,7 +19,15 @@ fn finish_of_another_seats_ticket_says_send() {
     let tracker = dir.path().join("tracker");
     let project = tracker.join("Software/demo");
     std::fs::create_dir_all(&project).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         project.join("issues.org"),
         "\
@@ -52,6 +58,10 @@ fn finish_of_another_seats_ticket_says_send() {
     let home = dir.path().join("home");
     std::fs::create_dir_all(home.join("run")).unwrap();
     let path = format!("{}:/usr/bin:/bin", dir.path().display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["finish", "demo-uqy6"])
         .env_clear()

@@ -16,6 +16,10 @@ const FIXTURE: &str = include_str!("fixtures/graphify/graph.json");
 fn tracker(root: &Path) {
     let project = root.join("Software/cue");
     std::fs::create_dir_all(&project).expect("project dir");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         project.join("issues.org"),
         "\
@@ -43,16 +47,15 @@ fn tracker(root: &Path) {
 fn stub_vissue(bin: &Path) {
     std::fs::create_dir_all(bin).expect("bin");
     let path = bin.join("vissue");
-    std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("vissue stub");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    }
+    ljos_cli::install_executable(&path, "#!/bin/sh\nexit 0\n").expect("vissue stub");
 }
 
 fn write_graph(dir: &Path) {
     std::fs::create_dir_all(dir).expect("graph dir");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.join("graph.json"), FIXTURE).expect("graph.json");
 }
 
@@ -70,6 +73,10 @@ impl Seat {
     }
 
     fn recall(&self, args: &[&str], extra: &[(&str, &str)]) -> (bool, String) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(self.home.path())
@@ -170,6 +177,10 @@ fn recall_reads_a_graph_path_from_the_environment_or_ljos_toml() {
     let seat = Seat::new();
     let custom = seat.home.path().join("custom");
     write_graph(&custom);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         seat.home.path().join("ljos.toml"),
         "graphify = \"custom/graph.json\"\n",
@@ -185,6 +196,10 @@ fn recall_refuses_an_unknown_schema_major() {
     let seat = Seat::new();
     let dir = seat.home.path().join("graphify-out");
     std::fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         dir.join("graph.json"),
         r#"{"graph":{"schema_version":2,"graphify_version":"9.0.0"},"nodes":[],"links":[]}"#,
@@ -201,6 +216,10 @@ fn recall_refuses_an_unknown_schema_major() {
 fn mcp_recall_includes_the_same_section() {
     let seat = Seat::new();
     write_graph(&seat.home.path().join("graphify-out"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .current_dir(seat.home.path())
         .env_clear()
@@ -226,6 +245,10 @@ fn mcp_recall_includes_the_same_section() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(60));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut stdin = child.stdin.take().unwrap();

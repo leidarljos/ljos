@@ -42,15 +42,18 @@ impl Home {
         ] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("tracker/Software/demo/issues.org"), ISSUES).unwrap();
         let bin = root.join("home/.local/bin/vissue");
-        std::fs::write(&bin, VISSUE_STUB).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        ljos_cli::install_executable(&bin, VISSUE_STUB).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         thread::spawn(move || serve(listener, atoms));
@@ -73,6 +76,10 @@ impl Home {
     fn command(&self, args: &[&str], columns: Option<&str>) -> Command {
         let home = self.root.join("home");
         let path = format!("{}:/usr/bin:/bin", home.join(".local/bin").display());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(self.root.join("work"))
@@ -409,6 +416,10 @@ fn snap(name: &str, actual: &str) {
         .join(format!("{name}.txt"));
     if std::env::var_os("LJOS_UPDATE_LISTING").is_some() || !path.is_file() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, actual).unwrap();
         return;
     }

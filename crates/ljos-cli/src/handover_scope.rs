@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn only_atoms_tagged_with_the_scope_are_kept() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             dir.path().join("seat.jsonl"),
             concat!(
                 "{\"id\":\"a\",\"text\":\"cloud\",\"entities\":[\"scope:cloud\",\"deed-1\"]}\n",

@@ -30,7 +30,7 @@ impl World {
         ] {
             std::fs::create_dir_all(root.path().join(dir)).unwrap();
         }
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             root.path().join("gitconfig"),
             "[core]\n\thooksPath = /dev/null\n[user]\n\tname = Ada Example\n\temail = ada@example.invalid\n",
         )
@@ -45,6 +45,10 @@ impl World {
             .to_string_lossy()
             .into_owned();
         let world = Self { root, path };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             world.tracker().join("Software/demo/issues.org"),
             format!("* TODO [#B] Scoreboard\n:PROPERTIES:\n:ID:         {ISSUE}\n:END:\n"),
@@ -70,6 +74,10 @@ impl World {
 
     pub fn command(&self, program: &str) -> Command {
         let home = self.root.path().join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(program);
         cmd.env_clear()
             .env("PATH", &self.path)
@@ -125,6 +133,10 @@ impl World {
 
     pub fn write(&self, name: &str, text: impl AsRef<[u8]>) -> String {
         let path = self.root.path().join(name);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, text).unwrap();
         path.display().to_string()
     }
@@ -193,6 +205,10 @@ pub fn mcp(world: &World, calls: &[serde_json::Value]) -> Vec<serde_json::Value>
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(120));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut stdin = child.stdin.take().unwrap();

@@ -1278,6 +1278,10 @@ fn remember_receipts(keys: &[String]) {
         text.push_str(key);
         text.push('\n');
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let _ = std::fs::write(path, text);
 }
 

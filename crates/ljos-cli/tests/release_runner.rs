@@ -8,7 +8,6 @@
 ljos_test_boot::harness!();
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -67,6 +66,10 @@ fn build_side_release() -> PathBuf {
         return out;
     }
     let manifest = workspace_root().join("Cargo.toml");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let built = Command::new("cargo")
         .args(["build", "--release", "--locked", "--manifest-path"])
         .arg(&manifest)
@@ -116,6 +119,10 @@ fn assert_no_bypass(bin: &Path) {
 fn cgroup_while_hook_blocks(bin: &Path) -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let err_file = tempfile::NamedTempFile::new().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(bin)
         .arg("hook")
         .env_clear()
@@ -161,8 +168,7 @@ fn assert_deps_copy_stays_a_runner(bin: &Path) {
     let deps = dir.path().join("deps");
     fs::create_dir_all(&deps).unwrap();
     let copy = deps.join("ljos");
-    fs::copy(bin, &copy).unwrap();
-    fs::set_permissions(&copy, fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::copy_executable(bin, &copy).unwrap();
     assert!(
         copy.to_string_lossy().contains("/deps/"),
         "copy path {} has no /deps/ segment",
@@ -222,12 +228,16 @@ exit 0
     let home = dir.path().join("home");
     let rules = home.join(".config/ljos/user-rules.json");
     fs::create_dir_all(rules.parent().unwrap()).unwrap();
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         &rules,
         r#"{"rules": [{"id": "deadbeef5e1d0c4b3a29180716f5e4d3", "text": "Never post or reply to Alan.",
             "author": "person", "reason": "he asked us to stop", "written_at": "2020-01-01T00:00:00.000Z"}]}"#,
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let run = Command::new("bash")
         .args([
             "-c",
@@ -271,6 +281,10 @@ exit 0
         kept["rules"][0]["basis"], "agent",
         "deps copy kept the rule as the person's\n{dumped}"
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let _ = Command::new("sudo").args(["-n", "rmdir", &cg]).output();
 }
 

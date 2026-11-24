@@ -18,11 +18,9 @@ const NAME_COMMAND: &str = "git config --global user.name \"Your Name\"";
 const EMAIL_COMMAND: &str = "git config --global user.email \"you@example.com\"";
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 /// The directory of the `vissue` the test run has on `PATH`.
@@ -62,6 +60,10 @@ impl Seat {
             std::fs::create_dir_all(dir.path().join(sub)).unwrap();
         }
         let seat = Self { dir };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let init = Command::new("git")
             .args(["init", "-q"])
             .current_dir(seat.tracker())
@@ -86,12 +88,20 @@ impl Seat {
     /// guessing them from the account and the host.
     fn command(&self, identity: Option<&str>) -> Command {
         let global = self.dir.path().join("gitconfig");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&global, identity.unwrap_or("")).unwrap();
         let path = format!(
             "{}:{}:/usr/bin:/bin",
             self.dir.path().join("bin").display(),
             vissue_dir().display()
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.current_dir(self.home())
             .env_clear()

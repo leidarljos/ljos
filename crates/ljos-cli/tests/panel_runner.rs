@@ -6,10 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
     path
 }
 
@@ -32,12 +30,16 @@ impl World {
         std::fs::create_dir_all(&state).unwrap();
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&root).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join("vissue.toml"),
             "seats = [\"alice\", \"skeptic\"]\n",
         )
         .unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             state.join("issues.json"),
             r#"{"demo-1":{"id":"demo-1","title":"Ship the feature","body":"Options: A, B\n\nA: ship\nB: wait","type":"decision"}}"#,
         )
@@ -86,6 +88,10 @@ else:
                 if candidate.is_file() {
                     let link = bin.join(util);
                     if !link.exists() {
+                        #[expect(
+                            clippy::disallowed_methods,
+                            reason = "links a path that is not a git hook"
+                        )]
                         std::os::unix::fs::symlink(&candidate, link).unwrap();
                     }
                     break;
@@ -102,7 +108,11 @@ else:
     }
 
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(&self.root)
             .env_clear()
@@ -123,7 +133,7 @@ else:
             .env("LJOS_PROJECT", "demo")
             .envs(env.iter().copied())
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 
@@ -164,6 +174,10 @@ fn panel_run_and_open_panel_fail_loudly_when_no_runner_cli_is_installed() {
     );
 
     let prompt = world.state.join("question.txt");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&prompt, "Should we ship the cache?").unwrap();
     let log = world.state.join("open-panel.log");
     let open_out = world.command(
@@ -229,7 +243,7 @@ fn panel_run_detects_installed_runner_cli_and_supports_configured_templates() {
     );
     let cfg_dir = world.home.join(".config/ljos");
     std::fs::create_dir_all(&cfg_dir).unwrap();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         cfg_dir.join("ljos.toml"),
         "[panel]\ncommand = [\"bespoke-runner\", \"--role\", \"{persona}\", \"--prompt\", \"{prompt}\"]\n",
     )

@@ -23,10 +23,18 @@ fn filing_a_ticket_does_not_print_the_tracker_file_path() {
     let home = tempfile::tempdir().unwrap();
     let tracker = home.path().join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"ada\"]\n").unwrap();
     let ljos = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
     let vissue = tool_dir("vissue").expect("vissue");
     let path = format!("{}:{}:/usr/bin:/bin", ljos.display(), vissue.display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", path)

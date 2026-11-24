@@ -8,10 +8,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn ids(tracker: &Path) -> Vec<String> {
@@ -70,6 +68,10 @@ fn the_write_after_start_stays_on_the_issue_start_opened() {
         "#!/bin/sh\necho \"vissue $*\" >> \"$CALLS\"\nexit 0\n",
     );
     let calls = root.path().join("calls.log");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .current_dir(&product)
         .env_clear()
@@ -94,6 +96,10 @@ fn the_write_after_start_stays_on_the_issue_start_opened() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(40));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let call = |id: u32, name: &str, args: serde_json::Value| serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":args}});

@@ -11,10 +11,8 @@ use std::path::Path;
 use std::process::Command;
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 const ORG: &str = "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
@@ -57,6 +55,10 @@ fn release_reopens_and_complete_keeps_the_state() {
     let tracker = dir.path().join("tracker");
     let file = tracker.join("Software/proj/issues.org");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&file, ORG).unwrap();
     let home = dir.path().join("home");
     let runtime = dir.path().join("run");
@@ -68,6 +70,10 @@ fn release_reopens_and_complete_keeps_the_state() {
         std::env::var("PATH").unwrap_or_default()
     );
     let ljos = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
@@ -186,6 +192,10 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
     let tracker = dir.path().join("tracker");
     let file = tracker.join("Software/proj/issues.org");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&file, FINISH_ORG).unwrap();
     let home = dir.path().join("home");
     let runtime = dir.path().join("run");
@@ -197,6 +207,10 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
         std::env::var("PATH").unwrap_or_default()
     );
     let ljos = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
@@ -223,6 +237,10 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
         "2",
     ]);
     let refuse = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
@@ -353,6 +371,10 @@ fn release_hands_the_tracker_back_when_the_claim_graph_holds_nothing() {
     let tracker = dir.path().join("tracker");
     let file = tracker.join("Software/proj/issues.org");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&file, UNHELD_ORG).unwrap();
     let home = dir.path().join("home");
     let runtime = dir.path().join("run");
@@ -363,6 +385,10 @@ fn release_hands_the_tracker_back_when_the_claim_graph_holds_nothing() {
         dir.path().display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let release = |id: &str| {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["release", id, "--assignee", "saddle@main"])
@@ -433,6 +459,10 @@ struct LiveSleeper(std::process::Child);
 
 impl LiveSleeper {
     fn spawn() -> Self {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let child = Command::new("sleep")
             .arg("30")
             .stdin(std::process::Stdio::null())
@@ -515,20 +545,24 @@ esac\nexit 0\n"
     let tracker = dir.path().join("tracker");
     let file = tracker.join("Software/Software/issues.org");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&file, TAKEOVER_ORG).unwrap();
     let home = dir.path().join("home");
     let runtime = dir.path().join("run");
     let ljos_run = runtime.join("ljos");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&ljos_run).unwrap();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         ljos_run.join(format!("hold-{actor_oc9o}")),
         "dseams-paper@dorx1f91mq:Software-oc9o\ndseams-paper\n4194303\nno-such-runner\n2026-10-11T05:00:00Z\nSoftware-oc9o\n-\n",
     )
     .unwrap();
     let sleeper = LiveSleeper::spawn();
     let live_hold = ljos_run.join(format!("hold-{actor_oc9p}"));
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         &live_hold,
         format!(
             "dseams-paper@live111111:Software-oc9p\ndseams-paper\n{}\nsleep\n2026-10-11T05:00:00Z\nSoftware-oc9p\n-\n",
@@ -538,6 +572,10 @@ esac\nexit 0\n"
     .unwrap();
 
     let path = format!("{}:/usr/bin:/bin", dir.path().display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
@@ -653,6 +691,10 @@ esac\nexit 0\n"
     let tracker = dir.path().join("tracker");
     let file = tracker.join("Software/Software/issues.org");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&file, ORG).unwrap();
     let home = dir.path().join("home");
     let runtime = dir.path().join("run");
@@ -664,6 +706,10 @@ esac\nexit 0\n"
         (actor_bare.as_str(), "Software-bare"),
         (actor_bar2.as_str(), "Software-bar2"),
     ] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             ljos_run.join(format!("hold-{actor}")),
             format!(
@@ -674,6 +720,10 @@ esac\nexit 0\n"
         .unwrap();
     }
     let path = format!("{}:/usr/bin:/bin", dir.path().display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)

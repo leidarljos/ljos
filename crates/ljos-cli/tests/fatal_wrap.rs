@@ -20,6 +20,10 @@ fn a_panic_message_wraps_on_a_tty() {
         panic!("{MESSAGE}");
     }
     let cols = 40;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(std::env::current_exe().unwrap());
     cmd.args([
         "--exact",

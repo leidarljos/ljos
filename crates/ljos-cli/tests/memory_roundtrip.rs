@@ -83,7 +83,11 @@ impl Seat {
     }
 
     fn run(&self, pack: &str, args: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("HOME", &self.home)
@@ -103,7 +107,7 @@ impl Seat {
             .env("PACKSET_AUTH", "off")
             .env("PACKSET_WORKSPACE", "seat")
             .output()
-            .expect("ljos")
+            .expect("ljos");
     }
 }
 
@@ -144,6 +148,10 @@ fn lane(seat: &Seat, name: &str, rows: &[(usize, &str)]) {
         );
         body.push('\n');
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(seat.handoff.join(format!("{name}.jsonl")), body).unwrap();
 }
 
@@ -279,7 +287,7 @@ fn an_unchanged_round_trip_does_not_wait_on_a_slow_pack() {
     let queue = seat.home.join(".local/state/ljos");
     std::fs::create_dir_all(&queue).unwrap();
     let queued = queue.join("note-queue.jsonl");
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         &queued,
         "{\"issue\":\"\",\"text\":\"a queued lesson that must stay\",\"workspace\":\"seat\",\"at\":1,\"kind\":\"lesson\",\"seat\":\"ada\"}\n",
     )

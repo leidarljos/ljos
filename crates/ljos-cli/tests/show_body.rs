@@ -28,6 +28,10 @@ impl Board {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(dir.path().join("run")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
         let path = format!("{}:/usr/bin:/bin", vissue.parent().unwrap().display());
         Self {
@@ -39,7 +43,11 @@ impl Board {
     }
 
     fn ljos(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.dir.path())
             .env_clear()
@@ -60,7 +68,7 @@ impl Board {
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn ok(&self, args: &[&str]) -> String {

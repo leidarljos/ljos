@@ -626,6 +626,10 @@ Body.\n\n\
 
     fn layout_with_board(dir: &std::path::Path) -> Layout {
         std::fs::create_dir_all(dir.join("Issues/demo")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("Issues/demo/issues.org"), BOARD).unwrap();
         Layout::new(dir, "Issues")
     }
@@ -650,6 +654,10 @@ Body.\n\n\
         let tmp = tempfile::tempdir().unwrap();
         let board = tmp.path().join("Software/Software/hle-mm");
         std::fs::create_dir_all(&board).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             board.join("issues.org"),
             "\
@@ -697,6 +705,10 @@ Body.\n\n\
         let tmp = tempfile::tempdir().unwrap();
         let layout = layout_with_board(tmp.path());
         std::fs::create_dir_all(tmp.path().join("Issues/broken")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             tmp.path().join("Issues/broken/issues.org"),
             "* TODO no id here\n:PROPERTIES:\n:END:\n",
@@ -719,6 +731,10 @@ Body.\n\n\
         assert!(Arc::ptr_eq(&first.recs, &again.recs), "the parse is kept");
         // A longer heading changes the length even inside one clock tick.
         let moved = BOARD.replace("* TODO [#C] Child", "* STARTED [#C] Child");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(tmp.path().join("Issues/demo/issues.org"), moved).unwrap();
         let after = in_layout(&layout, "demo-bbbb").expect("found");
         assert_eq!(after.card().unwrap()["state"], "STARTED");
@@ -740,6 +756,10 @@ Body.\n\n\
         ];
         keep_read(key.clone(), before.clone(), "[]");
         assert_eq!(kept_read(&key, &before).as_deref(), Some("[]"));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&file, format!("{BOARD}\n")).unwrap();
         let after = signature(&file).unwrap();
         assert_ne!(before, after, "a longer file has another signature");
@@ -776,6 +796,10 @@ Body.\n\n\
              [2026-10-30 Fri 09:04] pinky: land used=\n",
         );
         std::fs::create_dir_all(tmp.path().join("Issues/demo")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(tmp.path().join("Issues/demo/issues.org"), board).unwrap();
         let layout = Layout::new(tmp.path(), "Issues");
         for id in ["demo-aaaa", "demo-bbbb"] {
@@ -794,6 +818,10 @@ Body.\n\n\
         let tmp = tempfile::tempdir().unwrap();
         let layout = layout_with_board(tmp.path());
         std::fs::create_dir_all(tmp.path().join("Issues/other")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             tmp.path().join("Issues/other/issues.org"),
             "#+TODO: TODO STARTED | DONE CANCELLED\n\n\
@@ -818,6 +846,10 @@ Body.\n\n\
         assert!(Arc::ptr_eq(&recs, &again), "the parse is kept");
         // A write to the asking project is seen by the next read.
         let moved = BOARD.replace("* TODO [#C] Child", "* STARTED [#C] Child");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(tmp.path().join("Issues/demo/issues.org"), moved).unwrap();
         let spot = in_layout(&layout, "demo-aaaa").expect("found");
         let after = tracker_recs(&spot).expect("parsed");

@@ -465,6 +465,10 @@ fn move_aside(path: &Path) -> std::io::Result<PathBuf> {
         if dest.exists() {
             continue;
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         std::fs::rename(path, &dest)?;
         return Ok(dest);
     }
@@ -480,14 +484,18 @@ fn real_dir(path: &Path) -> bool {
 }
 
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
     }
-    builder.create(path)
+    #[cfg(not(unix))]
+    {
+        std::fs::DirBuilder::new().recursive(true).create(path)
+    }
 }
 
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
@@ -498,6 +506,10 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut file = options.open(path)?;
     file.write_all(text.as_bytes())?;
     file.sync_all()

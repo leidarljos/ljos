@@ -306,6 +306,10 @@ impl Builder {
     /// `PACKSET_HOME`, `--port 0`, and `--home`, and sets `INSIDE_EMBED`
     /// when the command does not.
     pub fn command(&mut self) -> &mut Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         if self.cmd.is_none() {
             let program = self.program.clone().unwrap_or_else(locate_or_panic);
             self.cmd = Some(Command::new(program));
@@ -329,6 +333,10 @@ impl Builder {
                     .and_then(|cmd| cmd.get_program().to_str().map(PathBuf::from))
             })
             .unwrap_or_else(locate_or_panic);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = self.cmd.take().unwrap_or_else(|| Command::new(&program));
         // HOME is a directory this test created, or a temp seat the caller
         // already set. A writer that inherits the process home can write
@@ -1081,7 +1089,15 @@ int main(void) {
             let dir = unique_dir();
             let src = dir.join("standin.c");
             let bin = dir.join("ljos-writer-standin");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&src, STANDIN_C).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let out = Command::new("cc")
                 .args(["-O2", "-o"])
                 .arg(&bin)
@@ -1297,6 +1313,10 @@ int main(void) {
         let mut started = Packsetd::build();
         started.bin(standin);
         let daemon = started.spawn();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(pidfile, daemon.id().to_string()).unwrap();
         assert!(alive(daemon.id()), "the writer was not alive");
         panic!("after start");
@@ -1305,30 +1325,25 @@ int main(void) {
     #[test]
     fn a_startup_failure_leaves_no_writer() {
         let dir = unique_dir();
-        let script = dir.join("sleep.sh");
         let pidfile = dir.join("pid");
-        // The script ignores the `--port 0 --home` the helper appends.
-        // `sleep 60` is longer than the two-second ready budget below, so
-        // the process is still alive when the helper gives up. A process
-        // that exited on its own would not show that the guard stopped it.
-        std::fs::write(&script, "#!/bin/sh\necho $$ > \"$1\"\nexec sleep 60\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script, perms).unwrap();
-        }
-        let script_text = script.to_string_lossy().into_owned();
+        // `sh -c` takes the script as text, so no file of this process is
+        // started. `$1` is the pidfile, and the script ignores the
+        // `--port 0 --home` the helper appends. `sleep 60` is longer than
+        // the two-second ready budget below, so the process is still alive
+        // when the helper gives up. A process that exited on its own would
+        // not show that the guard stopped it.
         let pidfile_text = pidfile.to_string_lossy().into_owned();
         // Two seconds is long enough for the script to write its pid on
         // a loaded CPU, and short of the 15s the real writer is given.
         // This stand-in never listens, so the wait ends in the panic.
         let caught = std::panic::catch_unwind(|| {
             let mut started = Packsetd::build();
-            started.bin(&script_text);
+            started.bin("/bin/sh");
             started.ready_for(Duration::from_secs(2));
-            started.command().arg(&pidfile_text);
+            started
+                .command()
+                .args(["-c", "echo $$ > \"$1\"; exec sleep 60", "sleep.sh"])
+                .arg(&pidfile_text);
             let daemon = started.spawn();
             panic!(
                 "a writer that never listens was returned on port {}",
@@ -1367,6 +1382,10 @@ int main(void) {
         let mut started = Packsetd::build();
         started.bin(&standin);
         let daemon = started.spawn();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&pidfile, daemon.id().to_string()).unwrap();
         // The parent signals this process inside its five-second wait.
         // Thirty seconds is only the fallback when that signal never arrives.
@@ -1377,6 +1396,10 @@ int main(void) {
         let dir = unique_dir();
         let pidfile = dir.join("pid");
         let exe = std::env::current_exe().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = Command::new(exe)
             .arg("packsetd::tests::a_sigint_stops_the_writer")
             .arg("--exact")
@@ -1468,6 +1491,10 @@ int main(void) {
 
     fn panic_after_packsetd(pidfile: &str) {
         let daemon = Packsetd::open();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(pidfile, daemon.id().to_string()).unwrap();
         assert_ne!(daemon.port(), 8761);
         assert!(alive(daemon.id()), "packsetd was not alive");
@@ -1516,7 +1543,15 @@ int main(int argc, char **argv) {
     fn foreign_bin(dir: &std::path::Path) -> PathBuf {
         let src = dir.join("foreign.c");
         let bin = dir.join("packsetd");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&src, FOREIGN_C).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("cc")
             .args(["-O2", "-o"])
             .arg(&bin)
@@ -1545,6 +1580,10 @@ int main(int argc, char **argv) {
         ));
         std::fs::create_dir_all(&home).unwrap();
         let exe = std::env::current_exe().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = Command::new(exe)
             .arg("packsetd::tests::a_foreign_packsetd_survives_the_test_process_exit")
             .arg("--exact")
@@ -1615,6 +1654,10 @@ int main(int argc, char **argv) {
         let bin = std::env::var("LJOS_FOREIGN_BIN").unwrap();
         let pidfile = std::env::var("LJOS_FOREIGN_PIDFILE").unwrap();
         let port: u16 = std::env::var("LJOS_FOREIGN_PORT").unwrap().parse().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut writer = Command::new(&bin)
             .arg(port.to_string())
             .env_clear()
@@ -1645,6 +1688,10 @@ int main(int argc, char **argv) {
                 .unwrap_or_default()
                 .trim_end_matches('/')
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&pidfile, pid.to_string()).unwrap();
         reap_listener(port);
         assert!(
@@ -1667,6 +1714,10 @@ int main(int argc, char **argv) {
         let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut writer = Command::new(&bin)
             .arg(port.to_string())
             .env_clear()

@@ -37,10 +37,8 @@ impl Drop for StopServer {
 }
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 struct Hab {
@@ -70,6 +68,10 @@ impl Hab {
 
     fn command(&self, bin: &str) -> Command {
         let home = self.dir.path().join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(bin);
         cmd.env_clear()
             .env(
@@ -158,6 +160,10 @@ fn the_mcp_claim_tool_answers_a_blank_id_at_once() {
             cancelled.recv_timeout(WATCHDOG),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         ) {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new("kill").arg(pid.to_string()).status();
         }
     });

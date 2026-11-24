@@ -9,3 +9,6 @@ description = "Test-only cgroup and environment setup for the ljos suite."
 
 [lib]
 path = "src/lib.rs"
+
+[lints]
+workspace = true

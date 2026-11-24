@@ -4,7 +4,6 @@
 //! the parent's must not do the same through ljos.
 
 ljos_test_boot::harness!();
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[test]
@@ -12,7 +11,7 @@ fn a_child_is_filed_in_its_parents_project() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("calls.log");
     let stub = dir.path().join("vissue");
-    std::fs::write(
+    ljos_cli::install_executable(
         &stub,
         format!(
             "#!/bin/sh\necho \"vissue $*\" >> '{}'\n[ \"$1\" = create ] && echo ljos-new1\nexit 0\n",
@@ -20,7 +19,6 @@ fn a_child_is_filed_in_its_parents_project() {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
     let home = dir.path().join("home");
     std::fs::create_dir_all(home.join("run")).unwrap();
     let path = format!(
@@ -29,6 +27,10 @@ fn a_child_is_filed_in_its_parents_project() {
         std::env::var("PATH").unwrap_or_default()
     );
     let file = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .arg("file")
             .args(args)

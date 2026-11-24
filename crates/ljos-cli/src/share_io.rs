@@ -198,6 +198,10 @@ impl Share {
         }
         let tmp_mv = tmp.clone();
         let dest = path.to_path_buf();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         if let Err(err) = io(Op::Rename, move || std::fs::rename(&tmp_mv, &dest)) {
             let tmp_rm = tmp;
             let _ = io(Op::Io, move || std::fs::remove_file(&tmp_rm));
@@ -257,6 +261,10 @@ fn lock_open(path: &Path, create: bool) -> IoResult<std::fs::File> {
     if create {
         opts.write(true).create(true).truncate(false).mode(0o600);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let file = opts.open(path)?;
     // SAFETY: flock on a descriptor this function owns and returns.
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
@@ -268,6 +276,10 @@ fn lock_open(path: &Path, create: bool) -> IoResult<std::fs::File> {
 
 fn write_new(path: &Path, bytes: &[u8]) -> IoResult<()> {
     use std::os::unix::fs::OpenOptionsExt;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -518,6 +530,10 @@ mod tests {
     fn an_injected_transport_error_does_not_replace_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("seed.jsonl");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, b"old\n").unwrap();
         let _fault = FaultArm::code(libc::ENOTCONN);
         let err = share(dir.path()).write_atomic(&path, b"new\n").unwrap_err();

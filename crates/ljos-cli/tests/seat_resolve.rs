@@ -27,6 +27,10 @@ impl World {
     }
 
     fn ljos(&self, args: &[&str], extra: &[(&str, &str)]) -> std::process::Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
@@ -79,6 +83,10 @@ fn an_explicit_seat_wins_and_each_later_rule_is_reached() {
     assert_eq!(field(&stdout, "seat"), "envy", "{text}");
     assert!(field(&stdout, "source").contains("LJOS_SEAT"), "{text}");
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(world.home().join(".config/ljos/env"), "seat=filed\n").unwrap();
     let from_file = world.ljos(&["seat"], &[]);
     let text = said(&from_file);
@@ -86,9 +94,17 @@ fn an_explicit_seat_wins_and_each_later_rule_is_reached() {
     let stdout = String::from_utf8_lossy(&from_file.stdout);
     assert_eq!(field(&stdout, "seat"), "filed", "{text}");
     assert!(stdout.contains("seat="), "{text}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(world.home().join(".config/ljos/env"), "").unwrap();
 
     let id = "bc-1234abcd-rest";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.home().join(".config/ljos/seats.map"),
         format!("{id} mapped\n"),
@@ -102,6 +118,10 @@ fn an_explicit_seat_wins_and_each_later_rule_is_reached() {
     assert!(stdout.contains("seats.map"), "{text}");
     std::fs::remove_file(world.home().join(".config/ljos/seats.map")).unwrap();
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.home().join(".config/ljos/seats.toml"),
         format!("{id:?} = \"toml-seat\"\n"),
@@ -118,6 +138,10 @@ fn an_explicit_seat_wins_and_each_later_rule_is_reached() {
     let parent = std::process::id();
     let runtime = world.root.path().join("run").join("ljos");
     std::fs::create_dir_all(&runtime).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         runtime.join(format!("seat-{parent}")),
         "parent-seat\nparent-seat\n",
@@ -132,6 +156,10 @@ fn an_explicit_seat_wins_and_each_later_rule_is_reached() {
     std::fs::remove_file(runtime.join(format!("seat-{parent}"))).unwrap();
 
     std::fs::create_dir_all(world.home().join(".local/state/ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.home().join(".local/state/ljos/seat-writes.log"),
         "2026-11-11T00:00:00Z\trecent\tbox\n",

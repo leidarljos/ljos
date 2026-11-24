@@ -87,7 +87,11 @@ impl Board {
     }
 
     fn ljos(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.dir.path())
             .env_clear()
@@ -107,7 +111,7 @@ impl Board {
             .env("LJOS_CLAIM_NOW", &self.claim_now)
             .envs(std::env::var_os("TZ").map(|tz| ("TZ", tz)))
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 

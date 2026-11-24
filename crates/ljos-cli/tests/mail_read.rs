@@ -9,10 +9,11 @@ ljos_test_boot::harness!();
 #[path = "common/maildir.rs"]
 mod maildir;
 
+use std::os::unix::fs::PermissionsExt;
+
 use ljos_cli::mailbox::config::MailConfig;
 use ljos_cli::mailbox::notmuch::Reader;
 use sha2::{Digest as _, Sha256};
-use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, Instant};
 
 fn reader(mailbox: &maildir::Mailbox) -> Reader {
@@ -191,6 +192,10 @@ fn a_notmuch_config_others_could_change_is_refused() {
     }
     let mailbox = maildir::mailbox();
     let link = mailbox.dir.path().join("linked-config");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink(&mailbox.config, &link).unwrap();
     let linked = Reader::new(&MailConfig {
         notmuch_config: Some(link),
@@ -199,6 +204,10 @@ fn a_notmuch_config_others_could_change_is_refused() {
     .unwrap();
     let err = linked.search("lunch", None).unwrap_err();
     assert!(format!("{err:#}").contains("symlink"), "{err:#}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(&mailbox.config, std::fs::Permissions::from_mode(0o620)).unwrap();
     let err = reader(&mailbox).search("lunch", None).unwrap_err();
     assert!(format!("{err:#}").contains("writable"), "{err:#}");
@@ -207,8 +216,11 @@ fn a_notmuch_config_others_could_change_is_refused() {
 /// A reader whose notmuch is `script`, a shell script.
 fn fake(dir: &tempfile::TempDir, script: &str) -> Reader {
     let bin = dir.path().join("notmuch");
-    std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.path().join("notmuch-config"), "").unwrap();
     Reader::new(&MailConfig {
         notmuch: Some(bin),
@@ -258,6 +270,10 @@ fn an_endless_attachment_does_not_stall_show() {
     let dir = tempfile::tempdir().unwrap();
     let mail = dir.path().join("Mail");
     std::fs::create_dir_all(mail.join("cur")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(mail.join("cur/1"), "From: big@example.test\n\n").unwrap();
     let json = r#"[[[{"id":"big@example.test","timestamp":0,"tags":[],"headers":{},"filename":["MAIL/cur/1"],"body":[{"id":1,"content-type":"multipart/mixed","content":[{"id":2,"content-type":"application/octet-stream","filename":"big.bin"}]}]},[]]]]"#
         .replace("MAIL", &mail.display().to_string());
@@ -350,12 +366,28 @@ fn a_message_file_that_is_a_symlink_or_outside_the_root_is_not_shown() {
     let message = |id: &str| {
         format!("From: a@example.test\nMessage-ID: <{id}>\nSubject: linked\n\nsecret outside\n")
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(outside.join("one.eml"), message("link-1@example.test")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink(outside.join("one.eml"), mailbox.maildir().join("cur/9:2,"))
         .unwrap();
     let away = mailbox.dir.path().join("away");
     std::fs::create_dir_all(away.join("cur")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(away.join("cur/1:2,"), message("away-1@example.test")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink(&away, mailbox.maildir().join("away")).unwrap();
     mailbox.notmuch(&["new", "--quiet"]);
     let reader = reader(&mailbox);

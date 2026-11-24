@@ -267,6 +267,10 @@ fn a_proposal_an_older_ljos_left_open_is_stored_once() {
         "origin": "agent-derived",
         "atom": atom,
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&rows, format!("{row}\n")).expect("proposals");
 
     let first = ljos_cli::admit::import_open(60_000);

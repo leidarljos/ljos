@@ -653,7 +653,11 @@ pub(crate) fn merge_org_files(base: &Path, ours: &Path, theirs: &Path) -> Result
     if merged.contains("<<<<<<<") {
         return Err("merged org still has conflict markers".into());
     }
-    std::fs::write(ours, merged).map_err(|e| e.to_string())
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    return std::fs::write(ours, merged).map_err(|e| e.to_string());
 }
 
 fn resolve_attributes(dir: &Path) -> Result<(), String> {
@@ -724,6 +728,10 @@ fn write_resolved(dir: &Path, file: &str, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     mark_resolved(dir, file)
 }
@@ -1035,7 +1043,11 @@ fn write_attributes(root: &Path) -> Result<(), String> {
     if out == have {
         return Ok(());
     }
-    std::fs::write(path, out).map_err(|e| e.to_string())
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    return std::fs::write(path, out).map_err(|e| e.to_string());
 }
 
 fn org_merge_line(trimmed: &str) -> bool {
@@ -1367,6 +1379,10 @@ fn fold_orgs(dir: &Path) -> Result<(), String> {
         if folded.contains("<<<<<<<") {
             return Err(format!("{file} still has conflict markers"));
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, &folded).map_err(|e| e.to_string())?;
         mark_resolved(dir, &file)?;
         changed.push(file);
@@ -1464,7 +1480,6 @@ fn git_path_exists(dir: &Path, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     use super::*;
@@ -1585,7 +1600,7 @@ note from b
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let git_bin = bin.join("git");
-        std::fs::write(
+        crate::install_executable(
             &git_bin,
             "#!/bin/sh\n\
              if [ \"$LC_ALL\" = C ]; then\n\
@@ -1596,7 +1611,6 @@ note from b
              exit 128\n",
         )
         .unwrap();
-        std::fs::set_permissions(&git_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _env = crate::test_env_lock();
         let path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{path}", bin.display()));
@@ -1659,7 +1673,15 @@ note from b
         }
         let preamble = "#+TITLE: probe\n\n";
         let seed = heading("seed", "Seed");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(a.join("issues.org"), format!("{preamble}{seed}")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             a.join(".gitattributes"),
             "*.org merge=union\n.ljos/atoms/* merge=ljos-atoms\n",
@@ -1680,11 +1702,19 @@ note from b
         ] {
             run(&b, &["config", key, value]);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             a.join("issues.org"),
             format!("{preamble}{seed}{}", heading("from-a", "From A")),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             b.join("issues.org"),
             format!("{preamble}{seed}{}", heading("from-b", "From B")),
@@ -2021,6 +2051,10 @@ body b
         let rel = format!(".ljos/atoms/{host}.digest");
         std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
         let current = root.join(".ljos/atoms").join(format!("{host}.digest"));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&current, "local\n").unwrap();
         let err = merge_atoms_driver(&current, &rel).unwrap_err();
         assert!(err.contains("names no scope"), "{err}");
@@ -2038,12 +2072,11 @@ body b
         let digest = format!(".ljos/atoms/{host}.digest");
         let age = format!(".ljos/atoms/{host}.jsonl.age");
         let script = dir.path().join("atoms-driver");
-        std::fs::write(
+        crate::install_executable(
             &script,
             "#!/bin/sh\nprintf 're-exported %s\\n' \"$2\" > \"$1\"\nexit 0\n",
         )
         .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let driver = format!("{} %A %P", script.display());
         let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
         unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
@@ -2090,14 +2123,30 @@ body b
         configure(&clones[0]);
         let preamble = "#+TITLE: probe\n\n";
         let seed = heading("seed", "Seed");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(clones[0].join("issues.org"), format!("{preamble}{seed}")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             clones[0].join(".gitattributes"),
             "*.org merge=union\n.ljos/atoms/* merge=ljos-atoms\n",
         )
         .unwrap();
         std::fs::create_dir_all(clones[0].join(".ljos/atoms")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(clones[0].join(&digest), "base\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(clones[0].join(&age), "base\n").unwrap();
         run(
             &clones[0],
@@ -2118,12 +2167,24 @@ body b
             configure(clone);
         }
         for (clone, id) in clones.iter().zip(["from-a", "from-b", "from-c"]) {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(
                 clone.join("issues.org"),
                 format!("{preamble}{seed}{}", heading(id, id)),
             )
             .unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(clone.join(&digest), format!("side-{id}\n")).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(clone.join(&age), format!("side-{id}\n")).unwrap();
             run(clone, &["add", "issues.org", ".ljos/atoms"]);
             run(clone, &["commit", "-q", "-m", id]);
@@ -2208,7 +2269,7 @@ body b
         let host = crate::sync::host();
         let digest = format!(".ljos/atoms/{host}.digest");
         let script = dir.path().join("atoms-driver");
-        std::fs::write(
+        crate::install_executable(
             &script,
             format!(
                 "#!/bin/sh\nf='{}'\nn=0\nif [ -f \"$f\" ]; then n=$(cat \"$f\"); fi\nn=$((n + 1))\nprintf '%s\\n' \"$n\" > \"$f\"\nif [ \"$n\" -eq 1 ]; then exit 1; fi\nprintf 're-exported %s\\n' \"$2\" > \"$1\"\nexit 0\n",
@@ -2216,7 +2277,6 @@ body b
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let driver = format!("{} %A %P", script.display());
         let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
         unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
@@ -2259,13 +2319,25 @@ body b
         ] {
             run(&a, &["config", key, value]);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             a.join(".gitattributes"),
             "*.org merge=union\n.ljos/atoms/* merge=ljos-atoms\n",
         )
         .unwrap();
         std::fs::create_dir_all(a.join(".ljos/atoms")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(a.join(&digest), "base\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(a.join("issues.org"), heading("seed", "Seed")).unwrap();
         run(&a, &["add", ".gitattributes", "issues.org", ".ljos/atoms"]);
         run(&a, &["commit", "-q", "-m", "seed"]);
@@ -2282,10 +2354,18 @@ body b
         ] {
             run(&b, &["config", key, value]);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(a.join(&digest), "side-a\n").unwrap();
         run(&a, &["add", ".ljos/atoms"]);
         run(&a, &["commit", "-q", "-m", "from a"]);
         run(&a, &["push", "-q"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(b.join(&digest), "side-b\n").unwrap();
         run(&b, &["add", ".ljos/atoms"]);
         run(&b, &["commit", "-q", "-m", "from b"]);
@@ -2344,12 +2424,20 @@ body b
         }
         let key = crate::sync::identity_path();
         std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let made = std::process::Command::new("age-keygen")
             .arg("-o")
             .arg(&key)
             .output()
             .unwrap();
         assert!(made.status.success());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let public = std::process::Command::new("age-keygen")
             .arg("-y")
             .arg(&key)
@@ -2390,22 +2478,42 @@ body b
         let digest = format!(".ljos/atoms/{host}.digest");
         let chunks = format!(".ljos/atoms/{host}.chunks");
         let chunk = format!("{chunks}/1.age");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join(".ljos/sync.toml"),
             format!("name = \"example-host\"\nrecipients = [\"{public}\"]\n"),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(&log), "base\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(&digest), "base\n").unwrap();
         run(&["add", ".ljos"]);
         run(&["commit", "-q", "-m", "seed"]);
         std::fs::create_dir_all(root.join(&chunks)).unwrap();
         run(&["checkout", "-q", "-b", "theirs"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(&chunk), "theirs\n").unwrap();
         run(&["add", ".ljos"]);
         run(&["commit", "-q", "-m", "theirs"]);
         run(&["checkout", "-q", "main"]);
         std::fs::create_dir_all(root.join(&chunks)).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(&chunk), "ours\n").unwrap();
         run(&["add", ".ljos"]);
         run(&["commit", "-q", "-m", "ours"]);
@@ -2418,6 +2526,10 @@ body b
         let listed = git(&root, &["ls-files", "--", &chunks]);
         assert_eq!(String::from_utf8_lossy(&listed.stdout), "");
         assert!(!root.join(&chunks).exists(), "the chunk directory stayed");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let opened = std::process::Command::new("age")
             .args(["-d", "-i"])
             .arg(&key)
@@ -2469,6 +2581,10 @@ body b
         let daemon = started.spawn();
         let port = daemon.port();
         let key = home.join(".config/ljos/age.key");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let made = std::process::Command::new("age-keygen")
             .arg("-o")
             .arg(&key)
@@ -2479,6 +2595,10 @@ body b
             "{}",
             String::from_utf8_lossy(&made.stderr)
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let public = std::process::Command::new("age-keygen")
             .arg("-y")
             .arg(&key)
@@ -2511,7 +2631,7 @@ body b
         let record = dir.path().join("percent-a");
         let wrapper = dir.path().join("atoms-driver");
         let ljos = ljos_bin();
-        std::fs::write(
+        crate::install_executable(
             &wrapper,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$1\" > {}\nexec {} merge-atoms \"$1\" \"$2\"\n",
@@ -2520,7 +2640,6 @@ body b
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
         let driver = format!("{} %A %P", wrapper.display());
         let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
         unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
@@ -2568,11 +2687,19 @@ body b
             run(&a, &["config", key, value]);
         }
         std::fs::create_dir_all(a.join(".ljos/atoms")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             a.join(".ljos/sync.toml"),
             format!("name = \"example-host\"\nrecipients = [\"{public}\"]\n"),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(a.join(&rel), "base\n").unwrap();
         prepare_tracker(&a, false, false).unwrap();
         run(&a, &["add", ".gitattributes", ".ljos"]);
@@ -2591,10 +2718,18 @@ body b
             run(&b, &["config", key, value]);
         }
         prepare_tracker(&b, false, false).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(a.join(&rel), "side-a\n").unwrap();
         run(&a, &["add", ".ljos/atoms"]);
         run(&a, &["commit", "-q", "-m", "from a"]);
         run(&a, &["push", "-q"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(b.join(&rel), "side-b\n").unwrap();
         run(&b, &["add", ".ljos/atoms"]);
         run(&b, &["commit", "-q", "-m", "from b"]);
@@ -2629,6 +2764,10 @@ body b
             passed.contains("merge_file"),
             "git %A was not its merge temp: {passed}"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let opened = std::process::Command::new("age")
             .args(["-d", "-i"])
             .arg(&key)
@@ -2660,6 +2799,10 @@ body b
         let dir = tempfile::tempdir().unwrap();
         let board = dir.path().join("Software/probe/issues.org");
         std::fs::create_dir_all(board.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &board,
             "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
@@ -2671,6 +2814,10 @@ body b
         let base = std::fs::read_to_string(&file).unwrap();
         vissue_core::ops::note(&layout, "probe-a1b2", "from ours").unwrap();
         let ours = std::fs::read_to_string(&file).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&file, &base).unwrap();
         vissue_core::ops::note(&layout, "probe-a1b2", "from theirs").unwrap();
         let theirs = std::fs::read_to_string(&file).unwrap();
@@ -2678,6 +2825,10 @@ body b
         assert!(merged.starts_with(&ours), "{merged}");
         assert!(merged.contains("from theirs"), "{merged}");
         assert!(!merged.contains("MERGE_CONFLICT"), "{merged}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&file, &merged).unwrap();
         let card = vissue_core::agent::show_json(&layout, "probe-a1b2").unwrap();
         let shown = card.to_string();

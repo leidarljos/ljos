@@ -123,6 +123,10 @@ fn serve(ready_after: Option<Duration>, hits: &'static str) -> Seat {
 fn run(seat: &Seat, args: &[&str], env: &[(&str, &str)]) -> (Output, Duration) {
     let home = seat.home.path();
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .current_dir(home)

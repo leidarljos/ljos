@@ -161,6 +161,10 @@ struct Env {
 
 impl Env {
     fn spawn_mcp(&self) -> std::process::Child {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.env_clear()
             .env("PATH", &self.path)
@@ -183,6 +187,10 @@ impl Env {
 
     fn claimdag_get(&self, issue: &str) -> String {
         let node = ljos_cli::work_id(issue);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("claimdag")
             .arg("get")
             .arg(&node)
@@ -225,7 +233,15 @@ fn setup(case: &str) -> Env {
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::create_dir_all(&runtime).unwrap();
     std::fs::create_dir_all(tracker.join("Software")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(repo.join("README.md"), "seed\n").unwrap();
 
     Env {

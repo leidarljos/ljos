@@ -28,6 +28,10 @@ impl Seat {
     }
 
     fn plan(&self, cwd: &Path, extra: &[(&str, &Path)]) -> Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args([
             "sitting",

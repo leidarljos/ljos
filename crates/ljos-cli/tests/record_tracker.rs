@@ -17,6 +17,10 @@ fn key(seed: u8) -> SigningKey {
 }
 
 fn git(dir: &Path, args: &[&str], date: Option<&str>) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(dir)
@@ -63,7 +67,15 @@ impl Tracker {
                 "* TODO [#C] Pick a rail for {id}\n:PROPERTIES:\n:ID:         {id}\n:END:\n"
             ));
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(BOARD), org).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".gitignore"), "*.lock\n").unwrap();
         let tracker = Self {
             _dir: dir,
@@ -111,6 +123,10 @@ impl Tracker {
                 format!("{voter} {}\n", hex::encode(key.verifying_key().to_bytes()))
             })
             .collect();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(self.root.join(ballot_sig::PIN_FILE), text).unwrap();
     }
 
@@ -135,6 +151,10 @@ impl Tracker {
 
     /// Whether the check passed, and what it said.
     fn check(&self) -> (bool, String) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["record", "check", "--tracker"])
             .arg(&self.root)
@@ -256,6 +276,10 @@ fn one_key_pinned_for_two_voters_stands_for_neither() {
     tracker.cast(ISSUE, "twin-a", "bus", &key(8));
     let hex = hex::encode(key(8).verifying_key().to_bytes());
     let pins = format!("twin-a {hex}\ntwin-b {}\n", hex.to_uppercase());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.root.join(ballot_sig::PIN_FILE), pins).unwrap();
     tracker.commit(None);
     let (ok, said) = tracker.check();
@@ -271,6 +295,10 @@ fn one_key_pinned_for_two_voters_stands_for_neither() {
     let order_two = ed25519_dalek::VerifyingKey::from_bytes(&order_two).unwrap();
     let twin = (key(8).verifying_key().to_edwards() + order_two.to_edwards()).compress();
     let pins = format!("twin-a {hex}\ntwin-b {}\n", hex::encode(twin.to_bytes()));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.root.join(ballot_sig::PIN_FILE), pins).unwrap();
     tracker.commit(None);
     let (ok, said) = tracker.check();

@@ -23,9 +23,7 @@ const CONV_Y: &str = "0199a1b2-c3d4-4e5f-8a6b-00000000000y";
 const CONV_Z: &str = "0199a1b2-c3d4-4e5f-8a6b-00000000000z";
 
 fn script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 fn text_of(out: &Output) -> String {
@@ -65,8 +63,7 @@ impl Box_ {
             std::fs::create_dir_all(d).unwrap();
         }
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+            ljos_cli::change_mode(&run, 0o700).unwrap();
         }
         script(
             &bin.join("claimdag"),
@@ -79,6 +76,10 @@ impl Box_ {
                 c = card.display(),
             ),
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let init = Command::new("git")
             .args(["init", "-q"])
             .current_dir(&repo)
@@ -98,6 +99,10 @@ impl Box_ {
     /// `PROGRAM ARGS` with this user's environment and `extra` on top.
     /// No conversation id unless `extra` names one.
     fn command(&self, program: &str, args: &[&str], extra: &[(&str, &str)]) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(program);
         cmd.args(args)
             .env_clear()
@@ -197,6 +202,10 @@ impl Box_ {
         steps: &[(Option<&str>, &str)],
     ) -> String {
         let file = self.run.join("payload.json");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&file, payload).unwrap();
         let mut all = vec![("LJOS", env!("CARGO_BIN_EXE_ljos"))];
         let file = file.display().to_string();
@@ -225,6 +234,10 @@ impl Box_ {
     }
 
     fn card(&self, by: &str) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &self.card,
             serde_json::json!({"id": ISSUE, "state": "STARTED", "claimed_by": by}).to_string(),
@@ -397,9 +410,17 @@ fn the_diag_repro_allows_a_without_its_id_in_the_hook_env() {
     const CONV_B: &str = "cursor-conv-0009bbbb";
     let home = Box_::new();
     home.card(&holder(CONV_A));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut sleeper = Command::new("sleep").arg("300").spawn().unwrap();
     let comm = exec_comm(&sleeper, "sleep");
     std::fs::create_dir_all(home.run.join("ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.run.join("ljos/hold-live"),
         format!(
@@ -864,6 +885,10 @@ fn a_subagent_writes_under_its_parents_sitting_and_z_does_not() {
 
     let fake = home.run.join("fake");
     std::fs::create_dir_all(&fake).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink(&python, fake.join("ljos")).unwrap();
     let forge = format!(
         "mkdir -p \"$XDG_RUNTIME_DIR/ljos\"; printf '%s\\n' '{}' inky \"$PPID\" ljos 2026-10-25T00:00:00Z {ISSUE} - > \"$XDG_RUNTIME_DIR/ljos/hold-fake\"",
@@ -1226,6 +1251,10 @@ fn a_forged_sitting_record_with_another_conversations_tag_is_refused() {
     let mut forged = lines;
     forged[0] = holder(CONV_Z);
     let forged_path = home.run.join("ljos/hold-zz");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&forged_path, forged.join("\n") + "\n").unwrap();
     let said = home.hook(CONV_Z, MERGE, &[]);
     assert!(
@@ -1246,7 +1275,7 @@ fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
     let org_dir = home.run.join("tracker/Software/proj");
     std::fs::create_dir_all(&org_dir).unwrap();
     let seed_tracker = || {
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             org_dir.join("issues.org"),
             format!(
                 "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#C] the merge\n:PROPERTIES:\n:ID:         {ISSUE}\n:CREATED:    [2026-10-25 Sun]\n:END:\n"
@@ -1267,6 +1296,10 @@ fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
         "packset",
         "packset-embed",
     ] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(cache.join(format!("crate-{name}")), "99.0.0\n").unwrap();
     }
     for name in ["deedar", "packset", "packsetd", "ljos-policyd"] {
@@ -1317,6 +1350,10 @@ fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
 
     let mcp_call = |meta: Option<serde_json::Value>| -> (serde_json::Value, Child) {
         let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.env_clear()
             .env(
@@ -1462,20 +1499,22 @@ fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
     let bare_actor = ljos_cli::work_id(&format!("inky:{ISSUE}"));
     let bare_path = home.run.join(format!("ljos/hold-{bare_actor}"));
     std::fs::remove_file(&record).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&bare_path, rlines.join("\n") + "\n").unwrap();
     home.card("inky");
-    let mut perms = std::fs::metadata(&bare_path).unwrap().permissions();
-    perms.set_readonly(true);
-    std::fs::set_permissions(&bare_path, perms).unwrap();
+    let mode = std::os::unix::fs::PermissionsExt::mode(
+        &std::fs::metadata(&bare_path).unwrap().permissions(),
+    );
+    ljos_cli::change_mode(&bare_path, mode & !0o222).unwrap();
     let _ = home.hook(CONV_X, MERGE, &[]);
     refused(
         &home.hook(CONV_Y, MERGE, &[]),
         "Y's merge after X adopted a bare record it could not rewrite",
     );
-    let mut perms = std::fs::metadata(&bare_path).unwrap().permissions();
-    #[allow(clippy::permissions_set_readonly_false)]
-    perms.set_readonly(false);
-    std::fs::set_permissions(&bare_path, perms).unwrap();
+    ljos_cli::change_mode(&bare_path, mode | 0o200).unwrap();
     let _ = srv1c.kill();
     let _ = srv1c.wait();
 
@@ -1635,6 +1674,10 @@ impl Box_ {
     ) -> String {
         let link = self.bin.join(comm);
         if !link.exists() {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             std::os::unix::fs::symlink("/usr/bin/python3", &link).unwrap();
         }
         let steps: Vec<(std::collections::BTreeMap<&str, &str>, &str)> = steps
@@ -1843,7 +1886,7 @@ fn a_tmux_pane_is_not_judged_as_the_last_conversation_to_name_tmux() {
             done = done.display(),
         );
         let file = home.run.join(format!("{who}.sh"));
-        std::fs::write(&file, body).unwrap();
+        ljos_cli::write_file(&file, body).unwrap();
         (go, done, file)
     };
     let wait_rc = |done: &Path| exit_status(done, Duration::from_secs(10));
@@ -1857,7 +1900,7 @@ fn a_tmux_pane_is_not_judged_as_the_last_conversation_to_name_tmux() {
     let _ = home.bash(&x, &x_cmd);
     // Z reads a file whose name mentions tmux. Nothing of Z's runs in X's pane.
     let _ = home.hook(CONV_Z, "cat ~/.tmux.conf", &z);
-    std::fs::write(&x_go, "").unwrap();
+    ljos_cli::write_file(&x_go, "").unwrap();
     assert_eq!(
         wait_rc(&x_done),
         "0",
@@ -1878,7 +1921,7 @@ fn a_tmux_pane_is_not_judged_as_the_last_conversation_to_name_tmux() {
     let _ = home.hook(CONV_Z, &z_cmd, &z);
     let _ = home.bash(&z, &z_cmd);
     let _ = home.hook(CONV_X, &format!("{tmux_s} list-windows"), &x);
-    std::fs::write(&z_go, "").unwrap();
+    ljos_cli::write_file(&z_go, "").unwrap();
     let z_rc = wait_rc(&z_done);
     let z_err = std::fs::read_to_string(home.run.join("z.done.err")).unwrap_or_default();
     assert_eq!(z_rc.trim(), "0", "Z's pane was refused: rc={z_rc} {z_err}");
@@ -1939,6 +1982,10 @@ fn rv_pane_script(home: &Box_, hooks: &Path, who: &str) -> (PathBuf, PathBuf, Pa
         done = done.display(),
     );
     let file = home.run.join(format!("{who}.sh"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&file, body).unwrap();
     (go, done, file)
 }
@@ -1978,7 +2025,7 @@ fn rv1_a_pane_on_a_shared_tmux_server_stays_its_conversations() {
     let z_cmd = format!("{tmux_s} new-session -d -s z 'sleep 30'");
     allowed(&home.hook(CONV_Z, &z_cmd, &z), "Z's tmux session");
     let _ = home.bash(&z, &z_cmd);
-    std::fs::write(&go, "").unwrap();
+    ljos_cli::write_file(&go, "").unwrap();
     let rc = rv_wait(&done);
     let _ = home.bash(&x, &format!("{tmux_s} kill-server"));
     assert_eq!(
@@ -2011,7 +2058,7 @@ fn rv2_a_pane_on_a_shared_tmux_server_does_not_borrow_the_last_openers_sitting()
     let x_cmd = format!("{tmux_s} new-window -d -t z 'sleep 30'");
     let _ = home.hook(CONV_X, &x_cmd, &x);
     let _ = home.bash(&x, &x_cmd);
-    std::fs::write(&go, "").unwrap();
+    ljos_cli::write_file(&go, "").unwrap();
     let rc = rv_wait(&done);
     let err = std::fs::read_to_string(home.run.join("z.done.err")).unwrap_or_default();
     let _ = home.bash(&x, &format!("{tmux_s} kill-server"));
@@ -2041,6 +2088,10 @@ impl Box_ {
     ) -> String {
         let link = self.bin.join(comm);
         if !link.exists() {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             std::os::unix::fs::symlink("/usr/bin/python3", &link).unwrap();
         }
         let steps: Vec<(std::collections::BTreeMap<&str, &str>, &str)> = steps
@@ -2109,7 +2160,11 @@ fn one_shot_bash_c_commit_from_unstamped_parent_is_allowed_when_sitting_is_live(
     );
 
     // Keep hold live as an active conversation shell would.
-    let mut sleeper = Command::new("sleep").arg("300").spawn().unwrap();
+    let mut sleeper = ljos_cli::program("sleep")
+        .unwrap()
+        .arg("300")
+        .spawn()
+        .unwrap();
     let pid = sleeper.id();
     let hold = std::fs::read_dir(home.run.join("ljos"))
         .unwrap()
@@ -2129,9 +2184,9 @@ fn one_shot_bash_c_commit_from_unstamped_parent_is_allowed_when_sitting_is_live(
         .collect();
     lines[2] = pid.to_string();
     lines[3] = "sleep".into();
-    std::fs::write(&hold, lines.join("\n") + "\n").unwrap();
+    ljos_cli::write_file(&hold, lines.join("\n") + "\n").unwrap();
 
-    std::fs::write(home.repo.join("f.txt"), "x\n").unwrap();
+    ljos_cli::write_file(home.repo.join("f.txt"), "x\n").unwrap();
     let add = home
         .command("git", &["add", "f.txt"], &[])
         .output()
@@ -2250,7 +2305,7 @@ fn rv9_a_script_that_execs_git_with_anothers_id_does_not_commit_on_its_sitting()
     let argv: Vec<String> = commit.split(' ').map(str::to_string).collect();
     let argv = serde_json::to_string(&argv).unwrap();
     let forge = home.run.join("forge.py");
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         &forge,
         format!(
             "import os\ne = dict(os.environ)\ne['CURSOR_CONVERSATION_ID'] = {CONV_X:?}\nos.execvpe('git', {argv}, e)\n"
@@ -2336,6 +2391,10 @@ fn a_one_shot_seat_under_a_cursor_agent_without_an_id_is_the_conversations() {
 fn a_runner_nested_in_another_conversations_shell_sits_as_its_own() {
     let home = Box_::new();
     let link = home.bin.join("cursor-agent");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink("/usr/bin/python3", &link).unwrap();
     let steps = serde_json::to_string(&[(None::<&str>, "\"$LJOS\" seat; true")]).unwrap();
     let inner = home.command(
@@ -2380,6 +2439,10 @@ impl Box_ {
     ) -> String {
         let link = self.bin.join(comm);
         if !link.exists() {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             std::os::unix::fs::symlink("/usr/bin/python3", &link).unwrap();
         }
         let steps: Vec<(std::collections::BTreeMap<&str, &str>, &str)> = steps
@@ -2454,7 +2517,7 @@ fn a_bare_mcp_sitting_is_not_bound_to_the_last_shell_that_ran_ljos() {
     let org_dir = home.run.join("tracker/Software/proj");
     std::fs::create_dir_all(&org_dir).unwrap();
     let seed_tracker = || {
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             org_dir.join("issues.org"),
             format!(
                 "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#C] the merge\n:PROPERTIES:\n:ID:         {ISSUE}\n:CREATED:    [2026-10-25 Sun]\n:END:\n"
@@ -2475,6 +2538,10 @@ fn a_bare_mcp_sitting_is_not_bound_to_the_last_shell_that_ran_ljos() {
         "packset",
         "packset-embed",
     ] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(cache.join(format!("crate-{name}")), "99.0.0\n").unwrap();
     }
     for name in ["deedar", "packset", "packsetd", "ljos-policyd"] {
@@ -2525,6 +2592,10 @@ fn a_bare_mcp_sitting_is_not_bound_to_the_last_shell_that_ran_ljos() {
 
     let mcp_call = |meta: Option<serde_json::Value>| -> (serde_json::Value, Child) {
         let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.env_clear()
             .env(
@@ -2613,7 +2684,7 @@ fn a_bare_mcp_sitting_is_not_bound_to_the_last_shell_that_ran_ljos() {
 fn rv_mcp_box(home: &Box_) -> String {
     let org_dir = home.run.join("tracker/Software/proj");
     std::fs::create_dir_all(&org_dir).unwrap();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         org_dir.join("issues.org"),
         format!(
             "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#C] the merge\n:PROPERTIES:\n:ID:         {ISSUE}\n:CREATED:    [2026-10-25 Sun]\n:END:\n"
@@ -2632,6 +2703,10 @@ fn rv_mcp_box(home: &Box_) -> String {
         "packset",
         "packset-embed",
     ] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(cache.join(format!("crate-{name}")), "99.0.0\n").unwrap();
     }
     for name in ["deedar", "packset", "packsetd", "ljos-policyd"] {
@@ -2686,6 +2761,10 @@ fn rv_mcp_box(home: &Box_) -> String {
 /// call's answer.
 fn rv_mcp_call(home: &Box_, pack_url: &str, meta: Option<serde_json::Value>) -> serde_json::Value {
     let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
         .env(
@@ -2853,6 +2932,10 @@ fn a_bare_seat_assignee_on_anothers_hold_record_does_not_pass_first_check() {
         .map(String::from)
         .collect();
     lines[0] = "inky".to_string();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(hold_path, lines.join("\n") + "\n").unwrap();
     home.card("inky");
 
@@ -2883,6 +2966,10 @@ fn a_bare_seat_assignee_on_anothers_hold_record_does_not_pass_first_check() {
     let _ = home.hook_with(&pre_x, &[]);
     let bare_actor = ljos_cli::work_id(&format!("inky:{ISSUE}"));
     let bare_path = home.run.join(format!("ljos/hold-{bare_actor}"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     std::fs::rename(hold_path, &bare_path).unwrap();
     home.card("inky");
     allowed(
@@ -2913,7 +3000,15 @@ fn two_conversations_can_check_one_bare_seat_record() {
     let fake_bin = home.run.join("fake-mcp");
     std::fs::create_dir_all(&fake_bin).unwrap();
     let fake_mcp = fake_bin.join("ljos-mcp");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink("/bin/sleep", &fake_mcp).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut sleeper = Command::new(&fake_mcp).arg("300").spawn().unwrap();
     let pid = sleeper.id();
 
@@ -2929,6 +3024,10 @@ fn two_conversations_can_check_one_bare_seat_record() {
             }
         }
         let _ = (&x_path, &y_path);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &bare_path,
             format!("inky\ninky\n{pid}\nljos-mcp\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n"),
@@ -3003,7 +3102,15 @@ fn two_conversations_racing_on_a_bare_seat_hold_adopts_at_most_one() {
     let fake_bin = home.run.join("fake-mcp");
     std::fs::create_dir_all(&fake_bin).unwrap();
     let fake_mcp = fake_bin.join("ljos-mcp");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink("/bin/sleep", &fake_mcp).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut sleeper = Command::new(&fake_mcp).arg("300").spawn().unwrap();
     let pid = sleeper.id();
 
@@ -3018,6 +3125,10 @@ fn two_conversations_racing_on_a_bare_seat_hold_adopts_at_most_one() {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &bare_path,
             format!("inky\ninky\n{pid}\nljos-mcp\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n"),
@@ -3070,10 +3181,18 @@ fn two_conversations_racing_on_a_bare_seat_hold_adopts_at_most_one() {
 fn a_forged_bare_session_record_does_not_hand_z_a_bare_seat_sitting() {
     let home = Box_::new();
     home.card("inky");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut sleeper = Command::new("sleep").arg("300").spawn().unwrap();
     let comm = exec_comm(&sleeper, "sleep");
     std::fs::create_dir_all(home.run.join("ljos")).unwrap();
     let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.run.join(format!("ljos/hold-{bare}")),
         format!(
@@ -3085,11 +3204,19 @@ fn a_forged_bare_session_record_does_not_hand_z_a_bare_seat_sitting() {
     .unwrap();
     // Name Y in `first-hook-conv`, so Z's hook cannot adopt a bare-seat
     // hold through first-caller adoption.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(home.run.join("ljos/first-hook-conv"), format!("{CONV_Y}\n")).unwrap();
     refused(
         &home.hook(CONV_Z, MERGE, &[]),
         "Z's merge on Y's bare-seat sitting",
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.run.join("ljos/session-bare-inky"),
         format!("inky\n{}\nids\t{CONV_Z}\n", holder(CONV_Z)),
@@ -3113,7 +3240,7 @@ fn a_bare_mcp_sitting_answers_the_same_outside_a_cargo_test_runner() {
     let org_dir = home.run.join("tracker/Software/proj");
     std::fs::create_dir_all(&org_dir).unwrap();
     let seed_tracker = || {
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             org_dir.join("issues.org"),
             format!(
                 "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#C] the merge\n:PROPERTIES:\n:ID:         {ISSUE}\n:CREATED:    [2026-10-25 Sun]\n:END:\n"
@@ -3134,6 +3261,10 @@ fn a_bare_mcp_sitting_answers_the_same_outside_a_cargo_test_runner() {
         "packset",
         "packset-embed",
     ] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(cache.join(format!("crate-{name}")), "99.0.0\n").unwrap();
     }
     for name in ["deedar", "packset", "packsetd", "ljos-policyd"] {
@@ -3186,7 +3317,15 @@ fn a_bare_mcp_sitting_answers_the_same_outside_a_cargo_test_runner() {
                     detached: bool|
      -> (serde_json::Value, Child) {
         let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = if detached {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let mut c = Command::new("setsid");
             c.args(["-f", env!("CARGO_BIN_EXE_ljos-mcp")]);
             c
@@ -3461,6 +3600,10 @@ fn two_sittings(first: &str, second: &str) -> (String, Vec<String>, usize, Strin
     let tracker = home.home.join("tracker");
     let project = tracker.join("Software/proj");
     std::fs::create_dir_all(&project).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         project.join("issues.org"),
         format!(
@@ -3577,6 +3720,10 @@ fn a_held_tmux_lock_does_not_stall_a_shell_hook() {
     std::fs::create_dir_all(&dir).unwrap();
     let lock = dir.join("tmux-sock.lock");
     let ready = home.run.join("locked");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut holder = Command::new("flock")
         .arg(&lock)
         .args(["sh", "-c", &format!("touch {}; sleep 25", ready.display())])

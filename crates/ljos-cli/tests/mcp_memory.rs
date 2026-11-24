@@ -100,6 +100,10 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
     let state = home.path().join("state");
     let tracker = home.path().join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let url = serve(Arc::new(Mutex::new(Vec::new())));
     let text = "Pin the review set before a release.";
@@ -110,6 +114,10 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
         "type": "user",
         "message": {"role": "user", "content": prompt},
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&transcript, format!("{turn}\n")).unwrap();
     let payload = serde_json::json!({
         "hook_event_name": "UserPromptSubmit",
@@ -125,6 +133,10 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
     let installed = runner::install_dir();
     let runner = installed.path().join("claude");
     runner::runner_at(&runner);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut noted = Command::new(&runner)
         .args([
             "-c",
@@ -163,6 +175,10 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
         "prompt hook failed: {}",
         String::from_utf8_lossy(&noted.stderr)
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(&runner)
         .args([
             "-c",
@@ -236,6 +252,10 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
     );
 
     let list = || {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let got = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["memories", "list", "--user"])
             .env("HOME", home.path())
@@ -260,6 +280,10 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
     );
     assert!(shown.contains("recalled 0x"), "{shown}");
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let searched = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["search", "review set"])
         .env("HOME", home.path())

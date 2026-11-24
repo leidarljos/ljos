@@ -37,6 +37,10 @@ impl Drop for OwnRuntime {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -72,7 +76,15 @@ fn an_untracked_ticket_is_added_and_committed_alone() {
     std::fs::create_dir_all(&issues).unwrap();
     let ticket = issues.join("proj-nnnn.org");
     let sibling = issues.join("proj-oooo.org");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&ticket, TICKET).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&sibling, TICKET.replace("nnnn", "oooo")).unwrap();
     assert!(git(dir, &["ls-files"]).is_empty());
 
@@ -104,8 +116,16 @@ fn a_ticket_reached_through_a_symlinked_checkout_is_committed() {
     std::fs::create_dir_all(dir.join("issues")).unwrap();
     let holder = tempfile::tempdir().unwrap();
     let link = holder.path().join("tracker");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink(dir, &link).unwrap();
     let ticket = link.join("issues/proj-pppp.org");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&ticket, TICKET.replace("nnnn", "pppp")).unwrap();
 
     std::env::set_var("LJOS_TRACKER_GIT", "commit");

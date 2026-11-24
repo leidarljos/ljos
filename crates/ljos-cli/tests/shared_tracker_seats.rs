@@ -22,6 +22,10 @@ fn run_ljos(
     seat: &str,
     args: &[&str],
 ) -> Output {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
@@ -52,6 +56,10 @@ fn call_mcp_one(
     name: &str,
     arguments: serde_json::Value,
 ) -> serde_json::Value {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
         .env("PATH", path)
@@ -75,6 +83,10 @@ fn call_mcp_one(
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(30));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut stdin = child.stdin.take().unwrap();
@@ -133,8 +145,16 @@ fn separate_homes_sharing_one_tracker_do_not_steal_claims() {
     ] {
         std::fs::create_dir_all(d).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
     let issues = tracker.join("Software/demo/issues.org");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         &issues,
         "\
@@ -259,8 +279,16 @@ fn separate_homes_report_holder_and_unclaimed_state_on_release_and_finish() {
     ] {
         std::fs::create_dir_all(d).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
     let issues = tracker.join("Software/demo/issues.org");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         &issues,
         "\
@@ -409,7 +437,15 @@ fn separate_homes_print_assist_line_when_noting_another_seats_ticket() {
     ] {
         std::fs::create_dir_all(d).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         tracker.join("Software/demo/issues.org"),
         "\
@@ -492,7 +528,15 @@ impl Shared {
             homes.push((home, run));
         }
         std::fs::create_dir_all(tracker.join("Software/demo")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             tracker.join("Software/demo/issues.org"),
             "\
@@ -566,6 +610,10 @@ impl Shared {
 
     /// Every node in bob's claim graph, as `claimdag list --all` prints it.
     fn bob_graph(&self) -> String {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("claimdag")
             .arg("--dir")
             .arg(self.bob.1.join("claimdag"))
@@ -593,6 +641,10 @@ fn said(out: &Output) -> String {
 #[test]
 fn a_claim_graph_id_is_claimed_without_a_ticket_of_that_name() {
     let world = Shared::new();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let minted = Command::new("claimdag")
         .arg("--dir")
         .arg(world.bob.1.join("claimdag"))
@@ -787,6 +839,10 @@ fn complete_on_another_seats_ticket_refuses_without_changing_state() {
     // Even if bob's own claim graph already has a node for demo-shr1,
     // completing it while alice owns the ticket must refuse and keep the node unchanged.
     let id = ljos_cli::work_id("demo-shr1");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let upsert = Command::new("claimdag")
         .arg("--dir")
         .arg(world.bob.1.join("claimdag"))

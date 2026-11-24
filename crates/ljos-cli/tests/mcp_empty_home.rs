@@ -121,6 +121,10 @@ fn assert_plain_schema(name: &str, value: &serde_json::Value) {
 #[test]
 fn tools_list_answers_with_an_empty_home_and_no_tracker() {
     let home = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -140,6 +144,10 @@ fn tools_list_answers_with_an_empty_home_and_no_tracker() {
     // A server that never answers fails the test instead of hanging it.
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(60));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let lines = [
@@ -234,6 +242,10 @@ fn a_missing_pack_names_the_next_step_and_the_client_is_not_the_seat() {
     // Held closed, and not the default port. A writer already listening
     // there belongs to another home and is not this seat's pack.
     let held = refused_port::RefusedPort::reserve();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -256,6 +268,10 @@ fn a_missing_pack_names_the_next_step_and_the_client_is_not_the_seat() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(60));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let lines = [
@@ -366,6 +382,10 @@ fn a_missing_pack_token_names_the_next_step_in_the_search_result() {
             let _ = std::io::Write::write_all(&mut stream, msg.as_bytes());
         }
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -384,6 +404,10 @@ fn a_missing_pack_token_names_the_next_step_in_the_search_result() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(30));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let lines = [
@@ -430,11 +454,19 @@ fn a_missing_pack_token_names_the_next_step_in_the_search_result() {
 fn a_missing_habitat_binary_names_doctor() {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join(".config")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.path().join(".config/gitconfig"),
         "[user]\n\tname = Walk User\n\temail = walk@example.com\n",
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -450,6 +482,10 @@ fn a_missing_habitat_binary_names_doctor() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(30));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let lines = [
@@ -492,6 +528,10 @@ fn tools_list_is_the_full_set_with_an_empty_home_and_no_box_env() {
     // Not the default port. A writer another test left on 8761 belongs to
     // another home and is not this seat's pack.
     let held = refused_port::RefusedPort::reserve();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["mcp"])
         .env_clear()
@@ -520,6 +560,10 @@ fn tools_list_is_the_full_set_with_an_empty_home_and_no_box_env() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(20));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let lines = [
@@ -605,6 +649,10 @@ fn a_silent_writer_is_a_tool_error_and_the_list_stays() {
             std::thread::sleep(Duration::from_secs(30));
         }
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -625,6 +673,10 @@ fn a_silent_writer_is_a_tool_error_and_the_list_stays() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(20));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let lines = [
@@ -708,6 +760,10 @@ fn a_refused_token_is_a_tool_error_and_the_list_stays() {
             let _ = std::io::Write::write_all(&mut stream, msg.as_bytes());
         }
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -729,6 +785,10 @@ fn a_refused_token_is_a_tool_error_and_the_list_stays() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(20));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let lines = [

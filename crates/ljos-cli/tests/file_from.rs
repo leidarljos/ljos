@@ -160,6 +160,10 @@ fn the_mcp_tool_files_rows_in_one_commit() {
 fn other_project(world: &World) {
     let dir = world.tracker().join("Software/other");
     std::fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         dir.join("issues.org"),
         "* TODO [#B] Other plan\n:PROPERTIES:\n:ID:         other-c3d4\n:END:\n",
@@ -274,6 +278,10 @@ fn a_commit_another_writer_holds_off_stamps_no_project() {
     use std::os::unix::io::AsRawFd as _;
     let world = World::new();
     other_project(&world);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let held = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -340,6 +348,10 @@ fn hold(world: &World, issue: &str) {
     let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
     let runtime = world.dir().join("run/ljos");
     std::fs::create_dir_all(&runtime).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         runtime.join("hold-alice"),
         format!(

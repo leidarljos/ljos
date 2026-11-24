@@ -538,14 +538,18 @@ mod tests {
             if unsafe { libc::geteuid() } == 0 {
                 return;
             }
-            struct Restore(std::path::PathBuf, std::fs::Permissions);
+            struct Restore(std::path::PathBuf, u32);
             impl Drop for Restore {
                 fn drop(&mut self) {
-                    let _ = std::fs::set_permissions(&self.0, self.1.clone());
+                    let _ = crate::change_mode(&self.0, self.1);
                 }
             }
-            let original = std::fs::metadata(&unreadable).unwrap().permissions();
+            let original = std::fs::metadata(&unreadable).unwrap().permissions().mode();
             let _restore = Restore(unreadable.clone(), original);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "sets the mode of a path that is not a git hook"
+            )]
             std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
             let started = std::time::Instant::now();
             settle_for(&unreadable);

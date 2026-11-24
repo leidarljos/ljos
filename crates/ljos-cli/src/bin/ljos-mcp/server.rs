@@ -235,6 +235,10 @@ fn scratch_file_in(base: &std::path::Path, name: &str, text: &str) -> std::io::R
         path: dir.join(name),
         dir,
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -2574,6 +2578,10 @@ impl LjosServer {
         let read = ljos_cli::deed_bytes::read_deed(&args.accession).map_err(refused)?;
         let text = match args.out.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
             Some(out) => {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "writes a file that is not a git hook"
+                )]
                 std::fs::write(out, &read.bytes)
                     .map_err(|e| refused(anyhow::anyhow!("deed: could not write {out}: {e}")))?;
                 format!(
@@ -6583,9 +6591,8 @@ mod tests {
 
         let bin = tempfile::tempdir().unwrap();
         let program = bin.path().join("deedar");
-        std::fs::write(&program, "#!/bin/sh\necho no such deed >&2\nexit 1\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::install_executable(&program, "#!/bin/sh\necho no such deed >&2\nexit 1\n")
+            .unwrap();
         unsafe { std::env::set_var("PATH", bin.path()) };
         let Err(err) = server
             .ljos_evidence(Parameters(AccessionArgs {
@@ -6603,6 +6610,10 @@ mod tests {
     #[tokio::test]
     async fn cards_are_read_and_never_made() {
         let dir = tempfile::tempdir().expect("tempdir");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.path().join("USER.md"), "the user\n").expect("write");
         let server = LjosServer::at(dir.path().to_path_buf());
         let out = server
@@ -6664,7 +6675,7 @@ mod tests {
         let danger = home.path().join("danger");
         std::fs::create_dir(&danger).expect("danger dir");
         let bin = home.path().join("ljos-policyd");
-        std::fs::write(
+        ljos_cli::install_executable(
             &bin,
             "#!/bin/sh\n\
              if [ \"$(basename \"$(/bin/pwd -P)\")\" = \"danger\" ]; then\n\
@@ -6674,10 +6685,6 @@ mod tests {
              printf 'allow\\n'\n",
         )
         .expect("policyd");
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
         unsafe {
             std::env::set_var("POLICYD_BIN", &bin);
             std::env::set_var("LJOS_GUARD", "on");
@@ -6720,7 +6727,7 @@ mod tests {
         std::fs::create_dir_all(&danger).expect("danger dir");
         let bin = home.path().join("ljos-policyd");
         // An older daemon's deny is read as the same warning.
-        std::fs::write(
+        ljos_cli::install_executable(
             &bin,
             "#!/bin/sh\n\
              case \"$*\" in\n\
@@ -6734,10 +6741,6 @@ mod tests {
              printf 'allow\\n'\n",
         )
         .expect("policyd");
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
         unsafe {
             std::env::set_var("POLICYD_BIN", &bin);
             std::env::set_var("LJOS_GUARD", "on");
@@ -6800,6 +6803,10 @@ mod tests {
         let cursor = home.path().join(".cursor");
         std::fs::create_dir_all(&cursor).expect("cursor dir");
         std::fs::create_dir(&project).expect("project dir");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&cursor, project.join("seat")).expect("seat link");
         unsafe {
             std::env::set_var("POLICYD_BIN", &bin);

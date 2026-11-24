@@ -40,6 +40,10 @@ fn recall_of_ufuv_kiln_lists_ten_own_memories_and_says_how_many_remain() {
     let root = std::env::temp_dir().join(format!("ljos-recall-caps-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("Software/ufuv")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(root.join("Software/ufuv/issues.org"), org(&fixture)).unwrap();
     let token = std::fs::read_to_string(daemon.pack_home().join("token"))
         .unwrap()
@@ -52,16 +56,15 @@ fn recall_of_ufuv_kiln_lists_ten_own_memories_and_says_how_many_remain() {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let stub = bin.join("vissue");
-    std::fs::write(
+    ljos_cli::install_executable(
         &stub,
         "#!/bin/sh\nif [ \"$1\" = recall ]; then printf 'tracker row\\n'; fi\nexit 0\n",
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let output = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("recall")
         .arg("ufuv-kiln")

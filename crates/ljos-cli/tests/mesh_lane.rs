@@ -12,7 +12,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 fn run(root: &Path, home: &Path, pack: &str, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .current_dir(root)
         .env_clear()
@@ -33,7 +37,7 @@ fn run(root: &Path, home: &Path, pack: &str, args: &[&str]) -> std::process::Out
         .env("PACKSET_TIMEOUT_MS", "2000")
         .stdin(Stdio::null())
         .output()
-        .expect("ljos")
+        .expect("ljos");
 }
 
 fn text(out: &std::process::Output) -> String {
@@ -64,6 +68,10 @@ fn write_lane(dir: &Path, lane: &str, texts: &[&str]) {
     }
     let mut body = lines.join("\n");
     body.push('\n');
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.join(format!("{lane}.jsonl")), body).unwrap();
 }
 
@@ -230,6 +238,10 @@ fn push_then_pull_round_trips_a_kept_lesson() {
         "machine": "lane-a",
         "seat": "lane-a",
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         root.join(".ljos/memory/kept/lane.json"),
         serde_json::to_vec_pretty(&row).unwrap(),
@@ -291,6 +303,10 @@ fn two_pulls_at_once_keep_one_copy_of_each_text() {
         "--from",
         from.to_str().unwrap(),
     ];
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let spawn = || {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
@@ -503,6 +519,10 @@ fn a_down_writer_names_the_next_pull_and_a_later_pull_imports() {
 fn pull_of_a_file_names_a_directory_of_lane_files() {
     let (home, root) = world();
     let file = root.join("lane-a.jsonl");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&file, "{}\n").unwrap();
     let pulled = run(
         &root,
@@ -559,6 +579,10 @@ fn run_share(
     args: &[&str],
     extra: &[(&str, &str)],
 ) -> std::process::Output {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .current_dir(root)
@@ -625,19 +649,17 @@ struct OpenMode(PathBuf);
 
 impl Drop for OpenMode {
     fn drop(&mut self) {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        let _ = ljos_cli::change_mode(&self.0, 0o755);
     }
 }
 
 #[test]
 fn a_read_only_share_does_not_report_a_push() {
-    use std::os::unix::fs::PermissionsExt;
     let (home, root) = world();
     let dest = root.join("handoff");
     std::fs::create_dir(&dest).unwrap();
     let _open = OpenMode(dest.clone());
-    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o555)).unwrap();
+    ljos_cli::change_mode(&dest, 0o555).unwrap();
     let pushed = run_share(
         &root,
         home.path(),
@@ -666,6 +688,10 @@ fn a_read_only_share_does_not_report_a_push() {
 fn a_missing_parent_names_the_folder() {
     let (home, root) = world();
     let blocker = root.join("not-a-directory");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&blocker, b"x").unwrap();
     let dest = blocker.join("handoff");
     let pushed = run_share(

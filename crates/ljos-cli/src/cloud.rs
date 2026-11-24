@@ -16,7 +16,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -44,6 +43,9 @@ pub(crate) const CURSOR_PUSH: &str = "cloud-cursor-push";
 const ENCODER_ARCHIVES: &[&str] = &["onnxruntime", "packset-embed"];
 /// Where the encoder's rpath, `$ORIGIN/../lib/onnxruntime`, finds the runtime.
 const ENCODER_LIB: &str = "lib/onnxruntime";
+/// Beside the binary directory, one directory per installed encoder, each
+/// with `bin/packset-embed` and its runtime.
+const ENCODER_VERSIONS: &str = "lib/packset-embed";
 #[cfg(target_os = "macos")]
 const ENCODER_SONAME: &str = "libonnxruntime.1.dylib";
 #[cfg(not(target_os = "macos"))]
@@ -914,6 +916,10 @@ fn read_config_text(path: &Path) -> TextRead {
     if path.file_name().and_then(|name| name.to_str()) == Some(".claude.json") {
         return read_claude_config(path);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let file = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
@@ -939,6 +945,10 @@ fn read_config_text(path: &Path) -> TextRead {
 fn read_claude_config(path: &Path) -> TextRead {
     use std::io::BufReader;
     use std::os::unix::fs::OpenOptionsExt;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let file = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
@@ -1264,6 +1274,10 @@ fn plugin_allowed(enabled: &Option<serde_json::Map<String, serde_json::Value>>, 
 fn read_capped(path: &Path) -> Option<String> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
@@ -1929,6 +1943,10 @@ fn shell_command_path(command: &str) -> Option<PathBuf> {
         return None;
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(shell);
     cmd.arg("-lc")
         .arg("command -v -- \"$1\"")
@@ -2052,6 +2070,10 @@ enum VersionLine {
 /// The first line of `path --version`, when the program returns inside
 /// [`VERSION_PROBE`]. A program that is still running is [`VersionLine::TimedOut`].
 fn binary_version(path: &Path) -> VersionLine {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(path);
     cmd.arg("--version");
     let out = match super::output_within(cmd, None, VERSION_PROBE) {
@@ -2118,26 +2140,13 @@ fn executable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Copy `src` beside `dest` and rename it over `dest`. A running binary
+/// Publish a copy of `src` at `dest` with `src`'s mode. A running binary
 /// cannot be opened for writing (ETXTBSY), and the `ljos` running cloud up
-/// is often the one being replaced; a rename leaves it running from the
-/// old inode.
+/// is often the one being replaced; the publish ends in a rename, which
+/// leaves it running from the old inode.
 fn install_binary(src: &Path, dest: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("ljos");
-    let tmp = dest.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
-    let _ = fs::remove_file(&tmp);
-    let copied = (|| -> Result<()> {
-        fs::copy(src, &tmp)
-            .with_context(|| format!("copy {} to {}", src.display(), tmp.display()))?;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
-        fs::rename(&tmp, dest).with_context(|| format!("install {}", dest.display()))?;
-        Ok(())
-    })();
-    if copied.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    copied
+    crate::copy_executable(src, dest)
+        .with_context(|| format!("install {} as {}", src.display(), dest.display()))
 }
 
 fn install_from_dir(bin_dir: &Path, src: &Path) -> Result<String> {
@@ -2231,11 +2240,19 @@ fn install_from_dir(bin_dir: &Path, src: &Path) -> Result<String> {
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new("sha256sum");
     cmd.arg(path).stdin(std::process::Stdio::null());
     let out = match cmd.output() {
         Ok(out) if out.status.success() => out,
         _ => {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let out = Command::new("shasum")
                 .args(["-a", "256"])
                 .arg(path)
@@ -2275,32 +2292,53 @@ fn ensure_encoder(bin_dir: &Path, force: bool) -> Result<String> {
             std::env::consts::OS
         ));
     };
-    let lib = bin_dir
-        .parent()
-        .context("cloud up: the binary directory has no parent for lib/")?
-        .join(ENCODER_LIB);
     let bin = bin_dir.join("packset-embed");
-    if !force && executable(&bin) && lib.join(ENCODER_SONAME).is_file() {
+    if !force && encoder_ready(&bin) {
         return Ok(format!(
             "encoder: packset-embed already in {}",
             bin_dir.display()
         ));
     }
-    let parent = lib.parent().context("cloud up: no lib directory")?;
-    let stage = parent.join(format!(".onnxruntime-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&stage);
-    fs::create_dir_all(&stage).with_context(|| format!("create {}", stage.display()))?;
-    let said = install_encoder(&stage, target, bin_dir, &lib);
-    let _ = fs::remove_dir_all(&stage);
-    said
+    let versions = bin_dir
+        .parent()
+        .context("cloud up: the binary directory has no parent for lib/")?
+        .join(ENCODER_VERSIONS);
+    fs::create_dir_all(&versions).with_context(|| format!("create {}", versions.display()))?;
+    let download = tempfile::Builder::new()
+        .prefix(".ljos-encoder-")
+        .tempdir_in(&versions)
+        .with_context(|| format!("create a private encoder stage in {}", versions.display()))?;
+    let tree = tempfile::Builder::new()
+        .prefix(&format!("{}-", env!("CARGO_PKG_VERSION")))
+        .tempdir_in(&versions)
+        .with_context(|| format!("create an encoder directory in {}", versions.display()))?;
+    install_encoder(download.path(), tree, target, &bin)
 }
 
-fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Result<String> {
+/// `bin` starts an encoder whose rpath finds its runtime. The loader takes
+/// `$ORIGIN` from the binary's real path, so that is the path checked.
+fn encoder_ready(bin: &Path) -> bool {
+    let Ok(exe) = fs::canonicalize(bin) else {
+        return false;
+    };
+    executable(&exe)
+        && exe
+            .parent()
+            .and_then(Path::parent)
+            .is_some_and(|prefix| regular_file(&prefix.join(ENCODER_LIB).join(ENCODER_SONAME)))
+}
+
+fn install_encoder(
+    download: &Path,
+    tree: tempfile::TempDir,
+    target: &str,
+    bin: &Path,
+) -> Result<String> {
     let mut archives = Vec::new();
     for base in ENCODER_ARCHIVES {
         let name = format!("{base}-{target}.tar.gz");
-        let file = stage.join(&name);
-        let sums = stage.join(format!("{name}.sha256"));
+        let file = download.join(&name);
+        let sums = download.join(format!("{name}.sha256"));
         match release_asset(&name, &file) {
             Ok(true) => {}
             Ok(false) => {
@@ -2334,14 +2372,16 @@ fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Re
     for file in &archives {
         refuse_unsafe_archive(file)?;
     }
-    let tree = stage.join("tree");
-    fs::create_dir_all(&tree)?;
     for file in &archives {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("tar")
             .arg("-xzf")
             .arg(file)
             .arg("-C")
-            .arg(&tree)
+            .arg(tree.path())
             .stdin(std::process::Stdio::null())
             .output()
             .context("tar")?;
@@ -2353,96 +2393,84 @@ fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Re
             );
         }
     }
-    refuse_unsafe_tree(&tree)?;
-    let new_lib = tree.join(ENCODER_LIB);
-    let new_bin = tree.join("bin/packset-embed");
+    refuse_unsafe_tree(tree.path())?;
+    let new_lib = tree.path().join(ENCODER_LIB);
+    let new_bin = tree.path().join("bin/packset-embed");
     if !regular_file(&new_lib.join(ENCODER_SONAME)) || !regular_file(&new_bin) {
         bail!("the encoder archives lack bin/packset-embed or {ENCODER_LIB}/{ENCODER_SONAME}; nothing was installed");
     }
-    // A running encoder keeps the inode it opened, so the new files are
-    // renamed in. chmod and the destination directory happen first: a
-    // failure after the runtime rename used to leave the new runtime and
-    // delete the old one with the stage. Both names move aside, then both
-    // new names move in, and either failure puts the previous pair back.
-    use std::os::unix::fs::PermissionsExt;
-    if let Err(err) = fs::set_permissions(&new_bin, fs::Permissions::from_mode(0o755)) {
-        bail!("encoder install failed ({err}); nothing was installed");
-    }
+    let bin_dir = bin
+        .parent()
+        .context("cloud up: the encoder has no directory")?;
     if let Err(err) = fs::create_dir_all(bin_dir) {
         bail!("encoder install failed ({err}); nothing was installed");
     }
-    let bin = bin_dir.join("packset-embed");
-    swap_encoder(stage, &new_lib, &new_bin, lib, &bin)?;
+    let installed = switch_encoder(tree, bin)?;
     Ok(format!(
         "encoder: installed {} and ONNX Runtime in {} (checksums match)",
         bin.display(),
-        lib.display()
+        installed.display()
     ))
 }
 
-/// `symlink_metadata` sees a dangling symlink. `exists` follows links and
-/// would leave that name in the way of the rename.
-fn path_present(path: &Path) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(err) => bail!("encoder install failed ({err}); nothing was installed"),
+/// Make the encoder unpacked in `tree` the one `bin` starts, and return
+/// the directory it now lives in.
+///
+/// `tree` holds `bin/packset-embed` and the runtime its rpath finds, so
+/// `bin` is a symlink into `tree` and one rename moves both. A crash leaves
+/// the previous pair or this one. `tree` is synced before the rename, so
+/// the link never names a file a crash could empty, and the previous
+/// directory is removed only after the new link is synced. The binary is
+/// published with mode `0o755`, so no name is made executable by path.
+fn switch_encoder(tree: tempfile::TempDir, bin: &Path) -> Result<PathBuf> {
+    let new_bin = tree.path().join("bin/packset-embed");
+    let versions = tree
+        .path()
+        .parent()
+        .context("cloud up: no encoder directory")?
+        .to_path_buf();
+    crate::publish(
+        &new_bin,
+        crate::Content::CopyOf(&new_bin),
+        crate::Mode::Exactly(0o755),
+    )
+    .and_then(|()| sync_tree(tree.path()))
+    .and_then(|()| fs::File::open(&versions)?.sync_all())
+    .and_then(|()| match versions.parent() {
+        Some(lib) => fs::File::open(lib)?.sync_all(),
+        None => Ok(()),
+    })
+    .map_err(|err| anyhow::anyhow!("encoder install failed ({err}); nothing was installed"))?;
+    #[cfg(test)]
+    tests::crash_point("built");
+    let previous = fs::read_link(bin).ok();
+    let moved = crate::publish_link(bin, &new_bin)
+        .map_err(|err| anyhow::anyhow!("encoder install failed ({err}); nothing was installed"))?;
+    let tree = tree.keep();
+    #[cfg(test)]
+    tests::crash_point("switched");
+    if let Err(err) = moved.durable {
+        bail!("encoder: {err}; the previous encoder directory is kept, since a crash may bring back the link to it");
     }
+    let old = previous.as_deref().and_then(|link| link.ancestors().nth(2));
+    if let Some(old) = old.filter(|old| old.parent() == Some(&versions) && *old != tree) {
+        let _ = fs::remove_dir_all(old);
+    }
+    Ok(tree)
 }
 
-/// Stage both names, swap both, and roll both back. The stage directory is
-/// removed by the caller, so a backup that is still there at return is gone.
-fn swap_encoder(
-    stage: &Path,
-    new_lib: &Path,
-    new_bin: &Path,
-    lib: &Path,
-    bin: &Path,
-) -> Result<()> {
-    let backup_lib = stage.join("old-lib");
-    let backup_bin = stage.join("old-bin");
-    let had_lib = path_present(lib)?;
-    let had_bin = path_present(bin)?;
-    let mut bin_aside = false;
-
-    let fail = |bin_aside: bool, cause: &str| -> Result<()> {
-        let lib_err = had_lib
-            .then(|| fs::rename(&backup_lib, lib).err())
-            .flatten();
-        let bin_err = bin_aside
-            .then(|| fs::rename(&backup_bin, bin).err())
-            .flatten();
-        match lib_err.or(bin_err) {
-            None => bail!("encoder install failed ({cause}); nothing was installed"),
-            Some(err) => bail!(
-                "encoder install failed ({cause}); restoring the previous encoder also failed: {err}"
-            ),
-        }
-    };
-
-    if had_lib {
-        if let Err(err) = fs::rename(lib, &backup_lib) {
-            bail!("encoder install failed ({err}); nothing was installed");
+/// `fsync` every file and directory under `dir`, then `dir` itself.
+/// [`refuse_unsafe_tree`] has checked there is nothing else there.
+fn sync_tree(dir: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            sync_tree(&entry.path())?;
+        } else {
+            fs::File::open(entry.path())?.sync_all()?;
         }
     }
-    if had_bin {
-        if let Err(err) = fs::rename(bin, &backup_bin) {
-            return fail(false, &err.to_string());
-        }
-        bin_aside = true;
-    }
-    if let Err(err) = fs::rename(new_lib, lib) {
-        return fail(bin_aside, &err.to_string());
-    }
-    if let Err(err) = fs::rename(new_bin, bin) {
-        // The new runtime is occupying the live name. Move it back into the
-        // stage, or delete it, so the previous runtime can return.
-        if fs::rename(lib, new_lib).is_err() {
-            let _ = fs::remove_dir_all(lib);
-        }
-        return fail(bin_aside, &err.to_string());
-    }
-    Ok(())
+    fs::File::open(dir)?.sync_all()
 }
 
 /// A cloud VM. A CI job is not one, so `cloud up` does not download
@@ -2481,7 +2509,7 @@ fn release_asset(name: &str, to: &Path) -> Result<bool> {
         if !src.is_file() {
             return Ok(false);
         }
-        fs::copy(&src, to).with_context(|| format!("copy {}", src.display()))?;
+        crate::copy_file(&src, to).with_context(|| format!("copy {}", src.display()))?;
         return Ok(true);
     }
     let url = format!(
@@ -2494,6 +2522,10 @@ fn release_asset(name: &str, to: &Path) -> Result<bool> {
         Err(ureq::Error::Status(404, _)) => return Ok(false),
         Err(e) => bail!("{url}: {e}"),
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let mut file = fs::File::create(to).with_context(|| format!("write {}", to.display()))?;
     std::io::copy(
         &mut std::io::Read::take(resp.into_reader(), 512 * 1024 * 1024),
@@ -2505,6 +2537,10 @@ fn release_asset(name: &str, to: &Path) -> Result<bool> {
 
 fn run_installer(bin_dir: &Path) -> Result<()> {
     let script = installer_script()?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new("sh");
     cmd.arg(&script)
         .arg("--no-onboard")
@@ -2546,10 +2582,8 @@ fn installer_script() -> Result<PathBuf> {
         .into_string()
         .with_context(|| format!("read {url}"))?;
     let path = std::env::temp_dir().join(format!("ljos-install-{}.sh", std::process::id()));
-    let mut file = fs::File::create(&path).with_context(|| format!("write {}", path.display()))?;
-    file.write_all(text.as_bytes())?;
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+    crate::install_executable(&path, text.as_bytes())
+        .with_context(|| format!("write {}", path.display()))?;
     Ok(path)
 }
 
@@ -2836,6 +2870,10 @@ fn write_env(path: &Path, pairs: &[(&str, String)]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(path, out).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
@@ -3024,6 +3062,10 @@ pub(crate) fn ensure_cloud_guard_rules() -> Result<String> {
         fs::create_dir_all(parent)?;
     }
     if !path.is_file() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(&path, "")?;
     }
     replace_stale_guard();
@@ -3395,6 +3437,10 @@ fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
             }
         }
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut current = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -3415,6 +3461,10 @@ fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
         }
         // SAFETY: current is an open directory fd. The name is a NUL-terminated
         // byte string with no interior NUL. openat returns a new fd or -1.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let fd = unsafe { libc::openat(current.as_raw_fd(), bytes.as_ptr().cast(), flags) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
@@ -3426,7 +3476,6 @@ fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
 }
 
 fn set_mode_0600(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     let unwound = unwind_system_links(path);
     let path = unwound.as_path();
     // Linux returns ENOTDIR, not ELOOP, when O_DIRECTORY meets a symlink
@@ -3448,8 +3497,7 @@ fn set_mode_0600(path: &Path) -> Result<()> {
     if !file.metadata().is_ok_and(|meta| meta.file_type().is_file()) {
         bail!("mode 0600 {}: target is not a file", path.display());
     }
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("mode 0600 {}", path.display()))
+    crate::change_mode_of(&file, 0o600).with_context(|| format!("mode 0600 {}", path.display()))
 }
 
 /// Write `text` to `path` as mode 0600. A symlink at `path` is refused, so
@@ -3458,7 +3506,6 @@ fn set_mode_0600(path: &Path) -> Result<()> {
 /// link: a file or link already at that name is refused, not written
 /// through, so no other user can read the identity even for a moment.
 fn write_private(path: &Path, text: &str) -> Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let unwound = unwind_system_links(path);
     let path = unwound.as_path();
     refuse_symlink_parent(path)?;
@@ -3471,30 +3518,12 @@ fn write_private(path: &Path, text: &str) -> Result<()> {
             path.display()
         );
     }
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("cloud.age");
-    let tmp = path.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&tmp)
-        .with_context(|| format!("create {}", tmp.display()))?;
-    let write = (|| -> Result<()> {
-        // The umask may clear bits of the mode asked for at creation.
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&tmp, path).with_context(|| format!("install {}", path.display()))?;
-        Ok(())
-    })();
-    if write.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    write
+    crate::publish(
+        path,
+        crate::Content::Bytes(text.as_bytes()),
+        crate::Mode::Exactly(0o600),
+    )
+    .with_context(|| format!("install {}", path.display()))
 }
 
 fn path_export_line(bin_dir: &Path) -> String {
@@ -3597,6 +3626,10 @@ fn ensure_path_file(path: &Path, bin_dir: &Path, before_interactive_guard: bool)
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(path, out).with_context(|| format!("write {}", path.display()))?;
     Ok(format!(
         "path: {} adds {}",
@@ -3991,6 +4024,10 @@ fn archive_member_path_ok(name: &[u8]) -> bool {
 /// flags, such as the one shipped on macOS, is asked again with `-tvzf`
 /// only. A listing that does not parse is refused.
 fn tar_verbose_listing(file: &Path) -> Result<Vec<u8>> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let run = |args: &[&str]| {
         Command::new("tar")
             .args(args)
@@ -4309,8 +4346,16 @@ hrwxr-xr-x  0 runner staff       0 Oct 29 22:00 bin/b link to bin/a file\n";
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("tree");
         std::fs::create_dir_all(dir.join("bin")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink("/etc/passwd", dir.join("bin/packset-embed")).unwrap();
         let archive = root.path().join("bad.tar.gz");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = std::process::Command::new("tar")
             .arg("-C")
             .arg(&dir)
@@ -4353,39 +4398,245 @@ mod tests {
 
     const SECRET: &str = "AGE-SECRET-KEY-1PLANTED\n";
 
+    /// `install_binary` copied to `.NAME.tmp-PID` and renamed that name
+    /// over the binary, so a link put there before the copy, or swapped in
+    /// before the rename, became the installed binary. A link left at that
+    /// name and a link at the binary itself are now neither followed nor
+    /// installed.
+    #[test]
+    fn a_binary_install_takes_no_side_name_and_follows_no_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src-ljos");
+        crate::install_executable_mode(&src, "#!/bin/sh\necho new\n", 0o750).unwrap();
+        let victim = dir.path().join("victim");
+        crate::write_file(&victim, "keep\n").unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let dest = bin.join("ljos");
+        let side = bin.join(format!(".ljos.tmp-{}", std::process::id()));
+        for link in [&side, &dest] {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "plants a link that is not a git hook"
+            )]
+            std::os::unix::fs::symlink(&victim, link).unwrap();
+        }
+        install_binary(&src, &dest).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep\n");
+        assert_eq!(fs::read_link(&side).unwrap(), victim);
+        let meta = fs::symlink_metadata(&dest).unwrap();
+        assert!(meta.file_type().is_file(), "{meta:?}");
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o750);
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "#!/bin/sh\necho new\n");
+        let mut names: Vec<_> = fs::read_dir(&bin)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        names.sort();
+        assert_eq!(names, [side.clone(), dest.clone()]);
+    }
+
+    /// An encoder unpacked into a new directory under `versions`, as the
+    /// release archives lay it out, marked `version`.
+    fn unpacked(versions: &Path, version: &str) -> tempfile::TempDir {
+        fs::create_dir_all(versions).unwrap();
+        let tree = tempfile::tempdir_in(versions).unwrap();
+        let lib = tree.path().join(ENCODER_LIB);
+        fs::create_dir_all(&lib).unwrap();
+        crate::write_file(lib.join(ENCODER_SONAME), format!("runtime-{version}")).unwrap();
+        fs::create_dir(tree.path().join("bin")).unwrap();
+        crate::write_file(
+            tree.path().join("bin/packset-embed"),
+            format!("encoder-{version}"),
+        )
+        .unwrap();
+        tree
+    }
+
+    /// The binary `bin` starts and the runtime its rpath loads.
+    fn pair(bin: &Path) -> (String, String) {
+        let exe = fs::canonicalize(bin).unwrap();
+        let runtime = exe
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join(ENCODER_LIB)
+            .join(ENCODER_SONAME);
+        (
+            fs::read_to_string(&exe).unwrap(),
+            fs::read_to_string(&runtime).unwrap(),
+        )
+    }
+
+    /// The encoder binary was chmodded by path in the stage and renamed
+    /// onto its name. Now a link into the new encoder's directory replaces
+    /// what is at that name, so a link already there is not followed and
+    /// its target keeps its bytes and mode.
+    #[test]
+    fn an_encoder_install_follows_no_link_at_the_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        crate::install_executable_mode(&victim, "keep\n", 0o700).unwrap();
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir(&bin_dir).unwrap();
+        let bin = bin_dir.join("packset-embed");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "plants a link that is not a git hook"
+        )]
+        std::os::unix::fs::symlink(&victim, &bin).unwrap();
+        let tree = switch_encoder(unpacked(&dir.path().join(ENCODER_VERSIONS), "1"), &bin).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep\n");
+        assert_eq!(
+            fs::symlink_metadata(&victim).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
+        assert_eq!(fs::read_link(&bin).unwrap(), tree.join("bin/packset-embed"));
+        let exe = fs::metadata(&bin).unwrap();
+        assert!(exe.file_type().is_file(), "{exe:?}");
+        assert_eq!(exe.permissions().mode() & 0o7777, 0o755);
+        assert!(encoder_ready(&bin));
+        assert_eq!(pair(&bin), ("encoder-1".into(), "runtime-1".into()));
+    }
+
+    /// The sync of the binary directory fails after the link was renamed
+    /// in. The name moved, so the error says so, the new pair is the one
+    /// that runs, and the previous encoder stays for a crash to bring back.
+    /// The old install took a failed sync after a rename for a failed
+    /// rename and deleted the previous runtime with its stage.
+    #[test]
+    fn a_failed_sync_after_the_switch_keeps_the_previous_encoder() {
+        struct Unset;
+        impl Drop for Unset {
+            fn drop(&mut self) {
+                crate::exe_publish::fail_flush_of(Vec::new());
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir(&bin_dir).unwrap();
+        let bin = bin_dir.join("packset-embed");
+        let versions = dir.path().join(ENCODER_VERSIONS);
+        let first = switch_encoder(unpacked(&versions, "1"), &bin).unwrap();
+        let _unset = Unset;
+        crate::exe_publish::fail_flush_of(vec![bin_dir.clone(), dir.path().join("lib")]);
+        let err = switch_encoder(unpacked(&versions, "2"), &bin)
+            .unwrap_err()
+            .to_string();
+        crate::exe_publish::fail_flush_of(Vec::new());
+        assert!(err.contains("is in place, but syncing"), "{err}");
+        assert!(!err.contains("nothing was installed"), "{err}");
+        assert!(encoder_ready(&bin), "{err}");
+        assert_eq!(pair(&bin), ("encoder-2".into(), "runtime-2".into()));
+        assert!(
+            first.join(ENCODER_LIB).join(ENCODER_SONAME).is_file(),
+            "the previous runtime was removed before the switch was synced: {err}"
+        );
+        assert!(first.join("bin/packset-embed").is_file(), "{err}");
+    }
+
+    /// End this process at `step` when `LJOS_TEST_ENCODER_CRASH` names it,
+    /// with no unwinding and no cleanup, as a crash would.
+    pub(super) fn crash_point(step: &str) {
+        if std::env::var("LJOS_TEST_ENCODER_CRASH").as_deref() == Ok(step) {
+            // SAFETY: _exit ends the process at once; nothing after it runs.
+            unsafe { libc::_exit(9) };
+        }
+    }
+
+    /// The child of [`a_crash_while_switching_the_encoder_leaves_a_ready_pair`]:
+    /// install encoder 2 over encoder 1 in `LJOS_TEST_ENCODER_HOME` and end
+    /// at the step `LJOS_TEST_ENCODER_CRASH` names. Run alone, it does
+    /// nothing.
+    #[test]
+    fn encoder_crash_child() {
+        let Some(home) = std::env::var_os("LJOS_TEST_ENCODER_HOME") else {
+            return;
+        };
+        let home = PathBuf::from(home);
+        let bin = home.join("bin/packset-embed");
+        let _ = switch_encoder(unpacked(&home.join(ENCODER_VERSIONS), "2"), &bin);
+        panic!("the install did not reach the crash point");
+    }
+
+    /// A process that ends while it installs a new encoder leaves `bin`
+    /// starting the old binary with the old runtime or the new binary with
+    /// the new runtime, and either reads as installed. The old install
+    /// renamed the runtime in and then published the binary, so a crash
+    /// between the two left the new runtime under the old binary, and
+    /// `cloud up` took that for an installed encoder.
+    #[test]
+    fn a_crash_while_switching_the_encoder_leaves_a_ready_pair() {
+        for (step, want) in [("built", "1"), ("switched", "2")] {
+            let dir = tempfile::tempdir().unwrap();
+            let bin_dir = dir.path().join("bin");
+            fs::create_dir(&bin_dir).unwrap();
+            let bin = bin_dir.join("packset-embed");
+            switch_encoder(unpacked(&dir.path().join(ENCODER_VERSIONS), "1"), &bin).unwrap();
+            let out = crate::program(std::env::current_exe().unwrap())
+                .unwrap()
+                .args(["--exact", "cloud::tests::encoder_crash_child"])
+                .args(["--test-threads", "1", "--nocapture"])
+                .env("LJOS_TEST_ENCODER_CRASH", step)
+                .env("LJOS_TEST_ENCODER_HOME", dir.path())
+                .output()
+                .unwrap();
+            assert_eq!(out.status.code(), Some(9), "{step}: {out:?}");
+            assert!(encoder_ready(&bin), "{step}");
+            assert_eq!(
+                pair(&bin),
+                (format!("encoder-{want}"), format!("runtime-{want}")),
+                "{step}"
+            );
+        }
+    }
+
     fn temp_of(path: &Path) -> PathBuf {
         path.with_file_name(format!(".cloud.age.tmp-{}", std::process::id()))
     }
 
     #[test]
-    fn a_link_planted_at_the_temp_name_is_not_followed() {
+    fn the_old_predictable_identity_temp_name_is_not_used() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cloud.age");
         let outside = dir.path().join("outside");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(&outside, "keep\n").unwrap();
         let tmp = temp_of(&path);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&outside, &tmp).unwrap();
-        assert!(write_private(&path, SECRET).is_err());
+        write_private(&path, SECRET).unwrap();
         assert_eq!(fs::read_to_string(&outside).unwrap(), "keep\n");
         assert!(fs::symlink_metadata(&tmp).unwrap().file_type().is_symlink());
-        assert!(!path.exists());
+        assert_eq!(fs::read_to_string(&path).unwrap(), SECRET);
     }
 
     #[test]
-    fn a_readable_file_planted_at_the_temp_name_never_holds_the_identity() {
+    fn an_old_predictable_temp_file_never_contains_the_identity() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cloud.age");
         let tmp = temp_of(&path);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(&tmp, "planted\n").unwrap();
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(write_private(&path, SECRET).is_err());
+        crate::exe_publish::fixture_mode(&tmp, 0o644);
+        write_private(&path, SECRET).unwrap();
         assert_eq!(fs::read_to_string(&tmp).unwrap(), "planted\n");
         assert_eq!(
             fs::metadata(&tmp).unwrap().permissions().mode() & 0o777,
             0o644
         );
-        assert!(!path.exists());
+        assert_eq!(fs::read_to_string(&path).unwrap(), SECRET);
 
+        fs::remove_file(&path).unwrap();
         fs::remove_file(&tmp).unwrap();
         write_private(&path, SECRET).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), SECRET);
@@ -4406,8 +4657,7 @@ mod tests {
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(&empty).unwrap();
         let server = bin.join("ljos-mcp");
-        fs::write(&server, "#!/bin/sh\n").unwrap();
-        fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&server, "#!/bin/sh\n").unwrap();
         let launch = LaunchSpec {
             command: "ljos-mcp".into(),
             args: Vec::new(),
@@ -4438,11 +4688,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cloud.age");
         let outside = dir.path().join("outside");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(&path, SECRET).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        crate::exe_publish::fixture_mode(&path, 0o644);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(&outside, "keep\n").unwrap();
-        fs::set_permissions(&outside, fs::Permissions::from_mode(0o644)).unwrap();
+        crate::exe_publish::fixture_mode(&outside, 0o644);
         fs::remove_file(&path).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&outside, &path).unwrap();
 
         assert!(set_mode_0600(&path).is_err());
@@ -4465,9 +4727,17 @@ mod tests {
         let real = dir.path().join("real");
         fs::create_dir(&real).unwrap();
         let path = real.join("cloud.age");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(&path, SECRET).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        crate::exe_publish::fixture_mode(&path, 0o644);
         let via_dir = dir.path().join("via");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&real, &via_dir).unwrap();
         let via = via_dir.join("cloud.age");
 
@@ -4575,6 +4845,10 @@ mod tests {
         };
         assert!(matches!(read_seat_keys(&missing), KeyRead::Absent));
         fs::remove_dir(&path).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(&path, "{not json").unwrap();
         assert!(matches!(read_seat_keys(&file), KeyRead::Ambiguous));
         let loose = McpFile {

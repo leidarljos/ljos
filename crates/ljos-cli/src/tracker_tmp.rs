@@ -53,6 +53,10 @@ impl TempFile {
             .unwrap_or(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let path = parent.join(format!(".{base}.tmp.{}-{nanos}-{seq}", std::process::id()));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -71,6 +75,10 @@ impl TempFile {
     }
 
     fn publish(mut self, target: &Path) -> std::io::Result<()> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         std::fs::rename(&self.path, target)?;
         self.published = true;
         Ok(())
@@ -218,6 +226,10 @@ pub(crate) mod tests {
     fn a_write_replaces_the_file_and_leaves_no_temporary() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("issues.org");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, "old\n").unwrap();
         replace_file(&path, "new\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
@@ -245,6 +257,10 @@ pub(crate) mod tests {
     fn a_failed_rename_step_leaves_the_old_file_and_no_temporary() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("issues.org");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, "old\n").unwrap();
         let mut seen = PathBuf::new();
         let err = replace_file_with(&path, "new\n", |tmp| {
@@ -276,6 +292,10 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("issues.org");
         std::fs::create_dir(&path).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(path.join("keep"), "x").unwrap();
         assert!(replace_file(&path, "new\n").is_err());
         assert!(temps(dir.path()).is_empty());
@@ -283,6 +303,10 @@ pub(crate) mod tests {
 
     /// The pid of a process that has exited and been reaped.
     pub(crate) fn dead_pid() -> u32 {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = std::process::Command::new("true").spawn().unwrap();
         let pid = child.id();
         child.wait().unwrap();
@@ -290,6 +314,10 @@ pub(crate) mod tests {
     }
 
     fn age(path: &Path, by: Duration) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         std::fs::File::options()
             .write(true)
             .open(path)
@@ -308,6 +336,10 @@ pub(crate) mod tests {
         let dotted = dir.path().join(".ljos-commit.pending");
         let bare = dir.path().join(".tmp.x");
         for path in [&old, &young, &board, &dotted, &bare] {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(path, "x").unwrap();
         }
         for path in [&old, &board, &dotted, &bare] {
@@ -338,6 +370,10 @@ pub(crate) mod tests {
             .path()
             .join(format!(".issues.org.tmp.{}-1-0", dead_pid()));
         for path in [&mine, &init, &vissue, &unnamed, &dead] {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(path, "half a board").unwrap();
             age(path, STALE_AFTER * 3);
         }

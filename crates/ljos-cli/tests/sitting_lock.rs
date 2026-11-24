@@ -31,10 +31,8 @@ const RELEASED_CLAIM_BUDGET_SECS: u64 = 5;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 struct Board {
@@ -57,6 +55,10 @@ impl Board {
         std::fs::create_dir_all(layout.projects_dir()).unwrap();
         vissue_core::ops::create(&layout, "probe", "wait for the writer", Default::default())
             .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let initialized = Command::new("git")
             .arg("-C")
             .arg(&root)
@@ -122,6 +124,10 @@ esac
     }
 
     fn hold_lock(path: &Path) -> std::fs::File {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -150,7 +156,11 @@ esac
     }
 
     fn sitting_with_env(&self, budget_secs: u64, tracker_git: &str, env: &[(&str, &str)]) -> Child {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["sitting", &self.issue, "--verbose"])
             .current_dir(self._dir.path())
             .env_clear()
@@ -176,7 +186,7 @@ esac
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .unwrap()
+            .unwrap();
     }
 
     fn state(&self) -> String {

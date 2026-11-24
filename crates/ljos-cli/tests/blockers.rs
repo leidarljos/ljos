@@ -49,7 +49,11 @@ impl Board {
 
     fn ljos_with_seat(&self, seat: &str, args: &[&str]) -> Output {
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.dir.path())
             .env_clear()
@@ -67,7 +71,7 @@ impl Board {
             .env("LJOS_ASK_PACK", "off")
             .env("LJOS_USER_RULES_SYNC", "off")
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -309,6 +313,10 @@ fn block_keeps_same_minute_note_state_and_claim_lines_on_all_tickets() {
         board.c,
         log("gamma")
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(board.issues_path(), tracker).unwrap();
 
     let said = board.ok(&["block", &board.a, "--on", &board.b]);
@@ -369,6 +377,10 @@ fn block_after_concurrent_claims_and_notes_keeps_each_tickets_own_logbook_rows()
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, normalized).unwrap();
 
     let said = board.ok(&["block", &board.a, "--on", &board.b]);
@@ -409,6 +421,10 @@ fn block_keeps_legacy_claimed_by_rows_on_every_ticket() {
 :END:\n",
         board.a, board.b
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(board.issues_path(), tracker).unwrap();
 
     let said = board.ok(&["block", &board.a, "--on", &board.b]);
@@ -439,6 +455,10 @@ fn board_with_legacy_stamps(board: &Board, minute: &str) {
 :END:\n",
         board.a, board.b
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(board.issues_path(), tracker).unwrap();
 }
 

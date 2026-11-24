@@ -7,6 +7,10 @@ use std::process::{Command, Stdio};
 
 fn hook(runner: &str, event: Option<&str>, bytes: &[u8]) -> std::process::Output {
     let home = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook").arg("--runner").arg(runner);
     if let Some(event) = event {

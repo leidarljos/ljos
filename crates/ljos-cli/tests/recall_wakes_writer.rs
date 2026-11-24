@@ -36,12 +36,7 @@ impl Drop for SeatHome {
 
 fn fake_bin(dir: &Path, name: &str, body: &str) {
     let path = dir.join(name);
-    std::fs::write(&path, body).expect(name);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    }
+    ljos_cli::install_executable(&path, body).expect(name);
 }
 
 fn seat() -> (SeatHome, PathBuf, u16) {
@@ -64,6 +59,10 @@ fn seat() -> (SeatHome, PathBuf, u16) {
 }
 
 fn ljos(home: &SeatHome, port: u16) -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.env_clear()
         .current_dir(home.path())
@@ -118,6 +117,10 @@ fn a_session_and_a_recall_start_the_writer_without_naming_the_command() {
     );
     assert!(!hook_text.contains("packset ensure"), "{hook_text}");
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&marker, "").expect("clear");
     let recall = ljos(&home, port)
         .args(["recall", "probe-0001"])
