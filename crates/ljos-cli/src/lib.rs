@@ -42716,17 +42716,51 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
 }
 
 /// Whether a refusal means the graph moved since the listing.
+///
+/// The claim's own refusals are read from the top error only, so a deeper
+/// cause that happens to say "status claimed" is not passed over. The mint
+/// collision arrives as a cause under the upsert's context, so that one
+/// line is read from the whole chain.
 fn taken_first(err: &anyhow::Error) -> bool {
-    let text = format!("{err:#}");
-    [
+    let top = err.to_string();
+    let refused = [
         "held by another",
         "status claimed",
         "status running",
         "deps unsatisfied",
-        "upsert: node is claimed; use completeWork",
     ]
     .iter()
-    .any(|said| text.contains(said))
+    .any(|said| top.contains(said));
+    refused || format!("{err:#}").contains("upsert: node is claimed; use completeWork")
+}
+
+#[cfg(test)]
+mod taken_first_tests {
+    use super::taken_first;
+    use anyhow::Context as _;
+
+    #[test]
+    fn a_top_refusal_and_a_mint_collision_are_passed_over() {
+        assert!(taken_first(&anyhow::anyhow!(
+            "claim: demo-aa01 is held by another seat"
+        )));
+        let minted: anyhow::Result<()> = Err(anyhow::anyhow!(
+            "claimdag: upsert: node is claimed; use completeWork"
+        ));
+        let minted = minted
+            .context("claim: could not mint a node for demo-aa01")
+            .unwrap_err();
+        assert!(taken_first(&minted), "{minted:#}");
+    }
+
+    #[test]
+    fn a_refusal_word_in_a_deeper_cause_is_not_passed_over() {
+        let deep: anyhow::Result<()> = Err(anyhow::anyhow!("tracker: status claimed"));
+        let deep = deep
+            .context("claim: could not write the tracker")
+            .unwrap_err();
+        assert!(!taken_first(&deep), "{deep:#}");
+    }
 }
 
 /// The claim graph stopped at the wall armed for this claim: a claimdag
