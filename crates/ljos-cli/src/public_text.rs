@@ -3328,8 +3328,7 @@ fn window_is_ipv6(chars: &[char], start: usize, end: usize) -> bool {
     (start..end).any(|at| candidate_at(chars, start, at) && candidate_is_ipv6(chars, at, end))
 }
 
-/// The run start, outside a word, and the character after `.`, `%` or a
-/// single colon.
+/// The run start and the character after `.`, `%` or `:`.
 fn candidate_at(chars: &[char], start: usize, at: usize) -> bool {
     if at == start {
         return true;
