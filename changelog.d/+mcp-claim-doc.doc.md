@@ -1,1 +1,0 @@
-The MCP reference says `ljos_start` and `ljos_sitting` claim on the call, not on the first write.

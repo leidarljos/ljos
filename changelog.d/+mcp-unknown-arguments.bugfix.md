@@ -1,1 +1,0 @@
-`ljos mcp` refuses a tool call whose arguments include a name the schema does not list, names the unknown name and the accepted ones, and does not run the tool. Tools that take an issue id accept `id` as an alias for `issue`.

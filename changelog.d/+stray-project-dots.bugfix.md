@@ -1,1 +1,0 @@
-`ljos file -p .` and `-p ..`, a project name that folds to one of them under Unicode NFKC such as U+2024, and the same name on an MCP tool, are refused as project names, so a ticket is no longer written to `issues.org` beside the prefix directory, in the prefix directory, or under a dot-named project directory.

@@ -1,1 +1,0 @@
-Tighten identity-gate coverage for `noreply@github.com` committers, seed `old_terminal` from documented legacy atom fixtures, assert legacy atoms stay unverified through `ljos doctor`, punctuate the busy pack doctor row like other command tails, and make person gate and key tests assert PTY output that `finish_reading` drains.

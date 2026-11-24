@@ -1,1 +1,0 @@
-`ljos file --from` files a row with no parent under the held issue, as `ljos file` does, and says so on stderr; `--top` now works with `--from` to file such rows at the top. Before, the batch ignored the hold and refused rows with no project.

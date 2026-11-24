@@ -1,1 +1,0 @@
-`ljos seat add` and `ljos seat grant` run in a directory that only vissue would guess as the tracker now stop with the `No tracker found` line, and no longer write `vissue.toml` and a commit lock into a product checkout.

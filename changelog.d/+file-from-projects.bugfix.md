@@ -1,1 +1,0 @@
-`ljos file --from` files each row in its parent's project, as `ljos file --parent` does, instead of putting every row in the project of the first parent; a refused row takes back every project the batch wrote.

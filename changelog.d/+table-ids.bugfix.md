@@ -1,1 +1,0 @@
-`ljos table --add` no longer fails with `deed frozen` when a second table's name differs from the first only in case, `.`, `_` or `-`, such as `Scores` and `scores`: it passes deedar an accession of its own, with a short digest for a name deedar would fold, and refuses an accession another deed already uses.
