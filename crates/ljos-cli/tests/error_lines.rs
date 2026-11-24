@@ -1038,6 +1038,107 @@ fn a_negative_on_every_remaining_numeric_flag_names_the_value() {
 }
 
 #[test]
+fn negative_zero_reaches_every_documented_numeric_flag() {
+    let home = Home::new();
+    let cases: &[(&[&str], bool)] = &[
+        (
+            &[
+                "persona",
+                "reviewer",
+                "--anchor",
+                "-0",
+                "--view",
+                "reads diffs",
+            ],
+            true,
+        ),
+        (&["ready", "-n", "-0"], true),
+        (&["search", "kiln", "--limit", "-0"], true),
+        (&["calibrate", "-p", "demo", "--rounds", "-0"], true),
+        (
+            &["wake", "alice", "--command", "true", "--timeout", "-0"],
+            true,
+        ),
+        (
+            &["panel", "demo-kiln", "--designers", "-0", "--dry-run"],
+            true,
+        ),
+        (&["claim", "demo-kiln", "--slack", "-0"], true),
+        (
+            &["learn", "demo-kiln", "--outcome", "keep", "--beta", "-0"],
+            false,
+        ),
+        (
+            &["learn", "demo-kiln", "--outcome", "keep", "--share", "-0"],
+            true,
+        ),
+        (
+            &[
+                "supervise",
+                "worker",
+                "--harness",
+                "codex",
+                "--exit",
+                "clean",
+                "--at",
+                "0",
+                "--failures",
+                "-0",
+            ],
+            true,
+        ),
+        (&["memories", "prune", "--stale", "--days", "-0"], true),
+        (&["claims", "--stale", "--days", "-0"], true),
+        (&["release", "--stale", "--days", "-0", "--yes"], true),
+        (
+            &["vote", "demo-kiln", "--for", "keep", "--confidence", "-0"],
+            false,
+        ),
+        (
+            &[
+                "file",
+                "Title",
+                "-p",
+                "demo",
+                "--quorum",
+                "-0",
+                "--deadline",
+                "2030-01-01T00:00:00Z",
+            ],
+            true,
+        ),
+        (
+            &["table", "demo-kiln", "--show", "scores", "--version", "-0"],
+            true,
+        ),
+    ];
+    for (args, zero_is_in_range) in cases {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        if *zero_is_in_range {
+            assert_ne!(out.status.code(), Some(2), "{args:?}\n{said}");
+        }
+        assert!(!said.contains("does not accept -0"), "{args:?}\n{said}");
+        assert!(!said.contains("has no flag"), "{args:?}\n{said}");
+        assert!(!said.contains("unexpected argument"), "{args:?}\n{said}");
+    }
+
+    let huge = home.run(
+        &[
+            "memories",
+            "prune",
+            "--stale",
+            "--days",
+            "9223372036854775808",
+        ],
+        &[("LJOS_SEAT", "alice")],
+    );
+    let said = text(&huge);
+    assert_ne!(huge.status.code(), Some(2), "{said}");
+    assert!(!said.contains("does not accept"), "{said}");
+}
+
+#[test]
 fn positional_flags_seat_values_and_negative_zero_are_unambiguous() {
     let home = Home::new();
     let cases: &[(&[&str], Option<i32>, &str)] = &[
