@@ -66463,13 +66463,22 @@ mod tests {
         let _g = env_guard();
         // A pronoun is treated as omitted: the holder is this conversation's,
         // whatever the tree above the test says the seat is. A name that is
-        // not a pronoun is a named worker and stands as given.
+        // not a pronoun is a named worker and stands as given. A login with
+        // no `USER` falls back to the placeholder, so the test names one.
+        let user = std::env::var_os("USER");
+        unsafe { std::env::remove_var("USER") };
+        assert_eq!(resolve_assignee(None), "seat");
+        unsafe { std::env::set_var("USER", "ada") };
         let holder = resolve_assignee(None);
         assert_eq!(resolve_assignee(Some("you")), holder);
         assert_eq!(resolve_assignee(Some("seat")), holder);
         assert_eq!(resolve_assignee(Some("agent")), holder);
         assert_ne!(holder, "seat");
         assert_eq!(resolve_assignee(Some("alice")), "alice");
+        match user {
+            Some(v) => unsafe { std::env::set_var("USER", v) },
+            None => unsafe { std::env::remove_var("USER") },
+        }
     }
 
     #[test]
