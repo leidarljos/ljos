@@ -1181,6 +1181,24 @@ fn the_getting_started_plan_sample_prints_next_once() {
 }
 
 #[test]
+fn the_getting_started_page_names_both_empty_memory_outcomes() {
+    for rel in [
+        "../../docs/source/getting-started.rst",
+        "../../docs/orgmode/getting-started.org",
+    ] {
+        let text = repo_file(rel);
+        assert!(
+            text.contains(ljos_cli::NO_MATCHING_MEMORIES_LINE.trim_end()),
+            "{rel} does not name an answering search with no matches"
+        );
+        assert!(
+            text.contains("matched by words (encoder not installed)"),
+            "{rel} does not name the no-encoder path"
+        );
+    }
+}
+
+#[test]
 fn a_new_seat_follows_the_readme_and_getting_started() {
     if !tools_ready() {
         return;

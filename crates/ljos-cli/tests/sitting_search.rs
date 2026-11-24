@@ -446,6 +446,56 @@ fn pressure_pack() -> u16 {
     port
 }
 
+/// A pack that answers every read with nothing. `search` false is a
+/// writer with no `/v1/search`, which the sitting asks for a listing.
+fn empty_pack(search: bool) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut sock) = stream else { break };
+            thread::spawn(move || {
+                let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 2048];
+                loop {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let request = String::from_utf8_lossy(&buf);
+                let line = request.lines().next().unwrap_or("");
+                let (status, body) = if line.contains("/v1/search") {
+                    if search {
+                        ("200 OK", r#"{"hits":[]}"#)
+                    } else {
+                        ("404 Not Found", r#"{"error":"not found"}"#)
+                    }
+                } else if line.contains("/v1/atoms") {
+                    ("200 OK", r#"{"atoms":[]}"#)
+                } else {
+                    (
+                        "200 OK",
+                        r#"{"embedder":{"available":true,"answering":true}}"#,
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(response.as_bytes());
+            });
+        }
+    });
+    port
+}
+
 fn sitting_fixture(root: &Path) -> (String, std::path::PathBuf, std::path::PathBuf) {
     let log = root.join("calls.log");
     let home = root.join("home");
@@ -558,4 +608,43 @@ fn a_sitting_skips_memory_when_packsetd_never_answers() {
     assert!(ok, "{said}");
     assert_eq!(said.matches(DOWN_LINE).count(), 1, "{said}");
     assert_eq!(said.matches("ranked by words").count(), 1, "{said}");
+}
+
+/// The lines under the `== island` heading, up to the next heading.
+fn island_lines(said: &str) -> Vec<&str> {
+    said.lines()
+        .skip_while(|line| !line.starts_with("== island"))
+        .skip(1)
+        .take_while(|line| !line.starts_with("== "))
+        .collect()
+}
+
+#[test]
+fn an_empty_pack_read_prints_only_the_no_matching_memories_line() {
+    assert_eq!(
+        ljos_cli::NO_MATCHING_MEMORIES_LINE,
+        "No matching memories for this task.\n"
+    );
+    for search in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        script(
+            root.path(),
+            "packset-embed",
+            "#!/bin/sh\necho 'packset-embed 0.18.2'\n",
+        );
+        let port = empty_pack(search);
+        let (ok, said, _) = run_sitting(root.path(), &format!("http://127.0.0.1:{port}"));
+        assert!(ok, "search {search}: {said}");
+        assert_eq!(
+            island_lines(&said),
+            ["No matching memories for this task."],
+            "search {search}: {said}"
+        );
+        assert_eq!(
+            said.matches("No matching memories for this task.").count(),
+            1,
+            "search {search}: {said}"
+        );
+        assert!(!said.contains("ranked by words"), "search {search}: {said}");
+    }
 }

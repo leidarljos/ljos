@@ -38627,6 +38627,9 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                     out.push_str(l);
                     out.push('\n');
                     continued = false;
+                } else if *l == NO_MATCHING_MEMORIES_LINE.trim_end() {
+                    out.push_str(NO_MATCHING_MEMORIES_LINE);
+                    continued = false;
                 } else {
                     continued = false;
                 }
@@ -47044,6 +47047,10 @@ fn claim_graph_marked_down() -> bool {
 /// not answer. `--verbose` keeps the section that failed.
 pub const MEMORY_DEGRADED_LINE: &str = "matched by words (encoder not installed)\n";
 
+/// The one line a sitting prints when its bounded search answered with no
+/// memories that match the task.
+pub const NO_MATCHING_MEMORIES_LINE: &str = "No matching memories for this task.\n";
+
 /// The atoms one sitting read, shared by due, recall, the playbook and
 /// the timeline. `ok` is false when that read did not answer; later
 /// sections then do not open another socket. `searched` is true when the
@@ -47567,6 +47574,11 @@ pub fn sitting_stream_started(
     // hits, with the same caps. The island's own ranking is a different
     // list and a sitting used to show fewer than recall.
     match recall_memories_with(issue, true, SITTING_WIDTH) {
+        Ok(text) if text.trim().is_empty() => {
+            if sitting_listing().is_none_or(|listing| listing.ok) {
+                piece.push_str(NO_MATCHING_MEMORIES_LINE);
+            }
+        }
         Ok(text) => piece.push_str(&text),
         Err(e) if is_pack_busy(&e) => {
             degraded::say(degraded::State::Busy);
@@ -76906,6 +76918,22 @@ What the seat remembers for this task:\n\
 Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sitting; `ljos sitting Software-x --verbose` prints every section.\n"
         );
         assert!(!short.contains("2 due"), "{short}");
+    }
+
+    #[test]
+    fn a_compact_sitting_keeps_the_no_matching_memories_line() {
+        let full = "\
+== island: Work
+No matching memories for this task.
+== claim
+claimed day-1 for ada
+";
+        let short = compact_sitting(full, "day-1");
+        assert_eq!(
+            short.matches(NO_MATCHING_MEMORIES_LINE.trim()).count(),
+            1,
+            "{short}"
+        );
     }
 
     #[test]
