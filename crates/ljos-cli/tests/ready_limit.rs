@@ -226,7 +226,7 @@ fn the_default_page_is_short_and_names_how_to_see_more() {
     assert_eq!(ticket_ids(&long), ticket_ids(&five), "{long}");
 
     let exact = board.ok(&["ready", "-n", "23"]);
-    assert_short_page(&exact, 23, 23, true);
+    assert_short_page(&exact, 23, 23, false);
 
     let none = board.ok(&["ready", "-n", "0"]);
     assert_short_page(&none, 0, 23, true);
