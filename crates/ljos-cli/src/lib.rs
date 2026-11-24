@@ -59767,28 +59767,73 @@ mod tests {
 
     /// A directory this test creates, outside the temp roots, mode `0o755`.
     /// A temp home is not a seat, so a proof that the guard runs cannot
-    /// live in `tempfile`.
-    struct SeatDir(std::path::PathBuf);
+    /// live in the system temp directory. The root can be a cache under
+    /// `HOME`, and another test sets `HOME` to its own `SeatDir` under the
+    /// env lock, so the root is read under that lock. Otherwise this
+    /// directory could land inside the other test's, which removes it.
+    /// The name is random, so no other `SeatDir` takes the same path.
+    struct SeatDir(tempfile::TempDir);
 
     impl SeatDir {
         fn new(name: &str) -> Self {
-            let dir = crate::test_seat_root::seat_root(crate::bookkeep::path_is_temp)
-                .join(format!("ljos-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            crate::change_mode(&dir, 0o755).unwrap();
+            let seat_root = || crate::test_seat_root::seat_root(crate::bookkeep::path_is_temp);
+            let root = if crate::ENV_LOCK_HELD.with(std::cell::Cell::get) {
+                seat_root()
+            } else {
+                let _env = crate::test_env_lock();
+                seat_root()
+            };
+            std::fs::create_dir_all(&root).unwrap();
+            let dir = tempfile::Builder::new()
+                .prefix(&format!("ljos-{name}-"))
+                .tempdir_in(&root)
+                .unwrap();
+            crate::change_mode(dir.path(), 0o755).unwrap();
             Self(dir)
         }
 
         fn path(&self) -> &std::path::Path {
-            &self.0
+            self.0.path()
         }
     }
 
-    impl Drop for SeatDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    #[test]
+    fn two_seat_dirs_of_one_name_are_apart() {
+        let first = SeatDir::new("same-name");
+        let marker = first.path().join("marker");
+        crate::write_file(&marker, b"first").unwrap();
+        let second = SeatDir::new("same-name");
+        assert_ne!(first.path(), second.path());
+        assert_eq!(std::fs::read(&marker).unwrap(), b"first");
+        let gone = second.path().to_path_buf();
+        drop(second);
+        assert!(!gone.exists(), "{}", gone.display());
+        assert!(marker.exists(), "{}", marker.display());
+    }
+
+    #[test]
+    fn a_seat_dir_waits_out_a_home_another_test_set() {
+        let other = SeatDir::new("other-home");
+        let home = other.path().to_path_buf();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _env = crate::test_env_lock();
+            crate::with_env_mutation(|| {
+                // SAFETY: test_env_lock is held and puts HOME back.
+                unsafe { std::env::set_var("HOME", &home) };
+            });
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+        ready_rx.recv().unwrap();
+        let mine = SeatDir::new("waits-out");
+        holder.join().unwrap();
+        assert!(
+            !mine.path().starts_with(other.path()),
+            "{} is inside {}",
+            mine.path().display(),
+            other.path().display()
+        );
     }
 
     /// A checkout under a temp root still gets seat homes the guard does
@@ -59848,7 +59893,13 @@ mod tests {
             for (k, v) in env {
                 cmd.env(k, v);
             }
-            cmd.output().unwrap()
+            cmd.output().unwrap_or_else(|err| {
+                panic!(
+                    "git in {}: {err}; the directory exists: {}",
+                    cwd.display(),
+                    cwd.exists()
+                )
+            })
         };
         // A home under /tmp, not under TMPDIR. The shim drops TMPDIR and
         // still treats /tmp as temporary. A TMPDIR that lives under the
