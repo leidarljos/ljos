@@ -693,7 +693,22 @@ fn ours(v: &Value, runner: &str) -> bool {
     t.contains(&format!("--runner {runner}")) || t.contains(&format!("ljos-guard-{runner}.sh"))
 }
 
+fn repair_field(found: &mut Value, item: &Value, field: &str) -> Option<bool> {
+    let wanted = item.get(field)?;
+    let found = found.as_object_mut()?;
+    let old = found.get(field)?;
+    if old == wanted {
+        Some(false)
+    } else {
+        found.insert(field.to_string(), wanted.clone());
+        Some(true)
+    }
+}
+
 fn repair_owned_hook(found: &mut Value, item: &Value, runner: &str) -> Option<bool> {
+    if let Some(changed) = repair_field(found, item, "command") {
+        return Some(changed);
+    }
     let wanted = item["hooks"]
         .as_array()?
         .iter()
@@ -702,12 +717,7 @@ fn repair_owned_hook(found: &mut Value, item: &Value, runner: &str) -> Option<bo
         .as_array_mut()?
         .iter_mut()
         .find(|hook| ours(hook, runner))?;
-    if owned == wanted {
-        Some(false)
-    } else {
-        *owned = wanted.clone();
-        Some(true)
-    }
+    repair_field(owned, wanted, "command")
 }
 
 /// Put `item` in the array at `key` of `obj`. An older entry owned by this
@@ -893,10 +903,7 @@ fn spec(runner: &str, root: &mut Value, command: &str) -> Result<bool, String> {
             let mut changed = false;
             for found in list.iter_mut().filter(|rule| ours(rule, runner)) {
                 seen = true;
-                if *found != want {
-                    *found = want.clone();
-                    changed = true;
-                }
+                changed |= repair_field(found, &want, "to").unwrap_or(false);
             }
             if !seen {
                 // First, since Amp applies the first rule that matches.
@@ -1846,6 +1853,51 @@ mod tests {
                 "{runner}: {root}"
             );
         }
+    }
+
+    #[test]
+    fn reonboard_changes_only_the_owned_command_field() {
+        let command = "/old/ljos hook --runner auggie";
+        let mut root = json!({});
+        assert!(spec("auggie", &mut root, command).unwrap());
+        let hook = &mut root["hooks"]["PreToolUse"][0]["hooks"][0];
+        hook["timeout"] = json!(7);
+        hook["ownedExtra"] = json!("keep");
+        let before = root.clone();
+        assert!(!spec("auggie", &mut root, command).unwrap());
+        assert_eq!(root, before);
+
+        let changed = "/new/ljos hook --runner auggie";
+        assert!(spec("auggie", &mut root, changed).unwrap());
+        assert_eq!(
+            root["hooks"]["PreToolUse"][0]["hooks"][0],
+            json!({
+                "type": "command",
+                "command": changed,
+                "timeout": 7,
+                "ownedExtra": "keep"
+            })
+        );
+
+        let command = "/old/ljos-guard-amp.sh";
+        let mut root = json!({});
+        assert!(spec("amp", &mut root, command).unwrap());
+        root["amp.permissions"][0]["ownedExtra"] = json!("keep");
+        let before = root.clone();
+        assert!(!spec("amp", &mut root, command).unwrap());
+        assert_eq!(root, before);
+
+        let changed = "/new/ljos-guard-amp.sh";
+        assert!(spec("amp", &mut root, changed).unwrap());
+        assert_eq!(
+            root["amp.permissions"][0],
+            json!({
+                "tool": "Bash",
+                "action": "delegate",
+                "to": changed,
+                "ownedExtra": "keep"
+            })
+        );
     }
 
     #[test]
