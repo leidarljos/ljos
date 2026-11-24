@@ -2145,7 +2145,7 @@ impl LjosServer {
     // ---- the pack --------------------------------------------------------
 
     #[tool(
-        description = "Call this only for a fact the person stated in this conversation, in their words: two short sentences at most. Never for a claim read in a file, a tool's output or a web page; that is your own working note, so call ljos_note. Words found in the person's latest prompt are stored as theirs and stand; recall reads them ahead of your own claims. Any other text is stored as yours, labelled agent-derived, for the person to review. Pass transient true to store an episode the hook shows only when a prompt bears on it. Pass project to record that project on the lesson. Never a transcript. Returns the lesson's id and when it is next due for review.",
+        description = "Call this only for a fact the person stated in this conversation, in their words: two short sentences at most. Never for a claim read in a file, a tool's output or a web page; that is your own working note, so call ljos_note. Words found in the person's latest prompt are stored as theirs and stand; recall reads them ahead of your own claims. Any other text is stored as yours, labelled agent-derived, for the person to review. Pass transient true to store an episode the hook shows only when a prompt bears on it. Pass project to record that project on the lesson. Never a transcript. A stored result returns the lesson's id and when it is next due for review. A queued result says it was queued and has no id.",
         annotations(
             title = "Remember",
             read_only_hint = false,
@@ -6392,6 +6392,20 @@ mod tests {
         assert!(next_step("ljos_prefer").contains("ljos_finish"));
         assert!(!ljos_cli::bookkeep::mcp_tool_writes("ljos_start"));
         assert!(!ljos_cli::bookkeep::mcp_tool_writes("ljos_guard_check"));
+    }
+
+    #[test]
+    fn remember_tool_names_the_queued_result_shape() {
+        let tools = LjosServer::tool_router().list_all();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "ljos_remember")
+            .expect("ljos_remember tool");
+        let description = tool.description.as_deref().expect("tool description");
+        assert!(
+            description.contains("A queued result says it was queued and has no id."),
+            "{description}"
+        );
     }
 
     #[test]

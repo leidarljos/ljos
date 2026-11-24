@@ -775,7 +775,7 @@ fn core_arguments_show_an_example_and_core_descriptions_say_what_comes_back() {
         ("ljos_rule", "Returns the stored rule with its id."),
         (
             "ljos_remember",
-            "Returns the lesson's id and when it is next due for review.",
+            "A stored result returns the lesson's id and when it is next due for review.",
         ),
         (
             "ljos_search",
