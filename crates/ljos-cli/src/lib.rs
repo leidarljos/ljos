@@ -64855,7 +64855,10 @@ mod tests {
             super::habitat_down_state("deed store", &anyhow::anyhow!("deedar not on PATH"));
         assert_eq!(
             install,
-            "deedar not on PATH, so run `cargo install --locked deedar-cli`."
+            format!(
+                "deedar not on PATH, so run `{}`.",
+                super::RELEASE_INSTALL_COMMAND
+            )
         );
 
         let seat = super::seat_source_row(&super::Seat::whole(

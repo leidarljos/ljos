@@ -10,6 +10,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use ljos_cli::RELEASE_INSTALL_COMMAND;
 use serde_json::Value;
 
 /// The rows `ljos_doctor` returns for a seat with nothing set up, with
@@ -83,6 +84,22 @@ fn rows(home: &Path, cwd: &Path) -> Vec<Value> {
         .clone()
 }
 
+/// The rows for a sibling `install.sh` installs, and the habitats that run
+/// one, with the program the habitat row names. Only these name the
+/// release installer, and only as that whole command.
+const RELEASE_INSTALLER_ROWS: &[(&str, &str)] = &[
+    ("vissue", ""),
+    ("vissue-mcp", ""),
+    ("claimdag", ""),
+    ("deedar", ""),
+    ("packset", ""),
+    ("packsetd", ""),
+    ("packset-mcp", ""),
+    ("tracker", "vissue "),
+    ("claim graph", "claimdag "),
+    ("deed store", "deedar "),
+];
+
 fn row<'a>(rows: &'a [Value], name: &str) -> &'a Value {
     rows.iter()
         .find(|row| row["name"] == name)
@@ -138,11 +155,25 @@ fn the_encoder_hint_is_the_same_in_a_checkout_and_out_of_one() {
     let inside = rows(home.path(), &checkout);
     let outside = rows(home.path(), &bare);
     for rows in [&inside, &outside] {
+        for (name, missing) in RELEASE_INSTALLER_ROWS {
+            let found = row(rows, name);
+            assert_eq!(
+                found["state"],
+                format!("{missing}not on PATH, so run `{RELEASE_INSTALL_COMMAND}`."),
+                "{name}: {found}"
+            );
+            assert_eq!(found["ok"], false, "{name}: {found}");
+        }
         for found in rows {
+            let name = found["name"].as_str().unwrap();
+            if RELEASE_INSTALLER_ROWS.iter().any(|(row, _)| *row == name) {
+                continue;
+            }
             let text = found["state"].as_str().unwrap();
             assert!(
                 !text.contains("curl") && !text.contains("wget") && !text.contains("install.sh"),
-                "{text}"
+                "{}: {text}",
+                found["name"]
             );
         }
         let text = row(rows, "packset-embed")["state"].as_str().unwrap();
