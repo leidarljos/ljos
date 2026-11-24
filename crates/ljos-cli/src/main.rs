@@ -7307,7 +7307,10 @@ fn run_command() -> Result<()> {
         Cmd::Reap { idle, apply } => {
             ljos_cli::tell_raw!(
                 "{}",
-                ljos_cli::reap::reap(span_or_refuse(ljos_cli::reap::parse_idle(&idle)), apply)?
+                ljos_cli::reap::reap(
+                    span_or_refuse(ljos_cli::reap::parse_reap_idle(&idle)),
+                    apply
+                )?
             )
         }
         Cmd::Vote {
