@@ -678,20 +678,31 @@ pub fn runner_command(base: &str, runner: &str) -> String {
     format!("{base} --runner {runner}")
 }
 
+/// The `exec` line of an Amp or Auggie wrapper. The program is quoted when
+/// the path needs it. The flags stay bare.
+fn hook_exec_line(base: &str, runner: &str) -> String {
+    let program = base.strip_suffix(" hook").unwrap_or(base);
+    format!("{} hook --runner {runner}", crate::tools::sh_word(program))
+}
+
 fn ours(v: &Value, runner: &str) -> bool {
     let t = v.to_string();
     t.contains(&format!("--runner {runner}")) || t.contains(&format!("ljos-guard-{runner}.sh"))
 }
 
-/// Push `item` onto the array at `key` of `obj` unless one already names
-/// the seat's command. True when it was added.
+/// Put `item` in the array at `key` of `obj`. An older entry owned by this
+/// seat is repaired in place; unrelated entries stay. True when it changed.
 fn ensure_in(obj: &mut Map<String, Value>, key: &str, item: Value, runner: &str) -> bool {
     let list = obj.entry(key.to_string()).or_insert_with(|| json!([]));
     let Some(list) = list.as_array_mut() else {
         return false;
     };
-    if list.iter().any(|g| ours(g, runner)) {
-        return false;
+    if let Some(found) = list.iter_mut().find(|g| ours(g, runner)) {
+        if *found == item {
+            return false;
+        }
+        *found = item;
+        return true;
     }
     list.push(item);
     true
@@ -894,8 +905,9 @@ pub fn hook_step(runner: &str, file: &Path, base_command: &str, dry: bool) -> St
         return cline_step(file, &command, dry);
     }
     let script = needs_script(runner).then(|| script_path(runner, file));
+    let exec_line = hook_exec_line(base_command, runner);
     let script_text = format!(
-        "#!/bin/sh\n# Written by ljos onboard: the seat's guard for {runner}.\nexec {command}\n"
+        "#!/bin/sh\n# Written by ljos onboard: the seat's guard for {runner}.\nexec {exec_line}\n"
     );
     let script_stale = script
         .as_ref()
@@ -903,6 +915,13 @@ pub fn hook_step(runner: &str, file: &Path, base_command: &str, dry: bool) -> St
     if let Some(p) = &script {
         command = p.display().to_string();
     }
+    // Auggie runs the entry through a shell. Amp's delegate takes a raw path,
+    // so a quote mark would be part of the filename.
+    let command = if runner == "auggie" {
+        crate::tools::sh_word(&command)
+    } else {
+        command
+    };
     let mut root: Value = match std::fs::read_to_string(file) {
         Ok(text) if !text.trim().is_empty() => match serde_json::from_str(&text) {
             Ok(v) => v,
@@ -1653,6 +1672,67 @@ mod tests {
             let again = hook_step(runner, &file, "/bin/ljos hook", false);
             assert!(again.detail.contains("carries"), "{}", again.detail);
         }
+    }
+
+    #[test]
+    fn amp_delegate_path_stays_raw_and_auggie_command_is_shell_quoted() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("my hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        for runner in ["amp", "auggie"] {
+            let file = dir.join("settings.json");
+            let _ = std::fs::remove_file(&file);
+            let step = hook_step(runner, &file, "/opt/my bin/ljos hook", false);
+            assert!(step.ok, "{}", step.detail);
+            let script = script_path(runner, &file);
+            let text = std::fs::read_to_string(&script).unwrap();
+            assert!(
+                text.contains(&format!("'/opt/my bin/ljos' hook --runner {runner}")),
+                "{text}"
+            );
+            let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            let raw = script.display().to_string();
+            if runner == "amp" {
+                assert_eq!(v["amp.permissions"][0]["to"], raw);
+            } else {
+                let command = v["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap_or("");
+                assert_eq!(command, crate::tools::sh_word(&raw));
+                assert!(command.starts_with('\''), "{command}");
+            }
+        }
+    }
+
+    #[test]
+    fn auggie_reonboard_repairs_an_owned_unquoted_command() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("my hooks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        let script = script_path("auggie", &file);
+        let old = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "launch-process",
+                    "hooks": [{
+                        "type": "command",
+                        "command": script.display().to_string(),
+                        "timeout": 20_000
+                    }]
+                }]
+            }
+        });
+        crate::write_file(&file, serde_json::to_string_pretty(&old).unwrap()).unwrap();
+
+        let step = hook_step("auggie", &file, "/opt/my bin/ljos hook", false);
+        assert!(step.ok, "{}", step.detail);
+        assert!(step.detail.contains("wrote"), "{}", step.detail);
+        let fixed: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(
+            fixed["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            json!(crate::tools::sh_word(&script.display().to_string()))
+        );
     }
 
     #[test]
