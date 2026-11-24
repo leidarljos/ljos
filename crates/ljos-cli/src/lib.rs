@@ -40785,16 +40785,42 @@ pub fn work_id(name: &str) -> String {
 
 /// The claimdag node standing for `issue`, minted with the tracker id as its
 /// summary when the graph does not hold it yet.
+///
+/// Another seat can mint and claim the node between the read and the mint,
+/// and claimdag then refuses the mint. The node is there, so it is the
+/// answer, and the claim that follows says who holds it. When the mint
+/// fails and the node is still not there, a read that failed for a reason
+/// other than a missing node is the error reported.
 pub fn node_for(issue: &str) -> Result<String> {
     let id = work_id(issue);
-    if id != issue.trim() && run_captured("claimdag", &["get", &id]).is_err() {
-        run_captured(
-            "claimdag",
-            &["upsert", "--id", &id, "--summary", issue.trim()],
-        )
-        .with_context(|| format!("claim: could not mint a node for {issue}"))?;
+    if id == issue.trim() {
+        return Ok(id);
     }
-    Ok(id)
+    let Err(read) = run_captured("claimdag", &["get", &id]) else {
+        return Ok(id);
+    };
+    let Err(minted) = run_captured(
+        "claimdag",
+        &["upsert", "--id", &id, "--summary", issue.trim()],
+    ) else {
+        return Ok(id);
+    };
+    if run_captured("claimdag", &["get", &id]).is_ok() {
+        return Ok(id);
+    }
+    if node_missing(&read) {
+        Err(minted.context(format!("claim: could not mint a node for {issue}")))
+    } else {
+        Err(read.context(format!("claim: could not read the node for {issue}")))
+    }
+}
+
+/// A `claimdag get` that failed because the node or the whole graph is not
+/// there yet. claimdag says so only on stderr, with exit 1 like any other
+/// failure.
+fn node_missing(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}");
+    text.contains("not found") || text.contains("no work graph")
 }
 
 /// The memories a task activates: the pack's island around the cue. With
