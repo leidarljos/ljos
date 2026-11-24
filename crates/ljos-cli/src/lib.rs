@@ -1870,8 +1870,10 @@ fn own_seat(name: &str) -> bool {
 
 /// The conversation this process speaks for, and the key it came from.
 /// Every reader of a conversation id asks this: the holder tag, the hook's
-/// book, a blank hook payload, a hold record and a sitting. None is the
-/// same answer for all of them.
+/// book, a blank hook payload and a sitting. None is the same answer for
+/// all of them. A hold record's conversation line is the exception: it is
+/// written with, and its owner compared against, `cursor_conversation`,
+/// see `write_hold`.
 #[must_use]
 pub fn resolve_conversation() -> Option<(String, String)> {
     conversation_for(&call_conversation())
@@ -42854,6 +42856,11 @@ fn write_hold(actor: &str, assignee: &str, node: &str) {
     // issue, so a gate reads one tracker instead of walking every root.
     // The ninth names the conversation this process spoke for, so a later
     // sitting learns whether that one carried a `sand-sub` id as well.
+    // It is [`cursor_conversation`], not [`resolve_conversation`], because
+    // [`hold_conversation_is_ours`] compares it with the same function. With
+    // both `CODEX_THREAD_ID` and `CURSOR_CONVERSATION_ID` set, the resolver
+    // picks the thread id, and that hold would be refused to the conversation
+    // that wrote it.
     #[expect(
         clippy::disallowed_methods,
         reason = "writes a file that is not a git hook"
@@ -65413,8 +65420,10 @@ mod tests {
 
     /// Every reader of a conversation id answers as
     /// [`super::resolve_conversation`]: the holder tag, a blank hook
-    /// payload and the book key it adopts, a hold record, the ballot
-    /// session and the id a call reports.
+    /// payload and the book key it adopts, the ballot session and the id a
+    /// call reports. A hold record's owner check is the exception: it
+    /// compares with `cursor_conversation`, so with `CODEX_THREAD_ID` also
+    /// set it takes the Cursor id, not the resolved thread id.
     #[test]
     fn every_conversation_reader_agrees_with_the_resolver() {
         use super::{CallConversation, HookCall, HookShape};
