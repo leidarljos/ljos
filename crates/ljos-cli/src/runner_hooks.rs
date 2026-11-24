@@ -688,12 +688,6 @@ fn quoted_hook_command(base: &str) -> String {
     format!("{program} hook")
 }
 
-/// The `exec` line of an Amp or Auggie wrapper. The program is quoted when
-/// the path needs it. The flags stay bare.
-fn hook_exec_line(base: &str, runner: &str) -> String {
-    format!("{} --runner {runner}", quoted_hook_command(base))
-}
-
 fn ours(v: &Value, runner: &str) -> bool {
     let t = v.to_string();
     t.contains(&format!("--runner {runner}")) || t.contains(&format!("ljos-guard-{runner}.sh"))
@@ -920,7 +914,7 @@ pub fn hook_step(runner: &str, file: &Path, base_command: &str, dry: bool) -> St
         return cline_step(file, &command, dry);
     }
     let script = needs_script(runner).then(|| script_path(runner, file));
-    let exec_line = hook_exec_line(base_command, runner);
+    let exec_line = runner_command(base_command, runner);
     let script_text = format!(
         "#!/bin/sh\n# Written by ljos onboard: the seat's guard for {runner}.\nexec {exec_line}\n"
     );
