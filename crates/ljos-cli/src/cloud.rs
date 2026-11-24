@@ -4415,6 +4415,84 @@ mod tests {
         assert!(!claim_past_lease(now, 10, now));
     }
 
+    #[test]
+    fn reap_keeps_a_fresh_claim_when_the_lease_does_not_fit() {
+        crate::with_env_mutation(|| {
+            const KEYS: &[&str] = &[
+                "HOME",
+                "XDG_CONFIG_HOME",
+                "XDG_RUNTIME_DIR",
+                "VISSUE_ROOT",
+                "ISSUE_ROOT",
+                "VISSUE_NO_ROUTE",
+                "LJOS_TRACKER_GIT",
+            ];
+            let saved: Vec<_> = KEYS
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect();
+            let root = tempfile::tempdir().unwrap();
+            let home = root.path().join("home");
+            let tracker = root.path().join("tracker");
+            let run = root.path().join("run");
+            fs::create_dir_all(&home).unwrap();
+            fs::create_dir_all(&run).unwrap();
+            unsafe {
+                std::env::set_var("HOME", &home);
+                std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+                std::env::set_var("XDG_RUNTIME_DIR", &run);
+                std::env::set_var("VISSUE_ROOT", &tracker);
+                std::env::set_var("ISSUE_ROOT", &tracker);
+                std::env::set_var("VISSUE_NO_ROUTE", "1");
+                std::env::set_var("LJOS_TRACKER_GIT", "push");
+            }
+
+            let layout = vissue_core::Layout::new(&tracker, "Software");
+            fs::create_dir_all(layout.projects_dir()).unwrap();
+            let id = vissue_core::ops::create(
+                &layout,
+                "work",
+                "fresh claim",
+                vissue_core::CreateOpts {
+                    quiet: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let id = id.trim();
+            vissue_core::ops::claim_as(&layout, id, false, "ada").unwrap();
+            fs::create_dir_all(crate::runtime_dir()).unwrap();
+            crate::write_file(
+                crate::runtime_dir().join("hold-ada"),
+                format!("ada\nada\n{}\ngone\n2026-11-20T00:00:00Z\n{id}\n", u32::MAX),
+            )
+            .unwrap();
+
+            let said = reap_gone_owners(Some("ada"), u64::MAX);
+            let (_, path, project) = vissue_core::store::find_by_id(&layout, id)
+                .unwrap()
+                .expect("fresh claim");
+            let doc = vissue_core::IssueDoc::parse_file(&project, &path).unwrap();
+            let heading = doc
+                .headings
+                .iter()
+                .find(|heading| heading.id == id)
+                .unwrap();
+            assert!(said.is_empty(), "{said}");
+            assert_eq!(heading.state, "STARTED");
+            assert_eq!(heading.claimed_by(), Some("ada"));
+
+            unsafe {
+                for (key, value) in saved {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        });
+    }
+
     const SECRET: &str = "AGE-SECRET-KEY-1PLANTED\n";
 
     /// `install_binary` copied to `.NAME.tmp-PID` and renamed that name
