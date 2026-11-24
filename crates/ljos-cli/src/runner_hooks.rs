@@ -713,11 +713,19 @@ fn repair_owned_hook(found: &mut Value, item: &Value, runner: &str) -> Option<bo
         .as_array()?
         .iter()
         .find(|hook| ours(hook, runner))?;
-    let owned = found["hooks"]
+    let mut seen = false;
+    let mut changed = false;
+    for owned in found["hooks"]
         .as_array_mut()?
         .iter_mut()
-        .find(|hook| ours(hook, runner))?;
-    repair_field(owned, wanted, "command")
+        .filter(|hook| ours(hook, runner))
+    {
+        if let Some(repaired) = repair_field(owned, wanted, "command") {
+            seen = true;
+            changed |= repaired;
+        }
+    }
+    seen.then_some(changed)
 }
 
 /// Put `item` in the array at `key` of `obj`. An older entry owned by this
@@ -1898,6 +1906,42 @@ mod tests {
                 "ownedExtra": "keep"
             })
         );
+    }
+
+    #[test]
+    fn reonboard_repairs_every_owned_hook_in_a_group() {
+        let command = "'/safe path/ljos-guard-auggie.sh'";
+        let mut root = json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "launch-process",
+                    "hooks": [
+                        {"type": "command", "command": command, "timeout": 20_000},
+                        {
+                            "type": "command",
+                            "command": "/opt/ljos$(echo)/ljos-guard-auggie.sh",
+                            "timeout": 7
+                        },
+                        {"type": "command", "command": "/usr/bin/true"}
+                    ]
+                }]
+            }
+        });
+
+        assert!(spec("auggie", &mut root, command).unwrap());
+        let hooks = root["hooks"]["PreToolUse"][0]["hooks"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            hooks
+                .iter()
+                .filter(|hook| hook["command"] == command)
+                .count(),
+            2,
+            "{root}"
+        );
+        assert_eq!(hooks[1]["timeout"], 7);
+        assert_eq!(hooks[2]["command"], "/usr/bin/true");
     }
 
     #[test]
