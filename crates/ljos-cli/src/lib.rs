@@ -36942,8 +36942,10 @@ fn habitat_down_state(name: &str, err: &anyhow::Error) -> String {
     state
 }
 
-/// `cargo install --locked CRATE` when `state` says a seat binary is not
-/// on `PATH`. `None` for any other refusal.
+/// The install for a seat binary `state` says is not on `PATH`:
+/// [`RELEASE_INSTALL_COMMAND`] for one `install.sh` installs, and
+/// `cargo install --locked CRATE` for any other. `None` for any other
+/// refusal.
 fn missing_bin_install(state: &str) -> Option<String> {
     SEAT_BINS.iter().find_map(|(bin, crate_name)| {
         state.contains(&format!("{bin} not on PATH")).then(|| {

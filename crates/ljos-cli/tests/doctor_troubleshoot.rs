@@ -382,6 +382,51 @@ fn the_troubleshooting_page_names_the_release_install_for_a_missing_sibling() {
     }
 }
 
+/// The registry section names the install doctor prints for a missing
+/// packset while crates.io does not answer, not a crate install of it.
+#[test]
+fn the_troubleshooting_registry_section_names_the_release_install() {
+    let (home, bin) = layout("registry-packset");
+    let _ = std::fs::remove_file(bin.join("packset"));
+    let (_, text) = doctor(&home, &format!("{}:/usr/bin:/bin", bin.display()));
+    assert!(
+        text.contains("warn\tcrates.io\tdid not answer, so the version check was skipped\n"),
+        "{text}"
+    );
+    let printed = text
+        .lines()
+        .find_map(|line| line.strip_prefix("no\tpackset\t"))
+        .unwrap_or_else(|| panic!("no packset row:\n{text}"));
+    assert_eq!(
+        printed,
+        format!(
+            "not on PATH, so run `{}`.",
+            ljos_cli::RELEASE_INSTALL_COMMAND
+        ),
+        "{text}"
+    );
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (rel, quote) in [
+        ("docs/orgmode/howto-troubleshoot.org", "="),
+        ("docs/source/howto-troubleshoot.rst", "``"),
+    ] {
+        let body = std::fs::read_to_string(root.join(rel)).unwrap();
+        let row = body
+            .lines()
+            .find(|line| line.starts_with("A missing binary then has no version in parentheses"))
+            .unwrap_or_else(|| panic!("{rel}: no registry row"));
+        assert_eq!(
+            row,
+            format!(
+                "A missing binary then has no version in parentheses: not on PATH, so run \
+                 {quote}{}{quote}.",
+                ljos_cli::RELEASE_INSTALL_COMMAND
+            ),
+            "{rel}"
+        );
+    }
+}
+
 #[test]
 fn doctor_warns_when_crates_io_does_not_answer() {
     let (home, bin) = layout("net");

@@ -268,7 +268,7 @@ With ``curl`` unable to reach crates.io, doctor printed:
 ..
    # proseguard:on
 
-A missing binary then has no version in parentheses: not on PATH, so run ``cargo install --locked packset``.
+A missing binary then has no version in parentheses: not on PATH, so run ``curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh``.
 The warning does not by itself exit 1.
 A copy already in the day cache is still used, and the row says ``crates.io (cached)``.
 
