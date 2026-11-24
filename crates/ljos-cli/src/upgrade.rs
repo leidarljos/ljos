@@ -888,6 +888,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_rollback_copy_keeps_a_0700_mode() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let installed = dir.path().join("ljos");
         let body = "#!/bin/sh\necho 'ljos 0.1.0'\n";
@@ -905,6 +906,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_existing_rollback_is_left_unread() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let installed = dir.path().join("ljos");
         let installed_body = "#!/bin/sh\necho installed\n";
@@ -927,6 +929,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_rollback_copy_failure_does_not_claim_an_existing_rollback() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let installed = dir.path().join("ljos");
         std::fs::create_dir(&installed).unwrap();
@@ -942,6 +945,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_crash_before_the_rollback_rename_does_not_block_the_next_upgrade() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let installed = dir.path().join("ljos");
         let body = "#!/bin/sh\necho installed\n";
@@ -964,6 +968,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn replacing_a_binary_takes_no_side_name_and_follows_no_link() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let new = dir.path().join("unpacked-ljos");
         crate::install_executable_mode(&new, "#!/bin/sh\necho new\n", 0o750).unwrap();
@@ -989,6 +994,7 @@ mod tests {
 
     #[test]
     fn each_published_target_has_its_archive_triple() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             target_for("x86_64", "linux"),
             Some("x86_64-unknown-linux-gnu")
@@ -1003,6 +1009,7 @@ mod tests {
 
     #[test]
     fn the_archive_name_and_its_checks_are_the_release_workflow_s() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             asset_name("0.22.3", "x86_64-unknown-linux-gnu"),
             "ljos-v0.22.3-x86_64-unknown-linux-gnu.tar.gz"
@@ -1060,6 +1067,7 @@ mod tests {
 
     #[test]
     fn an_unsupported_machine_names_the_archive_and_the_next_command() {
+        let _env_read = crate::test_env_read_lock();
         let text = unsupported_archive("linux", "riscv64");
         assert!(
             text.contains("no published archive for linux riscv64"),
@@ -1075,6 +1083,7 @@ mod tests {
 
     #[test]
     fn a_failed_download_names_the_retry() {
+        let _env_read = crate::test_env_read_lock();
         let text = download_failed("https://example.invalid/ljos.tar.gz", "dns error");
         assert!(
             text.contains("could not download https://example.invalid/ljos.tar.gz: dns error"),

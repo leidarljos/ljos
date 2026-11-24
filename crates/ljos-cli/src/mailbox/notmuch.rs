@@ -700,6 +700,7 @@ mod tests {
 
     #[test]
     fn ids_are_quoted_the_way_notmuch_quotes_them() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(id_term("a.b@example.test"), "id:a.b@example.test");
         assert_eq!(
             id_term("\"q\"@example.test"),
@@ -715,6 +716,7 @@ mod tests {
 
     #[test]
     fn walk_stops_at_the_thread_depth_cap() {
+        let _env_read = crate::test_env_read_lock();
         let mut nodes = json!([]);
         for n in 0..THREAD_DEPTH_MAX + 10 {
             nodes = json!([[{"id": n}, nodes]]);
@@ -730,6 +732,7 @@ mod tests {
 
     #[test]
     fn clean_replaces_what_could_hide_reorder_or_break_a_line() {
+        let _env_read = crate::test_env_read_lock();
         for c in [
             '\u{1b}', '\u{85}', '\u{ad}', '\u{180e}', '\u{200b}', '\u{200c}', '\u{200d}',
             '\u{200e}', '\u{200f}', '\u{2028}', '\u{2029}', '\u{202e}', '\u{2060}', '\u{2064}',
@@ -743,6 +746,7 @@ mod tests {
 
     #[test]
     fn alternatives_that_differ_are_both_shown_labeled_and_flagged() {
+        let _env_read = crate::test_env_read_lock();
         let reader = Reader::new(&MailConfig {
             notmuch_config: Some(PathBuf::from("/nonexistent/notmuch-config")),
             ..MailConfig::default()
@@ -784,6 +788,7 @@ mod tests {
 
     #[test]
     fn part_refuses_nesting_past_the_cap() {
+        let _env_read = crate::test_env_read_lock();
         let reader = Reader::new(&MailConfig {
             notmuch_config: Some(PathBuf::from("/nonexistent/notmuch-config")),
             ..MailConfig::default()

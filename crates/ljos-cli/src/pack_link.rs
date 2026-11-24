@@ -2350,6 +2350,7 @@ mod tests {
     /// lesson because the first had marked the pack quiet.
     #[test]
     fn a_quiet_pack_on_one_thread_does_not_silence_another() {
+        let _env_read = crate::test_env_read_lock();
         let gate = super::QuietPack::enter();
         super::mark_pack_quiet();
         assert!(super::pack_quiet());
@@ -2366,6 +2367,7 @@ mod tests {
 
     #[test]
     fn a_token_mismatch_names_the_port_command() {
+        let _env_read = crate::test_env_read_lock();
         let err = refused(
             "http://127.0.0.1:8761/v1/atoms",
             401,
@@ -2384,6 +2386,7 @@ mod tests {
     /// search reads them again.
     #[test]
     fn a_search_reads_the_port_owner_once_for_each_url() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         // SAFETY: under the lock every environment-reading test takes.
         unsafe { std::env::remove_var("LJOS_IN_HOOK") };
@@ -2412,6 +2415,7 @@ mod tests {
     /// hands the caller the JSON, not the chunk sizes around it.
     #[test]
     fn a_chunked_listing_reads_as_its_json() {
+        let _env_read = crate::test_env_read_lock();
         use std::io::Write;
         let atom = format!(r#"{{"id":"a","text":"{}"}}"#, "x".repeat(20 * 1024));
         let json = format!(r#"{{"atoms":[{atom},{atom}]}}"#);
@@ -2446,6 +2450,7 @@ mod tests {
 
     #[test]
     fn a_chunk_size_that_is_not_hex_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let mut out = Vec::new();
         let err = super::Chunks::default()
             .feed(b"zz\r\nhello\r\n0\r\n\r\n", &mut out)
@@ -2463,6 +2468,7 @@ mod tests {
     /// that chunk, and bytes already taken stay taken.
     #[test]
     fn a_chunk_that_arrives_in_pieces_is_one_body() {
+        let _env_read = crate::test_env_read_lock();
         let mut chunks = super::Chunks::default();
         let mut out = Vec::new();
         let mut raw = b"3\r\nabc\r\n4\r\n".to_vec();
@@ -2543,6 +2549,7 @@ mod tests {
     /// A chunked answer has to come back as JSON on each of them.
     #[test]
     fn mail_listing_search_and_status_read_a_chunked_body() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         let text = "x".repeat(20 * 1024);
@@ -2640,6 +2647,7 @@ mod tests {
     /// with JSON through the same reader.
     #[test]
     fn a_live_packsetd_listing_is_json() {
+        let _env_read = crate::test_env_read_lock();
         if !ljos_test_boot::Packsetd::on_path() {
             say!("skipped: packsetd is not installed");
             return;
@@ -2783,6 +2791,7 @@ mod tests {
 
     #[test]
     fn an_mcp_read_deadline_is_about_a_second() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         let _bound = crate::tool_bound::arm(std::time::Duration::from_secs(30));
@@ -2799,6 +2808,7 @@ mod tests {
     /// on one long read. The deadline is that pack timeout, not a second.
     #[test]
     fn a_raised_mcp_bound_keeps_the_pack_timeout_on_a_read() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         unsafe {
@@ -2819,6 +2829,7 @@ mod tests {
 
     #[test]
     fn a_one_second_clock_caps_the_read_deadline() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         let _clock = super::PackClock::enter(std::time::Duration::from_secs(1));
@@ -2903,6 +2914,7 @@ mod tests {
 
     #[test]
     fn a_200_carries_the_call_deadline() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         let (client, seen) = serve(|_, req| {
@@ -2923,6 +2935,7 @@ mod tests {
 
     #[test]
     fn a_503_waits_retry_after_once_and_then_reads() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         let (client, seen) = serve(|n, req| {
@@ -2953,6 +2966,7 @@ mod tests {
 
     #[test]
     fn a_second_503_is_the_error_line_and_stops() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         let (client, seen) = serve(|_, _| {
@@ -2978,6 +2992,7 @@ mod tests {
 
     #[test]
     fn a_warming_503_is_an_up_health_answer() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         let (client, seen) = serve(|_, _| {
@@ -2994,6 +3009,7 @@ mod tests {
 
     #[test]
     fn an_expired_deadline_is_the_error_line_and_is_not_retried() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         let (client, seen) = serve(|_, req| {
@@ -3015,6 +3031,7 @@ mod tests {
 
     #[test]
     fn a_retry_after_past_the_deadline_does_not_wait() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         let (client, seen) = serve(|_, _| (503, r#"{"error":"busy"}"#.into(), Some(30)));
@@ -3059,6 +3076,7 @@ mod tests {
 
     #[test]
     fn a_search_asks_a_busy_writer_again_and_then_reads() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
@@ -3088,6 +3106,7 @@ mod tests {
 
     #[test]
     fn a_search_that_stays_busy_stops_inside_the_budget() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
@@ -3133,6 +3152,7 @@ mod tests {
     /// A tracker write shares the client and must not spend the search wait.
     #[test]
     fn a_write_does_not_wait_out_a_busy_search() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         let _retry = super::BusyRetry::enter();
@@ -3159,6 +3179,7 @@ mod tests {
 
     #[test]
     fn a_search_waits_out_retry_after() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
@@ -3198,6 +3219,7 @@ mod tests {
 
     #[test]
     fn a_search_waits_out_retry_ms() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
@@ -3238,6 +3260,7 @@ mod tests {
 
     #[test]
     fn a_busy_sentence_on_another_status_is_one_answer() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         let _retry = super::BusyRetry::enter();
@@ -3264,6 +3287,7 @@ mod tests {
 
     #[test]
     fn busy_is_a_status_or_a_field() {
+        let _env_read = crate::test_env_read_lock();
         assert!(crate::response_is_busy(503, "not json"));
         assert!(crate::response_is_busy(429, ""));
         assert!(crate::response_is_busy(500, r#"{"code":"lock_timeout"}"#));
@@ -3290,6 +3314,7 @@ mod tests {
 
     #[test]
     fn a_busy_wait_of_zero_does_not_pause() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         struct Restore(Option<std::ffi::OsString>);
@@ -3333,6 +3358,7 @@ mod tests {
 
     #[test]
     fn stats_line_is_the_admission_line() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         let (client, seen) = serve(|_, req| {

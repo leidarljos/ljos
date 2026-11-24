@@ -130,6 +130,7 @@ mod tests {
 
     #[test]
     fn activate_raw_rejects_null_or_empty() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let null = std::ptr::null_mut();
         assert!(!activate_raw(null, null, "tok"));
         assert!(!activate_raw(null, null, ""));
@@ -138,6 +139,7 @@ mod tests {
 
     #[test]
     fn source_exports_activate() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let src = include_str!("wlactivate.rs");
         assert!(src.contains("pub fn activate"));
         assert!(src.contains("xdg_activation_v1"));

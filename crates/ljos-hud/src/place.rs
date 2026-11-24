@@ -188,6 +188,8 @@ mod tests {
 
     #[test]
     fn place_command_names_overlay_app_id() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let cmd = place_command("DP-1");
         assert!(cmd.contains(OVERLAY_APP_ID));
         assert!(cmd.contains("move to output \"DP-1\""));
@@ -198,12 +200,16 @@ mod tests {
 
     #[test]
     fn place_command_escapes_quotes() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let cmd = place_command(r#"DP"1"#);
         assert!(cmd.contains(r#"move to output "DP\"1""#));
     }
 
     #[test]
     fn pick_focused_wins_over_active() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let outs = [
             OutputPick {
                 name: "eDP-1".into(),
@@ -221,6 +227,8 @@ mod tests {
 
     #[test]
     fn pick_first_active_when_none_focused() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let outs = [
             OutputPick {
                 name: "eDP-1".into(),
@@ -238,6 +246,8 @@ mod tests {
 
     #[test]
     fn pick_skips_inactive_and_empty() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         assert_eq!(pick_focused_or_active(&[]), None);
         let outs = [OutputPick {
             name: String::new(),
@@ -249,6 +259,8 @@ mod tests {
 
     #[test]
     fn overlay_and_popout_ids_differ() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let s = crate::app::overlay_window();
         let pop = crate::app::popout_window();
         assert!(!s.decorations);
@@ -273,6 +285,8 @@ mod tests {
 
     #[test]
     fn empty_swaysock_is_unavailable() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let _lock = crate::env_lock();
         #[allow(unused_unsafe)]
         unsafe {
@@ -289,6 +303,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parse_outputs_fixture() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let raw = br#"[
           {"name":"eDP-1","active":true,"focused":false},
           {"name":"DP-1","active":true,"focused":true}
@@ -301,6 +317,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parse_outputs_rejects_garbage() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         assert!(ipc::parse_outputs(b"not-json").is_none());
         assert!(ipc::parse_outputs(b"{}").is_none());
     }
@@ -308,6 +326,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn command_reply_requires_success() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         assert!(ipc::command_reply_ok_for_test(br#"[{"success":true}]"#));
         assert!(ipc::command_reply_ok_for_test(
             br#"[{"success":true},{"success":true}]"#

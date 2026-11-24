@@ -146,6 +146,7 @@ mod tests {
 
     #[test]
     fn a_permanent_child_restarts_and_then_gives_up() {
+        let _env_read = crate::test_env_read_lock();
         let mut sup = child(Restart::Permanent);
         assert_eq!(sup.on_exit(ExitKind::Crash, 10), Action::Restart);
         assert_eq!(sup.on_exit(ExitKind::Clean, 20), Action::Restart);
@@ -156,6 +157,7 @@ mod tests {
 
     #[test]
     fn an_old_failure_leaves_the_window() {
+        let _env_read = crate::test_env_read_lock();
         let mut sup = child(Restart::Permanent);
         sup.failures = vec![10, 20, 30];
         assert_eq!(sup.on_exit(ExitKind::Crash, 100), Action::Restart);
@@ -164,6 +166,7 @@ mod tests {
 
     #[test]
     fn transient_stops_on_a_clean_exit_and_temporary_never_restarts() {
+        let _env_read = crate::test_env_read_lock();
         let mut sup = child(Restart::Transient);
         assert_eq!(sup.on_exit(ExitKind::Clean, 5), Action::Stop);
         assert!(sup.failures.is_empty());
@@ -174,6 +177,7 @@ mod tests {
 
     #[test]
     fn herdr_starts_a_grok_child_and_a_claude_child_the_same_way() {
+        let _env_read = crate::test_env_read_lock();
         let grok = herdr_argv(
             "grok-1",
             Path::new("/s/personas/grok-1"),

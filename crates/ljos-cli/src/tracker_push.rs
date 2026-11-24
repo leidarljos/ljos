@@ -1646,6 +1646,7 @@ mod tests {
 
     #[test]
     fn only_a_transport_or_sign_in_failure_is_a_remote_not_reached() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::process::ExitStatusExt;
         let died = ExitStatus::from_raw(GIT_DIED << 8);
         let refused = ExitStatus::from_raw(1 << 8);
@@ -1658,6 +1659,7 @@ mod tests {
 
     #[test]
     fn a_union_keeps_both_headings_keyed_by_id() {
+        let _env_read = crate::test_env_read_lock();
         let preamble = "#+TITLE: probe\n#+TODO: TODO | DONE\n\n";
         let seed = heading("seed", "Seed");
         let ours = format!("{preamble}{seed}{}", heading("from-a", "From A"));
@@ -1673,6 +1675,7 @@ mod tests {
 
     #[test]
     fn two_notes_on_one_issue_merge_by_field() {
+        let _env_read = crate::test_env_read_lock();
         let head = "#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n\n";
         let issue = |log: &str| {
             format!("* TODO [#A] Work\n:PROPERTIES:\n:ID:       acme-1a2b\n:END:\n:LOGBOOK:\n{log}:END:\n")
@@ -1694,6 +1697,7 @@ mod tests {
 
     #[test]
     fn the_push_does_not_force() {
+        let _env_read = crate::test_env_read_lock();
         let args = push_args_explicit("origin", "main");
         assert!(
             !args
@@ -1710,6 +1714,7 @@ mod tests {
 
     #[test]
     fn the_same_id_keeps_lines_from_both_sides() {
+        let _env_read = crate::test_env_read_lock();
         let ours = "\
 * STARTED [#C] Seed
 :PROPERTIES:
@@ -1736,6 +1741,7 @@ note from b
 
     #[test]
     fn a_non_fast_forward_is_the_rejection_that_retries() {
+        let _env_read = crate::test_env_read_lock();
         assert!(rejected(
             " ! [rejected] main -> main (non-fast-forward)\nfatal: failed to push some refs"
         ));
@@ -1752,6 +1758,7 @@ note from b
     /// unless `LC_ALL` is `C`, which is what the git child sets.
     #[test]
     fn a_non_english_locale_still_matches_english_git_text() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
@@ -1783,6 +1790,7 @@ note from b
 
     #[test]
     fn two_clones_race_and_both_headings_land() {
+        let _env_read = crate::test_env_read_lock();
         // The locale test puts a fake git first on PATH. This race needs
         // the real git, so it waits until that test has put PATH back.
         let _env = crate::test_env_lock();
@@ -1912,6 +1920,7 @@ note from b
 
     #[test]
     fn duplicate_ids_fold_into_one_heading() {
+        let _env_read = crate::test_env_read_lock();
         let text = "\
 * TODO [#C] One
 :PROPERTIES:
@@ -1937,6 +1946,7 @@ body b
     /// fold would merge the two and break the record framing.
     #[test]
     fn a_ledger_file_with_a_replace_record_is_not_folded() {
+        let _env_read = crate::test_env_read_lock();
         let heading = "* TODO [#C] One\n:PROPERTIES:\n:ID:         same\n:END:\nbody b\n";
         let text = format!(
             "#+VISSUE_LEDGER:\n#+VISSUE_LINES: 3 7\n* TODO [#C] One\n:PROPERTIES:\n:ID:         same\n:END:\nbody a\n#+VISSUE_LEDGER_LOG:\n%% replace {}\n{heading}\n",
@@ -1947,6 +1957,7 @@ body b
 
     #[test]
     fn prepare_writes_the_attributes_and_the_driver_once() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
         unsafe { std::env::remove_var("LJOS_ATOMS_DRIVER") };
@@ -2026,6 +2037,7 @@ body b
 
     #[test]
     fn prepare_tracker_inits_the_nested_tracker_not_the_enclosing_checkout() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let outer = dir.path().join("repo");
@@ -2112,6 +2124,7 @@ body b
 
     #[test]
     fn prepare_tracker_does_not_retarget_to_exported_git_dir() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let bare = dir.path().join("dots.git");
@@ -2191,6 +2204,7 @@ body b
     /// or `git init` runs it and exits with the French host line.
     #[test]
     fn the_atoms_driver_stops_before_the_pack_when_the_tracker_has_no_scope() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -2221,6 +2235,7 @@ body b
 
     #[test]
     fn three_clones_race_and_atoms_are_reexported() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let origin = dir.path().join("origin.git");
@@ -2416,6 +2431,7 @@ body b
 
     #[test]
     fn a_rebase_conflict_merges_and_reexports_atoms() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let origin = dir.path().join("origin.git");
@@ -2568,6 +2584,7 @@ body b
     /// and its digest names no sealed file.
     #[test]
     fn a_conflicted_chunk_seals_this_hosts_log_whole() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -2714,6 +2731,7 @@ body b
     /// an absolute path errors, and catch-up's merge aborts on the conflict.
     #[test]
     fn a_real_merge_reexports_a_conflicted_log_from_a_relative_temp() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -2951,6 +2969,7 @@ body b
     /// board merge to ours with theirs appended, with no conflict drawer.
     #[test]
     fn a_split_issue_file_merges_both_sides_records() {
+        let _env_read = crate::test_env_read_lock();
         let _env = crate::tests::env_guard();
         let dir = tempfile::tempdir().unwrap();
         let board = dir.path().join("Software/probe/issues.org");

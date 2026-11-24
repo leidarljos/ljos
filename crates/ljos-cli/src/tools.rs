@@ -387,6 +387,7 @@ mod tests {
 
     #[test]
     fn the_shipped_shapes_parse_herdr_first() {
+        let _env_read = crate::test_env_read_lock();
         let tools = shipped();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["herdr", "tmux"]);
@@ -405,6 +406,7 @@ mod tests {
 
     #[test]
     fn a_declared_tool_replaces_the_shipped_one_of_its_name() {
+        let _env_read = crate::test_env_read_lock();
         let mine = Tool {
             name: "tmux".into(),
             detect: vec!["true".into()],
@@ -422,24 +424,28 @@ mod tests {
 
     #[test]
     fn sh_word_leaves_a_safe_token_bare() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(sh_word("LJOS_WAKE_INKY_URL"), "LJOS_WAKE_INKY_URL");
         assert_eq!(sh_word("probe-mine"), "probe-mine");
     }
 
     #[test]
     fn sh_word_quotes_a_value_with_a_space_or_quote() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(sh_word("has space"), "'has space'");
         assert_eq!(sh_word("bob's"), "'bob'\\''s'");
     }
 
     #[test]
     fn shell_cp_quotes_a_leading_dash_path() {
+        let _env_read = crate::test_env_read_lock();
         let line = shell_cp("/tmp/-dash/ballot.key", "/tmp/new/ballot.key");
         assert_eq!(line, "cp -- '/tmp/-dash/ballot.key' '/tmp/new/ballot.key'");
     }
 
     #[test]
     fn placeholders_fill_and_an_unknown_one_reaches_the_tool() {
+        let _env_read = crate::test_env_read_lock();
         let vars = Vars::default()
             .with("home", "/s/personas/reviewer")
             .with("name", "reviewer")
@@ -468,6 +474,7 @@ mod tests {
 
     #[test]
     fn the_pane_is_read_off_the_json_open_printed() {
+        let _env_read = crate::test_env_read_lock();
         let out = r#"{"id":"cli:workspace:create","result":{"root_pane":{"pane_id":"w1:p2"}}}"#;
         assert_eq!(
             pane_from(out, "/result/root_pane/pane_id").as_deref(),
@@ -479,6 +486,7 @@ mod tests {
 
     #[test]
     fn a_refusal_says_what_the_tool_said() {
+        let _env_read = crate::test_env_read_lock();
         let err = run(
             "fake",
             &[
@@ -495,6 +503,7 @@ mod tests {
 
     #[test]
     fn a_refused_prompt_falls_to_typing_the_line() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let got = dir.path().join("typed");
         let tool = Tool {
@@ -520,6 +529,7 @@ mod tests {
 
     #[test]
     fn the_first_open_that_takes_wins_and_the_rest_are_reasons() {
+        let _env_read = crate::test_env_read_lock();
         let tool = Tool {
             name: "fake".into(),
             open: vec![

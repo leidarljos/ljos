@@ -43,6 +43,7 @@ fn alan() {
 /// into place. A benign GitHub comment is not denied while that happens.
 #[test]
 fn concurrent_rule_stores_never_deny_a_benign_github_write() {
+    let _env_read = crate::test_env_read_lock();
     let (_lock, _dir) = review_env();
     alan();
     let rows = user_rules::read_all().unwrap();

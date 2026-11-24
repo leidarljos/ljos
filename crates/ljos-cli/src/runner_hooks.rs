@@ -1073,6 +1073,7 @@ mod tests {
 
     #[test]
     fn each_runner_payload_reads_as_the_command_it_runs() {
+        let _env_read = crate::test_env_read_lock();
         let cases = [
             (
                 "windsurf",
@@ -1158,6 +1159,7 @@ mod tests {
 
     #[test]
     fn a_rule_reaches_every_runner_as_an_allow_with_its_warning() {
+        let _env_read = crate::test_env_read_lock();
         for runner in RUNNERS {
             let (out, err, _) = answer(runner, "PreToolUse", WARNED);
             assert!(!decides(&out, &err), "{runner}: {out}{err}");
@@ -1180,6 +1182,7 @@ mod tests {
 
     #[test]
     fn a_deny_reaches_each_runner_in_its_own_contract() {
+        let _env_read = crate::test_env_read_lock();
         let (out, _, code) = answer("copilot", "PreToolUse", DENY);
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!((v["permissionDecision"].as_str(), code), (Some("deny"), 0));
@@ -1223,6 +1226,7 @@ mod tests {
     /// is no deny; an ask, which only an older hook prints, is a warning.
     #[test]
     fn a_tool_call_deny_is_each_runners_deny_and_nothing_else_is() {
+        let _env_read = crate::test_env_read_lock();
         for runner in RUNNERS {
             for (refused, why) in [(DENY, "no force push"), (OLD_BLOCK, "no rm -rf")] {
                 let (out, err, code) = answer(runner, "PreToolUse", refused);
@@ -1242,6 +1246,7 @@ mod tests {
 
     #[test]
     fn an_allow_says_nothing_and_a_note_reaches_runners_that_take_one() {
+        let _env_read = crate::test_env_read_lock();
         for runner in ["copilot", "windsurf", "kiro", "crush"] {
             assert_eq!(
                 answer(runner, "PreToolUse", ""),
@@ -1288,6 +1293,7 @@ mod tests {
 
     #[test]
     fn a_relay_fault_allows_and_warns_in_the_runners_contract() {
+        let _env_read = crate::test_env_read_lock();
         for event in ["", "BeforeTool", "UserPromptSubmit", "BeforeAgent"] {
             for runner in RUNNERS {
                 let (stdout, stderr) = relay_fault_answer(runner, event, "stdin is not utf-8");
@@ -1326,6 +1332,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_inner_hook_fault_allows_in_every_runner_shape() {
+        let _env_read = crate::test_env_read_lock();
         // The timeout, the exit, and the signal are injected. A wall-clock
         // race is what made a slow runner report the timeout instead of
         // the signal.
@@ -1359,6 +1366,7 @@ mod tests {
     /// Cline all block on that deny. A prompt is not a tool call.
     #[test]
     fn a_prompt_fault_is_not_a_deny() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let why = format!(
             "gave no answer within {} s",
@@ -1404,6 +1412,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_prompt_hook_that_exits_early_is_not_denied() {
+        let _env_read = crate::test_env_read_lock();
         let out = run_inner(
             sh("exit 3"),
             r#"{"hook_event_name":"UserPromptSubmit","prompt":"hello"}"#,
@@ -1419,6 +1428,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_unhealthy_note_is_not_a_second_deny() {
+        let _env_read = crate::test_env_read_lock();
         let why = "did not answer in time";
         let exact = json!({
             "hookSpecificOutput": {
@@ -1446,6 +1456,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_inner_hook_that_answers_keeps_its_answer() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(inner("true", 30_000), "", "a clean allow");
         assert_eq!(inner(&format!("printf '%s' '{WARNED}'"), 30_000), WARNED);
         let note = inner(&format!("printf '%s' '{WARNED}'; exit 1"), 30_000);
@@ -1454,6 +1465,7 @@ mod tests {
 
     #[test]
     fn hook_files_are_written_in_each_runner_shape_and_never_twice() {
+        let _env_read = crate::test_env_read_lock();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
         let base = "/opt/bin/ljos hook";
@@ -1574,6 +1586,7 @@ mod tests {
 
     #[test]
     fn goose_payload_reaches_the_seat_and_a_rule_is_a_warning_on_stderr() {
+        let _env_read = crate::test_env_read_lock();
         let n = normalize_input(
             "goose",
             r#"{"event":"PreToolUse","session_id":"g-1","tool_name":"shell","tool_input":{"command":"rm -rf /"},"working_dir":"/r"}"#,
@@ -1598,6 +1611,7 @@ mod tests {
 
     #[test]
     fn amp_reads_cmd_and_a_rule_is_a_warning_on_stderr() {
+        let _env_read = crate::test_env_read_lock();
         let n = normalize_input("amp", r#"{"cmd":"git push --force"}"#);
         let v: Value = serde_json::from_str(&n).unwrap();
         assert_eq!(v["tool_input"]["command"], "git push --force");
@@ -1609,6 +1623,7 @@ mod tests {
 
     #[test]
     fn auggie_launch_process_is_the_shell_and_its_warning_is_claude_shaped() {
+        let _env_read = crate::test_env_read_lock();
         let n = normalize_input(
             "auggie",
             r#"{"hook_event_name":"PreToolUse","tool_name":"launch-process","tool_input":{"command":"ls"}}"#,
@@ -1626,6 +1641,7 @@ mod tests {
 
     #[test]
     fn auggie_and_amp_hooks_name_a_script_and_are_written_once() {
+        let _env_read = crate::test_env_read_lock();
         for (runner, name) in [("auggie", "settings.json"), ("amp", "settings.json")] {
             let dir = tempfile::tempdir().unwrap();
             let file = dir.path().join(name);
@@ -1657,6 +1673,7 @@ mod tests {
 
     #[test]
     fn goose_hook_is_a_plugin_whose_failure_does_not_block() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("ljos/hooks/hooks.json");
         let step = hook_step("goose", &file, "/bin/ljos hook", false);
@@ -1674,6 +1691,7 @@ mod tests {
 
     #[test]
     fn openhands_terminal_is_the_shell_and_a_rule_is_context() {
+        let _env_read = crate::test_env_read_lock();
         let n = normalize_input(
             "openhands",
             r#"{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"rm -rf ~"},"working_dir":"/w"}"#,
@@ -1692,6 +1710,7 @@ mod tests {
 
     #[test]
     fn the_start_line_leads_an_openhands_prompt_note() {
+        let _env_read = crate::test_env_read_lock();
         let out = with_start_line("{\"additionalContext\":\"lesson\"}\n", "ljos is on: x");
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["additionalContext"], "ljos is on: x\n\nlesson");

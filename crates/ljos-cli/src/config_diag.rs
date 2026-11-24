@@ -1784,6 +1784,7 @@ mod tests {
 
     #[test]
     fn a_misspelled_variable_names_the_nearest_one() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             nearest("LJOS_SEET", VARS.iter().map(|var| var.name)),
             "LJOS_SEAT"
@@ -1793,6 +1794,7 @@ mod tests {
 
     #[test]
     fn invalid_toml_names_a_line_and_a_column() {
+        let _env_read = crate::test_env_read_lock();
         let text = "quorum = [\n";
         let err = toml::from_str::<toml::Value>(text).unwrap_err();
         let (line, column) = toml_line_column(&err);
@@ -1801,6 +1803,7 @@ mod tests {
 
     #[test]
     fn the_reference_lists_the_keys_and_the_variables() {
+        let _env_read = crate::test_env_read_lock();
         let text = reference_org();
         assert!(text.contains("=quorum="), "{text}");
         assert!(text.contains("default 2"), "{text}");
@@ -1823,6 +1826,7 @@ mod tests {
 
     #[test]
     fn every_ljos_name_in_the_sources_is_known() {
+        let _env_read = crate::test_env_read_lock();
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut missing = Vec::new();
         for entry in walk(&root) {

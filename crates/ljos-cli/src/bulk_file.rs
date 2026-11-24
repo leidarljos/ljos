@@ -708,6 +708,7 @@ mod tests {
 
     #[test]
     fn jsonl_takes_a_tag_list_and_refuses_an_unknown_column() {
+        let _env_read = crate::test_env_read_lock();
         let rows =
             parse_jsonl("{\"title\":\"a\",\"tags\":[\"x\",\"y\"],\"priority\":\"b\"}\n\n").unwrap();
         assert_eq!(rows[0].tags.as_deref(), Some("x,y"));
@@ -720,6 +721,7 @@ mod tests {
 
     #[test]
     fn a_header_named_twice_once_with_spaces_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let e = parse_csv_rows("s.csv", b"title,title \nkept,dropped\n")
             .unwrap_err()
             .to_string();
@@ -738,6 +740,7 @@ mod tests {
 
     #[test]
     fn a_roll_back_keeps_the_lock_file_and_never_puts_back_over_another_writer() {
+        let _env_read = crate::test_env_read_lock();
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("demo");
         std::fs::create_dir_all(&dir).unwrap();
@@ -860,6 +863,7 @@ mod tests {
 
     #[test]
     fn a_batch_takes_back_a_create_that_is_its_own() {
+        let _env_read = crate::test_env_read_lock();
         for ledger in [false, true] {
             let (_root, layout, mut board) = demo(ledger);
             let id = file(&layout, "new");
@@ -874,6 +878,7 @@ mod tests {
 
     #[test]
     fn a_batch_never_takes_back_a_file_another_writer_made_beside_the_board() {
+        let _env_read = crate::test_env_read_lock();
         for ledger in [false, true] {
             let (_root, layout, mut board) = demo(ledger);
             let id = file(&layout, "new");
@@ -892,6 +897,7 @@ mod tests {
 
     #[test]
     fn a_batch_never_takes_back_a_logbook_line_another_writer_put_on_the_new_heading() {
+        let _env_read = crate::test_env_read_lock();
         let (_root, layout, mut board) = demo(false);
         let id = file(&layout, "new");
         let text = std::fs::read_to_string(&board.issues).unwrap();
@@ -910,6 +916,7 @@ mod tests {
 
     #[test]
     fn a_batch_never_takes_back_a_ledger_record_another_writer_appended() {
+        let _env_read = crate::test_env_read_lock();
         let (_root, layout, mut board) = demo(true);
         let id = file(&layout, "new");
         let doc = vissue_core::IssueDoc::parse_file("demo", &board.issues).unwrap();
@@ -927,6 +934,7 @@ mod tests {
 
     #[test]
     fn a_batch_stops_on_a_new_heading_that_is_not_the_row() {
+        let _env_read = crate::test_env_read_lock();
         let (_root, layout, board) = demo(false);
         let id = file(&layout, "new");
         let mut other = want(&layout, &id);
@@ -940,6 +948,7 @@ mod tests {
 
     #[test]
     fn csv_rows_name_the_line_of_a_bad_priority() {
+        let _env_read = crate::test_env_read_lock();
         let e = parse_csv_rows("s.csv", b"title,priority\na,A\nb,Z\n")
             .unwrap_err()
             .to_string();

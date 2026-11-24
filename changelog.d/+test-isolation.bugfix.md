@@ -1,0 +1,1 @@
+Tests now share one process-state guard, bound network and fixture waits, and use a signalled rerank fixture, so parallel runs cannot exchange environment, cwd, temporary paths, or outlive their isolation.

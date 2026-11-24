@@ -329,6 +329,7 @@ fn warned(line: &str, cwd: &Path) {
 /// person already had, byte for byte.
 #[test]
 fn cloud_up_sets_no_hooks_path() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, xdg) = seat_env(root.path());
@@ -408,6 +409,7 @@ fn chain_stub(booked: &Path, ours: &Path) -> String {
 /// values at both levels and changes nothing.
 #[test]
 fn cloud_up_takes_back_the_hooks_an_earlier_cloud_up_set() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_home, xdg) = seat_env(root.path());
@@ -560,6 +562,7 @@ fn cloud_up_takes_back_the_hooks_an_earlier_cloud_up_set() {
 /// refused by the same rule name.
 #[test]
 fn shell_guard_warns_when_a_line_changes_the_hooks() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, xdg) = seat_env(root.path());
@@ -658,6 +661,7 @@ fn shell_guard_warns_when_a_line_changes_the_hooks() {
 /// the hooks, and its context carries the cloud seat rule's label.
 #[test]
 fn the_hook_allows_a_hooks_change_and_prints_the_warning() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_home, _xdg) = seat_env(root.path());
@@ -715,6 +719,7 @@ fn the_hook_allows_a_hooks_change_and_prints_the_warning() {
 /// a global `core.hooksPath` that names `ljos/git-hooks`.
 #[test]
 fn a_write_to_the_git_hooks_directory_runs_named_like_a_runner_hook() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, _xdg) = seat_env(root.path());
@@ -859,6 +864,7 @@ fn a_write_to_the_git_hooks_directory_runs_named_like_a_runner_hook() {
 
 #[test]
 fn doctor_reports_the_push_allowlist() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_home, _xdg) = seat_env(root.path());
@@ -885,6 +891,7 @@ fn doctor_reports_the_push_allowlist() {
 
 #[test]
 fn a_write_to_the_seat_git_config_warns() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_home, _xdg) = seat_env(root.path());
@@ -904,6 +911,7 @@ fn a_write_to_the_seat_git_config_warns() {
 
 #[test]
 fn send_pack_checks_the_destination_repository() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_home, _xdg) = seat_env(root.path());
@@ -941,6 +949,7 @@ fn hook_push(repo: &Path, local: &str, remote: &str) -> std::process::Output {
 /// A by-line with no blank line before it is refused too.
 #[test]
 fn a_commit_message_hook_is_refused_on_push() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_home, _xdg) = seat_env(root.path());
@@ -1030,6 +1039,7 @@ fn a_commit_message_hook_is_refused_on_push() {
 /// is allowed. The check reads only commits the remotes do not have.
 #[test]
 fn a_new_branch_omits_a_commit_already_on_a_remote() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_home, _xdg) = seat_env(root.path());
@@ -1073,6 +1083,7 @@ fn a_new_branch_omits_a_commit_already_on_a_remote() {
 /// A pre-push stdin line that is not a ref update is refused.
 #[test]
 fn a_pre_push_line_that_is_not_a_ref_is_refused() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_home, _xdg) = seat_env(root.path());

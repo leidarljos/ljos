@@ -227,6 +227,7 @@ mod tests {
 
     #[test]
     fn a_rewrite_verdict_names_the_call_to_run() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             rewritten("allow\trewrite\tuv run pytest -q").as_deref(),
             Some("uv run pytest -q")
@@ -241,6 +242,7 @@ mod tests {
     /// spread over several lines must not break it into two notes.
     #[test]
     fn the_note_is_one_line_and_names_both_calls() {
+        let _env_read = crate::test_env_read_lock();
         let line = note("pytest \\\n  -q", "uv run pytest \\\n  -q");
         assert!(!line.contains('\n'), "{line}");
         assert!(line.contains("`uv run pytest -q`"), "{line}");
@@ -250,6 +252,7 @@ mod tests {
 
     #[test]
     fn a_kept_row_reads_back_as_it_was_written() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("rewrite.jsonl");
         let row = Row {
@@ -272,6 +275,7 @@ mod tests {
 
     #[test]
     fn a_verdict_that_hands_back_the_same_call_is_no_swap() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             apply_rewrite("uv run pytest", "allow\trewrite\tuv run pytest", None),
             None
@@ -300,6 +304,7 @@ mod tests {
     /// repository's `rewrite = false` runs the line as written.
     #[test]
     fn a_swapped_call_is_said_once_and_kept_until_the_repo_turns_it_off() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let home = tempfile::TempDir::new().unwrap();
         let repo = home.path().join("proj");

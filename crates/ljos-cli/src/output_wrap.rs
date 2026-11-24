@@ -874,11 +874,13 @@ mod tests {
 
     #[test]
     fn no_tty_without_columns_keeps_bytes() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(prose_width(false, None), None);
     }
 
     #[test]
     fn prose_width_parses_columns_on_a_tty() {
+        let _env_read = crate::test_env_read_lock();
         let tty = Some(111);
         assert_eq!(
             prose_width_with(true, Some("0".to_string()), tty),
@@ -918,6 +920,7 @@ mod tests {
 
     #[test]
     fn a_terminal_width_is_clamped_like_columns() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(prose_width_with(true, None, Some(1)), Some(20));
         assert_eq!(prose_width_with(true, None, Some(10)), Some(20));
         assert_eq!(prose_width_with(true, None, Some(19)), Some(20));
@@ -934,47 +937,55 @@ mod tests {
 
     #[test]
     fn non_tty_stays_off_even_with_columns() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(prose_width(false, Some("60".to_string())), None);
     }
 
     #[test]
     fn unindented_prose_wraps_exactly() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose("alpha beta gamma", Some(12));
         assert_eq!(wrapped, "alpha beta\ngamma");
     }
 
     #[test]
     fn code_span_in_parens_stays_whole() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose("run (`ljos show ID`), now", Some(18));
         assert_eq!(wrapped, "run\n(`ljos show ID`),\nnow");
     }
 
     #[test]
     fn double_backtick_span_stays_whole() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose("Use ``ljos show ID`` now", Some(12));
         assert_eq!(wrapped, "Use\n``ljos show ID``\nnow");
     }
 
     #[test]
     fn ansi_sequences_do_not_count_for_width() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose("\u{1b}[31mred\u{1b}[0m blue", Some(7));
         assert_eq!(wrapped, "\u{1b}[31mred\u{1b}[0m\nblue");
     }
 
     #[test]
     fn cjk_uses_display_width() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose("你好 世界 再见", Some(8));
         assert_eq!(wrapped, "你好\n世界\n再见");
     }
 
     #[test]
     fn urls_stay_whole_tokens() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose("visit https://example.com/a/very/long/path now", Some(20));
         assert_eq!(wrapped, "visit\nhttps://example.com/a/very/long/path\nnow");
     }
 
     #[test]
     fn no_break_spaces_are_not_break_points() {
+        let _env_read = crate::test_env_read_lock();
         for space in ['\u{a0}', '\u{202f}', '\u{2007}'] {
             let wrapped = wrap_prose(&format!("walk of 10{space}km"), Some(10));
             assert_eq!(wrapped, format!("walk of\n10{space}km"), "{space:?}");
@@ -983,6 +994,7 @@ mod tests {
 
     #[test]
     fn urls_without_slashes_stay_whole() {
+        let _env_read = crate::test_env_read_lock();
         for url in [
             "mailto:someone.with.a.long.name@example.org",
             "urn:isbn:0451450523-0451450523",
@@ -1001,6 +1013,7 @@ mod tests {
 
     #[test]
     fn doctor_rows_use_spaces_consistently_and_wrap_with_zero_room() {
+        let _env_read = crate::test_env_read_lock();
         let line =
             "ok\t12345678901234\tcursor-x3jhes1i90 named by CURSOR_CONVERSATION_ID in this process";
         let wrapped = wrap_prose(line, Some(20));
@@ -1013,6 +1026,7 @@ mod tests {
 
     #[test]
     fn punctuation_before_code_span_does_not_split() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose("open and run (`ljos show ID`), then continue", Some(30));
         assert!(!wrapped.contains("(`ljos show\n"), "{wrapped}");
         assert!(!wrapped.contains("show\n ID`"), "{wrapped}");
@@ -1021,6 +1035,7 @@ mod tests {
 
     #[test]
     fn table_driven_review_repros() {
+        let _env_read = crate::test_env_read_lock();
         let cases = [
             ("no_spurious_newline", "  hello              ", 20, "  hello"),
             (
@@ -1050,6 +1065,7 @@ mod tests {
 
     #[test]
     fn doctor_prefix_overflow_uses_small_indent_and_no_trailing_spaces() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose(
             "info\t12345678901234567890\talpha beta gamma delta",
             Some(20),
@@ -1067,6 +1083,7 @@ mod tests {
 
     #[test]
     fn grapheme_sequences_wrap_at_display_width() {
+        let _env_read = crate::test_env_read_lock();
         let cases = [
             (
                 "vs16",
@@ -1097,6 +1114,7 @@ mod tests {
 
     #[test]
     fn grapheme_display_widths() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(visible_width("👨\u{200d}👩\u{200d}👧"), 2);
         assert_eq!(visible_width("1\u{fe0f}\u{20e3}"), 2);
         assert_eq!(visible_width("👍🏽"), 2);
@@ -1112,6 +1130,7 @@ mod tests {
 
     #[test]
     fn an_escape_inside_a_grapheme_keeps_its_width() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(visible_width("1\u{1b}[31m\u{fe0f}\u{20e3}"), 2);
         assert_eq!(visible_width("1\u{1b}[31m\u{fe0f}\u{20e3}\u{1b}[0m"), 2);
         assert_eq!(
@@ -1129,6 +1148,7 @@ mod tests {
 
     #[test]
     fn a_coloured_overwide_word_splits_at_width() {
+        let _env_read = crate::test_env_read_lock();
         let word = "\u{1b}[31mabcdefghijklmnop\u{1b}[0m";
         assert_eq!(
             wrap_prose(word, Some(8)),
@@ -1158,6 +1178,7 @@ mod tests {
 
     #[test]
     fn overwide_cjk_splits_at_grapheme_boundaries() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose("这是一个没有空格的很长的中文句子用来测试", Some(10));
         assert_eq!(wrapped, "这是一个没\n有空格的很\n长的中文句\n子用来测试");
 
@@ -1190,6 +1211,7 @@ mod tests {
 
     #[test]
     fn overwide_urls_paths_spans_and_hyperlinks_stay_whole() {
+        let _env_read = crate::test_env_read_lock();
         let cases = [
             "https://example.com/a/very/long/path",
             "/usr/local/share/ljos/very/long/path",
@@ -1206,6 +1228,7 @@ mod tests {
 
     #[test]
     fn doctor_prefix_at_edge_does_not_repeat_or_trail() {
+        let _env_read = crate::test_env_read_lock();
         let exact = wrap_prose("ok\t12345678901234\talpha beta gamma delta", Some(20));
         assert_eq!(exact, "ok  12345678901234\nalpha beta gamma\ndelta");
         assert!(
@@ -1230,6 +1253,7 @@ mod tests {
 
     #[test]
     fn backtick_run_matching_uses_same_tick_count() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose("Use `alpha `` beta` now", Some(12));
         assert_eq!(wrapped, "Use\n`alpha `` beta`\nnow");
 
@@ -1239,6 +1263,7 @@ mod tests {
 
     #[test]
     fn warming_rows_are_treated_as_doctor_rows() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose(
             "warming\tpack\twarming, about 4.5 s; http://127.0.0.1:9 workspace seat",
             Some(25),
@@ -1249,6 +1274,7 @@ mod tests {
 
     #[test]
     fn osc8_with_params_stays_atomic() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose(
             "See \u{1b}]8;id=1;https://example.com/long\u{7}click here now please\u{1b}]8;;\u{7} end",
             Some(20),
@@ -1261,6 +1287,7 @@ mod tests {
 
     #[test]
     fn osc8_single_char_uri_is_not_treated_as_close() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose(
             "See \u{1b}]8;;/\u{7}slash link text\u{1b}]8;;\u{7} now",
             Some(18),
@@ -1271,6 +1298,7 @@ mod tests {
 
     #[test]
     fn osc_with_spaces_stays_atomic() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose("pre \u{1b}]0;my title\u{7} post words", Some(10));
         assert!(wrapped.contains("\u{1b}]0;my title\u{7}"), "{wrapped}");
         assert!(!wrapped.contains("\u{1b}]0;\n"), "{wrapped}");
@@ -1278,6 +1306,7 @@ mod tests {
 
     #[test]
     fn multiline_hanging_keeps_prefix_blank_lines_and_inner_indent() {
+        let _env_read = crate::test_env_read_lock();
         let body =
             "first line\n  Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.\n\nsecond";
         let wrapped = wrap_hanging_prose(body, 28, "| ", "| ");
@@ -1295,6 +1324,7 @@ mod tests {
 
     #[test]
     fn tabs_measure_to_the_next_eight_column_stop() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = wrap_prose("alpha\tbeta\tgamma\tdelta\tepsilon", Some(20));
         for line in wrapped.lines() {
             assert!(visible_width(line) <= 20, "{wrapped}");
@@ -1303,6 +1333,7 @@ mod tests {
 
     #[test]
     fn an_unterminated_escape_leaves_the_rest_of_the_line_visible() {
+        let _env_read = crate::test_env_read_lock();
         for text in [
             "pre \u{1b}]0;my title with spaces that still has to wrap",
             "pre \u{1b}[1 22 333 4444 55555 666666 7777777 88888888 999",
@@ -1325,6 +1356,7 @@ mod tests {
 
     #[test]
     fn a_terminated_escape_still_has_no_width() {
+        let _env_read = crate::test_env_read_lock();
         for text in [
             "pre \u{1b}]0;a title\u{7}word",
             "pre \u{1b}]0;a title\u{1b}\\word",
@@ -1336,6 +1368,7 @@ mod tests {
 
     #[test]
     fn esc_before_multibyte_never_splits_utf8_or_panics() {
+        let _env_read = crate::test_env_read_lock();
         let text = "pre \u{1b}你好 world more words";
         let stripped = strip_ansi(text);
         assert_eq!(stripped, "pre 你好 world more words");
@@ -1355,6 +1388,7 @@ mod tests {
 
     #[test]
     fn esc_intermediate_sequence_keeps_trailing_text() {
+        let _env_read = crate::test_env_read_lock();
         let text = "pre \u{1b}(Bhello world";
         let stripped = strip_ansi(text);
         assert_eq!(stripped, "pre (Bhello world");
@@ -1364,6 +1398,7 @@ mod tests {
 
     #[test]
     fn strip_ansi_matches_base_non_tty_algorithm_for_escape_corpus() {
+        let _env_read = crate::test_env_read_lock();
         fn base_strip_ansi(text: &str) -> String {
             let mut out = String::new();
             let mut chars = text.chars().peekable();
@@ -1428,6 +1463,7 @@ mod tests {
 
     #[test]
     fn seeded_prose_property_roundtrip_and_width() {
+        let _env_read = crate::test_env_read_lock();
         fn strip_ws(s: &str) -> String {
             s.chars().filter(|ch| !ch.is_whitespace()).collect()
         }

@@ -580,6 +580,7 @@ mod tests {
 
     #[test]
     fn each_rule_stops_at_the_first_match_and_the_flag_wins() {
+        let _env_read = crate::test_env_read_lock();
         let mut inputs = blank();
         inputs.flag = Some("saddle");
         inputs.ljos_seat = Some("envy");
@@ -619,6 +620,7 @@ mod tests {
 
     #[test]
     fn a_map_line_needs_the_agent_or_conversation_id() {
+        let _env_read = crate::test_env_read_lock();
         let text = "# note\nbc-1234abcd = saddle\nother-id other\n";
         assert_eq!(
             map_hit(text, &["bc-1234abcd".into()]).as_deref(),
@@ -630,6 +632,7 @@ mod tests {
 
     #[test]
     fn two_recent_seats_are_not_one_candidate() {
+        let _env_read = crate::test_env_read_lock();
         let log = "\
 2026-11-11T00:00:00Z\talice\tbox
 2026-11-11T00:00:01Z\tbob\tbox
@@ -649,6 +652,7 @@ mod tests {
     /// names the later one. A line with no fraction is that second's start.
     #[test]
     fn a_later_fraction_in_the_same_second_is_the_recent_seat() {
+        let _env_read = crate::test_env_read_lock();
         let log = "\
 2026-11-11T00:00:01.100Z\talice\tbox
 2026-11-11T00:00:01Z\tcarol\tbox
@@ -675,6 +679,7 @@ mod tests {
 
     #[test]
     fn a_write_only_names_sessions_recorded_with_it() {
+        let _env_read = crate::test_env_read_lock();
         let one = "session-one-0001".to_string();
         let two = "session-two-0002".to_string();
         let log = "\
@@ -694,6 +699,7 @@ mod tests {
 
     #[test]
     fn a_subagent_name_is_not_a_seat_and_the_next_rule_runs() {
+        let _env_read = crate::test_env_read_lock();
         let mut inputs = blank();
         inputs.flag = Some("sand-subagent-001");
         inputs.ljos_seat = Some("example-host-sand-sub");
@@ -706,6 +712,7 @@ mod tests {
 
     #[test]
     fn reads_fall_back_to_every_seat_and_writes_to_unknown() {
+        let _env_read = crate::test_env_read_lock();
         let mut inputs = blank();
         assert!(pick(&inputs).is_none());
         assert_eq!(
@@ -739,6 +746,7 @@ mod tests {
 
     #[test]
     fn a_missing_login_stays_the_same_short_name() {
+        let _env_read = crate::test_env_read_lock();
         let host = "runnervm-abc123";
         let once = write_fallback_name(None, host);
         assert_eq!(once, write_fallback_name(None, host));
@@ -767,6 +775,7 @@ mod tests {
 
     #[test]
     fn an_explicit_seat_wins_over_a_later_rule() {
+        let _env_read = crate::test_env_read_lock();
         let mut inputs = blank();
         inputs.flag = Some("saddle");
         inputs.ljos_seat = Some("other");

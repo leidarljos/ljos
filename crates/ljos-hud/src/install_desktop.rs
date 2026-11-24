@@ -110,6 +110,8 @@ mod tests {
 
     #[test]
     fn overlay_and_popout_ids_differ() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         assert_ne!(OVERLAY_APP_ID, APP_ID);
         assert_eq!(OVERLAY_APP_ID, "me.rgoswami.ljos-hud");
         assert_eq!(APP_ID, "me.rgoswami.ljos-hud.window");
@@ -117,6 +119,8 @@ mod tests {
 
     #[test]
     fn sway_rules_name_one_overlay_id() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let s = sway_overlay_rules();
         assert!(s.contains(OVERLAY_APP_ID));
         assert!(s.contains("ljos hud --toggle"));
@@ -134,6 +138,8 @@ mod tests {
 
     #[test]
     fn install_writes_desktop_and_sway() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let _guard = crate::env_lock();
         let root_dir = tempfile::tempdir().unwrap();
         let root = root_dir.path();

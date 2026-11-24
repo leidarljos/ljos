@@ -320,6 +320,7 @@ fn assert_shell_line_is_safe(line: &str, mark: &Path) {
 
 #[test]
 fn a_checksum_mismatch_installs_nothing() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let rel = root.path().join("rel");
@@ -354,6 +355,7 @@ fn a_checksum_mismatch_installs_nothing() {
 
 #[test]
 fn a_missing_release_sums_shell_quotes_the_release_dir() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -388,6 +390,7 @@ fn a_missing_release_sums_shell_quotes_the_release_dir() {
 /// rerun of the same release rewrites nothing.
 #[test]
 fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
+    let _process = ljos_test_boot::env_lock();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let rel = root.path().join("rel");
@@ -589,6 +592,7 @@ fn encoder_machine(root: &Path) -> (PathBuf, PathBuf) {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn cloud_up_installs_the_release_encoder_on_a_cloud_vm() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, _rel) = encoder_machine(root.path());
@@ -626,6 +630,7 @@ fn cloud_up_installs_the_release_encoder_on_a_cloud_vm() {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn an_encoder_checksum_mismatch_installs_neither_archive() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, rel) = encoder_machine(root.path());
@@ -652,6 +657,7 @@ fn an_encoder_checksum_mismatch_installs_neither_archive() {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_missing_encoder_archive_shell_quotes_the_release_dir() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_home, rel) = encoder_machine(root.path());
@@ -786,6 +792,7 @@ fn plant_hostile(root: &Path, case: &str) -> (PathBuf, PathBuf) {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_hostile_encoder_archive_installs_nothing() {
+    let _process = ljos_test_boot::env_lock();
     for (case, needle) in [
         ("symlink", "is a symlink"),
         ("runtime-symlink", "is a symlink"),
@@ -853,6 +860,7 @@ fn unlock_bin_dir(bin_dir: &Path) {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_failed_encoder_swap_keeps_the_previous_pair() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, rel) = encoder_machine(root.path());
@@ -891,6 +899,7 @@ fn a_failed_encoder_swap_keeps_the_previous_pair() {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_failed_first_encoder_install_leaves_no_runtime() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, rel) = encoder_machine(root.path());
@@ -916,6 +925,7 @@ fn a_failed_first_encoder_install_leaves_no_runtime() {
 
 #[test]
 fn the_cloud_vm_doc_matches_the_encoder_install() {
+    let _process = ljos_test_boot::env_lock();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let docs = fs::read_to_string(root.join("docs/cloud-vm.md")).unwrap();
     assert!(
@@ -935,6 +945,7 @@ fn the_cloud_vm_doc_matches_the_encoder_install() {
 
 #[test]
 fn a_release_build_reuses_only_the_verified_onnx_runtime_archive() {
+    let _process = ljos_test_boot::env_lock();
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml");
     let yml = fs::read_to_string(&path).unwrap();
     assert!(
@@ -960,6 +971,7 @@ fn a_release_build_reuses_only_the_verified_onnx_runtime_archive() {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn an_encoder_directory_is_not_already_installed() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, rel) = encoder_machine(root.path());
@@ -995,6 +1007,7 @@ fn an_encoder_directory_is_not_already_installed() {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_ci_job_downloads_no_encoder() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, _rel) = encoder_machine(root.path());
@@ -1009,6 +1022,7 @@ fn a_ci_job_downloads_no_encoder() {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_generic_ci_job_downloads_no_encoder() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, _rel) = encoder_machine(root.path());
@@ -1024,6 +1038,7 @@ fn a_generic_ci_job_downloads_no_encoder() {
 
 #[test]
 fn cloud_up_installs_points_the_harness_and_clones() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     isolate_git(root.path());
@@ -1177,6 +1192,7 @@ fn ljos_seat(home: &Path) -> String {
 /// env file. The file and `ljos seat` stay as the first run left them.
 #[test]
 fn a_matching_seat_leaves_the_env_file_and_ljos_seat_unchanged() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = seat_env(root.path());
@@ -1219,6 +1235,7 @@ fn a_matching_seat_leaves_the_env_file_and_ljos_seat_unchanged() {
 /// and the caller's seat is the one written and the one `ljos seat` prints.
 #[test]
 fn a_different_seat_in_the_env_file_is_reported_and_the_caller_s_seat_is_used() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = seat_env(root.path());
@@ -1305,6 +1322,7 @@ fn tracker_vm(root: &Path) -> (PathBuf, PathBuf) {
 
 #[test]
 fn cloud_up_clones_the_tracker_a_workspace_checkout_holds() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, origin) = tracker_vm(root.path());
@@ -1344,6 +1362,7 @@ fn cloud_up_clones_the_tracker_a_workspace_checkout_holds() {
 
 #[test]
 fn cloud_up_does_not_take_an_enclosing_checkout_as_the_tracker() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, origin) = tracker_vm(root.path());
@@ -1398,6 +1417,7 @@ fn cloud_up_does_not_take_an_enclosing_checkout_as_the_tracker() {
 
 #[test]
 fn a_tracker_token_stays_private_and_answers_for_the_clone() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, origin) = tracker_vm(root.path());
@@ -1486,6 +1506,7 @@ fn a_tracker_token_stays_private_and_answers_for_the_clone() {
 
 #[test]
 fn a_tracker_clone_that_fails_names_the_fix_and_finishes_cloud_up() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, _origin) = tracker_vm(root.path());
@@ -1514,6 +1535,7 @@ fn a_tracker_clone_that_fails_names_the_fix_and_finishes_cloud_up() {
 /// clone gets the URL without it, and the helper answers with it.
 #[test]
 fn a_password_in_the_workspace_origin_stays_out_of_the_clone() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, origin) = tracker_vm(root.path());
@@ -1611,6 +1633,7 @@ fn auth_probe() -> (u16, std::sync::Arc<Mutex<Vec<String>>>) {
 /// token is sent, and with no tracker token nothing is.
 #[test]
 fn a_global_rewrite_or_helper_sends_the_tracker_no_other_token() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, _origin) = tracker_vm(root.path());
@@ -1679,6 +1702,7 @@ fn a_global_rewrite_or_helper_sends_the_tracker_no_other_token() {
 /// clone is refused, and the password is in no line.
 #[test]
 fn a_rewrite_of_the_exact_tracker_url_to_a_password_is_refused() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_home, _origin) = tracker_vm(root.path());
@@ -1708,6 +1732,7 @@ fn a_rewrite_of_the_exact_tracker_url_to_a_password_is_refused() {
 
 #[test]
 fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -1800,6 +1825,7 @@ fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
 /// still wins.
 #[test]
 fn cloud_up_puts_the_install_dir_ahead_of_a_stale_binary() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -1921,6 +1947,7 @@ fn cloud_up_command(root: &Path, bin: &Path, path: &str) -> String {
 /// install.
 #[test]
 fn cloud_up_writes_the_absolute_server_whatever_path_it_found() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     for shape in [
         "{stale}:/usr/bin:/bin",
@@ -1971,6 +1998,7 @@ fn cloud_up_writes_the_absolute_server_whatever_path_it_found() {
 
 #[test]
 fn cloud_up_writes_custom_ljos_bin_dir_into_shell_profiles() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -2046,6 +2074,7 @@ HISTCONTROL=ignoreboth
 /// appended after that case.
 #[test]
 fn cloud_up_inserts_path_before_ubuntu_skel_interactive_case() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     assert_path_before_guard(UBUNTU_SKEL_BASHRC, "case $- in");
 }
@@ -2054,6 +2083,7 @@ fn cloud_up_inserts_path_before_ubuntu_skel_interactive_case() {
 /// of their own.
 #[test]
 fn cloud_up_inserts_path_before_a_multi_line_if_guard() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     assert_path_before_guard(
         "# rc\nif [ -z \"$PS1\" ]; then\n    return\nfi\necho prompt\n",
@@ -2130,6 +2160,7 @@ fn assert_path_before_guard(rc: &str, guard: &str) {
 
 #[test]
 fn cloud_up_wakes_box_seats_with_keys_passed_by_name() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -2258,6 +2289,7 @@ fn cloud_up_wakes_box_seats_with_keys_passed_by_name() {
 
 #[test]
 fn cloud_up_retires_stale_env_wakes_and_keeps_a_hand_set_wake() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -2406,6 +2438,7 @@ key_env = \"SADDLE_HAND_KEY\"
 
 #[test]
 fn cloud_up_retires_env_wakes_even_when_cloud_age_fails() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -2475,6 +2508,7 @@ command = \"true\"
 
 #[test]
 fn cloud_up_refuses_to_overwrite_a_broken_wake_toml() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -2620,6 +2654,7 @@ fn allowed(line: &str, cwd: &Path) {
 
 #[test]
 fn cloud_up_installs_cloud_guard_refusals_idempotently() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = seat_env(root.path());
@@ -2673,6 +2708,7 @@ fn cloud_up_installs_cloud_guard_refusals_idempotently() {
 
 #[test]
 fn a_machine_without_cloud_up_keeps_doctor_healthy() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = seat_env(root.path());
@@ -2707,6 +2743,7 @@ fn a_machine_without_cloud_up_keeps_doctor_healthy() {
 
 #[test]
 fn cloud_guard_refuses_every_push_onto_a_cursor_ref() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     seat_env(root.path());
@@ -2798,6 +2835,7 @@ fn cloud_guard_refuses_every_push_onto_a_cursor_ref() {
 
 #[test]
 fn cloud_guard_reads_valued_push_options_before_the_subcommand() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     seat_env(root.path());
@@ -2817,6 +2855,7 @@ fn cloud_guard_reads_valued_push_options_before_the_subcommand() {
 
 #[test]
 fn cloud_guard_denies_heads_and_tags_shortcuts_under_cursor() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     seat_env(root.path());
@@ -2836,6 +2875,7 @@ fn cloud_guard_denies_heads_and_tags_shortcuts_under_cursor() {
 
 #[test]
 fn cloud_guard_reads_where_bare_refspecs_land() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     seat_env(root.path());
@@ -2876,6 +2916,7 @@ fn cloud_guard_reads_where_bare_refspecs_land() {
 
 #[test]
 fn cloud_guard_resolves_push_aliases_from_config_and_line_state() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     seat_env(root.path());
@@ -2898,6 +2939,7 @@ fn cloud_guard_resolves_push_aliases_from_config_and_line_state() {
 
 #[test]
 fn cloud_guard_refuses_shell_aliases_that_hide_git_push() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     seat_env(root.path());
@@ -2927,6 +2969,7 @@ fn cloud_guard_refuses_shell_aliases_that_hide_git_push() {
 
 #[test]
 fn cloud_guard_reads_git_env_and_env_chdir_context() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     seat_env(root.path());
@@ -2952,6 +2995,7 @@ fn cloud_guard_reads_git_env_and_env_chdir_context() {
 
 #[test]
 fn cloud_guard_refuses_prune_and_mirror_when_they_can_delete_heads() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     seat_env(root.path());
@@ -2967,6 +3011,7 @@ fn cloud_guard_refuses_prune_and_mirror_when_they_can_delete_heads() {
 
 #[test]
 fn cloud_guard_refuses_shell_trick_push_forms() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     seat_env(root.path());
@@ -2990,6 +3035,7 @@ fn cloud_guard_refuses_shell_trick_push_forms() {
 
 #[test]
 fn cloud_guard_refuses_send_pack_bulk_flags_for_cursor_refs() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     seat_env(root.path());
@@ -3018,6 +3064,7 @@ fn cloud_guard_refuses_send_pack_bulk_flags_for_cursor_refs() {
 
 #[test]
 fn cloud_guard_refuses_gh_api_ref_writes() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     seat_env(root.path());
@@ -3147,6 +3194,7 @@ fn write_seat_branches(home: &Path, branches: &[&str]) {
 /// does not show. Everyday pushes of the named branch and of develop stay.
 #[test]
 fn cloud_guard_judges_ref_writes_by_the_seat_allowlist() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = seat_env(root.path());
@@ -3353,6 +3401,7 @@ fn bare_checkout(root: &Path) -> (PathBuf, PathBuf) {
 /// actually push.
 #[test]
 fn cloud_guard_allows_resolved_destinations_toplevel_and_tags() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = seat_env(root.path());
@@ -3489,6 +3538,7 @@ fn cloud_guard_allows_resolved_destinations_toplevel_and_tags() {
 
 #[test]
 fn cloud_guard_allows_pushes_that_leave_cursor_refs_alone() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     seat_env(root.path());
@@ -3547,6 +3597,7 @@ fn cloud_guard_allows_pushes_that_leave_cursor_refs_alone() {
 
 #[test]
 fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
+    let _process = ljos_test_boot::env_lock();
     if tools::halt(tools::Tool::AgeKeygen) {
         return;
     }
@@ -3800,6 +3851,7 @@ fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
 
 #[test]
 fn two_vms_land_different_issues_and_merge_notes_on_one() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     isolate_git(root.path());
@@ -3884,6 +3936,7 @@ fn two_vms_land_different_issues_and_merge_notes_on_one() {
 
 #[test]
 fn a_refused_push_stays_queued_until_the_next_drain() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     isolate_git(root.path());
@@ -3986,6 +4039,7 @@ fn a_refused_push_stays_queued_until_the_next_drain() {
 
 #[test]
 fn a_claim_from_another_machine_stays_claimed() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     isolate_git(root.path());
@@ -4090,6 +4144,7 @@ fn a_claim_from_another_machine_stays_claimed() {
 /// so a dead one releases none of them.
 #[test]
 fn a_dead_hold_with_no_issue_releases_no_claim_of_its_seat() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     isolate_git(root.path());
@@ -4129,6 +4184,7 @@ fn a_dead_hold_with_no_issue_releases_no_claim_of_its_seat() {
 
 #[test]
 fn a_live_hold_keeps_its_issue_and_a_dead_process_is_released() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     isolate_git(root.path());
@@ -4197,6 +4253,7 @@ fn a_live_hold_keeps_its_issue_and_a_dead_process_is_released() {
 
 #[test]
 fn ljos_claim_commits_the_issue() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     isolate_git(root.path());
@@ -4253,6 +4310,7 @@ fn ljos_claim_commits_the_issue() {
 
 #[test]
 fn doctor_warns_on_unpushed_commits_and_not_on_zero() {
+    let _process = ljos_test_boot::env_lock();
     let row = |state: &str, ok: bool| ljos_cli::Habitat {
         name: "tracker",
         state: state.into(),
@@ -4269,6 +4327,7 @@ fn doctor_warns_on_unpushed_commits_and_not_on_zero() {
 
 #[test]
 fn a_missing_mcp_binary_is_named() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     clear_agent_ids();
     let root = tempfile::tempdir().unwrap();
@@ -4323,6 +4382,7 @@ fn a_missing_mcp_binary_is_named() {
 
 #[test]
 fn doctor_advises_cloud_up_only_on_a_cloud_vm() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     clear_agent_ids();
     let root = tempfile::tempdir().unwrap();
@@ -4370,6 +4430,7 @@ fn doctor_advises_cloud_up_only_on_a_cloud_vm() {
 /// Azure Pipelines, CircleCI, Jenkins, and `CI=true` are.
 #[test]
 fn desktop_cursor_and_ci_values_choose_cloud_up() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     clear_agent_ids();
     let root = tempfile::tempdir().unwrap();
@@ -4447,6 +4508,7 @@ fn desktop_cursor_and_ci_values_choose_cloud_up() {
 
 #[test]
 fn doctor_flags_a_command_from_another_home() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -4565,6 +4627,7 @@ fn doctor_flags_a_command_from_another_home() {
 /// that `$HOME/...` will run.
 #[test]
 fn doctor_leaves_dollar_home_literal_for_opencode() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     clear_agent_ids();
     let root = tempfile::tempdir().unwrap();
@@ -4654,6 +4717,7 @@ fn doctor_on_command(path: &Path, command: &str) -> Option<String> {
 /// (https://the editor harness.com/docs/context/mcp, "Config interpolation").
 #[test]
 fn doctor_expands_home_in_cursor_mcp_json_the_way_cursor_does() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     clear_agent_ids();
     let root = tempfile::tempdir().unwrap();
@@ -4685,6 +4749,7 @@ fn doctor_expands_home_in_cursor_mcp_json_the_way_cursor_does() {
 /// as written (https://docs.the terminal harness.com/en/docs/the terminal harness-code/mcp).
 #[test]
 fn doctor_expands_home_in_claude_json_the_way_claude_code_does() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     clear_agent_ids();
     let root = tempfile::tempdir().unwrap();
@@ -4721,6 +4786,7 @@ fn doctor_expands_home_in_claude_json_the_way_claude_code_does() {
 
 #[test]
 fn doctor_harness_advice_clears_after_running_onboard() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -4786,6 +4852,7 @@ fn doctor_harness_advice_clears_after_running_onboard() {
 
 #[test]
 fn doctor_warns_when_shell_path_finds_ljos_mcp() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -4828,6 +4895,7 @@ fn doctor_warns_when_shell_path_finds_ljos_mcp() {
 /// stale copy left in another directory is what the client starts.
 #[test]
 fn doctor_warns_on_an_absolute_ljos_mcp_from_another_install() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     clear_agent_ids();
     let root = tempfile::tempdir().unwrap();
@@ -4882,6 +4950,7 @@ fn doctor_warns_on_an_absolute_ljos_mcp_from_another_install() {
 /// target is, or when `--version` matches. A different binary still warns.
 #[test]
 fn doctor_accepts_a_wrapper_that_runs_this_install() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     clear_agent_ids();
     let root = tempfile::tempdir().unwrap();
@@ -4931,6 +5000,7 @@ fn doctor_accepts_a_wrapper_that_runs_this_install() {
 
 #[test]
 fn doctor_respects_env_path_in_the_entry() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -4959,6 +5029,7 @@ fn doctor_respects_env_path_in_the_entry() {
 
 #[test]
 fn doctor_reads_path_from_the_ljos_entry_only() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     clear_agent_ids();
     let root = tempfile::tempdir().unwrap();
@@ -5002,6 +5073,7 @@ fn doctor_reads_path_from_the_ljos_entry_only() {
 /// and the command harness none.
 #[test]
 fn doctor_expands_env_path_the_way_each_client_does() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     clear_agent_ids();
     let root = tempfile::tempdir().unwrap();
@@ -5093,6 +5165,7 @@ fn doctor_expands_env_path_the_way_each_client_does() {
 
 #[test]
 fn install_sh_cloud_reuses_binaries_that_already_answer() {
+    let _process = ljos_test_boot::env_lock();
     let root = tempfile::tempdir().unwrap();
     let bins = root.path().join("bin");
     fs::create_dir_all(&bins).unwrap();
@@ -5148,6 +5221,7 @@ fn install_sh_cloud_reuses_binaries_that_already_answer() {
 
 #[test]
 fn cloud_up_tags_vm_writes_scope_cloud_without_a_default_scope() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
@@ -5221,6 +5295,7 @@ fn clear_agent_ids() {
 
 #[test]
 fn a_run_id_suffixes_an_explicit_seat() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     clear_agent_ids();
     std::env::set_var("LJOS_SEAT", "ridley-ci-a");
@@ -5294,6 +5369,7 @@ fn land(root: &Path, origin: &Path, cast: Cast<'_>) {
 
 #[test]
 fn a_ci_seat_and_a_cloud_seat_vote_note_and_push_and_the_box_does_not_re_sign() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     isolate_git(root.path());
@@ -5392,6 +5468,7 @@ fn a_ci_seat_and_a_cloud_seat_vote_note_and_push_and_the_box_does_not_re_sign() 
 
 #[test]
 fn a_handover_keeps_an_existing_signature_and_uses_the_host_key_for_a_new_one() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     clear_agent_ids();
@@ -5538,6 +5615,7 @@ fn slot_world(root: &Path, issues: &[&str]) -> (PathBuf, PathBuf) {
 
 #[test]
 fn a_launcher_slots_the_seat_its_run_takes() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (origin, box_repo) = slot_world(root.path(), &["probe-slot"]);
@@ -5612,6 +5690,7 @@ fn a_launcher_slots_the_seat_its_run_takes() {
 /// for. The suffixed name is refused and the bare one is slotted.
 #[test]
 fn a_launcher_does_not_slot_a_seat_that_already_ends_with_the_run_id() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, box_repo) = slot_world(root.path(), &["probe-slot"]);
@@ -5639,6 +5718,7 @@ fn a_launcher_does_not_slot_a_seat_that_already_ends_with_the_run_id() {
 
 #[test]
 fn a_run_ballot_counts_for_a_push_under_its_slot_and_not_without_one() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (origin, box_repo) = slot_world(root.path(), &["probe-slot", "probe-bare"]);
@@ -5688,6 +5768,7 @@ fn a_run_ballot_counts_for_a_push_under_its_slot_and_not_without_one() {
 /// minted, and only that key's ballots count.
 #[test]
 fn a_seat_pinned_first_under_another_key_does_not_vote_as_the_run() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-k"]);
@@ -5718,6 +5799,7 @@ fn a_seat_pinned_first_under_another_key_does_not_vote_as_the_run() {
 /// signs the tracker's root commits.
 #[test]
 fn a_slot_copied_from_another_tracker_does_not_count() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let other = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -5775,6 +5857,7 @@ fn cast(seat: &str, issue: &str, choice: &str) {
 /// and the issue still decides.
 #[test]
 fn a_seat_pinned_before_slots_stands_and_an_unslotted_one_is_left_out() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-box", "probe-slot"]);
@@ -5819,6 +5902,7 @@ fn a_seat_pinned_before_slots_stands_and_an_unslotted_one_is_left_out() {
 /// the last line win.
 #[test]
 fn an_appended_pin_line_does_not_re_pin_a_standing_seat() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-c"]);
@@ -5856,6 +5940,7 @@ fn rewrite_pins(repo: &Path, edit: impl Fn(&str) -> Option<String>) {
 /// it: a pin once committed stays.
 #[test]
 fn a_pin_changed_in_place_does_not_re_pin_a_standing_seat() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-c"]);
@@ -5889,6 +5974,7 @@ fn a_pin_changed_in_place_does_not_re_pin_a_standing_seat() {
 /// ballot was only left out, so dropping its pin dropped its vote.
 #[test]
 fn a_removed_pin_does_not_drop_a_run_ballot() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-d"]);
@@ -5925,6 +6011,7 @@ fn a_removed_pin_does_not_drop_a_run_ballot() {
 /// launches when its pin is dated after.
 #[test]
 fn a_backdated_pin_does_not_make_a_standing_seat() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-bare", "probe-slot"]);
@@ -5996,6 +6083,7 @@ fn a_backdated_pin_does_not_make_a_standing_seat() {
 /// is not the box seat, so its ballot needs a slot and it cannot launch.
 #[test]
 fn an_unpinned_listed_name_pinned_after_slots_does_not_stand() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-b", "probe-slot"]);
@@ -6053,6 +6141,7 @@ fn commit_dated(repo: &Path, paths: &[&str], message: &str, unix: &str) {
 /// one committed after does not, however far back its dates are set.
 #[test]
 fn a_legacy_ballot_is_decided_by_commit_order_not_by_date() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-old", "probe-new"]);
@@ -6083,6 +6172,7 @@ fn a_legacy_ballot_is_decided_by_commit_order_not_by_date() {
 /// the line is before the pin; the gate still refuses.
 #[test]
 fn a_slot_line_replayed_from_another_issue_does_not_backdate_it() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-slot", "probe-other"]);
@@ -6202,6 +6292,7 @@ fn a_slot_line_replayed_from_another_issue_does_not_backdate_it() {
 /// slot at, so the ballot is left out until the pin is committed.
 #[test]
 fn an_uncommitted_run_pin_does_not_count_under_its_slot() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-u"]);
@@ -6246,6 +6337,7 @@ fn an_uncommitted_run_pin_does_not_count_under_its_slot() {
 /// introduction under the slot is not enough.
 #[test]
 fn a_run_pin_merged_from_a_branch_without_its_slot_does_not_count() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-m"]);
@@ -6304,6 +6396,7 @@ fn a_run_pin_merged_from_a_branch_without_its_slot_does_not_count() {
 /// there under a launcher on the standing list.
 #[test]
 fn a_slotted_run_counts_on_a_tracker_that_is_not_a_git_repository() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     isolate_git(root.path());
@@ -6395,6 +6488,7 @@ fn serve_empty_pack() -> String {
 /// seat, and consensus does not refuse the shared session.
 #[test]
 fn ballots_that_share_a_session_still_count() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-dup"]);
@@ -6485,6 +6579,7 @@ fn cite_world(root: &Path) {
 /// ballot decides is denied, and says why.
 #[test]
 fn the_push_gate_denies_a_cite_that_does_not_stand() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     cite_world(root.path());
@@ -6507,6 +6602,7 @@ fn the_push_gate_denies_a_cite_that_does_not_stand() {
 /// persona's ballot cannot be told from a seat's.
 #[test]
 fn the_gate_and_consensus_agree_when_the_roster_is_not_readable() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     cite_world(root.path());
@@ -6540,6 +6636,7 @@ fn the_gate_and_consensus_agree_when_the_roster_is_not_readable() {
 /// used to count as a seat, and the push cite stood on it.
 #[test]
 fn a_persona_ballot_does_not_count_as_a_seat_when_the_pack_is_off() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-cite"]);

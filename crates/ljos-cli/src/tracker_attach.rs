@@ -444,6 +444,7 @@ mod tests {
 
     #[test]
     fn one_repository_is_one_remote_however_it_is_written() {
+        let _env_read = crate::test_env_read_lock();
         let a = "https://x-access-token:secret@github.com/Org/tracker.git";
         for b in [
             "https://github.com/Org/tracker",
@@ -459,6 +460,7 @@ mod tests {
 
     #[test]
     fn a_written_url_carries_no_token() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             redact("https://x-access-token:secret@github.com/o/t"),
             "https://github.com/o/t"
@@ -469,6 +471,7 @@ mod tests {
 
     #[test]
     fn a_token_goes_only_to_a_hosted_remote() {
+        let _env_read = crate::test_env_read_lock();
         let want = Some("https://x-access-token@github.com/o/t.git".to_string());
         assert_eq!(token_url("git@github.com:o/t.git"), want);
         assert_eq!(token_url("https://other:pw@github.com/o/t.git"), want);
@@ -483,6 +486,7 @@ mod tests {
 
     #[test]
     fn a_password_comes_out_of_the_url_and_ssh_keeps_its_user() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             split_userinfo("https://x-access-token:s%2Fcret@github.com/o/t.git"),
             (
@@ -554,6 +558,7 @@ mod tests {
     /// clone of either lend no remote. A committed tracker does.
     #[test]
     fn only_the_tracker_lends_its_remote() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::TempDir::new().unwrap();
         let workspace = dir.path().join("workspace");

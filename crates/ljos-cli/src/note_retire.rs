@@ -130,6 +130,7 @@ mod tests {
 
     #[test]
     fn the_notes_the_old_verb_wrote_are_the_ones_retired() {
+        let _env_read = crate::test_env_read_lock();
         let atoms = vec![
             atom("a1", "ljos-note"),
             atom("a2", "ljos-remember"),
@@ -141,6 +142,7 @@ mod tests {
 
     #[test]
     fn a_lesson_is_not_a_note_and_is_left_alone() {
+        let _env_read = crate::test_env_read_lock();
         let atoms = vec![json!({
             "id": "l1",
             "kind": "lesson",
@@ -152,6 +154,7 @@ mod tests {
 
     #[test]
     fn the_marker_stops_a_second_sweep() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         assert!(!swept(dir.path()));
         mark_swept(dir.path(), 12);
@@ -164,6 +167,7 @@ mod tests {
 
     #[test]
     fn the_report_counts_what_it_retired() {
+        let _env_read = crate::test_env_read_lock();
         assert!(line(9513, 0).starts_with("retire-notes: retired 9513 note memories"));
         assert!(line(1, 0).contains("retired 1 note memory"));
         assert!(line(0, 0).contains("no note memories are left"));

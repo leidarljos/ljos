@@ -872,6 +872,7 @@ mod tests {
 
     #[test]
     fn uppercase_and_short_hex_are_refused() {
+        let _env_read = crate::test_env_read_lock();
         let good = "ab".repeat(32);
         assert_eq!(
             hexes_of(&format!("sha256:{good}")).unwrap(),
@@ -889,6 +890,7 @@ mod tests {
     /// still holds the one-line id. Seam must not copy that over the export.
     #[test]
     fn an_exported_digest_sidecar_is_left_in_place() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("store");
         let bag = dir.path().join("bag");
@@ -969,6 +971,7 @@ mod tests {
 
     #[test]
     fn a_symlinked_link_sidecar_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("store");
         let bag = dir.path().join("bag");
@@ -1041,6 +1044,7 @@ mod tests {
 
     #[test]
     fn a_symlinked_store_link_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("store");
         let bag = dir.path().join("bag");
@@ -1079,6 +1083,7 @@ mod tests {
 
     #[test]
     fn a_symlinked_store_entry_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("store");
         let bag = dir.path().join("bag");
@@ -1125,6 +1130,7 @@ mod tests {
 
     #[test]
     fn a_failed_publish_keeps_the_old_bag() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("seat");
         std::fs::create_dir_all(dest.join("kept")).unwrap();
@@ -1182,6 +1188,7 @@ mod tests {
     /// pointed.
     #[test]
     fn a_linked_deeds_directory_is_not_written_through() {
+        let _env_read = crate::test_env_read_lock();
         let git = |cwd: &Path, args: &[&str]| {
             let out = crate::git_cmd()
                 .arg("-C")
@@ -1274,6 +1281,7 @@ mod tests {
     /// from the open, so the outside directory stays empty.
     #[test]
     fn a_deeds_directory_swapped_after_the_open_is_not_written_through() {
+        let _env_read = crate::test_env_read_lock();
         for linked in [".ljos", ".ljos/deeds"] {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path().join("tracker");

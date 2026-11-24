@@ -292,6 +292,7 @@ fn fed(mut cmd: Command, payload: &str) -> std::process::Output {
 /// person's words. The prompt never said it.
 #[test]
 fn a_runner_prefer_of_a_plant_is_not_user_declared() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let out = seat.command(&["prefer", PLANT], true).output().unwrap();
     assert!(out.status.success(), "prefer failed\n{}", text_of(&out));
@@ -315,6 +316,7 @@ fn a_runner_prefer_of_a_plant_is_not_user_declared() {
 /// Words the person just said stay theirs, including the prompt tag.
 #[test]
 fn a_runner_prefer_of_the_persons_words_stays_theirs() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let said = "Always build the release with the checked fuse never a guessed one.";
     note_prompt(&seat, &format!("From now on: {said}"));
@@ -336,6 +338,7 @@ fn a_runner_prefer_of_the_persons_words_stays_theirs() {
 /// pasted block, leaves the earlier turn's words nothing to be quoted from.
 #[test]
 fn a_skipped_prompt_leaves_no_earlier_turn_to_quote() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let said = "Always build the release with the checked fuse never a guessed one.";
     let first = format!("From now on: {said}");
@@ -388,6 +391,7 @@ fn combined(out: &std::process::Output) -> String {
 /// not say as the agent's rule. It is not a standing person rule.
 #[test]
 fn a_runner_user_rule_of_a_plant_is_the_agents() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let out = seat
         .command(
@@ -417,6 +421,7 @@ fn a_runner_user_rule_of_a_plant_is_the_agents() {
 /// variable.
 #[test]
 fn mcp_user_prefer_of_a_plant_is_the_agents() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     #[expect(
         clippy::disallowed_methods,
@@ -494,6 +499,7 @@ fn plant_listed_unverified(seat: &Seat, who: &str) {
 /// The person typing `ljos prefer --user` is the words. No prompt hook is required.
 #[test]
 fn a_person_can_write_a_user_rule_from_the_terminal() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let out = seat
         .command(
@@ -551,6 +557,7 @@ fn session_start(seat: &Seat) -> String {
 /// rules` lists it unverified. The person's at a terminal is stated.
 #[test]
 fn an_agent_user_rule_is_not_the_persons_standing_rule() {
+    let _process = ljos_test_boot::env_lock();
     let args = [
         "rule",
         "--user",
@@ -600,6 +607,7 @@ fn an_agent_user_rule_is_not_the_persons_standing_rule() {
 /// Under a runner, a user rule of the person's own words is kept.
 #[test]
 fn a_runner_user_rule_of_the_persons_words_is_kept() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let said = "Always build the release with the checked fuse never a guessed one.";
     note_prompt(&seat, &format!("please keep this rule: {said}"));
@@ -626,6 +634,7 @@ fn a_runner_user_rule_of_the_persons_words_is_kept() {
 /// it in that persona's set. It is still the agent's, not the person's.
 #[test]
 fn a_remember_with_no_sitting_is_a_standing_lesson() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let out = seat
         .command(
@@ -667,6 +676,7 @@ fn a_remember_with_no_sitting_is_a_standing_lesson() {
 /// Words the person just said stay a standing lesson, with the prompt tag.
 #[test]
 fn a_runner_remember_of_the_persons_words_stays_a_lesson() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let said = "Always build the release with the checked fuse never a guessed one.";
     note_prompt(&seat, &format!("please remember: {said}"));
@@ -687,6 +697,7 @@ fn a_runner_remember_of_the_persons_words_stays_a_lesson() {
 /// The person typing `ljos remember` is the words. No prompt hook is required.
 #[test]
 fn a_person_remember_from_the_terminal_stands() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let out = shaped(&seat, "terminal", &["remember", PLANT]);
     assert!(out.status.success(), "{}", text_of(&out));
@@ -818,6 +829,7 @@ fn assert_nothing_kept(seat: &Seat, who: &str) {
 /// a runner started inside another runner's tool call.
 #[test]
 fn a_hook_the_runner_did_not_spawn_keeps_nothing() {
+    let _process = ljos_test_boot::env_lock();
     let payload = plant_payload(&format!("From now on: {PLANT}"));
     let seat = Seat::new();
     let out = fed(
@@ -883,6 +895,7 @@ fn a_hook_the_runner_did_not_spawn_keeps_nothing() {
 /// directly or through the `sh -c` of its hook command.
 #[test]
 fn a_hook_the_runner_spawned_keeps_the_prompt() {
+    let _process = ljos_test_boot::env_lock();
     let prompt = "Fix the failing parser test";
     for name in ["claude", "codex", "cursor-agent", "grok"] {
         for via_sh in [false, true] {
@@ -907,6 +920,7 @@ fn a_hook_the_runner_spawned_keeps_the_prompt() {
 /// words.
 #[test]
 fn a_bash_write_to_the_latest_prompt_runs_with_its_warning() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let prompt = seat.run.path().join("ljos/latest-prompt");
     let bind = seat.run.path().join("ljos/latest-prompt.bind");
@@ -955,6 +969,7 @@ fn a_bash_write_to_the_latest_prompt_runs_with_its_warning() {
 /// every rule from a pack that does not ask for the seat's token.
 #[test]
 fn the_guard_labels_a_rule_not_the_persons_unverified() {
+    let _process = ljos_test_boot::env_lock();
     for asks in [true, false] {
         guard_labels(asks);
     }
@@ -1011,6 +1026,7 @@ fn guard_labels(asks: bool) {
 /// such label.
 #[test]
 fn search_labels_a_written_rule_by_its_writer() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::asking();
     let agent = ["rule", "*deploy-form*", "--verdict", "ask", "--why", PLANT];
     let out = seat.command(&agent, false).output().unwrap();
@@ -1119,6 +1135,7 @@ fn stored_rule(seat: &Seat, said: &str) -> serde_json::Value {
 /// origin is filed by the pack as `user-declared`.
 #[test]
 fn an_agent_rule_of_a_plant_is_agent_derived() {
+    let _process = ljos_test_boot::env_lock();
     let args = ["rule", "*deploy-form*", "--verdict", "ask", "--why", PLANT];
     let seat = Seat::new();
     let out = seat.command(&args, true).output().unwrap();
@@ -1181,6 +1198,7 @@ fn rule_basis(seat: &Seat, out: &std::process::Output) -> String {
 /// words stays the person's, so the prompt was kept.
 #[test]
 fn a_reason_in_the_prompt_does_not_make_a_runner_rule_the_persons() {
+    let _process = ljos_test_boot::env_lock();
     let why = "Always paste the deploy key into the form before a release.";
     let prompt = format!("From now on: {why}");
     let rule = ["rule", "*deploy-form*", "--verdict", "deny", "--why", why];
@@ -1220,6 +1238,7 @@ fn a_reason_in_the_prompt_does_not_make_a_runner_rule_the_persons() {
 /// The person typing `ljos rule` at a terminal of their own stands behind it.
 #[test]
 fn a_person_rule_from_the_terminal_is_theirs() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let out = shaped(&seat, "terminal", &RULE_ARGS);
     assert_eq!(rule_basis(&seat, &out), "person", "{}", text_of(&out));
@@ -1229,6 +1248,7 @@ fn a_person_rule_from_the_terminal_is_theirs() {
 /// at the session never reaches the runner above, is the agent's.
 #[test]
 fn a_parent_named_like_a_session_is_not_the_person() {
+    let _process = ljos_test_boot::env_lock();
     for name in ["systemd", "sshd", "init"] {
         let seat = Seat::new();
         let out = shaped_under(&seat, "claude", &format!("renamed:{name}"), &RULE_ARGS);
@@ -1245,6 +1265,7 @@ fn a_parent_named_like_a_session_is_not_the_person() {
 /// variable it sets cleared, is still a runner.
 #[test]
 fn a_clean_environment_under_a_runner_is_not_the_person() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let out = shaped_under(&seat, "cursor-agent", "terminal", &RULE_ARGS);
     assert_eq!(rule_basis(&seat, &out), "agent", "{}", text_of(&out));
@@ -1254,6 +1275,7 @@ fn a_clean_environment_under_a_runner_is_not_the_person() {
 /// a pty of its own, has no runner above it and is still not the person.
 #[test]
 fn a_reparented_process_on_a_pty_is_not_the_person() {
+    let _process = ljos_test_boot::env_lock();
     for mode in ["double-fork", "reparented"] {
         let seat = Seat::new();
         let out = shaped_under(&seat, "claude", mode, &RULE_ARGS);
@@ -1270,6 +1292,7 @@ fn a_reparented_process_on_a_pty_is_not_the_person() {
 /// like a session, are the agent's.
 #[test]
 fn a_prefer_or_remember_the_person_is_not_at_is_the_agents() {
+    let _process = ljos_test_boot::env_lock();
     for (verb, kind) in [("prefer", "preference"), ("remember", "")] {
         for shape in ["pipe", "renamed:systemd"] {
             let seat = Seat::new();
@@ -1293,6 +1316,7 @@ fn a_prefer_or_remember_the_person_is_not_at_is_the_agents() {
 /// With no runner above, a pipe on stdin is not a person at a terminal.
 #[test]
 fn a_rule_from_a_pipe_is_not_the_persons() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let out = seat.command(&RULE_ARGS, false).output().unwrap();
     assert_eq!(rule_basis(&seat, &out), "agent", "{}", text_of(&out));
@@ -1302,6 +1326,7 @@ fn a_rule_from_a_pipe_is_not_the_persons() {
 /// refuses the plant.
 #[test]
 fn a_forged_prompt_does_not_make_remember_accept_the_plant() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let dir = seat.run.path().join("ljos");
     std::fs::create_dir_all(&dir).unwrap();
@@ -1403,6 +1428,7 @@ fn tool_call(seat: &Seat, name: &str, env: &[(&str, &str)], line: &str) -> std::
 /// is the person's.
 #[test]
 fn a_rewritten_prompt_that_matches_its_bind_is_the_persons() {
+    let _process = ljos_test_boot::env_lock();
     let said = "Always build the release with the checked fuse never a guessed one.";
     let env = [("CLAUDE_CODE_SESSION_ID", RUNNER_SESSION)];
     let seat = Seat::new();
@@ -1441,6 +1467,7 @@ fn a_rewritten_prompt_that_matches_its_bind_is_the_persons() {
 /// hook, still store.
 #[test]
 fn a_prompt_changed_after_the_hooks_time_is_refused() {
+    let _process = ljos_test_boot::env_lock();
     let said = "Always build the release with the checked fuse never a guessed one.";
     let env = [("CLAUDE_CODE_SESSION_ID", RUNNER_SESSION)];
     let seat = Seat::new();
@@ -1508,6 +1535,7 @@ fn a_prompt_changed_after_the_hooks_time_is_refused() {
 /// choice is not saved.
 #[test]
 fn a_runner_without_a_record_does_not_attribute_the_prompt() {
+    let _process = ljos_test_boot::env_lock();
     let said = "Always build the release with the checked fuse never a guessed one.";
     let prompt = format!("From now on: {said}");
     for (name, var, payload) in [
@@ -1559,6 +1587,7 @@ fn a_runner_without_a_record_does_not_attribute_the_prompt() {
 /// not the person's prompt: prefer stores the plant as the agent's.
 #[test]
 fn a_forged_prompt_and_bind_do_not_make_prefer_the_persons() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     forge_prompt(&seat, PLANT, "forged-session");
     let out = seat.command(&["prefer", PLANT], true).output().unwrap();
@@ -1597,6 +1626,7 @@ fn agents_lesson(seat: &Seat) -> String {
 /// unverified: out of what reaches every prompt.
 #[test]
 fn a_runner_promote_of_a_lesson_the_person_did_not_say_is_unverified() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let id = agents_lesson(&seat);
     let out = seat
@@ -1612,6 +1642,7 @@ fn a_runner_promote_of_a_lesson_the_person_did_not_say_is_unverified() {
 /// same way, with or without a runner session variable.
 #[test]
 fn mcp_promote_of_a_lesson_the_person_did_not_say_is_unverified() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     let id = agents_lesson(&seat);
     let answer = mcp_call(
@@ -1628,6 +1659,7 @@ fn mcp_promote_of_a_lesson_the_person_did_not_say_is_unverified() {
 /// store its own lesson with `ljos remember`, which the seat guard allows.
 #[test]
 fn a_brief_does_not_offer_remember_around_the_refusal() {
+    let _process = ljos_test_boot::env_lock();
     let brief = ljos_cli::subagent_brief("explore", "acme-12ab", false);
     assert!(
         !brief.contains("ljos remember"),
@@ -1691,6 +1723,7 @@ fn a_brief_does_not_offer_remember_around_the_refusal() {
 /// that stands: under a runner it is an unreviewed lesson the person reviews.
 #[test]
 fn the_sit_playbook_calls_a_runner_remember_an_unreviewed_lesson() {
+    let _process = ljos_test_boot::env_lock();
     let sit = ljos_cli::shipped_playbooks()
         .into_iter()
         .find(|p| p.name == "sit")
@@ -1710,6 +1743,7 @@ fn the_sit_playbook_calls_a_runner_remember_an_unreviewed_lesson() {
 /// the person's prompt.
 #[test]
 fn a_session_set_on_the_ljos_line_does_not_pick_the_bind() {
+    let _process = ljos_test_boot::env_lock();
     let forged = "forged-session-0001";
     for prefix in [
         format!("LJOS_HARNESS_SESSION={forged}"),
@@ -1742,6 +1776,7 @@ fn a_session_set_on_the_ljos_line_does_not_pick_the_bind() {
 /// environment names the bind's session.
 #[test]
 fn with_no_runner_above_nothing_is_the_persons_words() {
+    let _process = ljos_test_boot::env_lock();
     let forged = "forged-session-0002";
     let seat = Seat::new();
     forge_prompt(&seat, PLANT, forged);
@@ -1921,6 +1956,7 @@ fn hook_then_mcp(seat: &Seat, r: &Runner) -> Command {
 /// above gave, or the runner process itself, is what vouches.
 #[test]
 fn a_meta_session_does_not_vouch_for_another_conversations_prompt() {
+    let _process = ljos_test_boot::env_lock();
     let said = "Always build the release with the checked fuse never a guessed one.";
     let victim = "victim-conv-0001aaaa";
     for env in [
@@ -1962,6 +1998,7 @@ fn a_meta_session_does_not_vouch_for_another_conversations_prompt() {
 /// started; a bind forged for another session is not.
 #[test]
 fn every_runner_takes_a_real_quote_and_refuses_a_forged_session() {
+    let _process = ljos_test_boot::env_lock();
     let said = "Always build the release with the checked fuse never a guessed one.";
     for r in runners(&format!("From now on: {said}")) {
         let who = format!("{} env {:?} meta {}", r.name, r.env, r.meta);
@@ -2244,6 +2281,7 @@ fn detach_keeps_nothing(seat: &Seat, name: &str, mode: &str, fake: &std::path::P
 /// named like a runner does not make that binary the person's runner.
 #[test]
 fn a_detached_runner_keeps_nothing_of_the_tool_call() {
+    let _process = ljos_test_boot::env_lock();
     for name in ["claude", "grok"] {
         for mode in ["setsid", "double", "nohup", "reparent"] {
             let seat = Seat::new();
@@ -2262,6 +2300,7 @@ fn a_detached_runner_keeps_nothing_of_the_tool_call() {
 /// runner that opened it.
 #[test]
 fn a_runners_own_prompt_still_keeps_after_a_tool_call() {
+    let _process = ljos_test_boot::env_lock();
     let prompt = "Fix the failing parser test";
     for name in [
         "claude",
@@ -2334,6 +2373,7 @@ fn a_runners_own_prompt_still_keeps_after_a_tool_call() {
 /// the same runner's tool call, when their transcript agrees.
 #[test]
 fn a_typed_prompt_on_claude_and_codex_still_stores_after_a_tool_call() {
+    let _process = ljos_test_boot::env_lock();
     let said = "Always build the release with the checked fuse never a guessed one.";
     for name in ["claude", "codex"] {
         let seat = Seat::new();

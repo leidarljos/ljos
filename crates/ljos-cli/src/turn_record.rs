@@ -232,6 +232,7 @@ mod tests {
 
     #[test]
     fn a_claude_tool_result_is_not_the_persons_turn() {
+        let _env_read = crate::test_env_read_lock();
         let t = lines(&[
             serde_json::json!({"type": "user", "message": {"role": "user", "content": "Fix the parser test"}}),
             serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use"}]}}),
@@ -251,6 +252,7 @@ mod tests {
 
     #[test]
     fn codex_and_cursor_records_name_the_persons_turn() {
+        let _env_read = crate::test_env_read_lock();
         let codex = lines(&[
             serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>"}]}}),
             serde_json::json!({"type": "event_msg", "payload": {"type": "user_message", "message": "Always run the tests with --release"}}),
@@ -273,6 +275,7 @@ mod tests {
     /// the same entry, and a short clause taken from it is not.
     #[test]
     fn a_long_prompt_agrees_by_the_full_hash() {
+        let _env_read = crate::test_env_read_lock();
         let prompt = format!(
             "Keep the release notes in one file. {}",
             "word ".repeat(4000)
@@ -313,6 +316,7 @@ mod tests {
 
     #[test]
     fn the_record_is_read_under_the_runners_own_home() {
+        let _env_read = crate::test_env_read_lock();
         let env = vec![("HOME".to_string(), "/home/u".to_string())];
         assert_eq!(
             roots("claude", &env),

@@ -222,6 +222,7 @@ mod tests {
 
     #[test]
     fn a_finished_or_cancelled_ticket_is_closed() {
+        let _env_read = crate::test_env_read_lock();
         assert!(is_closed("DONE"));
         assert!(is_closed(" CANCELLED "));
         assert!(!is_closed("TODO"));
@@ -231,6 +232,7 @@ mod tests {
 
     #[test]
     fn a_reopen_goes_back_to_the_state_the_close_left() {
+        let _env_read = crate::test_env_read_lock();
         let v = json!({"logbook": [
             {"to": "DONE", "from": "STARTED", "timestamp": "[2026-10-20 Tue 09:00]"},
             {"to": "STARTED", "from": "TODO", "timestamp": "[2026-10-19 Mon 09:00]"},
@@ -245,6 +247,7 @@ mod tests {
 
     #[test]
     fn an_undo_says_who_undid_it_and_what() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(reopen_note("saddle", "DONE"), "reopened: saddle from DONE");
         let line = withdrawn_note("saddle", "the parser keeps the hyphen");
         assert_eq!(line, "note-withdrawn: saddle the parser keeps the hyphen");
@@ -257,6 +260,7 @@ mod tests {
 
     #[test]
     fn ljos_bookkeeping_is_not_a_note_a_seat_takes_back() {
+        let _env_read = crate::test_env_read_lock();
         assert!(machinery("ballot-sig: saddle ship a1"));
         assert!(machinery("quorum: 3 by 2026-10-30T00:00:00Z"));
         assert!(machinery("note-withdrawn: saddle a note"));
@@ -265,6 +269,7 @@ mod tests {
 
     #[test]
     fn a_text_names_one_note_or_says_it_cannot() {
+        let _env_read = crate::test_env_read_lock();
         let logbook = vec![
             note("the parser keeps the hyphen"),
             note("the parser drops the dash"),
@@ -284,6 +289,7 @@ mod tests {
 
     #[test]
     fn a_note_already_taken_back_is_not_taken_back_twice() {
+        let _env_read = crate::test_env_read_lock();
         let logbook = vec![
             note("note-withdrawn: saddle the parser keeps the hyphen"),
             note("the parser keeps the hyphen"),
@@ -294,6 +300,7 @@ mod tests {
 
     #[test]
     fn a_logbook_line_names_the_seat_that_wrote_it() {
+        let _env_read = crate::test_env_read_lock();
         let attributed = json!({
             "note": "the parser keeps the hyphen",
             "raw": "- Noted by saddle [2026-10-16 Fri 10:35]",

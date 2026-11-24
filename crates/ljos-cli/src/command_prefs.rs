@@ -309,6 +309,7 @@ mod tests {
 
     #[test]
     fn a_forbidding_preference_proposes_an_ask_over_its_command() {
+        let _env_read = crate::test_env_read_lock();
         assert!(asks(PREFS[0], "npm install lodash"));
         assert!(asks(PREFS[0], "npm i -D vitest"));
         assert!(!asks(PREFS[0], "pnpm add lodash"));
@@ -406,6 +407,7 @@ mod tests {
 
     #[test]
     fn a_preference_bears_on_the_command_it_names() {
+        let _env_read = crate::test_env_read_lock();
         let yes = [
             (0, "npm install lodash"),
             (2, "git push origin main"),

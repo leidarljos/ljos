@@ -444,6 +444,7 @@ mod tests {
 
     #[test]
     fn a_read_does_not_create_the_queue_dir_or_the_lock() {
+        let _env_read = crate::test_env_read_lock();
         let root = test_root().join("absent-read");
         let _ = std::fs::remove_dir_all(&root);
         let missing = root.join("ljos");
@@ -457,6 +458,7 @@ mod tests {
 
     #[test]
     fn an_old_line_without_kind_is_a_note() {
+        let _env_read = crate::test_env_read_lock();
         let dir = dir("old");
         #[expect(
             clippy::disallowed_methods,
@@ -478,6 +480,7 @@ mod tests {
 
     #[test]
     fn a_lesson_that_closes_another_atom_is_a_different_copy() {
+        let _env_read = crate::test_env_read_lock();
         let dir = dir("closes");
         let mut lesson = note("p-1", "one line");
         lesson.kind = "lesson".into();
@@ -494,6 +497,7 @@ mod tests {
     /// before it are.
     #[test]
     fn a_torn_last_copy_leaves_the_queue() {
+        let _env_read = crate::test_env_read_lock();
         let dir = dir("torn");
         let mut bytes =
             format!("{}\n", serde_json::to_string(&note("p-1", "kept")).unwrap()).into_bytes();
@@ -513,6 +517,7 @@ mod tests {
     /// taken, so two copies can still land on one line.
     #[test]
     fn concurrent_queue_rows_each_parse() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::PermissionsExt;
         let dir = dir("concurrent");
         const THREADS: usize = 32;
@@ -556,6 +561,7 @@ mod tests {
     /// than written through to its target.
     #[test]
     fn a_rewrite_stays_private_and_refuses_a_symlink() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::PermissionsExt;
         let dir = dir("rewrite");
         push_in(&dir, note("p-1", "a")).unwrap();
@@ -600,6 +606,7 @@ mod tests {
     /// stays for doctor to name.
     #[test]
     fn emptying_a_dangling_linked_queue_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let dir = dir("empty-dangling");
         let path = queue_file(&dir);
         #[expect(
@@ -617,6 +624,7 @@ mod tests {
     /// the rewrite.
     #[test]
     fn a_drain_sets_aside_what_it_cannot_read() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::PermissionsExt;
         let dir = dir("aside");
         let sent = format!("{}\n", serde_json::to_string(&note("p-1", "sent")).unwrap());
@@ -664,6 +672,7 @@ mod tests {
     /// the damaged file, and the next tidy finds nothing to move.
     #[test]
     fn a_tidy_sets_aside_a_queue_with_no_note_in_it() {
+        let _env_read = crate::test_env_read_lock();
         let dir = dir("tidy");
         #[expect(
             clippy::disallowed_methods,
@@ -684,6 +693,7 @@ mod tests {
     /// changed.
     #[test]
     fn a_linked_damaged_name_is_not_followed() {
+        let _env_read = crate::test_env_read_lock();
         let dir = dir("linked");
         let real = dir.join("note-queue.jsonl.2026-01-01.damaged");
         #[expect(
@@ -721,6 +731,7 @@ mod tests {
     /// lists nothing from that dir.
     #[test]
     fn a_linked_state_dir_lists_nothing_from_outside() {
+        let _env_read = crate::test_env_read_lock();
         let root = dir("linked-dir");
         let outside = root.join("outside");
         std::fs::create_dir(&outside).unwrap();
@@ -740,6 +751,7 @@ mod tests {
 
     #[test]
     fn the_same_note_waits_once() {
+        let _env_read = crate::test_env_read_lock();
         let dir = dir("once");
         assert!(push_in(&dir, note("p-1", "one line")).unwrap());
         assert!(!push_in(&dir, note("p-1", " one line ")).unwrap());
@@ -749,6 +761,7 @@ mod tests {
 
     #[test]
     fn a_drain_keeps_waiting_rows_and_tries_later_ones() {
+        let _env_read = crate::test_env_read_lock();
         let dir = dir("order");
         for (issue, text) in [("p-1", "a"), ("p-2", "b"), ("p-3", "c"), ("p-4", "d")] {
             push_in(&dir, note(issue, text)).unwrap();
@@ -800,6 +813,7 @@ mod tests {
     /// Another seat can queue a note while this one is asking the pack.
     #[test]
     fn a_drain_does_not_hold_the_queue_lock_while_the_pack_is_asked() {
+        let _env_read = crate::test_env_read_lock();
         let dir = dir("lock-during-send");
         push_in(&dir, note("p-1", "held")).unwrap();
         let done = drain_in(&dir, |_| {

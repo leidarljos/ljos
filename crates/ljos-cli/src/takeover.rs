@@ -238,6 +238,7 @@ mod tests {
 
     #[test]
     fn quiet_runs_from_the_claim_stamp() {
+        let _env_read = crate::test_env_read_lock();
         let c = card("[2026-11-18 Wed 05:00]", &[]);
         let now = at("[2026-11-18 Wed 06:00]");
         assert_eq!(quiet_secs(&c, now), Some(3600));
@@ -245,6 +246,7 @@ mod tests {
 
     #[test]
     fn a_later_note_restarts_the_quiet_clock() {
+        let _env_read = crate::test_env_read_lock();
         let c = card(
             "[2026-11-18 Wed 05:00]",
             &[("checked the codec", "[2026-11-18 Wed 05:50]")],
@@ -255,6 +257,7 @@ mod tests {
 
     #[test]
     fn the_release_bookkeeping_note_is_not_activity() {
+        let _env_read = crate::test_env_read_lock();
         let c = card(
             "[2026-11-18 Wed 05:00]",
             &[("claim released: alice", "[2026-11-18 Wed 05:55]")],
@@ -265,11 +268,13 @@ mod tests {
 
     #[test]
     fn a_card_with_no_time_has_no_quiet() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(quiet_secs(&json!({"logbook": []}), 0), None);
     }
 
     #[test]
     fn a_stamp_in_the_future_is_not_quiet() {
+        let _env_read = crate::test_env_read_lock();
         let c = card("[2026-11-18 Wed 07:00]", &[]);
         let now = at("[2026-11-18 Wed 06:00]");
         assert_eq!(quiet_secs(&c, now), Some(0));
@@ -277,6 +282,7 @@ mod tests {
 
     #[test]
     fn spans_read_in_one_unit() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(span_words(1), "1 second");
         assert_eq!(span_words(59), "59 seconds");
         assert_eq!(span_words(60), "1 minute");
@@ -288,6 +294,7 @@ mod tests {
 
     #[test]
     fn the_stale_refusal_names_one_takeover_command_on_one_line() {
+        let _env_read = crate::test_env_read_lock();
         let said = stale_refusal("demo-aaaa", "brio", "acme", 7200);
         assert!(said.contains("The holder looks stale"), "{said}");
         assert!(said.contains("`ljos claim demo-aaaa --takeover`"), "{said}");

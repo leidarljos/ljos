@@ -54,6 +54,7 @@ wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 
 [dev-dependencies]
 tempfile = "3"
+ljos-test-boot = { path = "../ljos-test-boot" }
 
 [lints]
 workspace = true

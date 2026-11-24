@@ -522,6 +522,7 @@ mod tests {
 
     #[test]
     fn a_ticket_id_is_not_shaped_like_a_memory() {
+        let _env_read = crate::test_env_read_lock();
         assert!(!memory_shaped("proj-1a2b"));
         assert!(!memory_shaped("demo-none"));
         assert!(memory_shaped("01234567"));
@@ -531,6 +532,7 @@ mod tests {
 
     #[test]
     fn each_id_form_names_one_memory() {
+        let _env_read = crate::test_env_read_lock();
         let full = format!("{}{}", "01234567", "89abcdef".repeat(7));
         let local = format!("local:f0ceee3d{}", "ab".repeat(28));
         let atoms = vec![
@@ -560,6 +562,7 @@ mod tests {
 
     #[test]
     fn a_long_lesson_wraps_once_to_the_terminal_width() {
+        let _env_read = crate::test_env_read_lock();
         let text = "The kiln holds a long lesson about the lexical default and the fuse that beat BM25 by two points on the turns the panel measured, and the glaze log that the morning firing left behind on the shelf.";
         let atoms = vec![atom("0123456789abcdef", text, json!({}))];
         for cols in [40, 160] {
@@ -577,6 +580,7 @@ mod tests {
 
     #[test]
     fn a_long_lesson_wraps_to_eighty_columns() {
+        let _env_read = crate::test_env_read_lock();
         let text = "The kiln holds a long lesson about the lexical default and the fuse that beat BM25 by two points on the turns the panel measured.";
         let atoms = vec![atom("0123456789abcdef", text, json!({}))];
         let page = render(&atoms, 0, false, crate::output_wrap::Width::FIXED);
@@ -594,6 +598,7 @@ mod tests {
 
     #[test]
     fn a_retired_memory_stays_readable() {
+        let _env_read = crate::test_env_read_lock();
         let id = format!("{}{}", "abcdef01", "23456789".repeat(7));
         let later = format!("{}{}", "abcdef02", "23456789".repeat(7));
         let atoms = vec![
@@ -626,6 +631,7 @@ mod tests {
 
     #[test]
     fn an_ambiguous_prefix_names_each_candidate() {
+        let _env_read = crate::test_env_read_lock();
         let left = format!("{}{}", "aaaaaaaa", "1".repeat(56));
         let right = format!("{}{}", "aaaaaaaa", "2".repeat(56));
         let line = ambiguous("aaaaaaaa", &[left.clone(), right.clone()]);

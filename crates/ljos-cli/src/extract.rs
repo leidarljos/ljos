@@ -414,6 +414,7 @@ mod tests {
 
     #[test]
     fn a_transcript_yields_its_durable_sentences_once() {
+        let _env_read = crate::test_env_read_lock();
         let got = facts(T, &BTreeSet::new());
         assert_eq!(got.len(), 3, "{got:?}");
         assert!(got[0].starts_with("The root cause was"));
@@ -426,6 +427,7 @@ mod tests {
 
     #[test]
     fn already_kept_facts_are_skipped_and_the_count_is_bounded() {
+        let _env_read = crate::test_env_read_lock();
         let kept: BTreeSet<String> = [normal(
             "The root cause was a shared temp dir between tests.",
         )]
@@ -442,6 +444,7 @@ mod tests {
     /// Unset runs the read. Only `off` stops it.
     #[test]
     fn extraction_runs_unless_turned_off() {
+        let _env_read = crate::test_env_read_lock();
         assert!(asked_by(None));
         assert!(asked_by(Some("")));
         assert!(asked_by(Some("on")));
@@ -453,6 +456,7 @@ mod tests {
 
     #[test]
     fn a_long_transcript_is_read_from_its_tail() {
+        let _env_read = crate::test_env_read_lock();
         let dir = std::env::temp_dir().join(format!("ljos-tail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -478,6 +482,7 @@ mod tests {
 
     #[test]
     fn questions_code_and_short_lines_are_not_facts() {
+        let _env_read = crate::test_env_read_lock();
         assert!(!is_fact("Should we always do this before a release?"));
         assert!(!is_fact("Always."));
         assert!(!is_fact(

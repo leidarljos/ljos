@@ -27,6 +27,7 @@ fn write_hold(home: &std::path::Path, issue: &str) {
 
 #[test]
 fn search_names_finish_with_a_lesson_when_the_top_ticket_is_yours() {
+    let _process = ljos_test_boot::env_lock();
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     write_hold(&home, "demo-kiln");
@@ -109,6 +110,7 @@ impl Seat {
 
 #[test]
 fn file_top_defaults_to_the_seat_project() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new("prefix=demo");
     let out = seat.ljos(&["file", "a ticket", "--top"]);
     let err = String::from_utf8_lossy(&out.stderr);
@@ -121,6 +123,7 @@ fn file_top_defaults_to_the_seat_project() {
 
 #[test]
 fn file_top_without_a_seat_project_names_p() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new("'vissue test'");
     let out = seat.ljos(&["file", "a ticket", "--top"]);
     assert!(!out.status.success());
@@ -132,6 +135,7 @@ fn file_top_without_a_seat_project_names_p() {
 
 #[test]
 fn sitting_plan_accepts_top() {
+    let _process = ljos_test_boot::env_lock();
     #[expect(
         clippy::disallowed_methods,
         reason = "starts a program outside git hook code"

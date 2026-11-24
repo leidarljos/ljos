@@ -79,6 +79,7 @@ fn field<'a>(text: &'a str, name: &str) -> &'a str {
 /// Nothing but `LJOS_SEAT` or a call's seat argument names the seat.
 #[test]
 fn only_a_named_seat_or_a_call_argument_names_the_seat() {
+    let _process = ljos_test_boot::env_lock();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config");
     std::fs::create_dir_all(config.join("ljos")).unwrap();

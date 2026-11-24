@@ -205,6 +205,7 @@ mod tests {
 
     #[test]
     fn panic_text_names_the_thread_place_and_message() {
+        let _env_read = crate::test_env_read_lock();
         let text = panic_text("main", "src/a.rs:3:5", "boom", None);
         assert_eq!(
             text,
@@ -216,6 +217,7 @@ mod tests {
 
     #[test]
     fn prose_wraps_on_a_terminal_and_machine_text_does_not() {
+        let _env_read = crate::test_env_read_lock();
         let text = "one two three four five six seven eight nine ten eleven\n";
         let narrow = Width::columns(20);
         let wrapped = shape(text, narrow, Kind::Prose);
@@ -227,6 +229,7 @@ mod tests {
 
     #[test]
     fn pretty_json_prose_stays_whole_on_either_stream() {
+        let _env_read = crate::test_env_read_lock();
         let text =
             "{\n  \"said\": \"exported forty memories to standard output for the seat\"\n}\n";
         assert_eq!(shape(text, Width::columns(20), Kind::Prose), text);

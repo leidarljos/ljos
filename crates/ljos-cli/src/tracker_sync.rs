@@ -297,6 +297,7 @@ mod tests {
 
     #[test]
     fn the_sync_line_names_the_count_and_the_fix() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, _) = checkout(dir.path());
@@ -363,6 +364,7 @@ warn\ttickets\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted iss
 
     #[test]
     fn finish_pushes_when_the_config_allows_it() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, origin) = checkout(dir.path());
@@ -410,6 +412,7 @@ warn\ttickets\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted iss
 
     #[test]
     fn review_repro_finish_pushes_a_new_branch_that_is_not_the_default() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, origin) = checkout(dir.path());
@@ -425,6 +428,7 @@ warn\ttickets\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted iss
 
     #[test]
     fn review_repro_finish_pushes_a_tracked_feature_branch() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, origin) = checkout(dir.path());
@@ -444,6 +448,7 @@ warn\ttickets\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted iss
 
     #[test]
     fn review_repro_the_suggested_fix_leaves_a_new_issue_file() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, _) = checkout(dir.path());
@@ -476,6 +481,7 @@ warn\ttickets\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted iss
 
     #[test]
     fn review_repro_a_feature_branch_with_no_upstream_counts_as_unpushed() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, origin) = checkout(dir.path());
@@ -496,6 +502,7 @@ warn\ttickets\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted iss
 
     #[test]
     fn review2_main_tracking_a_feature_branch_pushes_the_feature() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, origin) = checkout(dir.path());
@@ -515,6 +522,7 @@ warn\ttickets\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted iss
 
     #[test]
     fn review2_main_tracking_a_feature_branch_default_push_config() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, origin) = checkout(dir.path());
@@ -534,6 +542,7 @@ warn\ttickets\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted iss
 
     #[test]
     fn review2_main_tracking_another_remote_pushes_there() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, origin) = checkout(dir.path());
@@ -557,6 +566,7 @@ warn\ttickets\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted iss
 
     #[test]
     fn review2_the_fix_commits_and_pushes_a_stray_file() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, origin) = checkout(dir.path());

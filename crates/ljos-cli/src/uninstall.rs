@@ -398,6 +398,7 @@ mod tests {
     /// and refuses to stand in for the rest of the program.
     #[test]
     fn the_stub_allows_hooks_and_nothing_else() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ljos");
         write_stub(&path).unwrap();
@@ -443,6 +444,7 @@ mod tests {
     /// program ends up as one with it.
     #[test]
     fn the_script_carries_the_same_stub() {
+        let _env_read = crate::test_env_read_lock();
         let script = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/uninstall.sh"),
         )
@@ -458,6 +460,7 @@ mod tests {
     /// a hand-deleted ljos leaves no runner blocked.
     #[test]
     fn the_script_names_every_shipped_hooks_file() {
+        let _env_read = crate::test_env_read_lock();
         let script = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/uninstall.sh"),
         )
@@ -490,6 +493,7 @@ mod tests {
 
     #[test]
     fn a_dry_run_removes_nothing() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -535,6 +539,7 @@ mod tests {
 
     #[test]
     fn seat_programs_that_stay_name_the_writer_and_all() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();

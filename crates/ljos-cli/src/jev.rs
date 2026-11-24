@@ -1960,6 +1960,7 @@ mod tests {
 
     #[test]
     fn one_request_asks_about_every_candidate_and_both_cues() {
+        let _env_read = crate::test_env_read_lock();
         let body = request("jev-1.13.0", "fix the ci", &["alpha claim", "beta claim"]);
         let q = body["questions"].as_object().unwrap();
         assert_eq!(
@@ -1976,6 +1977,7 @@ mod tests {
 
     #[test]
     fn a_full_answer_is_read_and_a_partial_one_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let full = serde_json::json!({
             "answers": {
                 "bears_0": {"type": "noul", "noul": 0.9},
@@ -2009,6 +2011,7 @@ mod tests {
 
     #[test]
     fn jev_is_off_without_a_file_and_off_when_the_file_says_so() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
         // Safety: the test sets and clears this for itself.
@@ -2049,6 +2052,7 @@ mod tests {
 
     #[test]
     fn a_chat_reply_is_read_in_jev_shape() {
+        let _env_read = crate::test_env_read_lock();
         let body = request("m", "fix the ci", &["alpha claim", "beta claim"]);
         let chat = chat_request("m", &body);
         assert_eq!(chat["response_format"]["type"], "json_object");
@@ -2077,6 +2081,7 @@ mod tests {
 
     #[test]
     fn injection_and_effort_are_read_when_answered_and_optional_when_not() {
+        let _env_read = crate::test_env_read_lock();
         let with = serde_json::json!({"answers": {
             "bears_0": {"type": "noul", "noul": 0.9},
             "correction": {"type": "noul", "noul": 0.1},
@@ -2113,6 +2118,7 @@ mod tests {
 
     #[test]
     fn a_chat_ballot_fills_what_the_model_left_out() {
+        let _env_read = crate::test_env_read_lock();
         let options = vec!["A".to_string(), "B".to_string()];
         let body = ballot_request("m", "brief", &options);
         let content = serde_json::json!({"answers": {
@@ -2140,6 +2146,7 @@ mod tests {
 
     #[test]
     fn the_command_backend_answers_from_stdout_and_needs_no_key() {
+        let _env_read = crate::test_env_read_lock();
         let cfg: Config = toml::from_str(
             "enabled = true\nbackend = \"command\"\ncommand = [\"sh\", \"-c\", \
              \"cat >/dev/null; echo '{\\\"answers\\\": {\\\"bears_0\\\": 0.8, \\\"correction\\\": 0, \\\"choice\\\": 0.2}}'\"]\n",
@@ -2166,6 +2173,7 @@ mod tests {
 
     #[test]
     fn judges_are_named_and_routed_and_unknown_names_drop_out() {
+        let _env_read = crate::test_env_read_lock();
         let cfg: Config = toml::from_str(concat!(
             "enabled = true\nbackend = \"command\"\ncommand = [\"true\"]\n",
             "[judges.local]\nbackend = \"command\"\ncommand = [\"true\"]\nweight = 2.0\n",
@@ -2192,6 +2200,7 @@ mod tests {
 
     #[test]
     fn a_pool_averages_log_odds_and_multiplies_distributions() {
+        let _env_read = crate::test_env_read_lock();
         let body = serde_json::json!({"questions": {
             "q": {"type": "noul"},
             "c": {"type": "choice", "criteria": {"A": "a", "B": "b"}},
@@ -2230,6 +2239,7 @@ mod tests {
 
     #[test]
     fn a_key_line_gives_its_value() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(key_from("sk-or-v1-abc\n").as_deref(), Some("sk-or-v1-abc"));
         assert_eq!(
             key_from("apikey: sk-or-v1-abc\nurl: x\n").as_deref(),
@@ -2244,6 +2254,7 @@ mod tests {
 
     #[test]
     fn a_ballot_carries_its_confidence_and_forecast_and_escalates_under_the_cut() {
+        let _env_read = crate::test_env_read_lock();
         let options = vec!["age".to_string(), "gpg".to_string()];
         let body = ballot_request("jev-1.13.0", "You are brio.", &options);
         assert_eq!(body["questions"]["ballot"]["type"], "choice");
@@ -2276,6 +2287,7 @@ mod tests {
 
     #[test]
     fn an_identical_request_is_answered_from_the_cache_and_only_that_one() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
         // Safety: the test sets and clears this for itself.
@@ -2309,6 +2321,7 @@ mod tests {
 
     #[test]
     fn a_stop_is_held_only_on_done_beside_red_or_an_open_deferral() {
+        let _env_read = crate::test_env_read_lock();
         let a = |c: f64, g: f64, d: f64| Audit {
             claims_complete: c,
             tests_green: g,
@@ -2348,6 +2361,7 @@ mod tests {
 
     #[test]
     fn sha256_of_empty_and_abc_match() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -2360,6 +2374,7 @@ mod tests {
 
     #[test]
     fn a_chat_judge_without_a_price_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let chat: Config = toml::from_str(
             "enabled = true\nbackend = \"chat\"\nendpoint = \"http://127.0.0.1:9/v1\"\n",
         )
@@ -2383,6 +2398,7 @@ mod tests {
 
     #[test]
     fn option_order_is_stable_per_persona_and_differs_across_them() {
+        let _env_read = crate::test_env_read_lock();
         let options = vec!["age".into(), "gpg".into(), "minisign".into()];
         let a = shuffle_options("security-reviewer", &options);
         assert_eq!(a, shuffle_options("security-reviewer", &options));
@@ -2394,6 +2410,7 @@ mod tests {
 
     #[test]
     fn a_judge_log_scores_a_ballot_against_an_outcome() {
+        let _env_read = crate::test_env_read_lock();
         let entries = vec![
             serde_json::json!({
                 "kind": "ballot", "status": "ok",
@@ -2437,6 +2454,7 @@ mod tests {
 
     #[test]
     fn a_command_answer_is_logged_without_the_prompt() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = env_lock();
         let cfg_dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
@@ -2496,6 +2514,7 @@ mod tests {
     /// the middle of a character. The rows before it are still the log.
     #[test]
     fn a_torn_last_answer_leaves_the_rest_of_the_log() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = env_lock();
         let state = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("XDG_STATE_HOME", state.path()) };
@@ -2519,6 +2538,7 @@ mod tests {
     /// does not parse is an answer that cannot be scored.
     #[test]
     fn concurrent_log_rows_each_parse() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = env_lock();
         let state = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("XDG_STATE_HOME", state.path()) };

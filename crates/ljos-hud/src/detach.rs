@@ -101,6 +101,8 @@ mod tests {
 
     #[test]
     fn child_always_foreground_and_drops_toggle() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let mut cli = base();
         cli.toggle = true;
         let args = child_args(&cli);
@@ -114,6 +116,8 @@ mod tests {
 
     #[test]
     fn child_keeps_hide() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let mut cli = base();
         cli.hide = true;
         let args = child_args(&cli);
@@ -123,6 +127,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn start_detached_is_noop_when_summon_accepts() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         use std::os::unix::net::UnixListener;
 
         let _guard = crate::env_lock();

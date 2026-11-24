@@ -2807,6 +2807,7 @@ dependencies = [
  "icedtea",
  "ksni",
  "ljos",
+ "ljos-test-boot",
  "serde_json",
  "tempfile",
  "tokio",

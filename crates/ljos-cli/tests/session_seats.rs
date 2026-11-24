@@ -69,6 +69,7 @@ fn field<'a>(text: &'a str, name: &str) -> &'a str {
 
 #[test]
 fn two_sessions_differ_and_an_explicit_seat_wins() {
+    let _process = ljos_test_boot::env_lock();
     let world = World::new();
     let one = world.ljos(
         &["seat"],
@@ -121,6 +122,7 @@ fn two_sessions_differ_and_an_explicit_seat_wins() {
 /// so the parent's id does not name the seat.
 #[test]
 fn a_parent_session_id_does_not_name_this_process() {
+    let _process = ljos_test_boot::env_lock();
     let world = World::new();
     let id = "0199a1b2-claude-parent-only";
     let forbidden = format!("claude-{}", ljos_cli::session_tag(id));
@@ -148,6 +150,7 @@ fn a_parent_session_id_does_not_name_this_process() {
 /// fix is one export.
 #[test]
 fn the_source_names_this_process_and_a_missing_id_says_so() {
+    let _process = ljos_test_boot::env_lock();
     let world = World::new();
     let id = "0199a1b2-claude-session-one";
     let first = world.ljos(&["seat"], &[("CLAUDE_CODE_SESSION_ID", id)]);

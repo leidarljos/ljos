@@ -67,6 +67,7 @@ mod tests {
 
     #[test]
     fn mocha_tokens_match_seat_aliases() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let t = tokens();
         assert_eq!(t.canvas, BASE);
         assert_eq!(t.surface, SURFACE0);
@@ -76,6 +77,7 @@ mod tests {
 
     #[test]
     fn focus_ring_meets_three_to_one_on_base() {
+        let _process_read = ljos_test_boot::env_read_lock();
         assert!(
             contrast_ratio(BLUE, BASE) >= 3.0,
             "focus ring {} on base",

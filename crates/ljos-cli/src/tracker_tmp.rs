@@ -224,6 +224,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_write_replaces_the_file_and_leaves_no_temporary() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("issues.org");
         #[expect(
@@ -240,6 +241,7 @@ pub(crate) mod tests {
     /// list's matches `/.ljos-commit.*.tmp.*` in `info/exclude`.
     #[test]
     fn a_dotfile_temporary_has_one_leading_dot() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".ljos-commit.pending");
         let mut seen = String::new();
@@ -255,6 +257,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_failed_rename_step_leaves_the_old_file_and_no_temporary() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("issues.org");
         #[expect(
@@ -277,6 +280,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_panic_mid_write_leaves_no_temporary() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("issues.org");
         let caught = std::panic::catch_unwind(|| {
@@ -289,6 +293,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_rename_onto_a_directory_fails_and_leaves_no_temporary() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("issues.org");
         std::fs::create_dir(&path).unwrap();
@@ -328,6 +333,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_sweep_takes_old_temporaries_and_leaves_young_ones_and_others() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let gone = dead_pid();
         let old = dir.path().join(format!(".issues.org.tmp.{gone}-2-3"));
@@ -357,6 +363,7 @@ pub(crate) mod tests {
     /// carries no pid. A dead writer's goes.
     #[test]
     fn the_sweep_leaves_an_old_temporary_whose_writer_is_alive() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let mine = dir
             .path()
@@ -386,6 +393,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_writer_pid_is_the_number_before_the_first_dash() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(temp_writer_pid(".issues.org.tmp.123-45-6"), Some(123));
         assert_eq!(temp_writer_pid(".pins.tmp.77-1"), Some(77));
         assert_eq!(temp_writer_pid(".pins.tmp.77"), Some(77));
@@ -397,6 +405,7 @@ pub(crate) mod tests {
 
     #[test]
     fn temporary_names_are_dot_name_tmp_suffix() {
+        let _env_read = crate::test_env_read_lock();
         assert!(is_temp_name(".issues.org.tmp.12-34"));
         assert!(is_temp_name(".pins.tmp.1"));
         assert!(!is_temp_name("issues.org.tmp.1"));

@@ -509,6 +509,7 @@ mod tests {
 
     #[test]
     fn due_row_truncates_text() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let atom =
             serde_json::json!({"id":"abcdefghijklmnop","kind":"lesson","text":"x".repeat(200)});
         let row = due_row(&atom, "2026-09-20T10:00:00.000Z");
@@ -522,6 +523,7 @@ mod tests {
 
     #[test]
     fn due_row_keeps_due_at_and_display_grade() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let atom = serde_json::json!({
             "id":"abcdefghijklmnop",
             "kind":"lesson",
@@ -549,6 +551,7 @@ mod tests {
 
     #[test]
     fn clock_label_names_overdue() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let now = "2026-09-20T12:00:00.000Z";
         assert_eq!(clock_label("", now), "ungraded");
         assert_eq!(clock_label(now, now), "later");
@@ -569,6 +572,7 @@ mod tests {
 
     #[test]
     fn load_with_cue_none_does_not_steal_due_text() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let src = include_str!("data.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(
@@ -594,6 +598,7 @@ mod tests {
 
     #[test]
     fn island_notices_come_from_format_island() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let weak = serde_json::json!({
             "weak": true,
             "dense": true,
@@ -627,6 +632,7 @@ mod tests {
 
     #[test]
     fn lease_remaining_uses_default_window() {
+        let _process_read = ljos_test_boot::env_read_lock();
         assert_eq!(
             lease_remaining_secs(100, 100),
             claimdag::DEFAULT_LEASE_SECS as i64
@@ -651,6 +657,7 @@ mod tests {
 
     #[test]
     fn looks_like_issue_is_proj_xxxx() {
+        let _process_read = ljos_test_boot::env_read_lock();
         assert!(looks_like_issue("ljos-w8kb"));
         assert!(looks_like_issue("demo-n7ly"));
         assert!(!looks_like_issue("not-an-issue"));
@@ -663,6 +670,7 @@ mod tests {
 
     #[test]
     fn watchstamp_empty_pack_ts_is_boot_not_a_load() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let boot = WatchStamp {
             work_mtime: 1,
             pack_ts: String::new(),
@@ -692,6 +700,7 @@ mod tests {
 
     #[test]
     fn library_apis_not_cli_or_writer_paths() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let src = include_str!("data.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(prod.contains("due_of"));
@@ -720,6 +729,7 @@ mod tests {
 
     #[test]
     fn banner_only_is_an_empty_canvas() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let snap = Snapshot::banner_only("pack: down".into());
         assert!(snap.graph.is_empty());
         assert!(snap.due.is_empty());
@@ -733,6 +743,7 @@ mod tests {
 
     #[test]
     fn boot_banner_only_is_not_pack_down() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let snap = Snapshot::banner_only(String::new());
         assert!(snap.pack_ok, "first paint must not fake pack-down");
         assert!(snap.graph.is_empty());
@@ -741,6 +752,7 @@ mod tests {
 
     #[test]
     fn event_line_keeps_store_and_text() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let e = ljos_cli::Event {
             days: 20_000,
             clock: "08:01".into(),

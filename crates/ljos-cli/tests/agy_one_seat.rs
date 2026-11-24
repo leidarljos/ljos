@@ -42,6 +42,7 @@ fn seat_of() -> String {
 
 #[test]
 fn harness_ids_follow_the_vissue_roster() {
+    let _process = ljos_test_boot::env_lock();
     let saved: Vec<(&str, Option<std::ffi::OsString>)> =
         ["VISSUE_ROOT", "ISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_SEAT"]
             .into_iter()

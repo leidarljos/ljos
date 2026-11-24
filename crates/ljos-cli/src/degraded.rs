@@ -132,6 +132,7 @@ mod tests {
 
     #[test]
     fn a_command_says_one_line_whatever_the_state() {
+        let _env_read = crate::test_env_read_lock();
         forget();
         assert!(!said());
         assert!(say(State::Starting));
@@ -144,6 +145,7 @@ mod tests {
 
     #[test]
     fn every_line_names_the_doctor_and_none_runs_over_a_line() {
+        let _env_read = crate::test_env_read_lock();
         for state in [State::Starting, State::Busy, State::Down] {
             let line = state.line();
             assert!(line.contains("run `ljos doctor`"), "{line}");
@@ -154,6 +156,7 @@ mod tests {
 
     #[test]
     fn a_refused_token_is_not_a_degraded_writer() {
+        let _env_read = crate::test_env_read_lock();
         let err = anyhow::anyhow!("the writer refused this seat's token");
         assert_eq!(of_error(&err), None);
     }

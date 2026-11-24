@@ -194,6 +194,7 @@ mod tests {
 
     #[test]
     fn only_atoms_tagged_with_the_scope_are_kept() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             dir.path().join("seat.jsonl"),
@@ -214,6 +215,7 @@ mod tests {
 
     #[test]
     fn a_sealed_file_names_its_scope() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             sealed_scope(Path::new("data/atoms/cloud.jsonl.age")).as_deref(),
             Some("cloud")

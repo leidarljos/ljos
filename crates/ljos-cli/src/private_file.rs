@@ -369,6 +369,7 @@ mod tests {
 
     #[test]
     fn a_kept_file_is_read_only_when_it_is_a_plain_file_of_this_user() {
+        let _env_read = crate::test_env_read_lock();
         let root = home();
         let dir = root.path();
         let file = plain(dir, "plain.json", 0o600);
@@ -404,6 +405,7 @@ mod tests {
 
     #[test]
     fn a_kept_file_with_another_name_is_not_read() {
+        let _env_read = crate::test_env_read_lock();
         let root = home();
         let file = plain(root.path(), "alice.json", 0o600);
         assert!(read_private_file(&file).is_some());
@@ -421,6 +423,7 @@ mod tests {
 
     #[test]
     fn a_kept_file_in_a_directory_others_can_write_is_not_read() {
+        let _env_read = crate::test_env_read_lock();
         let root = home();
         let dir = root.path().join("ljos");
         std::fs::create_dir(&dir).unwrap();
@@ -435,6 +438,7 @@ mod tests {
 
     #[test]
     fn a_kept_file_in_a_directory_that_is_a_link_is_not_read() {
+        let _env_read = crate::test_env_read_lock();
         let root = home();
         let real = root.path().join("real");
         std::fs::create_dir(&real).unwrap();
@@ -451,6 +455,7 @@ mod tests {
 
     #[test]
     fn a_directory_for_a_write_is_made_tightened_or_refused() {
+        let _env_read = crate::test_env_read_lock();
         let root = home();
         let made = root.path().join("made");
         ensure_private_dir(&made).unwrap();
@@ -476,6 +481,7 @@ mod tests {
 
     #[test]
     fn an_entry_on_the_way_is_trusted_only_when_no_other_user_can_change_it() {
+        let _env_read = crate::test_env_read_lock();
         let me = 1000;
         assert!(trusted_entry(me, 0o40755, false, me));
         assert!(trusted_entry(0, 0o40755, false, me), "a directory of root");
@@ -497,6 +503,7 @@ mod tests {
 
     #[test]
     fn a_kept_file_under_a_parent_others_can_write_is_not_read_or_written() {
+        let _env_read = crate::test_env_read_lock();
         let root = home();
         let data = root.path().join("data");
         let dir = data.join("ljos");
@@ -520,6 +527,7 @@ mod tests {
 
     #[test]
     fn a_linked_data_home_is_followed_only_through_directories_no_other_user_can_change() {
+        let _env_read = crate::test_env_read_lock();
         let root = home();
         let good = root.path().join("good");
         std::fs::create_dir_all(good.join("ljos")).unwrap();
@@ -580,6 +588,7 @@ mod tests {
 
     #[test]
     fn a_slot_file_is_read_only_when_it_is_a_plain_file_with_one_name() {
+        let _env_read = crate::test_env_read_lock();
         let root = home();
         let top = root.path();
         let slot = root.path().join("slot");
@@ -641,6 +650,7 @@ mod tests {
 
     #[test]
     fn a_slot_file_is_not_read_through_a_link_above_its_directory() {
+        let _env_read = crate::test_env_read_lock();
         let root = home();
         let top = root.path().join("memory");
         let slot = top.join("imports").join("bob").join("imp1");
@@ -688,6 +698,7 @@ mod tests {
 
     #[test]
     fn a_shared_file_is_read_when_it_is_plain_and_not_world_writable() {
+        let _env_read = crate::test_env_read_lock();
         let root = home();
         let dir = root.path();
         let file = plain(dir, "row.json", 0o664);

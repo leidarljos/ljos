@@ -1653,6 +1653,7 @@ mod tests {
 
     #[test]
     fn the_doctor_names_a_hooks_path_that_is_not_the_onboard_one() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let ours = dir.path().join("ljos").join("git-hooks");
         let other = dir.path().join("user-hooks");
@@ -1764,6 +1765,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn chaining_a_user_hook_keeps_its_mode() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let prior = "#!/bin/sh\nprintf 'user-hook\\n'\n";
@@ -1795,6 +1797,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_symlinked_hooks_directory_is_followed() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target");
         std::fs::create_dir(&target).unwrap();
@@ -1834,6 +1837,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn chaining_or_stripping_a_hook_drops_setuid_and_setgid() {
+        let _env_read = crate::test_env_read_lock();
         let prior = "#!/bin/sh\nprintf 'user-hook\\n'\n";
         for (from, want) in [
             (0o4644, 0o755),
@@ -1914,6 +1918,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn install_refuses_a_symlinked_hook_before_writing_any() {
+        let _env_read = crate::test_env_read_lock();
         let chained = super::merge_block(PRIOR, "post-commit");
         for (text, mode) in [(PRIOR, 0o755), (PRIOR, 0o4644), (chained.as_str(), 0o4755)] {
             let (_dir, hooks, target) = linked_hooks(PRIOR, text, mode);
@@ -1937,6 +1942,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn uninstall_refuses_a_symlinked_hook_with_the_block() {
+        let _env_read = crate::test_env_read_lock();
         let push = super::merge_block(PRIOR, "pre-push");
         let chained = super::merge_block(PRIOR, "post-commit");
         let (_dir, hooks, target) = linked_hooks(&push, &chained, 0o755);
@@ -1958,6 +1964,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn uninstall_leaves_a_symlinked_hook_without_the_block() {
+        let _env_read = crate::test_env_read_lock();
         let push = super::merge_block(PRIOR, "pre-push");
         let (_dir, hooks, target) = linked_hooks(&push, PRIOR, 0o755);
         super::strip_user_hooks(&hooks).unwrap();
@@ -1983,6 +1990,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn two_concurrent_hook_edits_lose_neither() {
+        let _env_read = crate::test_env_read_lock();
         struct Unhook;
         impl Drop for Unhook {
             fn drop(&mut self) {
@@ -2043,6 +2051,7 @@ mod tests {
 
     #[test]
     fn the_doctor_fails_a_pre_push_stub_that_drops_a_refusal() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let ours = dir.path().join("git-hooks");
         let ours_s = ours.display().to_string();
@@ -2088,11 +2097,13 @@ mod tests {
 
     #[test]
     fn a_hook_that_does_not_book_succeeds() {
+        let _env_read = crate::test_env_read_lock();
         super::run_named("post-checkout").unwrap();
     }
 
     #[test]
     fn a_pre_push_ref_list_names_the_protected_branch_it_sends() {
+        let _env_read = crate::test_env_read_lock();
         let branches = vec!["develop".to_string(), "main".to_string()];
         let line = |dst: &str| format!("refs/heads/x 1111 {dst} 0000\n");
         assert_eq!(protected_ref("", &branches), None);
@@ -2109,6 +2120,7 @@ mod tests {
 
     #[test]
     fn hook_children_carry_the_guard_without_touching_the_process() {
+        let _env_read = crate::test_env_read_lock();
         let before_hook = std::env::var_os("LJOS_GIT_HOOK");
         let before_dir = std::env::var_os("GIT_DIR");
         let mut plain = crate::program("true").unwrap();
@@ -2133,6 +2145,7 @@ mod tests {
 
     #[test]
     fn a_tests_paragraph_is_kept_and_a_by_line_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         assert!(!super::line_refused("Tests: cargo test"));
         assert!(!super::message_refused("note\n\nTests: cargo test\n"));
         assert!(super::line_refused("Co-authored-by: Ada <ada@example.com>"));

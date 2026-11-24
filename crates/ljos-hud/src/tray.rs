@@ -120,12 +120,14 @@ mod tests {
 
     #[test]
     fn the_menu_toggles_then_quits() {
+        let _process_read = ljos_test_boot::env_read_lock();
         assert_eq!(menu_labels(), [MENU_TOGGLE, MENU_QUIT]);
         assert!(MENU_QUIT.contains("HUD"), "Quit names what it leaves");
     }
 
     #[test]
     fn status_notifier_id_is_overlay_app_id() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let src = include_str!("tray.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(prod.contains("OVERLAY_APP_ID"));

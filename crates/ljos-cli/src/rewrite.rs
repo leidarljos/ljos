@@ -394,6 +394,7 @@ mod tests {
 
     #[test]
     fn the_policyd_rewrite_line_is_read_and_nothing_else_is() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             from_policyd("allow\trewrite\tuv run x.py\n").as_deref(),
             Some("uv run x.py")
@@ -439,6 +440,7 @@ mod tests {
 
     #[test]
     fn the_local_table_runs_a_python_script_with_uv() {
+        let _env_read = crate::test_env_read_lock();
         let fix = |line: &str| local("python-requires-uv", line).map(|f| f.command);
         assert_eq!(fix("python x.py").as_deref(), Some("uv run x.py"));
         assert_eq!(fix("python3 x.py").as_deref(), Some("uv run x.py"));
@@ -477,6 +479,7 @@ mod tests {
 
     #[test]
     fn claude_code_gets_an_accepted_rewrite_as_updated_input() {
+        let _env_read = crate::test_env_read_lock();
         let v = policyd_run(CLAUDE, false);
         let specific = &v["hookSpecificOutput"];
         assert_eq!(specific["hookEventName"], "PreToolUse");
@@ -495,6 +498,7 @@ mod tests {
 
     #[test]
     fn codex_gets_an_accepted_rewrite_and_no_field_it_would_fail_on() {
+        let _env_read = crate::test_env_read_lock();
         let v = policyd_run(CODEX, false);
         let specific = &v["hookSpecificOutput"];
         assert_eq!(specific["permissionDecision"], "allow");
@@ -509,6 +513,7 @@ mod tests {
 
     #[test]
     fn cursor_pre_tool_use_gets_an_accepted_rewrite_as_updated_input() {
+        let _env_read = crate::test_env_read_lock();
         let v = policyd_run(CURSOR_TOOL, false);
         assert_eq!(v["permission"], "allow");
         assert_eq!(
@@ -520,6 +525,7 @@ mod tests {
 
     #[test]
     fn grok_build_gets_updated_input_unless_its_input_was_cut() {
+        let _env_read = crate::test_env_read_lock();
         let v = policyd_run(GROK, false);
         assert_eq!(v["decision"], "allow");
         let specific = &v["hookSpecificOutput"];
@@ -543,6 +549,7 @@ mod tests {
     /// `beforeShellExecution`, and every runner behind the relay.
     #[test]
     fn an_accepted_rewrite_is_a_warning_where_input_cannot_change() {
+        let _env_read = crate::test_env_read_lock();
         let cases = [
             (CURSOR_SHELL, false),
             (CLAUDE, true),
@@ -565,6 +572,7 @@ mod tests {
     /// so the line runs as written with a warning and nothing is held.
     #[test]
     fn a_rewrite_of_a_changed_copy_warns_and_runs_the_line() {
+        let _env_read = crate::test_env_read_lock();
         let line = "python x.py <<EOF\nbody\nEOF";
         let rule = hold_exact(line, "python x.py <<EOF\nEOF", "uv run x.py".into())
             .expect("a changed copy warns");
@@ -582,6 +590,7 @@ mod tests {
     /// no runner gets an updated input it might drop.
     #[test]
     fn a_local_fix_is_a_warning_on_every_runner() {
+        let _env_read = crate::test_env_read_lock();
         for input in RUNNERS {
             let v = local_warning(input);
             assert!(!holds(&v), "{input}\n{v}");
@@ -604,6 +613,7 @@ mod tests {
     /// warning stands as it came.
     #[test]
     fn a_local_fix_the_guard_warns_on_leaves_the_warning_as_it_came() {
+        let _env_read = crate::test_env_read_lock();
         let call = hook_call(CLAUDE);
         let warns = |_: &str| Some(uv_warning());
         assert_eq!(pick(&call, Some(&uv_warning()), warns), None);
@@ -619,6 +629,7 @@ mod tests {
     /// does not run; the original runs with a warning that names both.
     #[test]
     fn a_rewrite_the_recheck_rewrites_again_runs_the_line_with_a_warning() {
+        let _env_read = crate::test_env_read_lock();
         let call = hook_call(CLAUDE);
         hold(&call.cue, "python evil.py".into());
         let judge = |line: &str| {
@@ -647,6 +658,7 @@ mod tests {
     /// original runs, and its warning names the new line and the rule.
     #[test]
     fn a_rewrite_the_recheck_warns_on_runs_the_line_with_a_warning() {
+        let _env_read = crate::test_env_read_lock();
         let warns = |_: &str| Some(uv_warning());
         for input in RUNNERS {
             let call = hook_call(input);
@@ -671,6 +683,7 @@ mod tests {
 
     #[test]
     fn no_rewrite_without_a_held_line_or_a_known_warning() {
+        let _env_read = crate::test_env_read_lock();
         let call = hook_call(CLAUDE);
         assert!(pick(&call, None, allow_all).is_none(), "nothing held");
         hold("some other line", "uv run x.py".into());
@@ -699,6 +712,7 @@ mod tests {
     /// is never sent back as its input.
     #[test]
     fn a_read_call_never_gets_updated_input() {
+        let _env_read = crate::test_env_read_lock();
         let call = hook_call(READ);
         assert_eq!(call.event, "PreToolUse");
         hold(&call.cue, "uv run x.py --n 3".into());
@@ -727,6 +741,7 @@ esac
     /// as the recheck swaps in only an accepted line.
     #[test]
     fn the_real_guard_lets_only_an_accepted_rewrite_run() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let home = tempfile::tempdir().unwrap();
         let bin = home.path().join("policyd");
@@ -797,6 +812,7 @@ esac
     /// the declined swap is still kept.
     #[test]
     fn a_policyd_rewrite_is_passed_on_and_also_noted_and_logged() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let home = tempfile::tempdir().unwrap();
         let repo = home.path().join("proj");

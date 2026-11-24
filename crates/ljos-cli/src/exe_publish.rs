@@ -1447,6 +1447,7 @@ mod tests {
 
     #[test]
     fn a_published_stub_has_its_bytes_and_runs() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stub");
         install_executable(&path, b"#!/bin/sh\necho hi\n").unwrap();
@@ -1464,6 +1465,7 @@ mod tests {
 
     #[test]
     fn a_published_mode_drops_setuid_setgid_and_sticky() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stub");
         for (asked, want) in [(0o4755, 0o755), (0o2750, 0o750), (0o7700, 0o700)] {
@@ -1475,6 +1477,7 @@ mod tests {
 
     #[test]
     fn a_copied_executable_runs() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         install_executable(&src, b"#!/bin/sh\necho copied\n").unwrap();
@@ -1493,6 +1496,7 @@ mod tests {
     /// 0700 source used to come back 0755.
     #[test]
     fn a_copy_keeps_its_sources_mode_and_drops_setuid() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         let dest = dir.path().join("dest");
@@ -1513,6 +1517,7 @@ mod tests {
 
     #[test]
     fn a_copy_of_something_that_is_not_a_file_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("dest");
         let err = copy_executable(dir.path(), &dest).unwrap_err();
@@ -1527,6 +1532,7 @@ mod tests {
     /// file, not an option. The working directory is the crate's.
     #[test]
     fn a_source_named_like_an_option_is_copied() {
+        let _env_read = crate::test_env_read_lock();
         struct Gone(PathBuf);
         impl Drop for Gone {
             fn drop(&mut self) {
@@ -1554,6 +1560,7 @@ mod tests {
     /// after it, for both a written and a copied executable.
     #[test]
     fn a_publish_flushes_the_file_then_its_directory() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         let dest = dir.path().join("dest");
@@ -1579,6 +1586,7 @@ mod tests {
     /// renames nothing onto the destination and removes its stage.
     #[test]
     fn a_failed_flush_of_the_staged_file_fails_the_publish() {
+        let _env_read = crate::test_env_read_lock();
         struct Unset;
         impl Drop for Unset {
             fn drop(&mut self) {
@@ -1609,6 +1617,7 @@ mod tests {
     /// and says the file is in place.
     #[test]
     fn a_failed_directory_flush_fails_the_publish_without_a_stage() {
+        let _env_read = crate::test_env_read_lock();
         struct Unset;
         impl Drop for Unset {
             fn drop(&mut self) {
@@ -1646,6 +1655,7 @@ mod tests {
         reason = "a test writes its notes to the test harness, not to a person"
     )]
     fn a_planted_temp_symlink_is_not_written_through() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let victim = dir.path().join("victim");
         #[expect(
@@ -1805,6 +1815,7 @@ mod tests {
     /// rewrote the victim; the held directory is still the one written.
     #[test]
     fn a_stage_swapped_before_the_write_is_not_written_through() {
+        let _env_read = crate::test_env_read_lock();
         for step in ["copy", "install"] {
             let (dir, victim, attack, src) = arena(0o644, "victim");
             let dest = dir.path().join("stub");
@@ -1824,6 +1835,7 @@ mod tests {
     /// `chmod` by path made a `0600` victim `0755`.
     #[test]
     fn a_stage_swapped_before_the_mode_is_set_is_not_chmod_through() {
+        let _env_read = crate::test_env_read_lock();
         for step in ["copy", "install"] {
             let (dir, victim, attack, src) = arena(0o600, "victim");
             let dest = dir.path().join("stub");
@@ -1844,6 +1856,7 @@ mod tests {
     /// destination and returned Ok.
     #[test]
     fn a_stage_swapped_before_the_rename_publishes_the_staged_file() {
+        let _env_read = crate::test_env_read_lock();
         for step in ["install", "copy"] {
             let (dir, _, attack, src) = arena(0o644, "evil");
             #[expect(
@@ -1877,6 +1890,7 @@ mod tests {
     /// links to.
     #[test]
     fn a_failed_publish_cleans_only_what_it_made() {
+        let _env_read = crate::test_env_read_lock();
         for step in ["install", "copy"] {
             let (dir, victim, attack, src) = arena(0o644, "victim");
             let dest = dir.path().join("stub");
@@ -1922,6 +1936,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_flush_reaches_the_sync() {
+        let _env_read = crate::test_env_read_lock();
         let open = |path: &str| (std::fs::File::open(path).unwrap(), PathBuf::from(path));
         let (null, at) = open("/dev/null");
         let err = flush(&null, &at).unwrap_err();
@@ -1940,6 +1955,7 @@ mod tests {
         reason = "a test writes its notes to the test harness, not to a person"
     )]
     fn concurrent_publish_then_start_is_not_text_busy() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sibling-stub");
         install_executable(&path, b"#!/bin/sh\nexit 0\n").unwrap();
@@ -1995,6 +2011,7 @@ mod tests {
 
     #[test]
     fn write_file_refuses_a_hook_name_and_a_symlink() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let notes = dir.path().join("notes.txt");
         write_file(&notes, "x").unwrap();
@@ -2034,6 +2051,7 @@ mod tests {
 
     #[test]
     fn a_mode_change_never_makes_a_file_executable() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
         write_file(&data, "x").unwrap();
@@ -2066,6 +2084,7 @@ mod tests {
 
     #[test]
     fn a_mode_change_follows_no_symlink() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let victim = dir.path().join("victim");
         write_file(&victim, "keep").unwrap();
@@ -2083,6 +2102,7 @@ mod tests {
 
     #[test]
     fn a_copied_file_takes_no_execute_bit_and_follows_no_link() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         install_executable_mode(&src, OURS, 0o755).unwrap();
@@ -2105,6 +2125,7 @@ mod tests {
 
     #[test]
     fn program_refuses_a_program_that_writes_paths() {
+        let _env_read = crate::test_env_read_lock();
         for name in ["cp", "/bin/mv", "install", "/usr/bin/ln", "/bin/chmod"] {
             let err = program(name).unwrap_err();
             assert_eq!(
@@ -2122,6 +2143,7 @@ mod tests {
     /// and every member takes the workspace lints.
     #[test]
     fn every_crate_denies_the_hook_write_methods() {
+        let _env_read = crate::test_env_read_lock();
         let read = |path: &Path| -> toml::Table {
             std::fs::read_to_string(path)
                 .unwrap_or_else(|err| panic!("{}: {err}", path.display()))

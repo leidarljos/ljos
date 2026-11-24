@@ -1436,6 +1436,7 @@ mod tests {
 
     #[test]
     fn the_round_comes_from_the_tracker_not_only_the_title() {
+        let _env_read = crate::test_env_read_lock();
         // The panel eval's twelve decisions had question titles, so the
         // closer read round 0 and log-sink stayed TODO after three rounds.
         let mut v = serde_json::json!({
@@ -1478,6 +1479,7 @@ mod tests {
 
     #[test]
     fn a_blocking_mark_without_a_reason_is_a_nit() {
+        let _env_read = crate::test_env_read_lock();
         let line = "finding: tester: blocking: the comma is wrong";
         let got = parse_objection(line, "anneal-z64x").unwrap();
         assert_eq!(got.severity, Severity::Nit);
@@ -1502,6 +1504,7 @@ mod tests {
 
     #[test]
     fn the_same_text_and_target_are_one_objection() {
+        let _env_read = crate::test_env_read_lock();
         let a = Objection::nit("ceo", "Heading, tone!", "anneal-z64x");
         let b = Objection::wording("cto", "heading tone", "Anneal-z64x");
         assert_eq!(a.key(), b.key());
@@ -1511,6 +1514,7 @@ mod tests {
 
     #[test]
     fn an_endless_stream_of_nits_after_a_pass_files_nothing() {
+        let _env_read = crate::test_env_read_lock();
         let limits = ScopeBudget::panel();
         let mut state = PanelState::at_round(1);
         state.passed = true;
@@ -1569,6 +1573,7 @@ mod tests {
 
     #[test]
     fn a_blocking_dissent_files_a_child_and_a_nit_does_not_file_a_grandchild() {
+        let _env_read = crate::test_env_read_lock();
         let limits = ScopeBudget::panel();
         let mut state = PanelState::at_round(1);
         state.passed = true;
@@ -1620,6 +1625,7 @@ mod tests {
 
     #[test]
     fn new_blocking_objections_keep_filing_past_round_three() {
+        let _env_read = crate::test_env_read_lock();
         let limits = ScopeBudget::panel();
         let mut state = PanelState::at_round(1);
         let mut filed = Vec::new();
@@ -1653,6 +1659,7 @@ mod tests {
 
     #[test]
     fn a_wall_budget_does_not_skip_a_blocking_fix() {
+        let _env_read = crate::test_env_read_lock();
         let mut limits = ScopeBudget::panel();
         limits.max_wall_secs = Some(60);
         let mut state = PanelState::at_round(1);
@@ -1674,6 +1681,7 @@ mod tests {
 
     #[test]
     fn a_descendant_limit_pauses_for_a_person() {
+        let _env_read = crate::test_env_read_lock();
         let limits = ScopeBudget::panel();
         let mut state = PanelState::at_round(2);
         state.descendants = limits.max_descendants;
@@ -1694,6 +1702,7 @@ mod tests {
 
     #[test]
     fn a_full_child_list_holds_and_leaves_the_parent_open() {
+        let _env_read = crate::test_env_read_lock();
         let limits = ScopeBudget::panel();
         let mut state = PanelState::at_round(4);
         state.children_filed = limits.max_children;
@@ -1711,6 +1720,7 @@ mod tests {
 
     #[test]
     fn a_settled_majority_names_only_the_minority() {
+        let _env_read = crate::test_env_read_lock();
         let majority = vec![
             ("alice".to_string(), "drop".to_string()),
             ("bob".to_string(), "drop".to_string()),
@@ -1731,6 +1741,7 @@ mod tests {
 
     #[test]
     fn a_duplicate_is_not_filed_again() {
+        let _env_read = crate::test_env_read_lock();
         let limits = ScopeBudget::panel();
         let mut state = PanelState::at_round(1);
         let objection = Objection::blocking(
@@ -1757,6 +1768,7 @@ mod tests {
 
     #[test]
     fn a_long_blocking_finding_read_three_times_files_one_child() {
+        let _env_read = crate::test_env_read_lock();
         let finding = "x".repeat(181);
         assert_eq!(finding.chars().count(), 181);
         let objection = Objection::blocking("tester", "this blocks merge", &finding, "panel-long");
@@ -1786,6 +1798,7 @@ mod tests {
 
     #[test]
     fn a_spent_budget_lists_and_does_not_ask_to_close() {
+        let _env_read = crate::test_env_read_lock();
         let mut limits = ScopeBudget::panel();
         limits.max_wall_secs = Some(60);
         limits.max_tokens = Some(10);
@@ -1813,6 +1826,7 @@ mod tests {
 
     #[test]
     fn toml_overlays_the_defaults_and_leaves_the_other_scope() {
+        let _env_read = crate::test_env_read_lock();
         let budget = budget_from_toml(
             "[panel]\nmax_rounds = 2\nmax_tokens = 1000\n[workflow]\nmax_children = 4\n",
         );
@@ -1830,6 +1844,7 @@ mod tests {
 
     #[test]
     fn reap_flags_a_wide_tree_and_rounds_with_no_new_blocking_objection() {
+        let _env_read = crate::test_env_read_lock();
         let budget = PanelBudget::default();
         let mut lines = Vec::new();
         lines.push(

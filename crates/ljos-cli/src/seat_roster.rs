@@ -769,6 +769,7 @@ mod grant_tests {
     /// not a listed seat, is not a standing grant.
     #[test]
     fn a_grant_must_be_on_head_and_via_a_listed_seat() {
+        let _env_read = crate::test_env_read_lock();
         // The environment is process-global. Writing the tracker root
         // here without the suite lock let a ledger read in the same run
         // resolve this checkout instead of its own.
@@ -848,6 +849,7 @@ via = \"bea\"
     /// seat. Adding this seat then works, even though the list omitted it.
     #[test]
     fn adding_another_seat_first_names_this_one() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -874,6 +876,7 @@ via = \"bea\"
     /// The line names the file and still says to add this seat first.
     #[test]
     fn an_unlisted_seat_that_adds_another_name_is_seat_unlisted() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();

@@ -595,6 +595,7 @@ mod tests {
 
     #[test]
     fn a_line_matches_its_argv_and_an_expanded_word_matches_any() {
+        let _env_read = crate::test_env_read_lock();
         let argv = words("vote demo-a --for ship --used none");
         assert!(argv_matches(&argv, &argv));
         assert!(argv_matches(
@@ -610,6 +611,7 @@ mod tests {
 
     #[test]
     fn the_newest_matching_call_is_taken_once_and_a_stale_one_is_dropped() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let shell = shell_dir(dir.path(), "sess-1");
         let line = "vote demo-a --for ship --used none";
@@ -656,6 +658,7 @@ mod tests {
 
     #[test]
     fn a_process_with_no_session_takes_the_newest_call_of_any_session() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let line = "vote demo-a --for ship --used none --as reviewer";
         put(
@@ -700,6 +703,7 @@ mod tests {
 
     #[test]
     fn a_line_run_again_binds_what_its_first_run_took() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let shell = shell_dir(dir.path(), "sess-1");
         let line = "vote demo-a --for ship --used none --as reviewer";
@@ -739,6 +743,7 @@ mod tests {
 
     #[test]
     fn a_line_whose_environment_names_another_session_still_finds_its_harness() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let line = "vote demo-a --for ship --used none --as reviewer";
         let argv = words(line);
@@ -759,6 +764,7 @@ mod tests {
 
     #[test]
     fn a_call_whose_hook_ran_in_another_tree_is_not_taken() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let line = "vote demo-a --for ship --used none --as reviewer";
         let argv = words(line);
@@ -810,6 +816,7 @@ mod tests {
 
     #[test]
     fn an_mcp_call_names_its_subagent_once() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         put(
             &mcp_path(dir.path(), "toolu_a"),
@@ -834,6 +841,7 @@ mod tests {
 
     #[test]
     fn a_seat_shaped_name_needs_the_configured_server() {
+        let _env_read = crate::test_env_read_lock();
         let keys = BTreeSet::from(["ljos".to_string(), "my__seat".to_string()]);
         assert!(seat_call_matches("mcp__ljos__ljos_vote", None, &keys));
         assert!(seat_call_matches("mcp__my__seat__ljos_vote", None, &keys));

@@ -471,6 +471,7 @@ mod tests {
 
     #[test]
     fn quoted_fields_hold_commas_quotes_and_line_breaks() {
+        let _env_read = crate::test_env_read_lock();
         let csv = parse_csv("t.csv", b"a,b\n\"x, y\",\"say \"\"hi\"\"\nthere\"\r\n").unwrap();
         assert_eq!(csv.header, ["a", "b"]);
         assert_eq!(
@@ -481,6 +482,7 @@ mod tests {
 
     #[test]
     fn a_ragged_row_names_its_line_and_both_counts() {
+        let _env_read = crate::test_env_read_lock();
         let e = parse_csv("t.csv", b"a,b\n1,2\n3\n")
             .unwrap_err()
             .to_string();
@@ -489,6 +491,7 @@ mod tests {
 
     #[test]
     fn names_deedar_folds_together_get_their_own_ids() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(deed_id("p-1", "scores", 2), "deed-file-table-p-1-scores-v2");
         let ids: std::collections::BTreeSet<String> =
             ["scores", "Scores", "a.b", "ab", "scores_v1", "scores-v1"]
@@ -500,6 +503,7 @@ mod tests {
 
     #[test]
     fn a_label_reads_back_its_name_and_version() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             parse_label("p-1", &deed_label("p-1", "scores", 3)),
             Some(("scores".into(), 3))

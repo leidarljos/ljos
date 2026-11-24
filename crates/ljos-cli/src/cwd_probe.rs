@@ -454,6 +454,7 @@ mod tests {
 
     #[test]
     fn a_project_flag_or_a_ticket_id_names_the_project() {
+        let _env_read = crate::test_env_read_lock();
         let args = |words: &[&str]| {
             words
                 .iter()
@@ -485,6 +486,7 @@ mod tests {
 
     #[test]
     fn a_git_hook_is_not_a_command_that_probes_its_directory() {
+        let _env_read = crate::test_env_read_lock();
         let args = |words: &[&str]| {
             words
                 .iter()
@@ -505,6 +507,7 @@ mod tests {
 
     #[test]
     fn a_stat_that_has_not_started_is_not_a_hung_mount() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(probe_answer(false, None), Some(false));
         assert_eq!(probe_answer(true, Some(true)), Some(true));
         assert_eq!(probe_answer(true, Some(false)), Some(false));
@@ -513,6 +516,7 @@ mod tests {
 
     #[test]
     fn a_fuse_or_network_mount_is_slow_and_the_root_disk_is_not() {
+        let _env_read = crate::test_env_read_lock();
         let info = "\
 36 35 98:0 / / rw,relatime shared:1 - overlay overlay rw
 80 36 0:55 / /assets rw,nosuid shared:2 - fuse.portal portal rw
@@ -526,6 +530,7 @@ mod tests {
 
     #[test]
     fn a_gone_working_directory_is_ignored() {
+        let _env_read = crate::test_env_read_lock();
         let _guard = CWD_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -543,6 +548,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_working_directory_is_ignored() {
+        let _env_read = crate::test_env_read_lock();
         let _guard = CWD_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

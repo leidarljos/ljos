@@ -891,6 +891,7 @@ mod tests {
 
     #[test]
     fn the_pack_asks_before_data_or_infrastructure_goes() {
+        let _env_read = crate::test_env_read_lock();
         for (line, want) in [
             ("npx prisma migrate reset --force", "db-reset"),
             ("prisma migrate reset", "db-reset"),
@@ -1018,6 +1019,7 @@ mod tests {
 
     #[test]
     fn routine_work_on_the_same_tools_runs() {
+        let _env_read = crate::test_env_read_lock();
         for line in [
             "kubectl delete pod api-7f9c-xyz -n dev",
             "kubectl delete pod/api-7f9c-xyz",
@@ -1090,6 +1092,7 @@ mod tests {
 
     #[test]
     fn a_seat_rule_on_the_same_line_comes_first() {
+        let _env_read = crate::test_env_read_lock();
         let deny = Rule {
             pattern: "terraform destroy*".into(),
             verdict: "deny".into(),
@@ -1107,6 +1110,7 @@ mod tests {
 
     #[test]
     fn the_setting_turns_the_pack_or_a_class_off() {
+        let _env_read = crate::test_env_read_lock();
         assert!(ask_pack_verdict_with("npm publish", Some("off")).is_none());
         assert!(ask_pack_verdict_with("npm publish", Some("0")).is_none());
         assert!(ask_pack_verdict_with("npm publish", Some("db,cloud")).is_none());
@@ -1121,6 +1125,7 @@ mod tests {
 
     #[test]
     fn a_refusal_names_its_class_a_reason_and_a_safer_form() {
+        let _env_read = crate::test_env_read_lock();
         let r = ask_pack_verdict_with("terraform destroy -auto-approve", None).expect("asks");
         assert_eq!(r.pattern, "ask pack: cloud");
         assert!(r.reason.starts_with("infra-destroy: this tears down"));
@@ -1156,6 +1161,7 @@ mod tests {
 
     #[test]
     fn the_pack_asks_before_a_stash_a_config_or_path_goes() {
+        let _env_read = crate::test_env_read_lock();
         for (line, want) in [
             ("git stash drop stash@{0}", "stash-drop"),
             ("git stash drop", "stash-drop"),
@@ -1194,6 +1200,7 @@ mod tests {
 
     #[test]
     fn the_pack_leaves_a_forced_recursive_delete_to_the_guard() {
+        let _env_read = crate::test_env_read_lock();
         for line in [
             "rm -rf ~/.ssh",
             "rm -fr /etc/nginx",

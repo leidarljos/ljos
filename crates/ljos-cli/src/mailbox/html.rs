@@ -1012,6 +1012,7 @@ mod tests {
 
     #[test]
     fn hidden_text_is_dropped_and_reported() {
+        let _env_read = crate::test_env_read_lock();
         let html = "<style>.x { display : none } #y{visibility:hidden}</style>\
             <p>Shown <span style='DISPLAY: none'>inline</span>\
             <b class='a x'>class</b><i id=y>id</i><u hidden>attr</u> end</p>";
@@ -1022,6 +1023,7 @@ mod tests {
 
     #[test]
     fn plain_html_drops_nothing_and_shows_link_targets() {
+        let _env_read = crate::test_env_read_lock();
         let got = visible_text(
             "<head><title>t</title></head><div>A &amp; B</div><!-- c -->\
              <a href=\"https://example.test/x?a=1&amp;b=2\">here</a><script>evil()</script>",
@@ -1032,6 +1034,7 @@ mod tests {
 
     #[test]
     fn inline_concealment_beyond_display_none_is_dropped() {
+        let _env_read = crate::test_env_read_lock();
         for style in [
             "font-size:0",
             "font-size: 0px",
@@ -1062,6 +1065,7 @@ mod tests {
 
     #[test]
     fn the_concealment_the_review_found_is_dropped() {
+        let _env_read = crate::test_env_read_lock();
         for span in [
             "<span style=\"display&#58;none\">",
             "<span style=\"display&#x3a;none\">",
@@ -1097,6 +1101,7 @@ mod tests {
 
     #[test]
     fn styling_that_hides_nothing_keeps_its_text() {
+        let _env_read = crate::test_env_read_lock();
         for span in [
             "<span style=\"color:#333;opacity:.5;font-size:.8em;transform:none\">",
             "<span style=\"background:url(x.png) #06c no-repeat;color:#fff\">",
@@ -1112,6 +1117,7 @@ mod tests {
 
     #[test]
     fn what_the_reducer_cannot_decode_or_place_is_withheld() {
+        let _env_read = crate::test_env_read_lock();
         for html in [
             "<p><span style=\"display&colon;none\">SECRET</span></p>",
             "<p><span class=\"&#x78\">SECRET</span></p>",
@@ -1131,6 +1137,7 @@ mod tests {
 
     #[test]
     fn a_style_block_marks_the_part_and_what_cannot_be_followed_is_withheld() {
+        let _env_read = crate::test_env_read_lock();
         let plain = visible_text("<style>.a { color: red }</style><p>Hello</p>");
         assert_eq!(plain.text, "Hello");
         assert!(plain.hidden_content && !plain.withheld);
@@ -1160,6 +1167,7 @@ mod tests {
 
     #[test]
     fn at_rules_apply_as_if_they_match() {
+        let _env_read = crate::test_env_read_lock();
         for css in [
             "@media screen { .a { color: red } }",
             ".a::after { content: \"a@b\" }",
@@ -1182,6 +1190,7 @@ mod tests {
 
     #[test]
     fn a_stray_angle_bracket_is_text() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(visible_text("1 < 2 and 3 > 2").text, "1 < 2 and 3 > 2");
     }
 }

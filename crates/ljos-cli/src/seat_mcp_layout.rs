@@ -37,6 +37,7 @@ const SEAT_ENTRY: &str = r#"{"mcpServers":{"ljos":{"command":"ljos-mcp","args":[
 /// among its arguments. That entry is the seat server.
 #[test]
 fn the_plugin_launcher_entry_is_a_seat_server() {
+    let _env_read = crate::test_env_read_lock();
     let (_lock, dir) = review_env();
     put(
         &dir.path().join(".cursor/mcp.json"),
@@ -53,6 +54,7 @@ fn the_plugin_launcher_entry_is_a_seat_server() {
 /// outside `[A-Za-z0-9_-]` replaced by `_`.
 #[test]
 fn a_punctuated_seat_key_matches_its_normalised_tool_name() {
+    let _env_read = crate::test_env_read_lock();
     let (_lock, dir) = review_env();
     put(
         &dir.path().join(".claude.json"),
@@ -69,6 +71,7 @@ fn a_punctuated_seat_key_matches_its_normalised_tool_name() {
 /// cap. The seat key in it still counts.
 #[test]
 fn a_large_claude_json_still_names_the_seat() {
+    let _env_read = crate::test_env_read_lock();
     let (_lock, dir) = review_env();
     let history: Vec<_> = (0..1500)
         .map(|i| serde_json::json!({"display": format!("{i} {}", "x".repeat(1000))}))
@@ -89,6 +92,7 @@ fn a_large_claude_json_still_names_the_seat() {
 /// `the terminal harness config`.
 #[test]
 fn a_cursor_file_ljos_cannot_parse_does_not_hide_the_claude_seat() {
+    let _env_read = crate::test_env_read_lock();
     let (_lock, dir) = review_env();
     put(&dir.path().join(".claude.json"), SEAT_ENTRY);
     put(
@@ -107,6 +111,7 @@ fn a_cursor_file_ljos_cannot_parse_does_not_hide_the_claude_seat() {
 /// `.the terminal harness` directory is the seat.
 #[test]
 fn a_claude_plugin_install_names_the_seat() {
+    let _env_read = crate::test_env_read_lock();
     let (_lock, dir) = review_env();
     let root = dir
         .path()
@@ -136,6 +141,7 @@ fn a_claude_plugin_install_names_the_seat() {
 /// does not name the seat, even when it lists `ljos-mcp`.
 #[test]
 fn claude_config_dir_does_not_name_the_seat() {
+    let _env_read = crate::test_env_read_lock();
     let (_lock, dir) = review_env();
     let cfg = dir.path().join("claude-cfg");
     put(&cfg.join(".claude.json"), SEAT_ENTRY);
@@ -151,6 +157,7 @@ fn claude_config_dir_does_not_name_the_seat() {
 /// not name the seat.
 #[test]
 fn codex_home_does_not_name_the_seat() {
+    let _env_read = crate::test_env_read_lock();
     let (_lock, dir) = review_env();
     let cfg = dir.path().join("codex-cfg");
     put(
@@ -170,6 +177,7 @@ fn codex_home_does_not_name_the_seat() {
 /// the user rule applies.
 #[test]
 fn a_payload_command_that_is_not_the_seat_is_a_foreign_tool() {
+    let _env_read = crate::test_env_read_lock();
     let (_lock, dir) = review_env();
     put(
         &dir.path().join(".cursor/mcp.json"),

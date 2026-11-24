@@ -1247,6 +1247,7 @@ mod tests {
 
     #[test]
     fn pull_dedups_by_text_and_tags_each_lane() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let (from, store) = handoff(dir.path());
         write_lane(&from, "lane-a", &["alpha kiln", "shared kiln"]);
@@ -1290,6 +1291,7 @@ mod tests {
 
     #[test]
     fn a_second_pull_imports_nothing_and_leaves_the_seed() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let (from, store) = handoff(dir.path());
         write_lane(&from, "lane-a", &["alpha kiln", "shared kiln"]);
@@ -1327,6 +1329,7 @@ mod tests {
 
     #[test]
     fn a_known_lane_row_id_is_unchanged_when_the_text_changes() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let (from, store) = handoff(dir.path());
         let write = |text: &str| {
@@ -1386,6 +1389,7 @@ mod tests {
 
     #[test]
     fn concurrent_pulls_import_each_text_once() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let (from, store) = handoff(dir.path());
         write_lane(&from, "lane-a", &["alpha kiln", "shared kiln"]);
@@ -1419,6 +1423,7 @@ mod tests {
 
     #[test]
     fn a_deadline_keeps_finished_exports_and_drops_the_one_in_progress() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let (from, store) = handoff(dir.path());
         write_lane(&from, "lane-a", &["alpha kiln"]);
@@ -1467,6 +1472,7 @@ mod tests {
 
     #[test]
     fn push_writes_a_stable_lane_file() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let (from, store) = handoff(dir.path());
         write_lane(&from, "lane-a", &["alpha kiln", "shared kiln"]);
@@ -1497,6 +1503,7 @@ mod tests {
 
     #[test]
     fn concurrent_pushes_leave_both_lane_files() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("out");
         std::fs::create_dir(&dest).unwrap();
@@ -1641,6 +1648,7 @@ mod tests {
 
     #[test]
     fn a_second_pull_reads_no_unchanged_export() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let (from, store) = handoff(dir.path());
         let files = MemExports::new();
@@ -1691,6 +1699,7 @@ mod tests {
 
     #[test]
     fn a_changed_export_is_read_and_reimported() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let (from, store) = handoff(dir.path());
         let files = MemExports::new();
@@ -1722,6 +1731,7 @@ mod tests {
 
     #[test]
     fn a_touched_export_with_the_same_bytes_does_not_duplicate_rows() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let (from, store) = handoff(dir.path());
         let files = MemExports::new();
@@ -1756,6 +1766,7 @@ mod tests {
 
     #[test]
     fn a_pull_stopped_midway_resumes_without_a_half_export() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let (from, store) = handoff(dir.path());
         let files = MemExports::new();
@@ -1806,6 +1817,7 @@ mod tests {
 
     #[test]
     fn progress_is_one_line_on_a_terminal_and_quiet_otherwise() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             export_progress(false, 1, 7, "lane-a.jsonl", "skipped"),
             None
@@ -1821,6 +1833,7 @@ mod tests {
 
     #[test]
     fn a_second_pull_does_not_call_a_slow_pack_or_lock() {
+        let _env_read = crate::test_env_read_lock();
         let _env = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let from = dir.path().join("handoff");
