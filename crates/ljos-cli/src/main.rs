@@ -509,7 +509,12 @@ enum ProposalCmd {
 #[derive(Args, Debug)]
 struct HookArgs {
     /// Most memories to inject per call; each is injected once between compactions.
-    #[arg(long, default_value_t = 5, allow_hyphen_values = true)]
+    #[arg(
+        long,
+        default_value_t = 5,
+        allow_hyphen_values = true,
+        value_parser = usize_with_negative_zero
+    )]
     limit: usize,
     /// The event, for a runner whose payload does not name it
     /// (`PreToolUse`, `PostToolUse`, `PreInvocation`, `Stop`).
@@ -966,7 +971,13 @@ enum Cmd {
     /// Example: `ljos conflicts`
     Conflicts {
         /// Most pairs to print.
-        #[arg(short = 'n', long, default_value_t = 12, allow_hyphen_values = true)]
+        #[arg(
+            short = 'n',
+            long,
+            default_value_t = 12,
+            allow_hyphen_values = true,
+            value_parser = usize_with_negative_zero
+        )]
         limit: usize,
     },
     /// Close a memory that a later one rewrites.
@@ -1061,7 +1072,13 @@ enum Cmd {
     /// Example: `ljos hubs`
     Hubs {
         /// Most hubs to print.
-        #[arg(short = 'n', long, default_value_t = 10, allow_hyphen_values = true)]
+        #[arg(
+            short = 'n',
+            long,
+            default_value_t = 10,
+            allow_hyphen_values = true,
+            value_parser = usize_with_negative_zero
+        )]
         limit: usize,
         /// Print JSON. The human page is left off.
         #[arg(long)]
@@ -1737,7 +1754,13 @@ enum Cmd {
         /// The tracker id of the issue.
         issue: String,
         /// Most events to print, the latest kept.
-        #[arg(short = 'n', long, default_value_t = 60, allow_hyphen_values = true)]
+        #[arg(
+            short = 'n',
+            long,
+            default_value_t = 60,
+            allow_hyphen_values = true,
+            value_parser = usize_with_negative_zero
+        )]
         limit: usize,
         /// Print JSON. The human page is left off.
         #[arg(long)]
@@ -2655,7 +2678,12 @@ enum Cmd {
         #[arg(short, long)]
         project: String,
         /// Expectation-maximisation rounds.
-        #[arg(long, default_value_t = 20, allow_hyphen_values = true)]
+        #[arg(
+            long,
+            default_value_t = 20,
+            allow_hyphen_values = true,
+            value_parser = usize_with_negative_zero
+        )]
         rounds: usize,
     },
     /// Record that one due review was graded.
@@ -3021,9 +3049,15 @@ fn flag_sentence(typed: &str, args: &[String]) -> String {
         Some(name) => {
             let flag = flag_text(typed, name, &here.flags);
             let rewritten = rewrite_arg(args, typed, flag);
-            format!(
-                "ljos: {where_} has no flag {typed}, and the closest is {flag}, so run `{rewritten}`."
-            )
+            if ljos_cli::output::machine_output() {
+                format!(
+                    "ljos: {where_} has no flag {typed}, and the closest is {flag}, so run `{rewritten}`."
+                )
+            } else {
+                format!(
+                    "ljos: {where_} has no flag {typed}, and the closest is {flag}, so run `{rewritten}`; pass `--` before text that starts with `-`."
+                )
+            }
         }
         None => {
             let help = if here.at.is_empty() {
@@ -3031,7 +3065,13 @@ fn flag_sentence(typed: &str, args: &[String]) -> String {
             } else {
                 format!("ljos {} --help", here.at.join(" "))
             };
-            format!("ljos: {where_} has no flag {typed}, so run `{help}`.")
+            if ljos_cli::output::machine_output() {
+                format!("ljos: {where_} has no flag {typed}, so run `{help}`.")
+            } else {
+                format!(
+                    "ljos: {where_} has no flag {typed}, so run `{help}`; pass `--` before text that starts with `-`."
+                )
+            }
         }
     }
 }
@@ -4423,6 +4463,52 @@ fn take_seat_flag(args: &[std::ffi::OsString]) -> (Option<String>, Vec<std::ffi:
     (seat, kept)
 }
 
+fn global_seat_needs_value(args: &[std::ffi::OsString]) -> bool {
+    let mut index = 1;
+    while index < args.len() {
+        let arg = args[index].to_string_lossy();
+        if !arg.starts_with('-') {
+            return false;
+        }
+        if arg == "--seat" {
+            return args
+                .get(index + 1)
+                .is_none_or(|next| next.to_string_lossy().starts_with('-'));
+        }
+        if arg.starts_with("--seat=") {
+            return false;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn usize_with_negative_zero(value: &str) -> std::result::Result<usize, String> {
+    if value == "-0" {
+        Ok(0)
+    } else {
+        value.parse::<usize>().map_err(|error| error.to_string())
+    }
+}
+
+fn leading_positional_looks_like_flag(args: &[String]) -> Option<String> {
+    let command_at = args
+        .iter()
+        .position(|arg| matches!(arg.as_str(), "file" | "finish"))?;
+    if args[command_at + 1..].iter().any(|arg| arg == "--") {
+        return None;
+    }
+    let command = &args[command_at];
+    let typed = args[command_at + 1..].iter().find(|arg| {
+        arg.len() > 2
+            && !arg.starts_with("--")
+            && (arg.starts_with("-h") || (command == "file" && arg.starts_with("-t")))
+    })?;
+    Some(format!(
+        "ljos: {command} reads {typed} as a flag; pass `--` before text that starts with `-`."
+    ))
+}
+
 /// Reads look at every seat when none of the rules match. The writes
 /// that used to stop, and remember, note and file, use the login name,
 /// or a short stable name when that login is missing.
@@ -5446,6 +5532,10 @@ fn run_command() -> Result<()> {
         return Ok(());
     }
     let raw: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if global_seat_needs_value(&raw) {
+        ljos_cli::say!("ljos: --seat needs a value");
+        std::process::exit(USAGE_STATUS);
+    }
     let (seat_flag, args) = take_seat_flag(&raw);
     ljos_cli::load_seat_env();
     ljos_cli::normalize_tracker_env();
@@ -5465,6 +5555,10 @@ fn run_command() -> Result<()> {
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
+    if let Some(line) = leading_positional_looks_like_flag(&flag_args) {
+        ljos_cli::say!("{line}");
+        std::process::exit(USAGE_STATUS);
+    }
     if let Some(line) = missing_flag_value(&flag_args) {
         ljos_cli::say!("{line}");
         std::process::exit(USAGE_STATUS);
