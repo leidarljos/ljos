@@ -222,17 +222,16 @@ fn a_blank_id_fails_at_once_and_never_asks_the_claim_graph() {
 }
 
 #[test]
-fn next_with_nothing_ready_names_a_bare_claim() {
+fn an_omitted_id_checks_the_next_ready_node_and_refuses_when_none_is_ready() {
     let hab = Hab::new("0", "[]");
     let (out, _) = hab.claim(&["--next"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let said = format!("{stdout}{stderr}");
-    assert!(out.status.success(), "{said}");
+    assert_eq!(out.status.code(), Some(1), "{said}");
     assert!(
         said.contains("label claim-conflict:")
-            && said.contains("nothing in the claim graph is ready")
-            && said.contains("so run `ljos claim`."),
+            && said.contains("nothing in the claim graph is ready"),
         "{said}"
     );
     assert!(hab.calls().contains("claimdag ready"), "{}", hab.calls());

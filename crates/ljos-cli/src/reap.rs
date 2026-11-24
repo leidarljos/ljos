@@ -269,7 +269,7 @@ pub fn gate_quorum(id: &str, needed: usize, deadline: Option<&str>) -> Result<Qu
     }
     if !quorum_already_noted(id) {
         let note = format!("quorum timed out: {have} of {needed}");
-        crate::run_captured("vissue", &["note", id, &note])
+        crate::run_captured("vissue", &["note", id, "--", &note])
             .map_err(|e| anyhow::anyhow!("quorum: the lapse on {id} was not noted: {e:#}"))?;
     }
     Ok(QuorumGate::Lapsed { have, needed })

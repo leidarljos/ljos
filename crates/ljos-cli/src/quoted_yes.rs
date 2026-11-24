@@ -84,12 +84,13 @@ pub fn read(quote: Option<&str>, at: Option<&str>, via: Option<&str>) -> Result<
         .filter(|(_, had)| !had)
         .map(|(flag, _)| flag)
         .collect();
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "approval-unverified",
             format!(
                 "accept: a quoted yes needs {}, so the record says what was said, when, and which seat carried it. Nothing was written",
                 missing.join(" and ")
             ),
+            1,
         ));
     }
     let quote = quote.unwrap_or_default().trim();
@@ -104,26 +105,29 @@ pub fn read(quote: Option<&str>, at: Option<&str>, via: Option<&str>) -> Result<
 
 fn quote_words(quote: &str) -> Result<String> {
     if quote.is_empty() {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "approval-unverified",
             "accept: --quote is empty, and an empty quote is not a yes. Nothing was written",
+            1,
         ));
     }
     if quote.chars().count() > MAX_CHARS {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "approval-unverified",
             format!(
                 "accept: --quote is longer than {MAX_CHARS} characters. Quote the sentence that says yes, not the conversation. Nothing was written"
             ),
+            1,
         ));
     }
     let words = quote.split_whitespace().count();
     if words < MIN_WORDS {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "approval-unverified",
             format!(
                 "accept: --quote is {words} words, and a yes is kept from {MIN_WORDS} or more, so the record names what was agreed to. Nothing was written"
             ),
+            1,
         ));
     }
     Ok(quote.to_string())
@@ -131,20 +135,22 @@ fn quote_words(quote: &str) -> Result<String> {
 
 fn said_at(at: &str) -> Result<String> {
     let when = chrono::DateTime::parse_from_rfc3339(at).map_err(|e| {
-        crate::policy_label::labelled(
+        crate::policy_label::refused(
             "approval-unverified",
             format!(
                 "accept: --at {at:?} is not RFC 3339 ({e}), such as 2026-10-28T14:02:11Z. Nothing was written"
             ),
+            1,
         )
     })?;
     let ahead = when.timestamp() - chrono::Utc::now().timestamp();
     if ahead > AHEAD {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "approval-unverified",
             format!(
                 "accept: --at {at:?} is ahead of now, so nobody has said it yet. Nothing was written"
             ),
+            1,
         ));
     }
     Ok(at.to_string())
@@ -152,17 +158,19 @@ fn said_at(at: &str) -> Result<String> {
 
 fn carrier(via: &str) -> Result<String> {
     if via.is_empty() {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "approval-unverified",
             "accept: --via is empty, and a yes is carried by a named seat. Nothing was written",
+            1,
         ));
     }
     if via.chars().any(char::is_whitespace) || via.chars().count() > VIA_MAX {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "approval-unverified",
             format!(
                 "accept: --via {via:?} is not a seat name: one word, {VIA_MAX} characters or fewer. Nothing was written"
             ),
+            1,
         ));
     }
     Ok(via.to_string())

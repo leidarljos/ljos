@@ -386,19 +386,19 @@ pub fn resolve(short: &str, all: &[Memory]) -> Result<String> {
     let hits: Vec<&Memory> = all.iter().filter(|m| m.id.starts_with(short)).collect();
     match hits.as_slice() {
         [one] => Ok(one.id.clone()),
-        [] => Err(crate::policy_label::labelled(
+        [] => Err(crate::policy_label::refused(
             "review-input-warning",
             format!(
                 "memories: no memory starts with {short}. `ljos memories list --all --user` prints ids, and so does `ljos search`"
             ),
-        )),
-        _ => Err(crate::policy_label::labelled(
+            1)),
+        _ => Err(crate::policy_label::refused(
             "review-input-warning",
             format!(
                 "memories: {short} starts {} memories; give more of the id. `ljos memories list --all --user` prints them",
                 hits.len()
             ),
-        )),
+            1)),
     }
 }
 

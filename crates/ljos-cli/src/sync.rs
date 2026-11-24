@@ -418,18 +418,20 @@ pub fn scope_for_lesson(repo_scope: Option<String>) -> Option<String> {
 fn configured_default(scope: &Scope) -> Result<String> {
     let chosen = local().default_scope.unwrap_or_else(|| scope.name.clone());
     if !valid_scope_name(&chosen) {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "scope-warning",
             format!("sync: default_scope `{chosen}` is not a scope name; use [a-z0-9-]"),
+            1,
         ));
     }
     if scope.scopes.contains_key(&chosen) {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "scope-warning",
             format!(
                 "sync: default_scope `{chosen}` names an extra scope; unscoped atoms stay on the primary scope `{}`",
                 scope.name
             ),
+            1,
         ));
     }
     Ok(chosen)
@@ -811,9 +813,10 @@ fn scope_is_configured(scope: &Scope, name: &str) -> bool {
 /// `.ljos/sync.toml` does not parse.
 pub(crate) fn handover_recipients(scope_name: &str) -> Result<Vec<String>> {
     if !valid_scope_name(scope_name) {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "scope-warning",
             format!("handover: {scope_name:?} is not a scope name"),
+            1,
         ));
     }
     for root in sync_roots().unwrap_or_default() {
@@ -827,11 +830,12 @@ pub(crate) fn handover_recipients(scope_name: &str) -> Result<Vec<String>> {
     if scope_name == CLOUD_SCOPE && read_identity(&cloud).is_some_and(|text| age_identity(&text)) {
         return Ok(vec![identity_recipient(&cloud)?]);
     }
-    Err(crate::policy_label::labelled(
+    Err(crate::policy_label::refused(
         "scope-warning",
         format!(
             "handover: no tracker lists recipients for scope {scope_name}, so nothing was sealed; add them under [scopes] in .ljos/sync.toml"
         ),
+        1,
     ))
 }
 
@@ -898,9 +902,10 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
 /// the one returned.
 fn seal_bytes(plain: &str, recipients: &[String]) -> Result<Vec<u8>> {
     if recipients.is_empty() {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "scope-warning",
             "sync: the scope names no recipients; add this machine's `ljos sync --key` to .ljos/sync.toml",
+            1,
         ));
     }
     let mut cmd = age_cmd();
@@ -1448,9 +1453,10 @@ pub(crate) fn whole_export(
 ) -> Result<Vec<u8>> {
     let default = configured_default(scope)?;
     let Some(recipients) = scope.recipients_for(scope_name) else {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "scope-warning",
             format!("sync: scope `{scope_name}` is not named in .ljos/sync.toml"),
+            1,
         ));
     };
     let body = log_lines(atoms, scope_name, &default, scope_name != scope.name);
@@ -1474,9 +1480,10 @@ fn export_for_scope(
     default: &str,
 ) -> Result<String> {
     let Some(recipients) = scope.recipients_for(scope_name) else {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "scope-warning",
             format!("sync: scope `{scope_name}` is not named in .ljos/sync.toml"),
+            1,
         ));
     };
     export_named_scope(root, &scope.name, scope_name, recipients, atoms, default)
@@ -4804,22 +4811,24 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
             match log_committed_at(root, &log.age) {
                 Some(at) if host_is_quiet(at, now) => {}
                 Some(at) => {
-                    return Err(crate::policy_label::labelled(
+                    return Err(crate::policy_label::refused(
                         "adoption-warning",
                         format!(
                             "sync: {gone}'s {} log was committed {}; pass --force to adopt a host that may still be alive",
                             log.scope_name,
                             age_phrase(at, now)
                         ),
+                        1,
                     ));
                 }
                 None => {
-                    return Err(crate::policy_label::labelled(
+                    return Err(crate::policy_label::refused(
                         "adoption-warning",
                         format!(
                             "sync: {gone}'s {} log has no commit time; pass --force to adopt a host that may still be alive",
                             log.scope_name
                         ),
+                        1,
                     ));
                 }
             }
