@@ -41237,7 +41237,9 @@ pub fn parse_every(text: &str) -> Result<i64> {
     if n <= 0 {
         bail!("habit: --every must be positive");
     }
-    Ok(n * each)
+    n.checked_mul(each).ok_or_else(|| {
+        anyhow::anyhow!("habit: --every {t:?} is too long; write 7d, 24h, 2w or 30m")
+    })
 }
 
 /// An RFC 3339 stamp `secs` after `now` (`YYYY-MM-DDTHH:MM:SSZ`, to the

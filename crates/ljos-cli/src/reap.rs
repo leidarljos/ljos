@@ -26,9 +26,9 @@ pub fn parse_idle(s: &str) -> Result<Duration> {
         .map_err(|_| anyhow::anyhow!("reap: --idle {s:?} wants a number and s, m, h or d"))?;
     let secs = match unit {
         "s" => n,
-        "m" | "" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86400,
+        "m" | "" => n.saturating_mul(60),
+        "h" => n.saturating_mul(3600),
+        "d" => n.saturating_mul(86400),
         _ => bail!("reap: --idle {s:?} wants a number and s, m, h or d"),
     };
     Ok(Duration::from_secs(secs))
