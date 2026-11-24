@@ -304,7 +304,7 @@ for conv, line in json.loads(sys.argv[1]):
     env = dict(os.environ)
     if conv is not None:
         env['CURSOR_CONVERSATION_ID'] = conv
-    rc = subprocess.call(['sh', '-c', line], env=env)
+    rc = subprocess.call(['sh', '-c', line], env=env, stderr=subprocess.STDOUT)
 print('EXIT', rc)
 ";
 
