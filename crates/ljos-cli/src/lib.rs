@@ -20,7 +20,14 @@ pub use exe_publish::{
 };
 #[cfg(unix)]
 pub use exe_publish::{publish_link, Moved};
-pub use pack_link::PacksetClient;
+pub use pack_link::{PackWriteError, PacksetClient};
+#[cfg(test)]
+use remember::remember_with_post;
+pub use remember::{
+    busy_queue_line, remember_not_queued_line, remember_with_retry, shed_queue_line,
+    RememberOutcome, RememberRequest, RememberRoute,
+};
+use remember::{pack_under_load, queue_unjudged_lesson, remember_should_queue, writing_remember};
 
 /// Where the release installer is published. A literal, so the install
 /// command and the uninstall stub can be built from it with `concat!`.
@@ -172,6 +179,7 @@ pub mod readability;
 pub mod reap;
 pub mod recall_floor;
 pub mod record;
+mod remember;
 pub mod rewrite;
 pub mod runner_env;
 pub mod runner_hooks;
@@ -23991,6 +23999,13 @@ fn take_validity() -> Vec<String> {
     )
 }
 
+/// Put back a window [`take_validity`] took, for the next written claim.
+fn set_validity_tags(tags: Vec<String>) {
+    *VALIDITY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = tags;
+}
+
 /// Whether a claim with these entities held on `day` (YYYY-MM-DD). A claim
 /// with no window holds always; a bound it lacks is open.
 #[must_use]
@@ -24165,6 +24180,55 @@ fn post_claim_horizon(
     workspace: &str,
     transient: Option<bool>,
 ) -> Result<Value> {
+    let atom = typed_atom(label, text, workspace, None, transient)?;
+    let posted = post_or_reinforce(client, &atom, &format!("{label}: POST /v1/atoms failed"))?;
+    admit::satisfy_text(text.trim());
+    Ok(posted)
+}
+
+/// The atom a person types at their own terminal: origin `user-declared`,
+/// and the persona's entity and set when one is named.
+fn typed_atom(
+    label: &str,
+    text: &str,
+    workspace: &str,
+    persona: Option<&str>,
+    transient: Option<bool>,
+) -> Result<Value> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        memory_port::keep_empty(label);
+        return Err(policy_label::refused(
+            "empty-input",
+            format!("{label}: empty text is not a claim"),
+            1,
+        ));
+    }
+    let kind = atom_kind(label)?;
+    let mut atom = atom_body(kind, trimmed, workspace);
+    let persona = persona.map(str::trim).filter(|n| !n.is_empty());
+    if let Some(name) = persona {
+        add_entities(&mut atom, [persona_entity(name)]);
+    }
+    stamp_horizon(&mut atom, kind, trimmed, transient);
+    admit::stamp_person(&mut atom);
+    // Its own tree: the persona's conclusions replace and duplicate among
+    // themselves, not against the seat's or another persona's.
+    if let Some(name) = persona {
+        atom["set"] = Value::String(persona_set(name));
+    }
+    Ok(atom)
+}
+
+/// The atom an agent writes in its own words: origin `agent-derived` is
+/// added when it is posted.
+fn agent_atom(
+    label: &str,
+    text: &str,
+    workspace: &str,
+    persona: Option<&str>,
+    transient: Option<bool>,
+) -> Result<Value> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         memory_port::keep_empty(label);
@@ -24177,10 +24241,11 @@ fn post_claim_horizon(
     let kind = atom_kind(label)?;
     let mut atom = atom_body(kind, trimmed, workspace);
     stamp_horizon(&mut atom, kind, trimmed, transient);
-    admit::stamp_person(&mut atom);
-    let posted = post_or_reinforce(client, &atom, &format!("{label}: POST /v1/atoms failed"))?;
-    admit::satisfy_text(trimmed);
-    Ok(posted)
+    if let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) {
+        add_entities(&mut atom, [persona_entity(name)]);
+        atom["set"] = Value::String(persona_set(name));
+    }
+    Ok(atom)
 }
 
 /// Post a new lesson, or reinforce the live memory it says again
@@ -24223,13 +24288,7 @@ pub fn packset_write_agent(
     let kind = atom_kind(label)?;
     let prefix = format!("{label}: POST /v1/atoms failed");
     let client = client_or_queue(&prefix, kind, trimmed, "", &[])?;
-    let workspace = client.workspace();
-    let mut atom = atom_body(kind, trimmed, &workspace);
-    stamp_horizon(&mut atom, kind, trimmed, transient);
-    if let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) {
-        add_entities(&mut atom, [persona_entity(name)]);
-        atom["set"] = Value::String(persona_set(name));
-    }
+    let atom = agent_atom(label, trimmed, &client.workspace(), persona, transient)?;
     if let Some(held) = memories::reinforce_held(&client, &atom) {
         return Ok(held);
     }
@@ -24259,7 +24318,8 @@ pub(crate) fn strip_person_basis(atom: &mut Value) {
 }
 
 /// Who a claim written through MCP comes from, kept as `source.basis`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Basis {
     /// The words are in the person's latest prompt, as the prompt hook kept
     /// it.
@@ -24379,8 +24439,18 @@ pub fn packset_write_mcp(
     persona: Option<&str>,
     transient: Option<bool>,
 ) -> Result<Value> {
+    packset_write_mcp_as(label, text, persona, transient, Basis::of(text))
+}
+
+/// [`packset_write_mcp`] with the basis already decided.
+fn packset_write_mcp_as(
+    label: &str,
+    text: &str,
+    persona: Option<&str>,
+    transient: Option<bool>,
+    basis: Basis,
+) -> Result<Value> {
     let _durable = bookkeep::durable_write();
-    let basis = Basis::of(text);
     let _ = atom_kind(label)?;
     let client = pack()?;
     let atom = mcp_claim_atom(label, text, &client.workspace(), persona, transient, basis)?;
@@ -24534,11 +24604,35 @@ fn queue_waiting_lesson(atom: &Value, err: anyhow::Error, prefix: &str) -> anyho
 /// lock, is named rather than dropped.
 fn with_queue_outcome(err: anyhow::Error, queued: Result<Option<bool>>) -> anyhow::Error {
     match queued {
-        Ok(Some(true)) => err.context("the lesson is queued for the next send"),
-        Ok(Some(false)) => err.context("the lesson was already queued"),
+        Ok(Some(true)) => err.context(LessonWaits::Queued),
+        Ok(Some(false)) => err.context(LessonWaits::AlreadyQueued),
         Ok(None) => err,
         Err(e) => err.context(format!("and it could not be queued: {e:#}")),
     }
+}
+
+/// The context a failed write carries when its lesson waits in the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LessonWaits {
+    /// This write queued the lesson.
+    Queued,
+    /// The same lesson was already waiting.
+    AlreadyQueued,
+}
+
+impl std::fmt::Display for LessonWaits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Queued => "the lesson is queued for the next send",
+            Self::AlreadyQueued => "the lesson was already queued",
+        })
+    }
+}
+
+/// Whether the write behind `err` left its lesson in the queue.
+#[must_use]
+pub fn lesson_waits(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<LessonWaits>().is_some()
 }
 
 /// The pack client, or a queued lesson when the pack is off. `supersedes`
@@ -24740,6 +24834,7 @@ pub(crate) fn queue_memory(
                 .then(lesson_project_entity)
                 .flatten()
                 .unwrap_or_default(),
+            remember: (kind == "lesson").then(|| writing_remember(text)).flatten(),
         },
     )
 }
@@ -24770,6 +24865,10 @@ fn fit_queued(notes: Vec<note_queue::Queued>) -> Vec<note_queue::Queued> {
         }
         for text in copies {
             let item = note_queue::Queued {
+                remember: note
+                    .remember
+                    .as_ref()
+                    .map(|request| request.for_copy(&text)),
                 text,
                 ..note.clone()
             };
@@ -24862,72 +24961,40 @@ fn stamp_queued_seat(atom: &mut Value, seat: &str) {
     }
 }
 
+/// A replay that lost the first answer is posted again. The pack answers
+/// a claim it already holds, same text, set, issue and agent, with that
+/// claim, so the replay stores nothing new.
 fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Result<Value> {
-    if let Some(id) = queued_already_stored(client, note) {
-        return Ok(serde_json::json!({
-            "id": id,
-            "kind": "lesson",
-            "duplicate": true,
-        }));
+    let atom = queued_lesson_atom(note, &client.workspace())?;
+    match note.remember.as_ref().map(|request| request.basis) {
+        Some(Basis::Person) => with_writer(|| admit::post_kept(client, &atom)),
+        Some(Basis::Agent) => with_writer(|| admit::write_agent_one(client, atom.clone())),
+        None => with_writer(|| admit::post_kept(client, &atom)),
     }
+}
+
+/// The atom a queued lesson is sent as. A row a remember queued is built
+/// from its whole request. A row from an older ljos keeps the fields that
+/// row recorded and does not acquire a persona, basis or horizon.
+/// The seat that queued either row is the seat on the atom.
+fn queued_lesson_atom(note: &note_queue::Queued, workspace: &str) -> Result<Value> {
     let text = note.text.trim();
-    let project = (!note.project.trim().is_empty()).then(|| note.project.trim().to_string());
-    let _remember_project = RememberProject::set(project);
-    let mut atom = atom_body("lesson", text, &client.workspace());
+    let mut atom = match &note.remember {
+        Some(request) => request.atom(workspace)?,
+        None => {
+            let project =
+                (!note.project.trim().is_empty()).then(|| note.project.trim().to_string());
+            let _remember_project = RememberProject::set(project);
+            atom_body("lesson", text, workspace)
+        }
+    };
     stamp_queued_seat(&mut atom, &note.seat);
     stamp_issue(&mut atom, &note.issue);
-    stamp_horizon(&mut atom, "lesson", text, Some(false));
     if !note.supersedes.is_empty() {
         atom["supersedes"] =
             Value::Array(note.supersedes.iter().cloned().map(Value::String).collect());
     }
-    with_writer(|| admit::write_agent_one(client, atom.clone()))
-}
-
-/// The id of a lesson the pack already holds for this queued row.
-///
-/// A replay that lost the first answer, or a second drain of the same
-/// text, must not store another copy. A listing that does not answer is
-/// not a miss: the post that follows is what reports that.
-fn queued_already_stored(client: &PacksetClient, note: &note_queue::Queued) -> Option<String> {
-    if pack_link::clock_left().is_some_and(|left| left < std::time::Duration::from_millis(50)) {
-        return None;
-    }
-    let atoms = atoms_lean(client, &client.workspace()).ok()?;
-    let text = note.text.trim();
-    let (peeled, _) = peel_citations(text);
-    let want_raw = memories::lesson_key(&note.kind, text);
-    let want_peeled = memories::lesson_key(&note.kind, &peeled);
-    let issue = note.issue.trim();
-    let want_project = note.project.trim();
-    atoms.into_iter().find_map(|atom| {
-        let kind = atom["kind"].as_str().unwrap_or("");
-        let held = memories::lesson_key(kind, atom["text"].as_str().unwrap_or(""));
-        if held != want_raw && held != want_peeled {
-            return None;
-        }
-        if atom["issue"].as_str().unwrap_or("").trim() != issue {
-            return None;
-        }
-        let have_project = atom["entities"]
-            .as_array()
-            .and_then(|entities| {
-                entities.iter().find_map(|tag| {
-                    tag.as_str()
-                        .and_then(|s| s.strip_prefix("project:"))
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                })
-            })
-            .unwrap_or("");
-        if !have_project.eq_ignore_ascii_case(want_project) {
-            return None;
-        }
-        atom["id"]
-            .as_str()
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-    })
+    Ok(atom)
 }
 
 /// Send lessons that are already queued, without arming a new clock.
@@ -25593,14 +25660,11 @@ pub fn prompt_hook_wired() -> bool {
     false
 }
 
-/// The lines `ljos remember` prints, for `ljos_remember` to return.
-/// A queued write is the one busy line. Anything stored is the plain
-/// acknowledgement and [`remember_note`].
+/// The lines `ljos remember` prints for a stored lesson, for
+/// `ljos_remember` to return: the plain acknowledgement and
+/// [`remember_note`].
 #[must_use]
 pub fn remember_mcp_text(body: &Value) -> String {
-    if body["queued"].as_bool() == Some(true) {
-        return REMEMBER_QUEUED_LINE.to_string();
-    }
     let mut text = format!(
         "{}\n{}",
         format_write_ack_plain(body, &local_when),
@@ -25693,7 +25757,7 @@ pub fn packset_write(label: &str, text: &str) -> Result<Value> {
 /// The one line `ljos remember` prints when the lesson is queued because
 /// the pack is not answering. The command exits 0.
 pub const REMEMBER_QUEUED_LINE: &str =
-    "Memory busy: queued 1 write, it will be saved on a later call.";
+    "Memory busy: queued 1 write. A later ljos call from any seat will try to save it, and the pack may still refuse it.";
 
 /// The one line `ljos remember` prints when the pack stayed busy.
 /// Nothing was stored. The command exits 1.
@@ -25706,188 +25770,8 @@ pub fn memory_busy_line(n: usize) -> String {
     if n <= 1 {
         return REMEMBER_QUEUED_LINE.to_string();
     }
-    format!("Memory busy: queued {n} writes, they will be saved on a later call.")
-}
-
-fn remember_queued_body(text: &str) -> Value {
-    serde_json::json!({
-        "queued": true,
-        "kind": "lesson",
-        "text": text,
-    })
-}
-
-/// Whether the pack being down or slow is why `err` happened, and the
-/// lesson can wait. A content refusal and packs turned off are not this.
-fn remember_should_queue(err: &anyhow::Error) -> bool {
-    if pack_turned_off(err) || !note_can_wait(err) {
-        return false;
-    }
-    if pack_under_load(err)
-        || is_pack_busy(err)
-        || is_deadline_miss(err)
-        || writer_unreachable(err)
-        || writer_port_down(err)
-        || writer_slow(err)
-    {
-        return true;
-    }
-    let text = format!("{err:#}").to_ascii_lowercase();
-    text.contains("queued")
-        || text.contains("no pack writer")
-        || text.contains("connection refused")
-        || text.contains("closed the socket")
-        || text.contains("another memory call is in flight")
-}
-
-/// Post one lesson. The client waits out one `Retry-After` on a 503.
-/// A pack that reports busy is asked again inside [`search_busy_wait`].
-/// When it stays busy, nothing is stored and the error is
-/// [`REMEMBER_NOT_STORED_LINE`]. A pack that is not answering queues the
-/// lesson and the command still succeeds. Packs turned off, and a refusal
-/// of the text, stay errors.
-///
-/// # Errors
-///
-/// The pack stayed busy, refused the text, or packs are turned off.
-pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) -> Result<Value> {
-    let _call = SearchCall::enter();
-    // A pack that has not opened yet is waited out on the search warm-up
-    // budget. The short post budget starts only after that, so a pack that
-    // is already open and busy is asked again inside the busy bound.
-    answer_after_start(std::time::Instant::now(), || {
-        let _retry = pack_link::RememberRetry::enter();
-        let _deadline = pack_link::CommandDeadline::enter(REMEMBER_BUDGET);
-        let _clock = pack_link::PackClock::enter(REMEMBER_BUDGET);
-        let _quiet = pack_link::QuietPack::enter();
-        // Do not start a writer from this call. Twenty-six of those at once
-        // is what pushed the box into memory pressure.
-        let _skip = SkipWriterEnsure::enter();
-        match post() {
-            Ok(body) => Ok(body),
-            Err(err) if existing_atom_id(&err).is_some() => {
-                let id = existing_atom_id(&err).unwrap_or_default();
-                say!("remember: already stored as {id}, so run `ljos search`.");
-                Ok(serde_json::json!({
-                    "id": id,
-                    "kind": "lesson",
-                    "text": text,
-                    "duplicate": true,
-                }))
-            }
-            Err(err) if is_reported_busy(&err) => Err(anyhow::Error::msg(REMEMBER_NOT_STORED_LINE)),
-            Err(err) if is_memory_starting(&err) => Err(err),
-            Err(err) if pack_turned_off(&err) => Err(err),
-            Err(err) if remember_should_queue(&err) => {
-                // A sandbox home does not queue a lesson nobody will send.
-                // The line says why memory is off and which HOME to use.
-                if let Some(line) = sandbox_memory_off() {
-                    return Err(anyhow::Error::msg(line));
-                }
-                // Load has not judged the words. Keep the sentence as given,
-                // even when a local prose check would turn it away.
-                queue_busy_lesson(text);
-                Ok(remember_queued_body(text))
-            }
-            Err(err) => Err(err),
-        }
-    })
-}
-
-/// A 503, a shed, or a pressure line. A passed deadline is not load:
-/// the caller already returned it. The text match covers a 503 whose
-/// shed note was not on this thread, which is the line packsetd 0.17.8
-/// prints under memory pressure.
-fn pack_under_load(err: &anyhow::Error) -> bool {
-    if is_deadline_miss(err) {
-        return false;
-    }
-    if is_pack_busy(err)
-        || is_write_shed(err)
-        || is_read_shed(err)
-        || writer_busy(err)
-        || writer_slow(err)
-    {
-        return true;
-    }
-    let text = format!("{err:#}").to_ascii_lowercase();
-    text.contains("memory pressure") || text.contains("packsetd is busy") || text.contains(": 503:")
-}
-
-/// Keep `text` for the next ljos that reaches the pack, and say so.
-///
-/// A busy or pressure answer has not judged the words. The copy is
-/// queued. An empty text is not a lesson. A duplicate the pack already
-/// named is not queued: [`remember_with_retry`] prints that atom id.
-/// `1` when a busy writer queued the lesson, `2` when the queue refused it.
-static BUSY_QUEUE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-fn queue_busy_lesson(text: &str) {
-    let queued = queue_lesson_under_load(text);
-    let mark = if queued.is_ok() { 1 } else { 2 };
-    BUSY_QUEUE.store(mark, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// The shed line, and that the lesson was queued, on one line.
-/// A lesson that was queued is the one plain sentence. The fault is the
-/// line when nothing was queued.
-#[must_use]
-pub fn shed_queue_line(fault: &str) -> String {
-    match busy_queue_line() {
-        Some(line) if !line.contains("was not queued") => line.to_string(),
-        Some(line) => format!("{fault}. {line}"),
-        None => fault.to_string(),
-    }
-}
-
-/// The one line for a lesson queued while the writer was busy.
-/// `None` when this process did not queue one.
-#[must_use]
-pub fn busy_queue_line() -> Option<&'static str> {
-    match BUSY_QUEUE.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => Some(REMEMBER_QUEUED_LINE),
-        2 => Some(
-            "pack busy: the lesson was not queued. Retry later with `ljos remember` once the writer answers.",
-        ),
-        _ => None,
-    }
-}
-
-/// Queue `text` because the pack is under load. The local atom gate is
-/// not applied: that gate is a guess, and a 503 has not refused the copy.
-fn queue_lesson_under_load(text: &str) -> Result<bool> {
-    queue_unjudged_lesson("", text)
-}
-
-/// Queue one lesson the pack did not take. `issue` is empty for a
-/// remember that names no ticket. The same issue, text, workspace, kind
-/// and seat already waiting is not a second row.
-fn queue_unjudged_lesson(issue: &str, text: &str) -> Result<bool> {
-    let text = text.trim();
-    if text.is_empty() {
-        memory_port::keep_empty("lesson");
-        return Err(policy_label::refused(
-            "empty-input",
-            "remember: empty text is not a claim",
-            1,
-        ));
-    }
-    let at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    note_queue::push_in(
-        &note_queue::state_dir(),
-        note_queue::Queued {
-            issue: issue.trim().to_string(),
-            text: text.to_string(),
-            workspace: memory_workspace(""),
-            at,
-            kind: "lesson".into(),
-            supersedes: Vec::new(),
-            seat: seat_name(),
-            home: String::new(),
-            project: lesson_project_entity().unwrap_or_default(),
-        },
+    format!(
+        "Memory busy: queued {n} writes. A later ljos call from any seat will try to save them, and the pack may still refuse them."
     )
 }
 
@@ -25967,11 +25851,7 @@ pub fn flush_queued_lessons() {
     }
     let _deadline = pack_link::CommandDeadline::enter(REMEMBER_BUDGET);
     let _clock = pack_link::PackClock::enter(REMEMBER_BUDGET);
-    let first = {
-        let _quiet = pack_link::QuietPack::enter();
-        flush_note_queue()
-    };
-    let done = match first {
+    let done = match flush_note_queue_twice() {
         Ok(done) => done,
         Err(err) => {
             let waiting = note_queue::pending_in(&dir).len();
@@ -25986,23 +25866,6 @@ pub fn flush_queued_lessons() {
             }
             return;
         }
-    };
-    let done = if done.left > 0
-        && !queue_waits_on_writer(&done)
-        && pack_link::clock_left().is_some_and(|left| left > std::time::Duration::from_millis(50))
-    {
-        let _quiet = pack_link::QuietPack::enter();
-        match flush_note_queue() {
-            Ok(mut again) => {
-                again.kept.splice(0..0, done.kept);
-                again.refused.splice(0..0, done.refused);
-                again.set_aside.splice(0..0, done.set_aside);
-                again
-            }
-            Err(_) => done,
-        }
-    } else {
-        done
     };
     if queue_waits_on_writer(&done) {
         say_fault(&fault_line());
@@ -26019,6 +25882,26 @@ pub fn flush_queued_lessons() {
     if !lines.is_empty() {
         say_raw!("{lines}");
     }
+}
+
+/// One drain, and a second while the first left lessons the writer did
+/// not refuse and the pack clock still has time.
+fn flush_note_queue_twice() -> Result<note_queue::Drained> {
+    let done = {
+        let _quiet = pack_link::QuietPack::enter();
+        flush_note_queue()?
+    };
+    if done.left == 0
+        || queue_waits_on_writer(&done)
+        || pack_link::clock_left().is_none_or(|left| left <= std::time::Duration::from_millis(50))
+    {
+        return Ok(done);
+    }
+    let _quiet = pack_link::QuietPack::enter();
+    Ok(match flush_note_queue() {
+        Ok(again) => done.then(again),
+        Err(_) => done,
+    })
 }
 
 /// The drain left lessons because the writer refused the connection.
@@ -26124,29 +26007,9 @@ pub fn packset_write_as(
     transient: Option<bool>,
 ) -> Result<Value> {
     let client = pack()?;
-    let workspace = client.workspace();
-    let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) else {
-        return post_claim_horizon(&client, label, text, &workspace, transient);
-    };
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        memory_port::keep_empty(label);
-        return Err(policy_label::refused(
-            "empty-input",
-            format!("{label}: empty text is not a claim"),
-            1,
-        ));
-    }
-    let kind = atom_kind(label)?;
-    let mut atom = atom_body(kind, trimmed, &workspace);
-    add_entities(&mut atom, [persona_entity(name)]);
-    stamp_horizon(&mut atom, kind, trimmed, transient);
-    admit::stamp_person(&mut atom);
-    // Its own tree: the persona's conclusions replace and duplicate among
-    // themselves, not against the seat's or another persona's.
-    atom["set"] = Value::String(persona_set(name));
+    let atom = typed_atom(label, text, &client.workspace(), persona, transient)?;
     let posted = post_or_reinforce(&client, &atom, &format!("{label}: POST /v1/atoms failed"))?;
-    admit::satisfy_text(trimmed);
+    admit::satisfy_text(text.trim());
     Ok(posted)
 }
 
@@ -49352,31 +49215,51 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
 /// it. A refusal is a line that names the pack's reason and the command
 /// that keeps the lesson, never an error, so the finish still goes on to
 /// end the sitting.
+///
+/// The remember record is chosen once, before the post. A lesson the pack
+/// does not take is queued from that record by [`queue_finish_lesson`].
 fn finish_lesson(issue: &str, text: &str) -> String {
     let _call = SearchCall::enter();
+    let persons = lesson_is_the_persons(under_a_runner(), person_present());
+    let request = if persons {
+        RememberRequest::typed(text, None, Some(false))
+    } else {
+        RememberRequest::agent(text, None, Some(false))
+    };
+    // The record stays up for the post. A row queued under it carries
+    // this origin, basis and horizon.
+    let _scope = request.enter();
     let filed = answer_after_start(std::time::Instant::now(), || {
-        finish_lesson_post(issue, text)
+        finish_lesson_post(issue, text, persons)
     });
     match filed {
         Ok(line) => line,
-        // A pack that is starting or busy has not judged the lesson.
-        // Queue it, so the sentence is not dropped.
-        Err(e) if is_memory_starting(&e) || (!pack_turned_off(&e) && remember_should_queue(&e)) => {
-            // A busy writer has not judged the words. Queue the sentence
-            // as given. A second finish of the same lesson is the row
-            // already waiting, and the line still says it will be saved.
-            match queue_unjudged_lesson(issue, text) {
-                Ok(_) => format!("{}\n", memory_busy_line(1)),
-                Err(err) => format!(
-                    "the lesson was not kept: {err:#}. Reword the lesson and keep it with: ljos remember {}\n",
-                    tools::sh_quote(text)
-                ),
-            }
+        // The post queued the lesson, or the warm-up replaced that error
+        // after the row was written. The line says it is queued.
+        Err(e) if lesson_waits(&e) || is_memory_starting(&e) => {
+            format!("{}\n", memory_busy_line(1))
         }
         Err(e) => format!(
             "the lesson was not kept: {e:#}. Reword the lesson and keep it with: ljos remember {}\n",
             tools::sh_quote(text)
         ),
+    }
+}
+
+/// Queue the finish lesson the pack did not take.
+///
+/// The record is the one [`finish_lesson`] set for this call. A refusal
+/// and packs turned off are returned as they are. A second finish of the
+/// same lesson is the row already waiting.
+fn queue_finish_lesson(issue: &str, text: &str, err: anyhow::Error) -> anyhow::Error {
+    if !(is_memory_starting(&err) || (!pack_turned_off(&err) && remember_should_queue(&err))) {
+        return err;
+    }
+    let request = writing_remember(text);
+    match queue_unjudged_lesson(issue, text, request.as_ref()) {
+        Ok(true) => err.context(LessonWaits::Queued),
+        Ok(false) => err.context(LessonWaits::AlreadyQueued),
+        Err(cause) => err.context(format!("and it could not be queued: {cause:#}")),
     }
 }
 
@@ -49433,13 +49316,12 @@ pub(crate) fn lesson_request_budget() -> Option<std::time::Duration> {
     LESSON_REQUEST.with(|cell| cell.get())
 }
 
-fn finish_lesson_post(issue: &str, text: &str) -> Result<String> {
+fn finish_lesson_post(issue: &str, text: &str, persons: bool) -> Result<String> {
     let filed = (|| -> Result<String> {
         // Scope and the atom are local. They used to sit inside the pack
         // clock, so a slow lookup left the write no time and the lesson
         // was queued.
         let scope = sync::scope_for_lesson(sync::scope_for_issue(issue));
-        let persons = lesson_is_the_persons(under_a_runner(), person_present());
         let prefix = "finish: POST /v1/atoms failed for the lesson";
         let client = pack()?;
         let workspace = client.workspace();
@@ -49463,7 +49345,18 @@ fn finish_lesson_post(issue: &str, text: &str) -> Result<String> {
             // Typed by the person in a terminal of their own: no
             // runner above it, so it needs no second review.
             admit::stamp_person(&mut atom);
-            let posted = post_or_reinforce(&client, &atom, prefix)?;
+            // [`queue_finish_lesson`] writes the one queued row from the
+            // record set above.
+            let posted = if let Some(held) = memories::reinforce_held(&client, &atom) {
+                held
+            } else {
+                match with_writer(|| {
+                    admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e))
+                }) {
+                    Ok(posted) => posted,
+                    Err(err) => return Err(queue_finish_lesson(issue, text, err)),
+                }
+            };
             admit::satisfy_text(text);
             if let Some(line) = memories::reinforced_line(&posted) {
                 return Ok(format!("{line}\n"));
@@ -49485,7 +49378,10 @@ fn finish_lesson_post(issue: &str, text: &str) -> Result<String> {
         {
             return Ok(format!("{line}\n"));
         }
-        let posted = admit::store_labelled(&client, atom)?;
+        let posted = match admit::store_labelled(&client, atom) {
+            Ok(posted) => posted,
+            Err(err) => return Err(queue_finish_lesson(issue, text, err)),
+        };
         let id = memories::short_id(posted["id"].as_str().unwrap_or("?"));
         let warned = prose_warning_shown(&posted, false)
             .map(|line| format!("{line}\n"))
@@ -73934,6 +73830,266 @@ mod tests {
         assert!(!line.contains("Memory busy"), "{line}");
     }
 
+    /// A finish lesson that waits for the pack keeps the same provenance
+    /// and horizon when a later call sends it.
+    #[test]
+    fn a_queued_finish_lesson_replays_as_the_agents_lesson() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let down = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let _env = HoldEnv::set(&[
+            ("XDG_STATE_HOME", state.path().to_str().unwrap()),
+            ("CLAUDECODE", "1"),
+        ]);
+        let down_url = PackUrl::set(&down);
+        let line = finish_lesson("kiln-7", "Seat the kiln door only when cold.");
+        assert!(line.contains("Memory busy: queued 1 write"), "{line}");
+        drop(down_url);
+
+        let queued = note_queue::pending_in(&note_queue::state_dir());
+        let [row] = queued.as_slice() else {
+            panic!("finish queued {} rows: {queued:?}", queued.len());
+        };
+        let request = row.remember.as_ref().expect("current finish request");
+        assert_eq!(request.route, RememberRoute::Agent, "{row:?}");
+        assert_eq!(request.basis, Basis::Agent, "{row:?}");
+        assert_eq!(request.horizon, Some(false), "{row:?}");
+
+        let (url, stored) = serve_store();
+        let _url = PackUrl::set(&url);
+        let done = flush_note_queue().unwrap();
+        assert!(done.legacy.is_empty(), "{done:?}");
+        assert!(
+            !note_queue::drained_lines(&done).contains("came from an older ljos"),
+            "{done:?}"
+        );
+        let live = stored.lock().unwrap().clone();
+        assert_eq!(live.len(), 1, "{live:?}");
+        let atom = &live[0];
+        assert_eq!(atom["origin"], admit::ORIGIN_AGENT, "{atom}");
+        assert_eq!(atom["source"]["basis"], "agent", "{atom}");
+        assert_eq!(atom["issue"], "kiln-7", "{atom}");
+        assert!(
+            atom["entities"]
+                .as_array()
+                .is_some_and(|tags| tags.iter().any(|tag| tag == "horizon:standing")),
+            "{atom}"
+        );
+    }
+
+    /// A pack that dedupes a post the way packsetd does, on text, kind, set,
+    /// issue and agent, and that already holds `held`.
+    fn serve_deduping_store(held: Vec<Value>) -> (String, Arc<Mutex<Vec<Value>>>) {
+        let stored = Arc::new(Mutex::new(held));
+        let slot = Arc::clone(&stored);
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            let mut all = slot.lock().unwrap();
+            if first.starts_with("POST /v1/atoms ") {
+                let mut atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let same = |held: &&Value| {
+                    ["text", "kind", "set", "issue", "agent"]
+                        .iter()
+                        .all(|key| held.get(*key) == atom.get(*key))
+                };
+                if let Some(held) = all.iter().find(same) {
+                    return (200, held.to_string());
+                }
+                atom["id"] = Value::String(format!("atom-new-{:04}", all.len()));
+                all.push(atom.clone());
+                return (200, atom.to_string());
+            }
+            if first.starts_with("GET /v1/atoms") {
+                return (200, serde_json::json!({ "atoms": *all }).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        (url, stored)
+    }
+
+    /// A queued persona lesson whose words the pack already holds outside
+    /// that persona is still stored, in the persona's set.
+    #[test]
+    fn a_held_lesson_does_not_consume_a_different_queued_request() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
+        let text = "Seat the kiln door only when cold.";
+        let request = RememberRequest::typed(text, Some("critic"), None);
+        note_queue::push_in(
+            &note_queue::state_dir(),
+            note_queue::Queued {
+                issue: String::new(),
+                text: text.into(),
+                workspace: "seat".into(),
+                at: 1,
+                kind: "lesson".into(),
+                supersedes: Vec::new(),
+                seat: String::new(),
+                home: String::new(),
+                project: String::new(),
+                remember: Some(request),
+            },
+        )
+        .unwrap();
+        let held = serde_json::json!({
+            "id": "atom-held-0001",
+            "kind": "lesson",
+            "text": text,
+            "workspace": "seat",
+        });
+        let (url, stored) = serve_deduping_store(vec![held]);
+        let _url = PackUrl::set(&url);
+        let done = flush_note_queue().unwrap();
+        let live = stored.lock().unwrap().clone();
+        assert_eq!(live.len(), 2, "{done:?}\n{live:?}");
+        assert_eq!(live[1]["set"], persona_set("critic"), "{live:?}");
+        assert_eq!(
+            done.kept,
+            [(String::new(), live[1]["id"].as_str().unwrap().to_string())],
+            "{done:?}"
+        );
+        assert!(note_queue::pending_in(&note_queue::state_dir()).is_empty());
+
+        note_queue::push_in(
+            &note_queue::state_dir(),
+            note_queue::Queued {
+                issue: String::new(),
+                text: text.into(),
+                workspace: "seat".into(),
+                at: 2,
+                kind: "lesson".into(),
+                supersedes: Vec::new(),
+                seat: String::new(),
+                home: String::new(),
+                project: String::new(),
+                remember: Some(RememberRequest::typed(text, Some("critic"), None)),
+            },
+        )
+        .unwrap();
+        let again = flush_note_queue().unwrap();
+        assert_eq!(stored.lock().unwrap().len(), 2, "a replay stored a copy");
+        assert_eq!(again.kept, done.kept, "{again:?}");
+    }
+
+    /// When the first drain pass finishes an older row and the second pass
+    /// finishes another, the report names each older row once.
+    #[test]
+    fn a_second_drain_pass_keeps_what_the_first_pass_reported() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
+        let dir = note_queue::state_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let row = |issue: &str, text: &str| {
+            serde_json::json!({
+                "issue": issue,
+                "text": text,
+                "workspace": "seat",
+                "at": 1,
+                "kind": "lesson",
+            })
+            .to_string()
+        };
+        crate::write_file(
+            dir.join("note-queue.jsonl"),
+            format!(
+                "{}\n{}\n",
+                row("kiln-a", "Seat the kiln door only when cold."),
+                row("kiln-b", "Vent the kiln before the door opens.")
+            ),
+        )
+        .unwrap();
+        let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let once = Arc::clone(&failed);
+        let (url, _) = serve_http(move |req| {
+            if !req.starts_with("POST /v1/atoms ") {
+                return (200, r#"{"atoms":[]}"#.into());
+            }
+            if req.contains("Vent the kiln") && !once.swap(true, Ordering::SeqCst) {
+                return (500, r#"{"error":"busy"}"#.into());
+            }
+            (200, r#"{"id":"atom-kept-0001","kind":"lesson"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let _clock = pack_link::PackClock::enter(REMEMBER_BUDGET);
+        let done = flush_note_queue_twice().unwrap();
+        assert!(
+            failed.load(Ordering::SeqCst),
+            "the pack never failed a post"
+        );
+        assert_eq!(done.left, 0, "{done:?}");
+        assert_eq!(done.kept.len(), 2, "{done:?}");
+        assert_eq!(done.legacy, ["kiln-a", "kiln-b"], "{done:?}");
+        let lines = note_queue::drained_lines(&done);
+        assert_eq!(
+            lines.matches("came from an older ljos").count(),
+            2,
+            "{lines}"
+        );
+    }
+
+    /// A finish lesson the person typed, with the pack down, is one queued
+    /// row. Replay stores that row as the person's standing lesson.
+    #[test]
+    fn a_queued_finish_lesson_replays_as_the_persons_lesson() {
+        let _g = env_guard();
+        let state = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let down = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let _env = HoldEnv::set(&[("XDG_STATE_HOME", state.path().to_str().unwrap())]);
+        struct PersonTerminal;
+        impl Drop for PersonTerminal {
+            fn drop(&mut self) {
+                PERSON_AT_TERMINAL.with(|cell| cell.set(false));
+            }
+        }
+        PERSON_AT_TERMINAL.with(|cell| cell.set(true));
+        let _person = PersonTerminal;
+        assert!(
+            lesson_is_the_persons(under_a_runner(), person_present()),
+            "persons is true"
+        );
+        let down_url = PackUrl::set(&down);
+        let line = finish_lesson("kiln-8", "Seat the kiln door only when cold.");
+        assert!(line.contains("Memory busy: queued 1 write"), "{line}");
+        drop(down_url);
+
+        let queued = note_queue::pending_in(&note_queue::state_dir());
+        let [row] = queued.as_slice() else {
+            panic!("finish queued {} rows: {queued:?}", queued.len());
+        };
+        let request = row.remember.as_ref().expect("current finish request");
+        assert_eq!(request.route, RememberRoute::Typed, "{row:?}");
+        assert_eq!(request.basis, Basis::Person, "{row:?}");
+        assert_eq!(request.horizon, Some(false), "{row:?}");
+
+        let (url, stored) = serve_store();
+        let _url = PackUrl::set(&url);
+        let done = flush_note_queue().unwrap();
+        assert!(done.legacy.is_empty(), "{done:?}");
+        assert!(
+            !note_queue::drained_lines(&done).contains("came from an older ljos"),
+            "{done:?}"
+        );
+        let live = stored.lock().unwrap().clone();
+        assert_eq!(live.len(), 1, "{live:?}");
+        let atom = &live[0];
+        assert_eq!(atom["origin"], admit::ORIGIN_USER, "{atom}");
+        assert_eq!(atom["source"]["basis"], "person", "{atom}");
+        assert_eq!(atom["issue"], "kiln-8", "{atom}");
+        assert!(
+            atom["entities"]
+                .as_array()
+                .is_some_and(|tags| tags.iter().any(|tag| tag == "horizon:standing")),
+            "{atom}"
+        );
+    }
+
     /// A resolved campaign finding is tool output. It is stored at once
     /// as `tool-echo` at L0.
     #[test]
@@ -81081,18 +81237,215 @@ lesson, due yesterday, seat ada
             !pack_copy::pack_copy_ok(text),
             "the local gate accepted a sentence past the word limit"
         );
-        let body = super::remember_with_retry(text, || {
-            Err(anyhow::Error::new(packset_client::Error::Unavailable(
-                "packsetd is busy: memory pressure; try again".into(),
+        let request = super::RememberRequest::agent(text, None, Some(false));
+        let outcome = super::remember_with_post(&request, || {
+            Err(anyhow::Error::new(super::PackWriteError::MemoryPressure(
+                packset_client::Error::Unavailable(
+                    "packsetd is busy: memory pressure; try again".into(),
+                ),
             )))
         })
         .unwrap();
-        assert_eq!(body["queued"].as_bool(), Some(true), "{body}");
+        assert!(
+            matches!(outcome, super::RememberOutcome::Queued(_)),
+            "{outcome:?}"
+        );
         let queued =
             std::fs::read_to_string(tmp.path().join("ljos/note-queue.jsonl")).unwrap_or_default();
         assert!(
             queued.contains(text),
             "the lesson was dropped instead of queued:\n{queued}"
+        );
+    }
+
+    /// A queue that cannot take the lesson is its own outcome. A cause that
+    /// says busy is still not a queued lesson.
+    #[test]
+    fn a_queue_write_that_fails_is_not_queued() {
+        let _env = crate::test_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("busy");
+        std::fs::create_dir_all(state.join("ljos/note-queue.jsonl")).unwrap();
+        // SAFETY: test_env_lock holds the environment and restores it.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", &state);
+        }
+        let request = super::RememberRequest::agent("Seat the kiln door cold.", None, Some(false));
+        let outcome = super::remember_with_post(&request, || {
+            Err(anyhow::Error::new(super::PackWriteError::MemoryPressure(
+                packset_client::Error::Unavailable(
+                    "packsetd is busy: memory pressure; try again".into(),
+                ),
+            )))
+        })
+        .unwrap();
+        let super::RememberOutcome::NotQueued(cause) = outcome else {
+            panic!("a lesson the queue refused was not NotQueued: {outcome:?}");
+        };
+        assert!(!super::lesson_waits(&cause), "{cause:#}");
+        let line = super::remember_not_queued_line(&cause);
+        assert!(line.contains("busy"), "{line}");
+        assert!(line.ends_with(super::REMEMBER_NOT_STORED_LINE), "{line}");
+    }
+
+    #[test]
+    fn remember_does_not_queue_untyped_error_words() {
+        for words in [
+            "another service queued the request",
+            "an unrelated memory pressure warning",
+            "the proxy included : 503: in its message",
+            "the socket was closed by a different command",
+        ] {
+            let err = anyhow::anyhow!("{words}");
+            assert!(!super::remember_should_queue(&err), "{err:#}");
+            assert!(!super::pack_under_load(&err), "{err:#}");
+        }
+        for write in [
+            super::PackWriteError::BusyOrQueuedByServer(packset_client::Error::Bad("busy".into())),
+            super::PackWriteError::MemoryPressure(packset_client::Error::Bad("pressure".into())),
+            super::PackWriteError::Unavailable503(packset_client::Error::Bad("503".into())),
+        ] {
+            let err = anyhow::Error::new(write);
+            assert!(super::remember_should_queue(&err), "{err:#}");
+        }
+    }
+
+    /// A queued remember keeps every field of its request through the queue
+    /// file, and the send builds the lesson from that record.
+    #[test]
+    fn a_queued_remember_round_trips_and_is_sent_as_its_whole_request() {
+        let said = super::RememberRequest {
+            text: "Seat the kiln door only when cold.".into(),
+            route: super::RememberRoute::Said,
+            basis: super::Basis::Person,
+            persona: Some("reviewer".into()),
+            horizon: Some(true),
+            project: Some("Garden".into()),
+            validity: vec!["valid_from:2026-01-01".into(), "valid_to:2026-03-31".into()],
+        };
+        let requests = [
+            said.clone(),
+            super::RememberRequest {
+                route: super::RememberRoute::Typed,
+                horizon: Some(false),
+                ..said.clone()
+            },
+            super::RememberRequest {
+                route: super::RememberRoute::Agent,
+                basis: super::Basis::Agent,
+                persona: None,
+                horizon: None,
+                project: None,
+                validity: Vec::new(),
+                ..said.clone()
+            },
+        ];
+        for request in &requests {
+            let row = crate::note_queue::Queued {
+                issue: String::new(),
+                text: request.text.clone(),
+                workspace: "ws".into(),
+                at: 7,
+                kind: "lesson".into(),
+                supersedes: Vec::new(),
+                seat: "ada".into(),
+                home: String::new(),
+                project: request.project.clone().unwrap_or_default(),
+                remember: Some(request.clone()),
+            };
+            let line = serde_json::to_string(&row).unwrap();
+            let back: crate::note_queue::Queued = serde_json::from_str(&line).unwrap();
+            assert_eq!(back, row, "{line}");
+            assert_eq!(back.remember.as_ref(), Some(request), "{line}");
+            let kept: Value = serde_json::from_str(&line).unwrap();
+            for key in [
+                "text", "route", "basis", "persona", "horizon", "project", "validity",
+            ] {
+                assert!(kept["remember"].get(key).is_some(), "{key}: {line}");
+            }
+        }
+
+        let _env = crate::test_env_lock();
+        let row = |request: &super::RememberRequest| crate::note_queue::Queued {
+            issue: String::new(),
+            text: request.text.clone(),
+            workspace: "ws".into(),
+            at: 7,
+            kind: "lesson".into(),
+            supersedes: Vec::new(),
+            seat: "ada".into(),
+            home: String::new(),
+            project: String::new(),
+            remember: Some(request.clone()),
+        };
+        let entities = |atom: &Value| -> Vec<String> {
+            atom["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|e| e.as_str().map(str::to_string))
+                .collect()
+        };
+
+        let atom = super::queued_lesson_atom(&row(&said), "ws").unwrap();
+        let tags = entities(&atom);
+        assert_eq!(tags[0], "seat:ada", "{atom}");
+        for want in [
+            "persona:reviewer",
+            "horizon:transient",
+            "project:Garden",
+            "valid_from:2026-01-01",
+            "valid_to:2026-03-31",
+            super::SAID_ENTITY,
+        ] {
+            assert!(tags.iter().any(|tag| tag == want), "{want}: {atom}");
+        }
+        assert!(!tags.iter().any(|tag| tag == "horizon:standing"), "{atom}");
+        assert_eq!(atom["set"], super::persona_set("reviewer"), "{atom}");
+        assert_eq!(atom["source"]["basis"], "person", "{atom}");
+        assert_eq!(atom["origin"], admit::ORIGIN_USER, "{atom}");
+        assert_eq!(atom["source"]["seat"], "ada", "{atom}");
+
+        let agent = super::RememberRequest {
+            route: super::RememberRoute::Said,
+            basis: super::Basis::Agent,
+            ..said.clone()
+        };
+        let atom = super::queued_lesson_atom(&row(&agent), "ws").unwrap();
+        let tags = entities(&atom);
+        assert!(tags.iter().any(|tag| tag == "persona:reviewer"), "{atom}");
+        assert!(tags.iter().any(|tag| tag == "horizon:transient"), "{atom}");
+        assert!(!tags.iter().any(|tag| tag == super::SAID_ENTITY), "{atom}");
+        assert_eq!(atom["source"]["basis"], "agent", "{atom}");
+        assert_eq!(atom["origin"], admit::ORIGIN_AGENT, "{atom}");
+
+        let old = r#"{"issue":"kiln-7","text":"Seat the kiln door only when cold.","workspace":"old-ws","at":7,"kind":"lesson","supersedes":["old-atom"],"seat":"ada","home":"/home/ada/.ljos/memory","project":"Garden"}"#;
+        let old: crate::note_queue::Queued = serde_json::from_str(old).unwrap();
+        assert!(old.remember.is_none());
+        let atom = super::queued_lesson_atom(&old, &old.workspace).unwrap();
+        let tags = entities(&atom);
+        for want in ["seat:ada", "project:Garden"] {
+            assert!(tags.iter().any(|tag| tag == want), "{want}: {atom}");
+        }
+        for prefix in ["persona:", "horizon:", "valid_from:", "valid_to:"] {
+            assert!(
+                !tags.iter().any(|tag| tag.starts_with(prefix)),
+                "{prefix}: {atom}"
+            );
+        }
+        assert!(atom["source"].get("basis").is_none(), "{atom}");
+        assert!(atom.get("origin").is_none(), "{atom}");
+        assert_eq!(atom["issue"], "kiln-7");
+        assert_eq!(atom["supersedes"], serde_json::json!(["old-atom"]));
+        assert_eq!(atom["workspace"], "old-ws");
+
+        let lines = crate::note_queue::drained_lines(&crate::note_queue::Drained {
+            legacy: vec!["kiln-7".into()],
+            ..Default::default()
+        });
+        assert_eq!(
+            lines,
+            "memory: the queued lesson on kiln-7 came from an older ljos; its row did not record route, basis, persona, horizon or validity\n"
         );
     }
 
@@ -81286,12 +81639,16 @@ lesson, due yesterday, seat ada
         unsafe {
             std::env::set_var("XDG_STATE_HOME", tmp.path());
         }
-        let body = super::remember_with_retry("pin the fuse", || {
+        let request = super::RememberRequest::agent("pin the fuse", None, Some(false));
+        let outcome = super::remember_with_post(&request, || {
             Err(anyhow::anyhow!(
                 "http://127.0.0.1:9/v1/atoms: 400: duplicate of abcdef0123456789"
             ))
         })
         .unwrap();
+        let super::RememberOutcome::Stored(body) = outcome else {
+            panic!("a duplicate was not the stored atom: {outcome:?}");
+        };
         assert_eq!(body["id"], "abcdef0123456789");
         assert!(
             !tmp.path().join("ljos/note-queue.jsonl").exists(),
@@ -81316,6 +81673,7 @@ lesson, due yesterday, seat ada
                 seat: String::new(),
                 home: String::new(),
                 project: String::new(),
+                remember: None,
             },
         )
         .unwrap();
@@ -81395,6 +81753,7 @@ lesson, due yesterday, seat ada
                 seat: String::new(),
                 home: String::new(),
                 project: String::new(),
+                remember: None,
             },
         )
         .unwrap();
@@ -81483,6 +81842,7 @@ lesson, due yesterday, seat ada
                 seat: "fortranbot".into(),
                 home: home.display().to_string(),
                 project: String::new(),
+                remember: None,
             },
         )
         .unwrap();
@@ -94967,6 +95327,7 @@ lesson, due yesterday, seat ada
                 seat: String::new(),
                 home: String::new(),
                 project: String::new(),
+                remember: None,
             },
         )
         .unwrap();
