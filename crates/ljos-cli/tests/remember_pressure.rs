@@ -151,9 +151,46 @@ fn a_duplicate_lesson_prints_the_atom_id() {
 }
 
 #[test]
-fn json_prints_a_claims_document_when_every_chunk_is_already_stored() {
+fn json_for_one_claim_is_the_claim_object() {
+    let (port, _posts) =
+        serve_first_then_drop(r#"{"id":"abcdef0123456789","kind":"lesson","text":"pin the fuse"}"#);
+    let out = remember_with(port, &["remember", "--json", "pin the fuse"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!(
+        "status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+    assert!(out.status.success(), "{said}");
+    let want = "{\n  \"id\": \"abcdef0123456789\",\n  \"kind\": \"lesson\",\n  \"text\": \"pin the fuse\",\n  \"prose\": {\n    \"grade\": null,\n    \"target\": 14,\n    \"flagged_sentence\": null\n  }\n}\n";
+    assert_eq!(stdout.as_ref(), want, "{said}");
+}
+
+#[test]
+fn json_for_one_duplicate_prints_the_existing_claim() {
     let port = serve(400, r#"{"error":"duplicate of abcdef0123456789"}"#);
     let out = remember_with(port, &["remember", "--json", "pin the fuse"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!(
+        "status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+    assert!(out.status.success(), "{said}");
+    let claim: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|err| panic!("{err}\n{said}"));
+    assert_eq!(claim["id"], "abcdef0123456789", "{said}");
+    assert_eq!(claim["duplicate"], true, "{said}");
+    assert!(
+        stderr.contains("already stored as abcdef0123456789"),
+        "{said}"
+    );
+}
+
+#[test]
+fn json_prints_a_claims_document_when_every_chunk_is_already_stored() {
+    let port = serve(400, r#"{"error":"duplicate of abcdef0123456789"}"#);
+    let out = remember_with(port, &["remember", "--json", TWO_CLAIMS]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let said = format!(
@@ -170,10 +207,13 @@ fn json_prints_a_claims_document_when_every_chunk_is_already_stored() {
     let claims = page["claims"]
         .as_array()
         .unwrap_or_else(|| panic!("stdout has no claims array:\n{said}"));
-    assert_eq!(claims.len(), 1, "{said}");
+    assert_eq!(claims.len(), 2, "{said}");
+    assert_eq!(page["stored"], 2, "{said}");
+    assert_eq!(page["queued"], 0, "{said}");
     assert_eq!(claims[0]["id"], "abcdef0123456789", "{said}");
     assert_eq!(claims[0]["duplicate"], true, "{said}");
-    assert_eq!(claims[0]["text"], "pin the fuse", "{said}");
+    assert_eq!(claims[1]["duplicate"], true, "{said}");
+    assert_ne!(claims[0]["text"], claims[1]["text"], "{said}");
 }
 
 #[test]
@@ -193,6 +233,26 @@ fn a_fully_queued_split_says_queued() {
     assert!(stderr.contains("remember: queued as 2 claims"), "{said}");
     assert!(!stderr.contains("stored as"), "{said}");
     assert!(!stdout.contains("stored as"), "{said}");
+}
+
+#[test]
+fn json_for_one_queued_claim_is_one_document() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let out = remember_with(port, &["remember", "--json", "Fire the kiln before dusk."]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!(
+        "status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+    assert!(out.status.success(), "{said}");
+    let claim: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|err| panic!("{err}\n{said}"));
+    assert_eq!(claim["queued"], true, "{said}");
+    assert!(stderr.contains(ljos_cli::REMEMBER_QUEUED_LINE), "{said}");
+    assert!(!stdout.contains("Memory busy:"), "{said}");
 }
 
 /// A pack that stores the first post and drops the socket on every later

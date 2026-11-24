@@ -25882,12 +25882,13 @@ pub fn remember_split_summary(stored: usize, queued: usize) -> String {
     }
 }
 
-/// One JSON document for `ljos remember --json`.
+/// One JSON document for a split `ljos remember --json`.
 ///
-/// `claims` lists every chunk the pack accepted, including a duplicate, and
-/// every chunk that was queued. `stored` counts the first kind and `queued`
-/// the second. `failed` is present when a later chunk was refused, and names
-/// that text.
+/// One claim is the claim object itself, printed by the command. This page
+/// is only the split. `claims` lists every chunk the pack accepted, including
+/// a duplicate, and every chunk that was queued. `stored` counts the first
+/// kind and `queued` the second. `failed` is present when a later chunk was
+/// refused, and names that text.
 ///
 /// # Errors
 ///
