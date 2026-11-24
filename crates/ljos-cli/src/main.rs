@@ -4492,24 +4492,6 @@ fn usize_with_negative_zero(value: &str) -> std::result::Result<usize, String> {
     }
 }
 
-fn leading_positional_looks_like_flag(args: &[String]) -> Option<String> {
-    let command_at = args
-        .iter()
-        .position(|arg| matches!(arg.as_str(), "file" | "finish"))?;
-    if args[command_at + 1..].iter().any(|arg| arg == "--") {
-        return None;
-    }
-    let command = &args[command_at];
-    let typed = args[command_at + 1..].iter().find(|arg| {
-        arg.len() > 2
-            && !arg.starts_with("--")
-            && (arg.starts_with("-h") || (command == "file" && arg.starts_with("-t")))
-    })?;
-    Some(format!(
-        "ljos: {command} reads {typed} as a flag; pass `--` before text that starts with `-`."
-    ))
-}
-
 /// Reads look at every seat when none of the rules match. The writes
 /// that used to stop, and remember, note and file, use the login name,
 /// or a short stable name when that login is missing.
@@ -5383,24 +5365,42 @@ fn missing_flag_value_inner(args: &[String]) -> Option<String> {
             if let Some(sub) = cmd.find_subcommand(arg).cloned() {
                 path.push(arg.clone());
                 cmd = sub;
+                if matches!(
+                    path.last().map(String::as_str),
+                    Some("evidence" | "git-hook")
+                ) {
+                    return None;
+                }
                 i += 1;
                 continue;
+            }
+            if path.is_empty() {
+                return None;
             }
             i += 1;
             continue;
         }
         let Some(parsed) = parse_flag(arg, &cmd) else {
+            if arg.strip_prefix('-').is_some_and(|text| {
+                !text.starts_with('-') && text.chars().next().is_some_and(char::is_alphabetic)
+            }) {
+                return Some(flag_sentence(arg, &args[1..]));
+            }
             i += 1;
             continue;
         };
         let takes = find_flag(&cmd, &parsed.name).is_some_and(requires_value);
         if takes {
+            let allows_hyphen =
+                find_flag(&cmd, &parsed.name).is_some_and(clap::Arg::is_allow_hyphen_values_set);
             if let Some(value) = &parsed.inline {
                 if !parsed.bound && known_flag_token(value, &cmd) {
                     return Some(missing_value_line(&path, &flag_label(&parsed.name, &cmd)));
                 }
             } else if let Some(next) = args.get(i + 1) {
-                if known_flag_token(next, &cmd) {
+                if known_flag_token(next, &cmd)
+                    || (!allows_hyphen && next.starts_with('-') && next != "-")
+                {
                     return Some(missing_value_line(&path, &flag_label(&parsed.name, &cmd)));
                 }
                 i += 1;
@@ -5445,27 +5445,35 @@ fn parse_flag(token: &str, cmd: &clap::Command) -> Option<FlagTok> {
             bound,
         });
     }
-    let rest = &token[1..];
-    let (body, inline_eq) = split_flag_eq(rest);
-    let mut chars = body.chars();
-    let first = chars.next()?;
-    let name = first.to_string();
-    let arg = find_flag(cmd, &name)?;
-    let rest_body: String = chars.collect();
-    let bound = inline_eq.is_some();
-    let inline = if let Some(value) = inline_eq {
-        Some(value)
-    } else if rest_body.is_empty() {
-        None
-    } else if requires_value(arg) {
-        Some(rest_body)
-    } else {
-        None
-    };
+    let (body, inline_eq) = split_flag_eq(&token[1..]);
+    let shorts: Vec<char> = body.chars().collect();
+    let first = shorts.first()?.to_string();
+    for (at, short) in shorts.iter().enumerate() {
+        let name = short.to_string();
+        let arg = find_flag(cmd, &name)?;
+        if requires_value(arg) {
+            let attached: String = shorts[at + 1..].iter().collect();
+            let inline = if attached.is_empty() {
+                inline_eq.clone()
+            } else if let Some(value) = &inline_eq {
+                Some(format!("{attached}={value}"))
+            } else {
+                Some(attached)
+            };
+            return Some(FlagTok {
+                name,
+                inline,
+                bound: inline_eq.is_some(),
+            });
+        }
+    }
+    if inline_eq.is_some() {
+        return None;
+    }
     Some(FlagTok {
-        name,
-        inline,
-        bound,
+        name: first,
+        inline: None,
+        bound: false,
     })
 }
 
@@ -5556,10 +5564,6 @@ fn run_command() -> Result<()> {
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
-    if let Some(line) = leading_positional_looks_like_flag(&flag_args) {
-        ljos_cli::say!("{line}");
-        std::process::exit(USAGE_STATUS);
-    }
     if let Some(line) = missing_flag_value(&flag_args) {
         ljos_cli::say!("{line}");
         std::process::exit(USAGE_STATUS);
