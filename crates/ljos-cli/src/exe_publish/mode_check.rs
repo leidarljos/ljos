@@ -199,7 +199,7 @@ const ALLOWED: &[(&str, &str, usize, &str)] = &[
     ),
     (
         "crates/ljos-cli/src/lib.rs",
-        "run_captured_within",
+        "run_captured_once",
         1,
         "runs a resolved testable program",
     ),

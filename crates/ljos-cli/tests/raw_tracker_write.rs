@@ -256,7 +256,10 @@ fn the_vissue_children_ljos_runs_are_not_refused() {
     let stub = bin.join("vissue");
     ljos_cli::install_executable(
         &stub,
-        format!("#!/bin/sh\necho \"vissue $*\" >> '{}'\n", log.display()),
+        format!(
+            "#!/bin/sh\necho \"vissue $*\" >> '{}'\nif [ \"$1\" = show ]; then printf '{{\"id\":\"%s\",\"logbook\":[]}}\\n' \"$2\"; fi\n",
+            log.display()
+        ),
     )
     .unwrap();
     let path = format!(
