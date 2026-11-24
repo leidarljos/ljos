@@ -149,7 +149,7 @@ enum MemCmd {
         #[arg(long, value_name = "ID")]
         merge: Vec<String>,
         /// Replacement text for `--edit`, or the text of the merged memory for `--merge`.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         text: Option<String>,
     },
     /// Browse, filter by seat or date, and prune memories in a terminal viewer.
@@ -478,7 +478,7 @@ enum SeatAction {
         #[arg(long, value_name = "PATH")]
         ids_file: Option<PathBuf>,
         /// The owner's yes, quoted as they said it.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         quote: String,
         /// When the owner said it, as RFC 3339.
         #[arg(long)]
@@ -498,7 +498,7 @@ enum ProposalCmd {
         /// Id or prefix of the proposal.
         id: String,
         /// The revised text. `-` reads it from stdin.
-        #[arg(long, value_name = "TEXT")]
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
         text: String,
     },
 }
@@ -641,6 +641,7 @@ enum Cmd {
     #[command(after_help = "Example: `ljos remember \"The lexical default is BM25+.\"`")]
     Remember {
         /// The lesson to store.
+        #[arg(allow_hyphen_values = true)]
         text: Vec<String>,
         /// Remember as this persona: the lesson comes back to it first in its next brief.
         #[arg(long = "as")]
@@ -680,21 +681,22 @@ enum Cmd {
     /// Example: `ljos prefer "CombMNZ over RRF for fusing two ballots."`
     Prefer {
         /// The preference to store.
+        #[arg(allow_hyphen_values = true)]
         text: Vec<String>,
         /// Prefer as this persona.
         #[arg(long = "as")]
         as_persona: Option<String>,
         /// Also write a deny rule over this command pattern, with the preference as its reason, so the hook warns on what the preference forbids. Repeatable.
-        #[arg(long, value_name = "PATTERN")]
+        #[arg(long, value_name = "PATTERN", allow_hyphen_values = true)]
         deny: Vec<String>,
         /// Also write an ask rule over this command pattern, with the preference as its reason. Repeatable.
-        #[arg(long, value_name = "PATTERN")]
+        #[arg(long, value_name = "PATTERN", allow_hyphen_values = true)]
         ask: Vec<String>,
         /// Write a user rule in the user config, shared by every seat on this machine. It does not decay and it is not also stored as a seat preference.
         #[arg(long)]
         user: bool,
         /// Why this user rule stands. Required with `--user`.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         why: Option<String>,
         /// Copy this lesson into a user rule. The lesson stays stored. Pass `--user`.
         #[arg(long, value_name = "ID")]
@@ -789,7 +791,7 @@ enum Cmd {
         #[arg(required = true)]
         ids: Vec<String>,
         /// The person's own words accepting this lesson, as they said them. Needs --at and --via, and takes the place of a terminal of the person's own.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         quote: Option<String>,
         /// When the person said those words, RFC 3339, such as 2026-10-28T14:02:11Z.
         #[arg(long)]
@@ -905,6 +907,7 @@ enum Cmd {
     #[command(after_help = "Example: `ljos search \"lexical default\"`")]
     Search {
         /// Words to look for.
+        #[arg(allow_hyphen_values = true)]
         query: Vec<String>,
         /// Most hits to print.
         #[arg(short = 'n', long, default_value_t = 10)]
@@ -1065,6 +1068,7 @@ enum Cmd {
     /// Example: `ljos island codec`
     Island {
         /// Words that name the task.
+        #[arg(allow_hyphen_values = true)]
         cue: Vec<String>,
         /// Strengthen the links among the strongest eight memories.
         #[arg(long)]
@@ -1205,7 +1209,7 @@ enum Cmd {
     )]
     File {
         /// The issue's title.
-        #[arg(required_unless_present = "from")]
+        #[arg(required_unless_present = "from", allow_hyphen_values = true)]
         title: Option<String>,
         /// File one ticket per row of this JSONL or CSV file (`-` reads
         /// stdin) in one tracker commit. Prints the new ids one per line.
@@ -1238,10 +1242,10 @@ enum Cmd {
         #[arg(long)]
         priority: Option<String>,
         /// Body prose under the heading. A decision's body names `Options: A, B`.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         body: Option<String>,
         /// Comma-separated options. Two or more become the first body line `Options: A, B`.
-        #[arg(long, value_name = "A,B")]
+        #[arg(long, value_name = "A,B", allow_hyphen_values = true)]
         options: Option<String>,
         /// Ballots the decision needs. With `--deadline`, `ljos reap --apply`
         /// lapses the vote once the deadline passes short of it.
@@ -1307,7 +1311,12 @@ enum Cmd {
     #[command(after_help = "Example: `ljos note \"the door seats when it is cold\"`")]
     Note {
         /// The note, or an issue id and then the note.
-        #[arg(value_name = "WORDS", required = true, num_args = 1..)]
+        #[arg(
+            value_name = "WORDS",
+            required = true,
+            num_args = 1..,
+            allow_hyphen_values = true
+        )]
         words: Vec<String>,
         /// Print the tracker and sync lines. Without it, a commit that landed
         /// is quiet, and so is a push that landed. A refusal is still printed.
@@ -1360,7 +1369,12 @@ enum Cmd {
     /// Example: `ljos send bob "the codec is chosen"`
     Send {
         /// The seat and the message, or with `--group` the message alone.
-        #[arg(value_name = "WORDS", required = true, num_args = 1..)]
+        #[arg(
+            value_name = "WORDS",
+            required = true,
+            num_args = 1..,
+            allow_hyphen_values = true
+        )]
         words: Vec<String>,
         /// Write to every other member of this group.
         #[arg(long)]
@@ -1418,7 +1432,7 @@ enum Cmd {
         /// The id `send` printed.
         id: String,
         /// The reply; several words are one reply.
-        #[arg(required = true, num_args = 1..)]
+        #[arg(required = true, num_args = 1.., allow_hyphen_values = true)]
         text: Vec<String>,
         /// Show this ahead of other mail on the next prompt.
         #[arg(long)]
@@ -1662,7 +1676,7 @@ enum Cmd {
         /// The ticket to vote on. With no `--for`, the tally is printed.
         issue: String,
         /// The option to vote for.
-        #[arg(long = "for")]
+        #[arg(long = "for", allow_hyphen_values = true)]
         choice: Option<String>,
         /// Probability in (0, 1] that the choice is the outcome. Recorded;
         /// `ljos learn` scores it once the outcome is named, and no settle
@@ -1676,7 +1690,7 @@ enum Cmd {
         /// The option you expect the others to pick, or a JSON object of
         /// option to share. Same command as the ballot, so the surprisingly
         /// popular reading has a forecast without a second verb.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         expect: Option<String>,
         /// The persona this ballot records. The casting seat and the parent
         /// session are stored with it. Consensus counts the ballot.
@@ -1696,7 +1710,7 @@ enum Cmd {
         withdraw: bool,
         /// Vote no. The text is why. A no ballot is cast only with `--child`
         /// naming an open child of this issue (`ljos file --parent ISSUE`).
-        #[arg(long, conflicts_with_all = ["choice", "jev"], value_name = "REASON")]
+        #[arg(long, conflicts_with_all = ["choice", "jev"], value_name = "REASON", allow_hyphen_values = true)]
         against: Option<String>,
         /// The open child a no ballot links. Filed with `ljos file --parent ISSUE`.
         #[arg(long, value_name = "ID", conflicts_with_all = ["choice", "jev"])]
@@ -1772,7 +1786,7 @@ enum Cmd {
         #[arg(long, default_value_t = 0.5)]
         anchor: f64,
         /// How this persona reads the work, in a sentence or two.
-        #[arg(long, required_unless_present = "retire")]
+        #[arg(long, required_unless_present = "retire", allow_hyphen_values = true)]
         view: Option<String>,
         /// Domains it speaks to, comma-separated, repeated, or several after one flag; a trust row scoped to one of them applies when the issue is about it.
         #[arg(long, value_delimiter = ',', num_args = 1..)]
@@ -1854,6 +1868,7 @@ enum Cmd {
         /// The persona to ask.
         name: String,
         /// What to ask, in words.
+        #[arg(allow_hyphen_values = true)]
         text: Vec<String>,
     },
     /// List each persona: name, anchor, domains, view, and who defined it.
@@ -2021,7 +2036,7 @@ enum Cmd {
         /// The ticket the forecast is about.
         issue: String,
         /// The option you expect to win, or a JSON object of option to share.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         expect: String,
         /// The persona this forecast records. Absent, the casting seat.
         #[arg(long = "as")]
@@ -2039,13 +2054,14 @@ enum Cmd {
     /// Example: `ljos rule "git push *" --why "name the branch"`
     Rule {
         /// A glob over the whole command line: `rm -rf *`, `*--force*`, `git push --force*`.
+        #[arg(allow_hyphen_values = true)]
         pattern: String,
         /// Label the warning deny or ask. With `--user`, at your own terminal, allow clears
         /// the seat's warnings for the matching lines.
         #[arg(long, default_value = "ask")]
         verdict: String,
         /// The reason a reader sees when the rule fires.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         why: String,
         /// Print the atom JSON. The default is one line: id, kind, due, text.
         #[arg(long)]
@@ -2470,7 +2486,7 @@ enum Cmd {
         /// The reading; absent, show the habit.
         value: Option<f64>,
         /// The unit the reading is in, for the reader.
-        #[arg(long, default_value = "")]
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
         unit: String,
         /// How often a reading is taken: 7d, 24h, 2w, 30m. The next is due one cadence on.
         #[arg(long, default_value = "7d")]
@@ -2500,7 +2516,7 @@ enum Cmd {
         )]
         issue: Option<String>,
         /// File this parent and the items after `--`, then sit the parent.
-        #[arg(long, value_name = "TITLE")]
+        #[arg(long, value_name = "TITLE", allow_hyphen_values = true)]
         plan: Option<String>,
         /// No parent for the plan, even while an issue is held.
         #[arg(long, requires = "plan")]
@@ -2562,13 +2578,17 @@ enum Cmd {
         #[arg(long, default_value = "done")]
         status: String,
         /// The lesson this work taught, two sentences at most.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         lesson: Option<String>,
         /// The lesson given after the issue without `--lesson`, as agents often write it.
-        #[arg(value_name = "LESSON", conflicts_with = "lesson")]
+        #[arg(
+            value_name = "LESSON",
+            conflicts_with = "lesson",
+            allow_hyphen_values = true
+        )]
         lesson_text: Option<String>,
         /// The option that turned out right, when the ballots are in and the world has said.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         outcome: Option<String>,
         /// The outcome is none of the ballot's options: the person answered with a new one.
         #[arg(long, requires = "outcome")]
@@ -2616,7 +2636,7 @@ enum Cmd {
         /// The tracker id of the issue.
         issue: String,
         /// The note to take back, whole or the part of it that names one note. Without this, the ballot is taken back.
-        #[arg(long, value_name = "TEXT")]
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
         note: Option<String>,
         /// The name a ballot was cast under, for a persona's ballot.
         #[arg(long = "as", value_name = "NAME")]
@@ -2654,7 +2674,7 @@ enum Cmd {
         /// The ticket whose ballots to reweigh.
         id: String,
         /// The option that turned out right.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         outcome: String,
         /// The outcome is none of the ballot's options: the person answered with a new one.
         #[arg(long)]
@@ -5157,6 +5177,168 @@ fn dispatch_hook(seat_flag: Option<String>, hook: HookArgs) -> Result<()> {
     run_hook(hook)
 }
 
+/// A value-taking flag whose next word is itself a flag of this command.
+/// An equals sign binds the text, so that text is the value.
+fn missing_flag_value(args: &[String]) -> Option<String> {
+    let args = args.to_vec();
+    std::thread::Builder::new()
+        .name("ljos-flag-value".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || missing_flag_value_inner(&args))
+        .expect("flag value thread")
+        .join()
+        .expect("flag value")
+}
+
+struct FlagTok {
+    name: String,
+    inline: Option<String>,
+    /// True when an equals sign joined the text to the flag.
+    bound: bool,
+}
+
+fn missing_flag_value_inner(args: &[String]) -> Option<String> {
+    let mut cmd = Cli::command();
+    cmd.build();
+    let mut path = Vec::new();
+    let mut i = usize::from(args.first().is_some_and(|arg| !arg.starts_with('-')));
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            break;
+        }
+        if !arg.starts_with('-') {
+            if let Some(sub) = cmd.find_subcommand(arg).cloned() {
+                path.push(arg.clone());
+                cmd = sub;
+                i += 1;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        let Some(parsed) = parse_flag(arg, &cmd) else {
+            i += 1;
+            continue;
+        };
+        let takes = find_flag(&cmd, &parsed.name).is_some_and(requires_value);
+        if takes {
+            if let Some(value) = &parsed.inline {
+                if !parsed.bound && known_flag_token(value, &cmd) {
+                    return Some(missing_value_line(&path, &flag_label(&parsed.name, &cmd)));
+                }
+            } else if let Some(next) = args.get(i + 1) {
+                if known_flag_token(next, &cmd) {
+                    return Some(missing_value_line(&path, &flag_label(&parsed.name, &cmd)));
+                }
+                i += 1;
+            } else {
+                return Some(missing_value_line(&path, &flag_label(&parsed.name, &cmd)));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn missing_value_line(path: &[String], flag: &str) -> String {
+    let cmd = path.last().map(String::as_str).unwrap_or("ljos");
+    format!("{cmd}: {flag} needs a value")
+}
+
+fn flag_label(name: &str, cmd: &clap::Command) -> String {
+    if let Some(long) = find_flag(cmd, name).and_then(clap::Arg::get_long) {
+        return format!("--{long}");
+    }
+    if name.chars().count() == 1 {
+        format!("-{name}")
+    } else {
+        format!("--{name}")
+    }
+}
+
+fn parse_flag(token: &str, cmd: &clap::Command) -> Option<FlagTok> {
+    if token == "-" || token == "--" || !token.starts_with('-') {
+        return None;
+    }
+    if let Some(rest) = token.strip_prefix("--") {
+        let (name, inline) = split_flag_eq(rest);
+        if name.is_empty() || find_flag(cmd, &name).is_none() {
+            return None;
+        }
+        let bound = inline.is_some();
+        return Some(FlagTok {
+            name,
+            inline,
+            bound,
+        });
+    }
+    let rest = &token[1..];
+    let (body, inline_eq) = split_flag_eq(rest);
+    let mut chars = body.chars();
+    let first = chars.next()?;
+    let name = first.to_string();
+    let arg = find_flag(cmd, &name)?;
+    let rest_body: String = chars.collect();
+    let bound = inline_eq.is_some();
+    let inline = if let Some(value) = inline_eq {
+        Some(value)
+    } else if rest_body.is_empty() {
+        None
+    } else if requires_value(arg) {
+        Some(rest_body)
+    } else {
+        None
+    };
+    Some(FlagTok {
+        name,
+        inline,
+        bound,
+    })
+}
+
+fn split_flag_eq(token: &str) -> (String, Option<String>) {
+    match token.split_once('=') {
+        Some((name, value)) => (name.to_string(), Some(value.to_string())),
+        None => (token.to_string(), None),
+    }
+}
+
+fn find_flag<'a>(cmd: &'a clap::Command, name: &str) -> Option<&'a clap::Arg> {
+    cmd.get_arguments().find(|arg| {
+        if arg.get_long() == Some(name) {
+            return true;
+        }
+        if arg
+            .get_all_aliases()
+            .is_some_and(|aliases| aliases.contains(&name))
+        {
+            return true;
+        }
+        let Some(ch) = name.chars().next().filter(|_| name.chars().count() == 1) else {
+            return false;
+        };
+        arg.get_short() == Some(ch)
+            || arg
+                .get_all_short_aliases()
+                .is_some_and(|shorts| shorts.contains(&ch))
+    })
+}
+
+fn requires_value(arg: &clap::Arg) -> bool {
+    if !arg.get_action().takes_values() {
+        return false;
+    }
+    match arg.get_num_args() {
+        Some(range) => range.min_values() >= 1,
+        None => true,
+    }
+}
+
+fn known_flag_token(token: &str, cmd: &clap::Command) -> bool {
+    token != "--" && parse_flag(token, cmd).is_some()
+}
+
 fn run_command() -> Result<()> {
     // The tool server answers before the seat, the tracker or the pack is
     // read. Those can exit, block or write, and `initialize` needs none of
@@ -5193,6 +5375,14 @@ fn run_command() -> Result<()> {
     // fall through, so those messages stay as they are.
     if let Some(hook) = hook_parsed_alone(&args) {
         return dispatch_hook(seat_flag, hook);
+    }
+    let flag_args: Vec<String> = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    if let Some(line) = missing_flag_value(&flag_args) {
+        ljos_cli::say!("{line}");
+        std::process::exit(USAGE_STATUS);
     }
     // Help, version and a missing argument exit here, before any write.
     // A memory subcommand that clap cannot parse still records the error.
@@ -8537,5 +8727,78 @@ mod usage_hint {
         assert!(line.contains("`ljos search \"kiln\"`"), "{line}");
         assert!(line.contains("`ljos remember "), "{line}");
         assert!(line.contains("`ljos proposals`"), "{line}");
+    }
+}
+
+#[cfg(test)]
+mod flag_text {
+    use super::*;
+
+    fn on_stack<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(work)
+            .expect("spawn")
+            .join()
+            .expect("flag text check")
+    }
+
+    fn words(args: &[&str]) -> Vec<String> {
+        std::iter::once("ljos")
+            .chain(args.iter().copied())
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn an_equals_value_is_the_value_and_free_text_may_start_with_a_hyphen() {
+        on_stack(an_equals_value_is_the_value_and_free_text_may_start_with_a_hyphen_inner);
+    }
+
+    fn an_equals_value_is_the_value_and_free_text_may_start_with_a_hyphen_inner() {
+        let inline = words(&["finish", "demo-kiln", "--lesson=--json"]);
+        assert!(
+            missing_flag_value_inner(&inline).is_none(),
+            "an '=' value was treated as a missing flag: {:?}",
+            missing_flag_value_inner(&inline)
+        );
+        let separate = words(&["finish", "demo-kiln", "--lesson", "--json"]);
+        let missing = missing_flag_value_inner(&separate).expect("next flag is a missing value");
+        assert!(
+            missing.contains("finish: --lesson needs a value"),
+            "{missing}"
+        );
+
+        let lesson = Cli::try_parse_from(words(&["finish", "demo-kiln", "--lesson", "-x"]))
+            .expect("a lesson may start with a hyphen");
+        match lesson.cmd {
+            Cmd::Finish {
+                lesson: Some(text), ..
+            } => assert_eq!(text, "-x"),
+            _ => panic!("finish did not keep the lesson"),
+        }
+        let joined = Cli::try_parse_from(words(&["finish", "demo-kiln", "--lesson=--json"]))
+            .expect("an '=' lesson is the lesson");
+        match joined.cmd {
+            Cmd::Finish {
+                lesson: Some(text), ..
+            } => assert_eq!(text, "--json"),
+            _ => panic!("finish did not keep the joined lesson"),
+        }
+
+        let cases: &[(&[&str], &str)] = &[
+            (&["remember", "-x"], "remember text"),
+            (&["search", "-x"], "search query"),
+            (&["note", "-x"], "note text"),
+            (&["file", "-x", "-p", "demo"], "file title"),
+            (&["prefer", "-x"], "prefer text"),
+            (&["ask", "editor", "-x"], "ask text"),
+            (&["finish", "demo-kiln", "-x"], "finish lesson text"),
+        ];
+        for (args, what) in cases {
+            Cli::try_parse_from(words(args)).unwrap_or_else(|err| {
+                panic!("{what} refused a leading hyphen:\n{err}");
+            });
+        }
     }
 }
