@@ -46,7 +46,7 @@ impl Hab {
 printf '%s\n' "vissue $*" >> '{log}'
 if [ "$1" = show ]; then cat '{record}'; exit 0; fi
 if [ "$1" = note ]; then
-  python3 - "$3" <<'PY'
+  python3 - "$4" <<'PY'
 import json, sys
 path = "{record}"
 v = json.load(open(path))
@@ -136,7 +136,7 @@ fn a_withdrawn_note_stays_on_the_logbook_under_its_withdrawal() {
     assert!(out.status.success(), "{}", said(&out));
     assert!(
         hab.calls().contains(&format!(
-            "vissue note {ISSUE} note-withdrawn: saddle {NOTE}"
+            "vissue note {ISSUE} -- note-withdrawn: saddle {NOTE}"
         )),
         "{}",
         hab.calls()

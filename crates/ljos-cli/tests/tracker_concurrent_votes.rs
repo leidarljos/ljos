@@ -40,9 +40,14 @@ fn vissue_shim() {
     let layout = vissue_core::Layout::resolve(None, None).unwrap();
     let agent = std::env::var("VISSUE_AGENT").unwrap_or_else(|_| "seat".into());
     let flag = |name: &str| {
-        args.iter()
-            .position(|a| *a == name)
-            .and_then(|i| args.get(i + 1).copied())
+        args.iter().enumerate().find_map(|(i, arg)| {
+            if *arg == name {
+                args.get(i + 1).copied()
+            } else {
+                arg.strip_prefix(name)
+                    .and_then(|value| value.strip_prefix('='))
+            }
+        })
     };
     let said = match args.as_slice() {
         ["vote", id, rest @ ..] if rest.contains(&"--json") => {
@@ -63,7 +68,9 @@ fn vissue_shim() {
         )
         .unwrap(),
         ["vote", id] => vissue_core::ops::vote(&layout, id, None, &agent).unwrap(),
-        ["note", id, text @ ..] => vissue_core::ops::note(&layout, id, &text.join(" ")).unwrap(),
+        ["note", id, "--", text @ ..] | ["note", id, text @ ..] => {
+            vissue_core::ops::note(&layout, id, &text.join(" ")).unwrap()
+        }
         ["show", id, ..] => vissue_core::agent::show_json(&layout, id)
             .unwrap()
             .to_string(),

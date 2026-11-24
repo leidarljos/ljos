@@ -1152,14 +1152,11 @@ fn file_child(parent: &str, project: &str, title: &str, depth: usize) -> Result<
     };
     let mut args = vec!["q".to_string()];
     if !project.is_empty() {
-        args.push("-p".into());
-        args.push(project);
+        args.push(format!("--project={project}"));
     }
     args.extend([
-        "--parent".into(),
-        parent.to_string(),
-        "-t".into(),
-        "task".into(),
+        format!("--parent={parent}"),
+        "--type=task".into(),
         "--".into(),
         title.to_string(),
     ]);
