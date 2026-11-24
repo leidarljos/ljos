@@ -2519,7 +2519,7 @@ fn hold_env_allowed() -> bool {
             || (cursor_conversation().is_none()
                 && std::env::var_os("CURSOR_CONVERSATION_ID").is_none()
                 && std::env::var_os("CURSOR_AGENT").is_none()
-                && !stamp_env()
+                && !runner_stamp_env()
                     .iter()
                     .any(|(k, _)| k == "CURSOR_AGENT" || k == "CURSOR_CONVERSATION_ID")))
 }
@@ -2543,7 +2543,7 @@ pub fn call_unattributed() -> bool {
 /// Whether this process is in a `the runner mark` shell whose conversation
 /// id was stripped or is unusable.
 fn cursor_agent_without_id() -> bool {
-    let env = stamp_env();
+    let env = runner_stamp_env();
     let claude = std::env::var_os("CLAUDECODE").is_some()
         || env
             .iter()
@@ -3339,10 +3339,19 @@ fn sessions_for(bound: &CallConversation) -> Vec<(String, String)> {
         CallConversation::Named(id) => vec![("CURSOR_CONVERSATION_ID".to_string(), id.clone())],
         CallConversation::Kept(id) => vec![("LJOS_SESSION_ID".to_string(), id.clone())],
         CallConversation::Unusable | CallConversation::Unattributed => Vec::new(),
-        CallConversation::Unbound | CallConversation::UnusableOther if runner_mark_set() => {
-            stamped_env_sessions()
-        }
-        CallConversation::Unbound | CallConversation::UnusableOther => Vec::new(),
+        CallConversation::Unbound | CallConversation::UnusableOther => stamped_env_sessions(),
+    }
+}
+
+/// [`stamp_env`] for a process under a runner, and nothing for one whose
+/// own environment carries no runner variable. Every read of whether this
+/// process is a runner's goes through here, so the hold a sitting writes
+/// and the reader that looks for it agree on the same process.
+fn runner_stamp_env() -> Vec<(String, String)> {
+    if runner_mark_set() {
+        stamp_env()
+    } else {
+        Vec::new()
     }
 }
 
@@ -3357,11 +3366,11 @@ pub(crate) fn own_stamped_sessions() -> Vec<(String, String)> {
     found
 }
 
-/// Every usable session variable in [`stamp_env`], sorted. This does not
-/// read the bound call, so a blank payload can resolve an id before the
-/// bind is stored.
+/// Every usable session variable in [`runner_stamp_env`], sorted. This
+/// does not read the bound call, so a blank payload can resolve an id
+/// before the bind is stored.
 fn stamped_env_sessions() -> Vec<(String, String)> {
-    let mut found: Vec<(String, String)> = stamp_env()
+    let mut found: Vec<(String, String)> = runner_stamp_env()
         .into_iter()
         .filter(|(k, v)| runner_session_var(k, v) && usable_session_id(v).is_some())
         .map(|(k, v)| (k, v.trim().to_string()))

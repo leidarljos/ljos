@@ -146,6 +146,27 @@ fn script(dir: &std::path::Path, name: &str, body: &str) {
     ljos_cli::install_executable(&dir.join(name), body).unwrap();
 }
 
+/// The output of one step of a shell script that prints `--- NAME` before
+/// each step and `NAME=STATUS` after it.
+fn step<'a>(text: &'a str, name: &str) -> (&'a str, &'a str) {
+    let body = text
+        .split_once(&format!("--- {name}\n"))
+        .unwrap_or_else(|| panic!("no step {name} in {text}"))
+        .1;
+    let status = format!("{name}=");
+    let (body, rest) = match body.strip_prefix(&status) {
+        Some(rest) => ("", rest),
+        None => body
+            .split_once(&format!("\n{status}"))
+            .unwrap_or_else(|| panic!("no status for {name} in {text}")),
+    };
+    (body, rest.lines().next().unwrap_or(""))
+}
+
+/// The sitting a bare `env -i` call opens under a `CURSOR_AGENT` shell is
+/// that call's own: it names no conversation, and the next `env -i` call
+/// in the same shell reads it back. A runner by name sits above the
+/// shell, so the sitting gate is active for each call.
 #[test]
 fn a_parent_cursor_id_does_not_attribute_a_sitting_under_env_i() {
     let world = World::new();
@@ -156,11 +177,16 @@ fn a_parent_cursor_id_does_not_attribute_a_sitting_under_env_i() {
     std::fs::create_dir_all(&bin_dir).unwrap();
     let tracker = root.join("tracker");
     std::fs::create_dir_all(tracker.join("Software")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(tracker.join("vissue.toml"), "seats = [\"alice\"]\n").unwrap();
     script(
         &bin_dir,
         "vissue",
         &format!(
-            "#!/bin/sh\ncase \"$1\" in\n  show) printf '%s\\n' '{{\"id\":\"probe-sit\",\"title\":\"probe\",\"state\":\"TODO\"}}' ;;\n  identity) printf '%s\\n' 'vissue test' 'root={}' 'prefix=Software' ;;\nesac\nexit 0\n",
+            "#!/bin/sh\ncase \"$1\" in\n  show) printf '%s\\n' '{{\"id\":\"probe-sit\",\"title\":\"probe\",\"state\":\"TODO\"}}' ;;\n  identity) printf '%s\\n' 'vissue test' 'root={}' 'prefix=Software' ;;\n  vote) printf '%s\\n' '[{{\"agent\":\"alice\",\"choice\":\"approve\"}}]' ;;\n  note) printf '%s: noted\\n' \"$2\" >&2 ;;\nesac\nexit 0\n",
             tracker.display()
         ),
     );
@@ -170,6 +196,31 @@ fn a_parent_cursor_id_does_not_attribute_a_sitting_under_env_i() {
         "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
     );
     script(&bin_dir, "deedar", "#!/bin/sh\necho head\nexit 0\n");
+    script(&bin_dir, "curl", "#!/bin/sh\nexit 6\n");
+    let runner = bin_dir.join("opencode");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
+    std::os::unix::fs::symlink("/bin/bash", &runner).unwrap();
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.email", "t@example.invalid"],
+        &["config", "user.name", "t"],
+        &["config", "commit.gpgsign", "false"],
+        &["config", "core.hooksPath", "/dev/null"],
+        &["commit", "-q", "--allow-empty", "-m", "seed"],
+    ] {
+        let out = ljos_cli::program("git")
+            .unwrap()
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", said(&out));
+    }
     let layout = vissue_core::Layout::new(&tracker, "Software");
     vissue_core::ops::create(&layout, "probe", "probe work", Default::default()).unwrap();
     let doc =
@@ -177,21 +228,32 @@ fn a_parent_cursor_id_does_not_attribute_a_sitting_under_env_i() {
     let issue = doc.headings[0].id.clone();
     let parent_id = "0199c0de-cursor-parent-only";
     let bin = env!("CARGO_BIN_EXE_ljos");
-    // The trailing `exit` keeps bash from exec'ing `env`, as above.
+    // Each call is a child of this shell, which carries the id and the
+    // mark: `env -i` runs from the function, so bash does not exec it.
     let script = format!(
-        "env -i HOME='{home}' XDG_CONFIG_HOME='{home}/.config' \
+        "bare() {{ env -i HOME='{home}' XDG_CONFIG_HOME='{home}/.config' \
          XDG_STATE_HOME='{home}/.local/state' XDG_RUNTIME_DIR='{run}' \
-         PATH='{path}:/usr/bin:/bin' VISSUE_ROOT='{tracker}' VISSUE_NO_ROUTE=1 \
-         LJOS_TRACKER_GIT=off LJOS_HOOKD=off PACKSET_URL=off LJOS_SEAT=alice \
-         {bin} sitting {issue}; exit $?",
+         PATH='{path}:/usr/bin:/bin' VISSUE_ROOT='{tracker}' ISSUE_ROOT='{tracker}' \
+         VISSUE_NO_ROUTE=1 LJOS_TRACKER_GIT=off LJOS_HOOKD=off PACKSET_URL=off \
+         LJOS_SEAT=alice LJOS_UNSIGNED_BALLOTS=allow {bin} \"$@\"; }}\n\
+         cd '{repo}' || exit 1\n\
+         echo '--- sitting'; bare sitting {issue}; echo \"sitting=$?\"\n\
+         echo '--- doctor'; bare doctor 2>&1; echo \"doctor=$?\"\n\
+         echo '--- note'; bare note 'a working note' 2>&1; echo \"note=$?\"\n\
+         head=$(git rev-parse HEAD)\n\
+         echo '--- push'; printf 'refs/heads/develop %s refs/heads/develop %s\\n' \"$head\" \"$head\" \
+         | bare git-hook pre-push origin x 2>&1; echo \"push=$?\"\n\
+         exit 0",
         home = home.display(),
         run = run.display(),
         path = bin_dir.display(),
         tracker = tracker.display(),
+        repo = repo.display(),
     );
-    let mut cmd = ljos_cli::program("bash").unwrap();
+    let mut cmd = ljos_cli::program("setsid").unwrap();
     seat_env::clear(&mut cmd);
-    cmd.args(["--noprofile", "--norc", "-c", &script])
+    cmd.args(["-w".as_ref(), runner.as_os_str()])
+        .args(["--noprofile", "--norc", "-c", &script])
         .env("CURSOR_CONVERSATION_ID", parent_id)
         .env("CURSOR_AGENT", "1")
         .env("HOME", &home)
@@ -200,6 +262,27 @@ fn a_parent_cursor_id_does_not_attribute_a_sitting_under_env_i() {
     let out = cmd.output().unwrap();
     let text = said(&out);
     assert!(out.status.success(), "{text}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let (_, sitting) = step(&stdout, "sitting");
+    assert_eq!(sitting, "0", "{text}");
+    let (doctor, _) = step(&stdout, "doctor");
+    let gate = doctor
+        .lines()
+        .find(|line| line.contains("\tsitting gate\t"))
+        .unwrap_or_else(|| panic!("no sitting gate row\n{text}"));
+    assert!(
+        gate.contains(&issue) && !gate.contains("holds no live sitting"),
+        "the next call does not read the hold back: {gate}\n{text}"
+    );
+    let (note, status) = step(&stdout, "note");
+    assert_eq!(status, "0", "{text}");
+    assert!(note.contains(&format!("{issue}: noted")), "{text}");
+    let (push, status) = step(&stdout, "push");
+    assert_eq!(status, "0", "{text}");
+    assert!(
+        !push.contains("sitting-gate"),
+        "the pre-push sitting check did not pass: {push}\n{text}"
+    );
     let holds: Vec<String> = std::fs::read_dir(run.join("ljos"))
         .unwrap()
         .flatten()
