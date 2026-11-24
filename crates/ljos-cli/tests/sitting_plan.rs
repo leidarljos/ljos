@@ -78,7 +78,7 @@ fn a_busy_pack_costs_one_read_and_the_sitting_stays_quiet() {
         dir.path(),
         "claimdag",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{log_s}'\ncase \"$1\" in\n  list) echo '[]' ;;\n  get) exit 1 ;;\n  upsert|claim) echo gen=2 ;;\nesac\nexit 0\n"
+            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{log_s}'\ncase \"$1\" in\n  list) echo '[]' ;;\n  get) echo 'not found' >&2; exit 1 ;;\n  upsert|claim) echo gen=2 ;;\nesac\nexit 0\n"
         ),
     );
     script(dir.path(), "deedar", "#!/bin/sh\necho head\nexit 0\n");

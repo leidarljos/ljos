@@ -2,7 +2,8 @@
 //! the graph, finds no node, and mints it; the other has minted and claimed
 //! that node in between. The late seat is told who holds the ticket, and
 //! never that it could not mint a node. A graph that cannot be read is
-//! reported as that, and not as a failed mint.
+//! reported as that, and not as a failed mint, and a node it holds is
+//! never minted over.
 
 ljos_test_boot::harness!();
 
@@ -178,6 +179,94 @@ fn a_graph_that_cannot_be_read_is_reported_and_not_a_failed_mint() {
     assert!(said.contains("could not read the node"), "{said}");
     assert!(said.contains("get: snapshot checksum mismatch"), "{said}");
     assert!(!said.contains("could not mint"), "{said}");
+}
+
+/// A node the graph already holds, with a kind, status and summary a mint
+/// would overwrite, and a claimdag on PATH that logs every call and answers
+/// `get` with a checksum failure: every `get`, or only the first.
+fn seeded_world_with_failing_reads(only_first: bool) -> (World, PathBuf) {
+    let world = World::new();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let seeded = Command::new(&world.claimdag)
+        .args(["--dir"])
+        .arg(world.graph())
+        .args(["upsert", "--id", &ljos_cli::work_id(TICKET)])
+        .args(["--kind", "goal", "--status", "ready"])
+        .args(["--summary", "preserve-this-summary"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(seeded.status.success(), "{}", text(&seeded));
+    let log = world.root.path().join("claimdag.log");
+    let marker = world.root.path().join("read-failed");
+    let fail_when = if only_first {
+        format!("[ \"$1\" = get ] && [ ! -e '{}' ]", marker.display())
+    } else {
+        "[ \"$1\" = get ]".to_string()
+    };
+    ljos_cli::install_executable(
+        &world.root.path().join("bin/claimdag"),
+        format!(
+            "#!/bin/sh\n\
+             echo \"$*\" >> '{log}'\n\
+             if {fail_when}; then\n\
+             : > '{marker}'\n\
+             echo 'snapshot checksum mismatch' >&2\n\
+             exit 1\n\
+             fi\n\
+             exec '{real}' \"$@\"\n",
+            log = log.display(),
+            marker = marker.display(),
+            real = world.claimdag.display(),
+        ),
+    )
+    .unwrap();
+    (world, log)
+}
+
+#[test]
+fn a_read_that_fails_for_another_reason_never_rewrites_the_node() {
+    let (world, log) = seeded_world_with_failing_reads(false);
+    let before = world.node(TICKET);
+    assert!(before.contains("preserve-this-summary"), "{before}");
+
+    let out = world.command("seat0", &["claim", TICKET]).output().unwrap();
+    let said = text(&out);
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains("could not read the node"), "{said}");
+    assert!(said.contains("snapshot checksum mismatch"), "{said}");
+    assert!(!said.contains("could not mint"), "{said}");
+    assert!(
+        !calls.lines().any(|l| l.starts_with("upsert")),
+        "{calls}\n{said}"
+    );
+    assert_eq!(world.node(TICKET), before, "{said}");
+}
+
+#[test]
+fn a_read_that_fails_once_is_asked_again_and_not_minted_over() {
+    let (world, log) = seeded_world_with_failing_reads(true);
+
+    let out = world.command("seat0", &["claim", TICKET]).output().unwrap();
+    let said = text(&out);
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+
+    assert!(
+        calls.lines().any(|l| l.starts_with("get")),
+        "{calls}\n{said}"
+    );
+    assert!(
+        !calls.lines().any(|l| l.starts_with("upsert")),
+        "{calls}\n{said}"
+    );
+    let node = world.node(TICKET);
+    assert!(node.contains("goal"), "{node}\n{said}");
+    assert!(node.contains("preserve-this-summary"), "{node}\n{said}");
 }
 
 #[test]

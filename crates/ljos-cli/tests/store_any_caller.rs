@@ -100,7 +100,7 @@ impl Seat {
         script(
             &bin,
             "claimdag",
-            "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\n  claim) echo gen=1 ;;\n  complete) echo done ;;\n  *) echo '[]' ;;\nesac\nexit 0\n",
+            "#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\n  claim) echo gen=1 ;;\n  complete) echo done ;;\n  *) echo '[]' ;;\nesac\nexit 0\n",
         );
         script(&bin, "deedar", "#!/bin/sh\necho head\nexit 0\n");
         Self { root, port, issue }

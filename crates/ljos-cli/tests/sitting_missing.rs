@@ -93,7 +93,7 @@ fn a_sitting_on_a_missing_issue_names_it_and_writes_nothing() {
     script(
         &bin,
         "claimdag",
-        "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\nexit 0\n",
+        "#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\nexit 0\n",
     );
     script(&bin, "deedar", "#!/bin/sh\necho head\nexit 0\n");
     let before = files(&product);
@@ -249,7 +249,7 @@ impl Probe {
         script(
             &bin,
             "claimdag",
-            "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\nexit 0\n",
+            "#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\nexit 0\n",
         );
         script(&bin, "deedar", "#!/bin/sh\necho head\nexit 0\n");
         #[expect(

@@ -3448,7 +3448,7 @@ elif cmd == "get":
     elif i in s["known"]:
         print(f"id={i} status=ready")
     else:
-        sys.exit(1)
+        sys.stderr.write("not found\n"); sys.exit(1)
 elif cmd == "claim":
     i, who = a[1], opt("--assignee")
     if i in s["claims"]:
