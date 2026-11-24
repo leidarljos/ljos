@@ -25483,6 +25483,9 @@ fn with_next_cause(err: &anyhow::Error, top: &str) -> String {
 /// run can reach is 75. Anything else is 1.
 #[must_use]
 pub fn user_fault_exit(err: &anyhow::Error, line: &str) -> i32 {
+    if err.downcast_ref::<NoteWriteUncertain>().is_some() {
+        return NOTE_WRITE_UNCERTAIN_EXIT;
+    }
     // The writer answered and refused this home. Running the search again
     // does not start a writer, so this is not the retry status.
     if line.contains(WRITER_PORT_FIX) {
@@ -49474,13 +49477,19 @@ pub fn reopen(issue: &str) -> Result<String> {
         }
     }
     let note = undo::reopen_note(&caller, state);
-    if let Err(e) = run_captured("vissue", &["note", issue, "--", &note]) {
-        say!("ljos reopen: the note on {issue} was not written: {e:#}");
+    let noted = run_captured("vissue", &["note", issue, "--", &note]);
+    let persisted = persist_tracker(issue, "reopened");
+    if let Err(err) = noted {
+        let why = if err.downcast_ref::<NoteWriteUncertain>().is_some() {
+            err.to_string()
+        } else {
+            format!("the reopen note was not written: {err:#}")
+        };
+        return Err(err.context(format!("reopen: {issue} reopened as {prior}, but {why}")));
     }
-    let mut out = format!("{issue} reopened as {prior}\n");
-    out.push_str("the close stays on the logbook, with the reopen under it\n");
-    out.push_str(&persist_tracker(issue, "reopened"));
-    Ok(out)
+    Ok(format!(
+        "{issue} reopened as {prior}\nthe close stays on the logbook, with the reopen under it\n{persisted}"
+    ))
 }
 
 fn same_writer(caller: &str, writer: &str) -> bool {
@@ -57708,6 +57717,27 @@ pub fn run_for(bin: &str, args: &[impl AsRef<str>], deadline: std::time::Duratio
     run_captured_within(bin, args, None, deadline)
 }
 
+/// Exit status for a note whose timed-out write cannot be confirmed.
+pub const NOTE_WRITE_UNCERTAIN_EXIT: i32 = 74;
+
+/// A `vissue note` that timed out, whose text the logbook does not show.
+#[derive(Debug)]
+struct NoteWriteUncertain {
+    issue: String,
+}
+
+impl std::fmt::Display for NoteWriteUncertain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the note on {issue} may or may not have been written; run `ljos show {issue}` to check",
+            issue = self.issue
+        )
+    }
+}
+
+impl std::error::Error for NoteWriteUncertain {}
+
 /// The identity a ballot is cast under: the persona named, else the seat
 /// ([`whoami`]), the same name across a runner's conversations so its
 /// record accrues to one voter.
@@ -57789,9 +57819,16 @@ pub fn bind_connection_env(cmd: &mut std::process::Command) {
 /// ballot is the caster's persona ballot, not that seat's own row.
 pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Result<()> {
     use std::process::{Command, Stdio};
-    if tool_bound::armed() {
+    let bound = tool_bound::armed();
+    if bound || note_write(bin, args).is_some() {
         let left = wall_left()
-            .unwrap_or_else(tool_bound::budget)
+            .unwrap_or_else(|| {
+                if bound {
+                    tool_bound::budget()
+                } else {
+                    CAPTURE_DEADLINE
+                }
+            })
             .max(std::time::Duration::from_millis(1));
         let said = run_captured_within(bin, args, identity, left)?;
         tell_raw!("{}", said.stdout);
@@ -57896,10 +57933,13 @@ fn tracker_retryable_verb(bin: &str, args: &[impl AsRef<str>]) -> bool {
     if in_push_check() {
         return false;
     }
-    matches!(
-        args.first().map(AsRef::as_ref).unwrap_or(""),
-        "note" | "show" | "claim" | "release" | "update" | "close" | "cancel" | "block"
-    )
+    match args.first().map(AsRef::as_ref).unwrap_or("") {
+        // A note is never sent twice. A timed-out note is checked against
+        // the logbook by [`run_captured_within`].
+        "note" => false,
+        "show" | "claim" | "release" | "update" | "close" | "cancel" | "block" => true,
+        _ => false,
+    }
 }
 
 fn tracker_retry_budget() -> std::time::Duration {
@@ -57914,51 +57954,6 @@ fn tracker_retry_line(retries: usize) -> String {
     } else {
         format!("tracker did not answer after {retries} retries")
     }
-}
-
-#[derive(Debug)]
-struct NoteBefore {
-    issue: String,
-    text: String,
-    count: usize,
-    first: Option<serde_json::Value>,
-}
-
-fn tracker_note_before(args: &[impl AsRef<str>]) -> Option<NoteBefore> {
-    if args.first().map(AsRef::as_ref) != Some("note") || args.len() < 3 {
-        return None;
-    }
-    let issue = args.get(1).map(AsRef::as_ref).unwrap_or_default();
-    let mut text = args.get(2).map(AsRef::as_ref).unwrap_or_default();
-    if text == "--" {
-        text = args.get(3).map(AsRef::as_ref).unwrap_or_default();
-    }
-    if issue.trim().is_empty() || text.trim().is_empty() {
-        return None;
-    }
-    let card = tracker_show_json(issue).ok()?;
-    let logbook = card["logbook"].as_array()?;
-    Some(NoteBefore {
-        issue: issue.to_string(),
-        text: text.to_string(),
-        count: logbook.len(),
-        first: logbook.first().cloned(),
-    })
-}
-
-fn tracker_note_landed(before: &NoteBefore) -> bool {
-    let Ok(card) = tracker_show_json(&before.issue) else {
-        return false;
-    };
-    let Some(logbook) = card["logbook"].as_array() else {
-        return false;
-    };
-    logbook.len() == before.count + 1
-        && logbook
-            .first()
-            .and_then(|entry| entry["note"].as_str())
-            .is_some_and(|note| note.trim() == before.text.trim())
-        && logbook.get(1) == before.first.as_ref()
 }
 
 /// How long [`run_captured`] waits. A habitat that never exits used to
@@ -58216,10 +58211,72 @@ fn reap_child(child: &mut std::process::Child) {
     }
 }
 
+/// The issue and text of a `vissue note ISSUE [--] TEXT` call.
+fn note_write<'a>(bin: &str, args: &'a [impl AsRef<str>]) -> Option<(&'a str, &'a str)> {
+    if call_deadline::base(bin) != "vissue" {
+        return None;
+    }
+    let words: Vec<&'a str> = args.iter().map(AsRef::as_ref).collect();
+    match words.as_slice() {
+        ["note", issue, "--", text] | ["note", issue, text] => Some((issue, text)),
+        _ => None,
+    }
+}
+
+/// The number of entries in `issue`'s logbook, or `None` when it cannot be read.
+fn logbook_len(issue: &str) -> Option<usize> {
+    issue_record(issue)
+        .ok()?
+        .get("logbook")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+}
+
 /// [`run_captured_as`] that stops the child at `deadline`. Stdout and
 /// stderr are drained while it runs, so a full pipe cannot stall it
 /// past the wait.
+///
+/// A note is sent once. When it times out, the logbook is read once, and
+/// the write stands only when an entry added since the note started has
+/// exactly its text. Otherwise the result is [`NoteWriteUncertain`].
 fn run_captured_within(
+    bin: &str,
+    args: &[impl AsRef<str>],
+    identity: Option<&str>,
+    deadline: std::time::Duration,
+) -> Result<Said> {
+    let Some((issue, text)) = note_write(bin, args) else {
+        return run_captured_once(bin, args, identity, deadline);
+    };
+    let before = logbook_len(issue);
+    match run_captured_once(bin, args, identity, deadline) {
+        Err(err) if capture_timed_out(&err) => {
+            let landed = before.is_some_and(|before| {
+                issue_record(issue).ok().is_some_and(|card| {
+                    let logbook = card["logbook"].as_array().map_or(&[][..], Vec::as_slice);
+                    let added = logbook.len().saturating_sub(before);
+                    logbook
+                        .iter()
+                        .take(added)
+                        .any(|entry| entry["note"].as_str() == Some(text))
+                })
+            });
+            if landed {
+                Ok(Said {
+                    stdout: String::new(),
+                    stderr: "tracker did not answer in time; the note is in the logbook\n".into(),
+                })
+            } else {
+                Err(anyhow::Error::new(NoteWriteUncertain {
+                    issue: issue.to_string(),
+                }))
+            }
+        }
+        other => other,
+    }
+}
+
+fn run_captured_once(
     bin: &str,
     args: &[impl AsRef<str>],
     identity: Option<&str>,
@@ -58242,7 +58299,7 @@ fn run_captured_within(
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
     #[expect(
         clippy::disallowed_methods,
-        reason = "starts a program outside git hook code"
+        reason = "starts a resolved testable program"
     )]
     let mut cmd = Command::new(&path);
     if let Some(seat) = checked_seat() {
@@ -58271,12 +58328,12 @@ fn run_captured_within(
         cmd.process_group(0);
     }
     let retryable = tracker_retryable_verb(bin, args);
+    let note_write = note_write(bin, args).is_some();
     let retry_budget = tracker_retry_budget();
     let retry_start = std::time::Instant::now();
     let mut retries = 0usize;
     let words: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
     'attempt: loop {
-        let note_before = tracker_note_before(args);
         let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -58324,25 +58381,17 @@ fn run_captured_within(
                         tool_bound::mark_failed(line.clone());
                         bail!(line);
                     }
-                    if retryable {
-                        if note_before.as_ref().is_some_and(tracker_note_landed) {
-                            return Ok(Said {
-                                stdout: String::new(),
-                                stderr: String::new(),
-                            });
-                        }
-                        if retries < 2 {
-                            let backoff = std::time::Duration::from_millis(120 * (1u64 << retries));
-                            if retry_start
-                                .elapsed()
-                                .saturating_add(backoff)
-                                .saturating_add(deadline)
-                                <= retry_budget
-                            {
-                                retries += 1;
-                                std::thread::sleep(backoff);
-                                continue 'attempt;
-                            }
+                    if retryable && retries < 2 {
+                        let backoff = std::time::Duration::from_millis(120 * (1u64 << retries));
+                        if retry_start
+                            .elapsed()
+                            .saturating_add(backoff)
+                            .saturating_add(deadline)
+                            <= retry_budget
+                        {
+                            retries += 1;
+                            std::thread::sleep(backoff);
+                            continue 'attempt;
                         }
                     }
                     let line = if retries > 0 && retryable {
@@ -58350,17 +58399,15 @@ fn run_captured_within(
                     } else {
                         call_deadline::stall_line(bin, &words, deadline)
                     };
-                    // The tracker write did not happen. Exit here, before any
-                    // id is printed, so stdout stays empty and the status is
-                    // a failure. A later `?` used to be able to print and return.
-                    if line.contains("the tracker was not written")
-                        || line.contains("the note was not written")
-                    {
+                    // A tracker rewrite is known not to have finished. Exit
+                    // before any id is printed. A note timeout is uncertain,
+                    // so [`run_captured_within`] checks the logbook.
+                    if line.contains("the tracker was not written") {
                         call_deadline::stop(&line);
                     }
                     let capped =
                         caller >= cap && wall_left().map(|left| left >= cap).unwrap_or(true);
-                    if capped {
+                    if capped && !note_write {
                         call_deadline::stop(&line);
                     }
                     bail!(line);
@@ -66261,6 +66308,60 @@ mod tests {
             err,
             "reopen: LJOS_SEAT bob and the seat file alice name different seats and nothing was written, so run `export LJOS_SEAT=alice`."
         );
+    }
+
+    /// A reopen whose logbook note times out and is not in the logbook
+    /// fails with the uncertain-note status, and makes no claim that the
+    /// reopen note is under the close.
+    #[test]
+    fn a_timed_out_reopen_note_is_uncertain_not_written() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        crate::write_file(
+            root.join("Software/probe/issues.org"),
+            "* DONE [#C] Seat the kiln door\n:PROPERTIES:\n:ID:         probe-k001\n:END:\n",
+        )
+        .unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".config/ljos")).unwrap();
+        crate::write_file(home.join(".config/ljos/env"), "LJOS_SEAT=ada\n").unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("vissue");
+        crate::install_executable(
+            &fake,
+            "#!/bin/sh\ncase \"$1\" in\n  note) exec sleep 30 ;;\n  *) exit 0 ;;\nesac\n",
+        )
+        .unwrap();
+        let _bins = super::prepend_path(&bin);
+        unsafe { std::env::set_var("HOME", &home) };
+        unsafe { std::env::remove_var("LJOS_SEAT") };
+        unsafe { std::env::set_var("VISSUE_ROOT", &root) };
+        unsafe { std::env::set_var("VISSUE_NO_ROUTE", "1") };
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        unsafe { std::env::set_var("LJOS_TRACKER_GIT", "off") };
+        unsafe { std::env::set_var("LJOS_CALL_TIMEOUT", "1") };
+
+        super::PERSON_AT_TERMINAL.with(|p| p.set(true));
+        let present = super::person_present();
+        let said = super::reopen("probe-k001");
+        super::PERSON_AT_TERMINAL.with(|p| p.set(false));
+        unsafe { std::env::remove_var("LJOS_CALL_TIMEOUT") };
+        if !present {
+            return;
+        }
+        let err = said.expect_err("a reopen whose note is uncertain succeeded");
+        let line = super::user_fault_line(&err);
+        assert_eq!(
+            super::user_fault_exit(&err, &line),
+            super::NOTE_WRITE_UNCERTAIN_EXIT,
+            "{line}"
+        );
+        assert!(line.contains("probe-k001 reopened as"), "{line}");
+        assert!(line.contains("may or may not have been written"), "{line}");
+        assert!(!line.contains("with the reopen under it"), "{line}");
     }
 
     /// A board shows whose claim it is: the seat, then a short tag for the
@@ -81256,6 +81357,29 @@ lesson, due yesterday, seat ada
             queued.contains(text),
             "the lesson was dropped instead of queued:\n{queued}"
         );
+    }
+
+    /// A test that changes PATH holds the environment lock until PATH is
+    /// back, even when it did not take the lock itself.
+    #[test]
+    fn a_path_guard_holds_the_env_lock_until_path_is_back() {
+        let held = || super::ENV_LOCK_HELD.with(std::cell::Cell::get);
+        assert!(!held());
+        let dir = tempfile::tempdir().unwrap();
+        let path = crate::prepend_path(dir.path());
+        assert!(held());
+        let now = std::env::var_os("PATH").unwrap();
+        let mut dirs = std::env::split_paths(&now);
+        assert_eq!(dirs.next().as_deref(), Some(dir.path()));
+        let rest: Vec<_> = dirs.collect();
+        drop(path);
+        assert!(!held());
+
+        let _env = crate::test_env_lock();
+        let back = std::env::var_os("PATH").unwrap_or_default();
+        assert_eq!(std::env::split_paths(&back).collect::<Vec<_>>(), rest);
+        drop(crate::set_path("/nonexistent"));
+        assert!(held());
     }
 
     /// A queue that cannot take the lesson is its own outcome. A cause that
