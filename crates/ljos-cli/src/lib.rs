@@ -37863,14 +37863,17 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.name == "search" && !row.ok {
         return "warn";
     }
-    // The encoder is loading or the last encode failed. Recall still runs,
-    // on words alone, and the seat still starts. A failed row names the
-    // command that replaces the writer. A loading row says when to rerun.
+    // A loading encoder still answers by words, and the load finishes on
+    // its own. The short doctor prints the row as info, so it is not one
+    // of the rows the summary says need action.
+    if row.name == "encoder" && !row.ok && row.state.starts_with("loading") {
+        return "info";
+    }
+    // The last encode failed. Recall still runs, on words alone, and the
+    // seat still starts. The row names the command that replaces the writer.
     if row.name == "encoder"
         && !row.ok
-        && (row.state.starts_with(ENCODER_DEGRADED)
-            || row.state.starts_with("failed:")
-            || row.state.starts_with("loading"))
+        && (row.state.starts_with(ENCODER_DEGRADED) || row.state.starts_with("failed:"))
     {
         return "warn";
     }
@@ -38029,8 +38032,8 @@ pub fn doctor_summary(rows: &[Habitat]) -> String {
 /// Whether a row in the short doctor asks the person to do something.
 fn doctor_needs_action(row: &Habitat) -> bool {
     // The number in the summary is the warn and no rows the short report
-    // prints. An info row, including an encoder that is not installed, is
-    // printed on its own and is not part of that number.
+    // prints. An info row, including an encoder that is not installed or
+    // still loading, is printed on its own and is not part of that number.
     matches!(doctor_word(row), "no" | "warn")
 }
 
@@ -38235,11 +38238,13 @@ pub fn doctor_shows_in_short(row: &Habitat) -> bool {
     shown_short(doctor_word(row), row.name) || plain_encoder_row(row)
 }
 
-/// The not-installed encoder, which plain `ljos doctor` prints so a
-/// word-only search has a command to run. Loading and failed rows are
-/// already `warn` and pass [`shown_short`].
+/// An encoder plain `ljos doctor` prints while search is not using the
+/// model yet. Not installed names the install command. Loading names the
+/// wait and is info: the load finishes on its own. A failed row is `warn`
+/// and passes [`shown_short`] on its own.
 fn plain_encoder_row(row: &Habitat) -> bool {
-    row.name == "encoder" && row.state.starts_with("not installed")
+    row.name == "encoder"
+        && (row.state.starts_with("not installed") || row.state.starts_with("loading"))
 }
 
 /// Whether the short doctor prints a row, from its word and name. An
@@ -76677,16 +76682,31 @@ mod tests {
             "remaining_ms": 2500
         }));
         assert!(!loading.ok);
-        assert_eq!(doctor_word(&loading), "warn");
+        assert_eq!(doctor_word(&loading), "info");
+        assert!(
+            doctor_shows_in_short(&loading),
+            "a loading encoder stays on the short doctor"
+        );
         assert_eq!(
             loading.state,
             "loading, about 3 s left. Search matches words until then."
+        );
+        let seat = Habitat {
+            name: "seat source",
+            state: "no seat is set; reads use every seat, so run `export LJOS_SEAT=NAME`.".into(),
+            ok: false,
+        };
+        let summary = doctor_summary(&[seat, loading]);
+        assert!(
+            summary.contains("1 row needs action"),
+            "a loading encoder is not an action: {summary}"
         );
         let loading_quiet = row(serde_json::json!({
             "available": true,
             "answering": null
         }));
-        assert_eq!(doctor_word(&loading_quiet), "warn");
+        assert_eq!(doctor_word(&loading_quiet), "info");
+        assert!(doctor_shows_in_short(&loading_quiet));
         assert_eq!(
             loading_quiet.state,
             "loading. Search matches words until it is ready."
