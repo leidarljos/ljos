@@ -9143,15 +9143,18 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
         let Some(groups) = groups.as_array_mut() else {
             continue;
         };
-        let before = groups.len();
-        groups.retain(|g| {
-            !g["hooks"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(is_seat_hook)
+        let mut changed = false;
+        groups.retain_mut(|group| {
+            let Some(entries) = group["hooks"].as_array_mut() else {
+                return true;
+            };
+            let before = entries.len();
+            entries.retain(|entry| !is_seat_hook(entry));
+            let removed_owned = entries.len() != before;
+            changed |= removed_owned;
+            !removed_owned || !entries.is_empty()
         });
-        if groups.len() != before {
+        if changed {
             removed.push(event.clone());
         }
     }
@@ -60623,6 +60626,50 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn removing_an_unrequested_hook_keeps_its_foreign_group_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        crate::write_file(
+            &file,
+            serde_json::json!({
+                "hooks": {
+                    "PostToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "/opt/ljos/bin/ljos hook",
+                                "timeout": 20
+                            },
+                            {
+                                "type": "command",
+                                "command": "/usr/bin/true",
+                                "foreignExtra": "keep"
+                            }
+                        ]
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let step = hook_step(&file, &["PreToolUse".to_string()], false);
+        assert!(step.ok, "{step:?}");
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let groups = value["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "{value}");
+        assert_eq!(
+            groups[0]["hooks"],
+            serde_json::json!([{
+                "type": "command",
+                "command": "/usr/bin/true",
+                "foreignExtra": "keep"
+            }])
+        );
     }
 
     /// Recall lists an issue's own memories by their tag, newest first, with
