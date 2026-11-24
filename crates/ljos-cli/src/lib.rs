@@ -25551,6 +25551,15 @@ pub fn remember_split_line(n: usize) -> String {
     )
 }
 
+/// What `ljos remember` prints when every chunk of a split was queued.
+#[must_use]
+pub fn remember_queued_split_line(n: usize) -> String {
+    let claims = if n == 1 { "claim" } else { "claims" };
+    format!(
+        "remember: queued as {n} {claims}, because a lesson is at most two sentences, so run `ljos search`."
+    )
+}
+
 /// One JSON document for `ljos remember --json`.
 ///
 /// `claims` lists every chunk the pack accepted, including a duplicate.

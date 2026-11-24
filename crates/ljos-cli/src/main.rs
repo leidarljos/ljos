@@ -5626,10 +5626,8 @@ fn run_command() -> Result<()> {
             let chunks = ljos_cli::claim_chunks(&text);
             let split_n = chunks.len();
             let split = split_n > 1;
-            if split {
-                ljos_cli::say!("{}", ljos_cli::remember_split_line(chunks.len()));
-            }
             let mut stored: Vec<(String, String)> = Vec::new();
+            let mut queued_n = 0usize;
             let mut json_bodies: Vec<serde_json::Value> = Vec::new();
             let mut failed: Vec<serde_json::Value> = Vec::new();
             let mut hard: Option<anyhow::Error> = None;
@@ -5676,6 +5674,9 @@ fn run_command() -> Result<()> {
                 };
                 let duplicate = body["duplicate"].as_bool() == Some(true);
                 let queued = body["queued"].as_bool() == Some(true);
+                if queued {
+                    queued_n += 1;
+                }
                 if split && (duplicate || !queued) {
                     stored.push(stored_claim(&body, &text));
                 }
@@ -5715,6 +5716,13 @@ fn run_command() -> Result<()> {
                             .collect::<Vec<_>>()
                             .join(", ")
                     );
+                }
+            }
+            if split && hard.is_none() {
+                if stored.is_empty() && queued_n == split_n {
+                    ljos_cli::say!("{}", ljos_cli::remember_queued_split_line(split_n));
+                } else if !stored.is_empty() {
+                    ljos_cli::say!("{}", ljos_cli::remember_split_line(split_n));
                 }
             }
             if json {
