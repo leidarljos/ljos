@@ -235,7 +235,7 @@ fn a_missing_memory_id_names_the_list_and_search() {
         "--text",
         "Leave the kiln cold.",
     ]);
-    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(code, 1, "{stdout}{stderr}");
     assert!(
         stdout.contains("no memory starts with abcd1234abcd"),
         "{stdout}"
