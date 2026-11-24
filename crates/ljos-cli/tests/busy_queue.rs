@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const LESSON: &str = "Cold metal seats the door.";
-const QUEUED: &str = "Memory busy: queued 1 write, it will be saved on a later call.";
+const QUEUED: &str = "Memory busy: queued 1 write. A later ljos call from any seat will try to save it, and the pack may still refuse it.";
 const WORDS: &str =
     "Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`.";
 
@@ -49,6 +49,9 @@ fn busy_pack() -> String {
 }
 
 /// A pack that stores each new lesson once and lists what it stored.
+/// A post of a claim it holds, same text, kind, set, issue and agent, is
+/// answered with that claim, as packsetd answers it. `posts` counts the
+/// claims stored.
 fn healthy_pack(posts: Arc<AtomicUsize>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -87,15 +90,25 @@ fn healthy_pack(posts: Arc<AtomicUsize>) -> String {
                 let req = String::from_utf8_lossy(&buf);
                 let line = req.lines().next().unwrap_or("");
                 let body = if line.starts_with("POST") && line.contains("/v1/atoms") {
-                    posts.fetch_add(1, Ordering::SeqCst);
                     let raw = req.split("\r\n\r\n").nth(1).unwrap_or("");
                     let mut atom: serde_json::Value =
                         serde_json::from_str(raw).unwrap_or(serde_json::json!({}));
-                    if atom.get("id").and_then(|id| id.as_str()).is_none() {
-                        atom["id"] = serde_json::json!("atom-kept");
+                    let mut all = stored.lock().unwrap();
+                    let same = |held: &&serde_json::Value| {
+                        ["text", "kind", "set", "issue", "agent"]
+                            .iter()
+                            .all(|key| held.get(*key) == atom.get(*key))
+                    };
+                    if let Some(held) = all.iter().find(same) {
+                        held.to_string()
+                    } else {
+                        posts.fetch_add(1, Ordering::SeqCst);
+                        if atom.get("id").and_then(|id| id.as_str()).is_none() {
+                            atom["id"] = serde_json::json!("atom-kept");
+                        }
+                        all.push(atom.clone());
+                        atom.to_string()
                     }
-                    stored.lock().unwrap().push(atom.clone());
-                    atom.to_string()
                 } else if line.contains("/v1/atoms") {
                     let atoms = stored.lock().unwrap().clone();
                     serde_json::json!({"atoms": atoms}).to_string()
@@ -224,6 +237,14 @@ fn text_of(out: &std::process::Output) -> String {
     )
 }
 
+fn queued_lesson_count(queue: &str) -> usize {
+    queue
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|row| row["text"] == LESSON)
+        .count()
+}
+
 #[test]
 fn a_busy_pack_queues_the_lesson_and_a_healthy_pack_saves_it_once() {
     let seat = Seat::open();
@@ -261,7 +282,7 @@ fn a_busy_pack_queues_the_lesson_and_a_healthy_pack_saves_it_once() {
         "a note talked about skipped memory:\n{said}"
     );
     assert_eq!(
-        seat.queue().matches(LESSON).count(),
+        queued_lesson_count(&seat.queue()),
         1,
         "note changed the queued lesson:\n{}",
         seat.queue()
@@ -277,7 +298,7 @@ fn a_busy_pack_queues_the_lesson_and_a_healthy_pack_saves_it_once() {
         "{said}"
     );
     assert_eq!(
-        seat.queue().matches(LESSON).count(),
+        queued_lesson_count(&seat.queue()),
         1,
         "file changed the queued lesson:\n{}",
         seat.queue()
@@ -295,7 +316,7 @@ fn a_busy_pack_queues_the_lesson_and_a_healthy_pack_saves_it_once() {
     );
     let waiting = seat.queue();
     assert_eq!(
-        waiting.matches(LESSON).count(),
+        queued_lesson_count(&waiting),
         1,
         "sitting dropped the queued lesson:\n{waiting}\n{said}"
     );

@@ -14,10 +14,10 @@ use ljos_cli::{
     format_remembered, format_seat_command, format_steps, graded, habit, habits, handover_scoped,
     healthy, hook_note, island_entities, join, learn_anchors, learn_and_write, learn_reading,
     learn_shared, mark_seen, now_utc, on_path, onboard_to, packset_consolidate, packset_forget,
-    packset_hubs, packset_island_as, packset_search_as_of, packset_write_as, panel, panel_steps,
-    parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout,
-    predictions_of, prompt_hook_stdout, protocol_brief, protocol_text, read_campaign, receive,
-    release, remember_findings, reopen, rows_about, run, run_as, run_captured, settle_discount,
+    packset_hubs, packset_island_as, packset_search_as_of, panel, panel_steps, parse_every,
+    personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of,
+    prompt_hook_stdout, protocol_brief, protocol_text, read_campaign, receive, release,
+    remember_findings, reopen, rows_about, run, run_as, run_captured, settle_discount,
     sitting_close, sitting_stream_started, stop_hook_stdout, timeline, topic_words,
     tracker_show_json, trim_num, trust_from_pack, uncite_deed, with_discount, write_outcome,
     write_persona_as, write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading,
@@ -5761,34 +5761,35 @@ fn run_command() -> Result<()> {
             let mut json_bodies: Vec<serde_json::Value> = Vec::new();
             let mut failed: Vec<serde_json::Value> = Vec::new();
             let mut hard: Option<anyhow::Error> = None;
+            let mut not_queued: Option<String> = None;
             for text in chunks {
                 // A person at the terminal, and words from their latest
                 // prompt, are their lesson. Any other text is a standing
                 // lesson too, sitting or not, labelled agent-derived.
                 // A busy pack queues the lesson and this command exits 0.
-                let body = match ljos_cli::remember_with_retry(&text, || {
-                    if ljos_cli::person_present() {
-                        let horizon = ljos_cli::remember_horizon(transient, standing, false);
-                        packset_write_as("Remember", &text, as_persona.as_deref(), horizon)
-                    } else if ljos_cli::capture::said_in_latest_prompt(&text) {
-                        let horizon = transient.then_some(true);
-                        ljos_cli::packset_write_mcp(
-                            "Remember",
-                            &text,
-                            as_persona.as_deref(),
-                            horizon,
-                        )
-                    } else {
-                        let horizon = if transient { Some(true) } else { Some(false) };
-                        ljos_cli::packset_write_agent(
-                            "Remember",
-                            &text,
-                            as_persona.as_deref(),
-                            horizon,
-                        )
+                let persona = as_persona.as_deref();
+                let request = if ljos_cli::person_present() {
+                    let horizon = ljos_cli::remember_horizon(transient, standing, false);
+                    ljos_cli::RememberRequest::typed(&text, persona, horizon)
+                } else if ljos_cli::capture::said_in_latest_prompt(&text) {
+                    ljos_cli::RememberRequest::said(&text, persona, transient.then_some(true))
+                } else {
+                    ljos_cli::RememberRequest::agent(&text, persona, Some(transient))
+                };
+                let (body, queued) = match ljos_cli::remember_with_retry(&request) {
+                    Ok(ljos_cli::RememberOutcome::Stored(body)) => (body, false),
+                    Ok(ljos_cli::RememberOutcome::Queued(body)) => (body, true),
+                    Ok(ljos_cli::RememberOutcome::NotQueued(cause)) => {
+                        let line = ljos_cli::remember_not_queued_line(&cause);
+                        if json {
+                            failed.push(serde_json::json!({
+                                "text": text,
+                                "error": line,
+                            }));
+                        }
+                        not_queued = Some(line);
+                        break;
                     }
-                }) {
-                    Ok(body) => body,
                     Err(err) => {
                         // One document names what was stored and the chunk
                         // that failed. Later chunks are not written.
@@ -5803,7 +5804,6 @@ fn run_command() -> Result<()> {
                     }
                 };
                 let duplicate = body["duplicate"].as_bool() == Some(true);
-                let queued = body["queued"].as_bool() == Some(true);
                 if queued {
                     queued_n += 1;
                 }
@@ -5821,7 +5821,7 @@ fn run_command() -> Result<()> {
                 if duplicate {
                     continue;
                 }
-                if body["queued"].as_bool() == Some(true) {
+                if queued {
                     // JSON stdout is always one document, so prose goes to
                     // stderr for one claim and a split alike.
                     if json {
@@ -5856,6 +5856,7 @@ fn run_command() -> Result<()> {
             }
             if split
                 && hard.is_none()
+                && not_queued.is_none()
                 && (!stored.is_empty() || queued_n > 0)
                 && (json || stored.is_empty())
             {
@@ -5877,6 +5878,10 @@ fn run_command() -> Result<()> {
                 }
             } else if split && !stored.is_empty() {
                 ljos_cli::tell_raw!("{}", split_claims_page(stored.len(), queued_n, &stored));
+            }
+            if let Some(line) = not_queued {
+                ljos_cli::say!("{line}");
+                std::process::exit(1);
             }
             if let Some(err) = hard {
                 return Err(err);

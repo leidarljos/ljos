@@ -30,6 +30,88 @@ pub struct PacksetClient {
     token: Mutex<Option<String>>,
 }
 
+/// A pack write failure, classified at the client boundary.
+#[derive(Debug)]
+pub enum PackWriteError {
+    BusyOrQueuedByServer(Error),
+    MemoryPressure(Error),
+    Unavailable503(Error),
+    Other(Error),
+}
+
+impl PackWriteError {
+    /// Whether a remember can keep the write for a later pack call.
+    #[must_use]
+    pub fn queueable(&self) -> bool {
+        match self {
+            Self::BusyOrQueuedByServer(_) | Self::MemoryPressure(_) | Self::Unavailable503(_) => {
+                true
+            }
+            Self::Other(Error::Http(_) | Error::Io(_) | Error::NoUrl) => true,
+            Self::Other(_) => false,
+        }
+    }
+}
+
+impl std::fmt::Display for PackWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BusyOrQueuedByServer(err)
+            | Self::MemoryPressure(err)
+            | Self::Unavailable503(err)
+            | Self::Other(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for PackWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::BusyOrQueuedByServer(err)
+            | Self::MemoryPressure(err)
+            | Self::Unavailable503(err)
+            | Self::Other(err) => Some(err),
+        }
+    }
+}
+
+fn status_code(why: &str) -> Option<u16> {
+    why.split(": ").find_map(|part| {
+        part.trim()
+            .strip_prefix("status code ")
+            .unwrap_or(part.trim())
+            .parse()
+            .ok()
+    })
+}
+
+fn memory_pressure_line(line: &str) -> bool {
+    let line = line.trim().to_ascii_lowercase();
+    line == "memory pressure"
+        || line.starts_with("memory pressure;")
+        || line.starts_with("packsetd is busy: memory pressure")
+}
+
+fn classify_write_error(err: Error) -> PackWriteError {
+    if matches!(
+        &err,
+        Error::Io(io)
+            if io
+                .get_ref()
+                .is_some_and(|inner| inner.is::<crate::PackReportedBusy>())
+    ) {
+        return PackWriteError::BusyOrQueuedByServer(err);
+    }
+    match &err {
+        Error::Unavailable(line) if memory_pressure_line(line) => {
+            PackWriteError::MemoryPressure(err)
+        }
+        Error::Unavailable(_) => PackWriteError::Unavailable503(err),
+        Error::Bad(why) if status_code(why) == Some(503) => PackWriteError::Unavailable503(err),
+        _ => PackWriteError::Other(err),
+    }
+}
+
 impl Clone for PacksetClient {
     fn clone(&self) -> Self {
         Self {
@@ -2011,16 +2093,21 @@ impl PacksetClient {
         self.json_ok("/v1/status", answer)
     }
 
-    pub fn post_atom(&self, atom: &Value) -> Result<Value, Error> {
-        let bytes = serde_json::to_vec(atom)?;
-        let answer = self.tried(
-            "POST",
-            "/v1/atoms",
-            &[],
-            Some(&bytes),
-            super::REMEMBER_BUDGET,
-        )?;
+    pub fn post_atom(&self, atom: &Value) -> Result<Value, PackWriteError> {
+        let bytes = serde_json::to_vec(atom)
+            .map_err(Error::from)
+            .map_err(classify_write_error)?;
+        let answer = self
+            .tried(
+                "POST",
+                "/v1/atoms",
+                &[],
+                Some(&bytes),
+                super::REMEMBER_BUDGET,
+            )
+            .map_err(classify_write_error)?;
         self.json_ok("/v1/atoms", answer)
+            .map_err(classify_write_error)
     }
 
     pub fn delete_atom(
