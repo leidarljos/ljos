@@ -141,6 +141,3 @@ bench/hf/out/
 
 # Python bytecode
 __pycache__/
-
-# Seat state. An empty or relative state home used to create this in a crate.
-/crates/*/ljos/
