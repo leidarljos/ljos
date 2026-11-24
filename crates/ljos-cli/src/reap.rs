@@ -39,6 +39,15 @@ pub fn parse_idle(s: &str) -> Result<Duration> {
     Ok(Duration::from_secs(secs))
 }
 
+/// A reap window, whose tracker timestamps have one-minute resolution.
+pub fn parse_reap_idle(s: &str) -> Result<Duration> {
+    let idle = parse_idle(s)?;
+    if idle < Duration::from_secs(60) {
+        bail!("reap: --idle {s:?} must be at least 1m because claim times have minute resolution");
+    }
+    Ok(idle)
+}
+
 /// The tracker's `[2026-10-13 Tue 16:01]`, read in this machine's zone.
 pub fn org_ts(s: &str) -> Option<i64> {
     let t = s
@@ -355,6 +364,15 @@ mod tests {
         assert_eq!(parse_idle("2d").unwrap().as_secs(), 172800);
         assert!(parse_idle("6x").is_err());
         assert!(parse_idle("h").is_err());
+    }
+
+    #[test]
+    fn reap_idle_needs_one_minute() {
+        for value in ["0", "0s", "59s"] {
+            let err = parse_reap_idle(value).unwrap_err().to_string();
+            assert!(err.contains("must be at least 1m"), "{value}: {err}");
+        }
+        assert_eq!(parse_reap_idle("1m").unwrap(), Duration::from_secs(60));
     }
 
     #[test]
