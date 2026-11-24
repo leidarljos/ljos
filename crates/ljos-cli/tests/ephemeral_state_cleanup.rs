@@ -56,7 +56,9 @@ fn no_home_remember_search_and_doctor_discard_temporary_state() {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(
-            text.contains("state is in a temporary directory and will be discarded"),
+            text.contains(
+                "state is in a temporary directory, removed when this command exits normally"
+            ),
             "{}:\n{text}",
             args.join(" ")
         );

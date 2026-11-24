@@ -19766,7 +19766,10 @@ fn fallback_state_base() -> PathBuf {
 }
 
 /// The line shown when state has nowhere durable to live.
-const EPHEMERAL_STATE_WARNING: &str = "ljos: state is in a temporary directory and will be discarded; set HOME or XDG_STATE_HOME to an absolute path";
+///
+/// The directory is removed by an `atexit` handler, which a signal, `exec`
+/// or abort skips, so the line does not promise more than a normal exit.
+const EPHEMERAL_STATE_WARNING: &str = "ljos: state is in a temporary directory, removed when this command exits normally; set HOME or XDG_STATE_HOME to an absolute path";
 
 fn no_home_message(why: &str) -> String {
     format!("ljos: {why}; set HOME or XDG_STATE_HOME to an absolute path")
