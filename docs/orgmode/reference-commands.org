@@ -69,7 +69,8 @@ A word that is not a command names the verb it was reaching for as a line that r
   The page prints the first 20, headed =ready  shown X of Y=.
   =-n N= and =--limit N= print N.
   =--all= prints every ticket.
-  A limited page ends with one line naming =--limit=, =--all=, =-p= and =--mine=, even when every ticket fits.
+  A page that leaves tickets out ends with one line naming =--limit=, =--all=, =-p= and =--mine=.
+  A page that shows every ticket prints no such line.
   =--json= prints =shown=, =total= and =rows= for that same page and order.
   =--mine= keeps its separate meaning: it names the next unfinished item of each of this seat's plans.
   When the open sitting's ticket is not a plan, the line names that ticket and says it has no plan items.
