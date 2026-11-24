@@ -8970,19 +8970,32 @@ fn is_seat_hook(h: &Value) -> bool {
     h["command"].as_str().and_then(seat_hook_program).is_some()
 }
 
+/// The `ljos` a seat hook runs, in any form an onboard has written: bare
+/// `ljos`, one shell word, or an older unquoted absolute path that may
+/// hold spaces.
+fn repairable_seat_hook_path(command: &str) -> Option<String> {
+    let program = command.strip_suffix(" hook")?;
+    if program == "ljos" || (program.starts_with('/') && program.ends_with("/ljos")) {
+        return Some(program.to_string());
+    }
+    hook_word_path(program)
+}
+
+fn is_repairable_seat_hook(h: &Value) -> bool {
+    h["command"]
+        .as_str()
+        .and_then(repairable_seat_hook_path)
+        .is_some()
+}
+
 fn repaired_seat_hook_command(command: &str, wanted: &str) -> Option<String> {
     if command == wanted {
         return None;
     }
-    if command == "ljos hook" && wanted != "ljos hook" {
+    let path = repairable_seat_hook_path(command)?;
+    if path == "ljos" {
         return Some(wanted.to_string());
     }
-    let program = command.strip_suffix(" hook")?;
-    let path = if program.starts_with('/') && program.ends_with("/ljos") {
-        program.to_string()
-    } else {
-        hook_word_path(program)?
-    };
     let fixed = format!("{} hook", tools::sh_word(&path));
     (fixed != command).then_some(fixed)
 }
@@ -9157,7 +9170,7 @@ fn hook_step(file: &Path, events: &[String], dry: bool) -> Step {
                 return true;
             };
             let before = entries.len();
-            entries.retain(|entry| !is_seat_hook(entry));
+            entries.retain(|entry| !is_repairable_seat_hook(entry));
             let removed_owned = entries.len() != before;
             changed |= removed_owned;
             !removed_owned || !entries.is_empty()
@@ -61003,6 +61016,45 @@ mod tests {
                 "command": "/usr/bin/true",
                 "foreignExtra": "keep"
             }])
+        );
+    }
+
+    #[test]
+    fn removing_an_unrequested_hook_drops_an_unquoted_spaced_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        let old = "/opt/My Tools/ljos hook";
+        let foreign = serde_json::json!({"type": "command", "command": "/usr/bin/true"});
+        crate::write_file(
+            &file,
+            serde_json::json!({
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": old, "timeout": 20}]
+                        },
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {"type": "command", "command": old, "timeout": 20},
+                                foreign.clone()
+                            ]
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let step = hook_step(&file, &["PreToolUse".to_string()], false);
+        assert!(step.detail.contains("dropped from PostToolUse"), "{step:?}");
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(
+            value["hooks"]["PostToolUse"],
+            serde_json::json!([{"matcher": "Bash", "hooks": [foreign]}]),
+            "{value}"
         );
     }
 
