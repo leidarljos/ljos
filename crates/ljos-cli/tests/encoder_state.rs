@@ -468,17 +468,13 @@ fn doctor_names_an_encoder_install_command_that_runs_here() {
         "{cargo}"
     );
     assert!(!cargo.contains("cargo binstall"), "{cargo}");
+    let release_hint = format!("so run `{}`.", ljos_cli::RELEASE_INSTALL_COMMAND);
     let from_checkout = packset_embed_line(&curl_only.display().to_string(), &script_home);
     assert!(
-        from_checkout.contains("so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`."),
+        from_checkout.contains(&release_hint),
         "a checkout in the working directory changes nothing: {from_checkout}"
     );
     let release = packset_embed_line(&curl_only.display().to_string(), &bare);
-    assert!(
-        release.contains(
-            "so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`."
-        ),
-        "{release}"
-    );
+    assert!(release.contains(&release_hint), "{release}");
     assert!(!release.contains("cargo binstall"), "{release}");
 }

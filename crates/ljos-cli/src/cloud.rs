@@ -33,7 +33,6 @@ const OPTIONAL_BINS: &[&str] = &[
     "claimdag",
     "ljos-consensus",
 ];
-const INSTALL_URL: &str = "https://github.com/leidarljos/ljos/releases/latest/download/install.sh";
 const CLOUD_GUARD_RULES_FILE: &str = "cloud-guard-rules.json";
 /// The one cloud push rule, read from the push's argv by
 /// the push check.
@@ -2571,7 +2570,8 @@ fn installer_script() -> Result<PathBuf> {
         }
         return Ok(path);
     }
-    let url = std::env::var("LJOS_INSTALL_URL").unwrap_or_else(|_| INSTALL_URL.to_string());
+    let url = std::env::var("LJOS_INSTALL_URL")
+        .unwrap_or_else(|_| crate::RELEASE_INSTALL_URL.to_string());
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(60))
         .build();

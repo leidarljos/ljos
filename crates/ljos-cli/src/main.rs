@@ -1560,7 +1560,8 @@ enum Cmd {
     /// The id breaks the last tie.
     /// The page prints the first 20, headed `ready  shown X of Y`.
     /// `-n N` prints N tickets. `--limit N` is the same flag. `--all` prints every ticket.
-    /// A limited page ends with one line naming `--limit`, `--all`, `-p` and `--mine`.
+    /// A page that leaves tickets out ends with one line naming `--limit`, `--all`, `-p` and `--mine`.
+    /// A page that shows every ticket prints no such line.
     /// `--json` prints `shown`, `total` and `rows` for that same page and that same order.
     /// `--mine` names the next unfinished item of each plan this seat holds.
     /// When the open sitting's ticket is not a plan, the line names that ticket and says it has no plan items.
@@ -4042,7 +4043,7 @@ const DOCS_URL: &str = "https://leidarljos.github.io/ljos/reference-commands.htm
 
 /// The first commands, in the order the getting-started page runs them.
 const FIRST_COMMANDS: &[(&str, &str)] = &[
-    ("sh install.sh --no-embed", "install ljos"),
+    (ljos_cli::RELEASE_INSTALL_COMMAND, "install ljos"),
     ("ljos doctor", "check that ljos is ready"),
     ("ljos remember TEXT", "store one lesson"),
     ("ljos search QUERY", "find what is stored"),
@@ -4068,7 +4069,7 @@ fn opening_screen() -> String {
     let commands_src: Vec<(&str, &str)> = FIRST_COMMANDS
         .iter()
         .copied()
-        .filter(|(cmd, _)| *cmd != "sh install.sh --no-embed" || !installed_ljos())
+        .filter(|(cmd, _)| *cmd != ljos_cli::RELEASE_INSTALL_COMMAND || !installed_ljos())
         .collect();
     let width = commands_src
         .iter()
@@ -4522,8 +4523,7 @@ fn run_hook(hook: HookArgs) -> Result<()> {
     if !prompt {
         ljos_cli::hook_timed("arm_gate", || ljos_cli::arm_gate(&input, event.as_deref()));
     }
-    ljos_cli::bind_call_conversation(&input, &call);
-    ljos_cli::adopt_blank_conversation(&input, &mut call);
+    ljos_cli::bind_hook_call(&input, &mut call);
     ljos_cli::ballot_sig::export_hook_session(call.session.as_deref());
     if ljos_cli::subagent::note_hook_call(&input, &call.event) {
         // the editor harness blocks a permission hook that prints nothing.

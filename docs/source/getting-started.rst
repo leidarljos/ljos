@@ -287,7 +287,7 @@ A plan files one parent and its checklist in a single tracker commit, claims the
    $ LJOS_SEAT=alice ljos ready --mine
    next: day-ef56  pick a default
 
-``ljos ready`` without ``--mine`` prints the first 20 open tickets, headed ``ready  shown X of Y``, and ends a short page with a hint naming ``--limit``, ``--all``, ``-p`` and ``--mine``, even when every ticket fits.
+``ljos ready`` without ``--mine`` prints the first 20 open tickets, headed ``ready  shown X of Y``, and ends a truncated page with a hint naming ``--limit``, ``--all``, ``-p`` and ``--mine``. It omits the hint when every ticket fits.
 This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last.
 ``--all`` prints every ticket, and ``--limit N`` prints N.
 
@@ -295,6 +295,7 @@ This seat's claims come first, then unclaimed work by priority and recent activi
 
 To work one ticket with no plan, run ``ljos sitting ID``.
 It claims the ticket and prints what the seat remembers about it.
+When the pack answers but nothing matches, it prints ``No matching memories for this task.`` instead of leaving that part blank.
 ``ljos note "TEXT"`` writes on that ticket, and ``ljos finish`` with no id ends the sitting and leaves the ticket open.
 ``ljos finish --close`` closes it, once the work is accepted.
 From a container, a CI runner, ``setsid``, or a parent that carries a runner's variables, that close is refused unless a standing grant covers this seat and this ticket.

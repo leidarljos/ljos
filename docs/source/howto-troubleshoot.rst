@@ -12,13 +12,13 @@ Exit 1 when a ``no`` row is a required part, the pack, the note queue, or a trac
 A ``warn`` row does not change the exit code.
 These blocks copy the lines that command printed.
 The home in them is ``/tmp/seat``, except the Model Context Protocol (MCP) blocks, which used ``/tmp/seat-probe``.
-When the registry answers, a missing program's row names that version. These blocks do not pin one.
+When the registry answers, a missing program that ``install.sh`` does not install names that version. These blocks do not pin one.
 
 The pack writer
 ===============
 
 A checkout that had only ``ljos`` and ``ljos-mcp`` on ``PATH`` printed these pack rows and this summary.
-The other missing programs used the same shape, not on PATH, then ``cargo install --locked`` and the crate name. When the registry answers, the row also names that version.
+The other missing siblings, ``vissue``, ``deedar`` and ``claimdag``, used the same shape, not on PATH, then the release install command. Any other missing program names ``cargo install --locked`` and the crate name, and when the registry answers, that row also names that version.
 Exit 1.
 
 ..
@@ -27,16 +27,17 @@ Exit 1.
 .. code:: text
 
    $ ljos doctor
-   no  packset not on PATH, so run `cargo install --locked packset`.
-   no  packsetd    not on PATH, so run `cargo install --locked packset`.
+   no  packset not on PATH, so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`.
+   no  packsetd    not on PATH, so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`.
    no  memory    http://127.0.0.1:8761 does not answer. no pack writer is answering and packset is not on PATH, so run `cargo install --locked packset`.
    ljos is not ready: ljos-policyd, vissue, deedar, claimdag, packset, packsetd and memory do not answer. Optional extras: `ljos doctor --all`.
 
 ..
    # proseguard:on
 
-The next command is ``cargo install --locked packset``.
-That installs ``packset`` and ``packsetd``.
+The next command is ``curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh``.
+That installs ``packset`` and ``packsetd`` with the other siblings.
+The memory row still names ``cargo install --locked packset``.
 
 With ``packset`` on ``PATH`` and nothing listening, a home that is not a temporary directory printed:
 
@@ -163,16 +164,16 @@ When a budget cut the wait short, the line names that budget and the ``LJOS_TRAC
 A missing habitat binary
 ========================
 
-``deedar`` not on ``PATH``, with the registry answering, printed:
+``deedar``, ``vissue`` and ``claimdag`` not on ``PATH`` printed:
 
 ..
    # proseguard:off
 
 .. code:: text
 
-   no  deedar  not on PATH, and crates.io lists 0.6.1, so run `cargo install --locked deedar-cli`.
-   info    tickets vissue not on PATH, so run `cargo install --locked vissue-cli`.
-   no  claim graph claimdag not on PATH, so run `cargo install --locked claimdag-cli`.
+   no  deedar  not on PATH, so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`.
+   info    tickets vissue not on PATH, so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`.
+   no  claim graph claimdag not on PATH, so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`.
 
 ..
    # proseguard:on
@@ -184,12 +185,12 @@ A missing habitat binary
 
 .. code:: text
 
-   info    deeds  deedar not on PATH, so run `cargo install --locked deedar-cli`.
+   info    deeds   deedar not on PATH, so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`.
 
 ..
    # proseguard:on
 
-The ``vissue`` and ``claimdag`` rows are the same shape, with ``vissue-cli`` and ``claimdag-cli``.
+The ``vissue`` and ``claimdag`` rows are the same shape. A missing sibling names the release install command, not a crates.io version.
 A required binary exits 1.
 The tickets and deeds rows are info when the program is the thing that is missing.
 
@@ -267,7 +268,7 @@ With ``curl`` unable to reach crates.io, doctor printed:
 ..
    # proseguard:on
 
-A missing binary then has no version in parentheses: not on PATH, so run ``cargo install --locked packset``.
+A missing binary then has no version in parentheses: not on PATH, so run ``curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh``.
 The warning does not by itself exit 1.
 A copy already in the day cache is still used, and the row says ``crates.io (cached)``.
 

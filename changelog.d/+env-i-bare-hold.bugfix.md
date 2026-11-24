@@ -1,0 +1,2 @@
+A call that `env -i` starts under a `CURSOR_AGENT` shell now reads the hold its own `ljos sitting` wrote, so the doctor's sitting gate row, the `pre-push` sitting check and a stale-hold line from `ljos plan` find that sitting.
+Whether a call is an id-less Cursor agent, and whether `LJOS_HOLD` may name its claimant, is read only when the call's own environment carries a runner variable, the same rule the holder follows.

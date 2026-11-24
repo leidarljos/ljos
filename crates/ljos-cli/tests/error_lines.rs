@@ -185,7 +185,10 @@ fn a_missing_tracker_program_names_the_install_and_exits_1() {
     assert_eq!(out.status.code(), Some(1), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "vissue is not on PATH. Install it with `cargo install --locked vissue-cli`."
+        format!(
+            "vissue is not on PATH. Install it with `{}`.",
+            ljos_cli::RELEASE_INSTALL_COMMAND
+        )
     );
 }
 
@@ -226,7 +229,10 @@ fn a_missing_claim_program_names_the_install_and_exits_1() {
     assert_eq!(out.status.code(), Some(1), "{said}");
     assert_eq!(
         one_line(&out.stderr),
-        "claimdag is not on PATH. Install it with `cargo install --locked claimdag-cli`."
+        format!(
+            "claimdag is not on PATH. Install it with `{}`.",
+            ljos_cli::RELEASE_INSTALL_COMMAND
+        )
     );
 }
 

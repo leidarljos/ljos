@@ -1,1 +1,1 @@
-Show the ready and list flag hint when every ticket fits on the default page.
+Show the ready and list flag hint only when the page leaves tickets out.

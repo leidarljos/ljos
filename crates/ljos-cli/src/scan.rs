@@ -874,7 +874,7 @@ const READY_HINT: &str = "See more with `--limit` or `--all`. Narrow with `-p` o
 /// The ready page at `width`: `vissue ready` rows, relaid so a padded id
 /// does not push the title out. `limit` is how many tickets to print.
 /// `None` prints every row. The header is `ready  shown X of Y`. A limited
-/// page ends with [`READY_HINT`], including when every available row fits.
+/// page ends with [`READY_HINT`] only when more rows are available.
 /// JSON stays with the caller.
 #[must_use]
 pub fn ready_page(raw: &str, limit: Option<usize>, width: Width) -> String {
@@ -919,7 +919,7 @@ pub fn ready_page(raw: &str, limit: Option<usize>, width: Width) -> String {
             }
         }
     }
-    if limit.is_some() {
+    if take < total {
         out.push_str(&wrap_line(READY_HINT));
         out.push('\n');
     }
@@ -1022,7 +1022,7 @@ mod tests {
         );
         assert!(text.contains("claimed 3d by ada"), "{text}");
         let limited = ready_page(&raw, Some(20), Width::FIXED);
-        assert!(limited.trim_end().ends_with(READY_HINT), "{limited}");
+        assert!(!limited.contains(READY_HINT), "{limited}");
         assert!(
             text.lines().all(|line| line.chars().count() <= COLS),
             "{text}"

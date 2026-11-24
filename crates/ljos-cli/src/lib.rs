@@ -22,6 +22,28 @@ pub use exe_publish::{
 pub use exe_publish::{publish_link, Moved};
 pub use pack_link::PacksetClient;
 
+/// Where the release installer is published. A literal, so the install
+/// command and the uninstall stub can be built from it with `concat!`.
+macro_rules! release_install_url {
+    () => {
+        "https://github.com/leidarljos/ljos/releases/latest/download/install.sh"
+    };
+}
+
+/// The README install, including the encoder and its model.
+macro_rules! release_install_command {
+    () => {
+        concat!("curl -fsSLO ", release_install_url!(), " && sh install.sh")
+    };
+}
+
+/// Where the release installer is published.
+pub const RELEASE_INSTALL_URL: &str = release_install_url!();
+
+/// The README install. Every line that tells a person to install ljos or
+/// a sibling `install.sh` installs prints this.
+pub const RELEASE_INSTALL_COMMAND: &str = release_install_command!();
+
 /// `eprintln!` for a person: the line wraps to the terminal stderr is on,
 /// and stays byte for byte when stderr is a pipe or a file.
 #[macro_export]
@@ -1846,14 +1868,23 @@ fn own_seat(name: &str) -> bool {
         || whoami().seat == n
 }
 
-/// The conversation this process belongs to: every `*_SESSION_ID` the
-/// runner stamped, one occupancy name and the keys it came from. No
-/// product list.
-fn session_actor() -> Option<(String, String)> {
-    session_choice(stamped_sessions())
+/// The conversation this process speaks for, and the key it came from.
+/// Every reader of a conversation id asks this: the holder tag, the hook's
+/// book, a blank hook payload, a hold record and a sitting. None is the
+/// same answer for all of them.
+#[must_use]
+pub fn resolve_conversation() -> Option<(String, String)> {
+    conversation_for(&call_conversation())
 }
 
-/// One occupancy name from `parts`, in the order [`session_actor`] uses.
+/// [`resolve_conversation`] as if `bound` were the bound call. A blank
+/// payload asks with [`CallConversation::Unbound`] before its bind is
+/// stored.
+fn conversation_for(bound: &CallConversation) -> Option<(String, String)> {
+    session_choice(sessions_for(bound))
+}
+
+/// One occupancy name from `parts`, in the order [`resolve_conversation`] uses.
 /// `the command harness thread id` alone, then `the conversation id` alone, then the
 /// one remaining variable, else a hash of all of them.
 fn session_choice(mut parts: Vec<(String, String)>) -> Option<(String, String)> {
@@ -1908,7 +1939,7 @@ fn session_from_value(key: &str, raw: &str) -> (String, String) {
 /// is one. Used to bind a ballot when no MCP call and no hook named a
 /// session of its own. The holder an env file shares is not one.
 pub(crate) fn runner_session_id() -> Option<String> {
-    session_actor()
+    resolve_conversation()
         .filter(|(id, keys)| !(keys == "LJOS_SESSION_ID" && is_shared_holder_id(id)))
         .map(|(id, _)| id)
 }
@@ -1922,9 +1953,10 @@ pub(crate) fn runner_session_id() -> Option<String> {
 /// A person at their own terminal is one seat. A conversation id the
 /// shell was started with does not tag that holder, so a sitting names
 /// the seat. Under a runner the tag stays, and two conversations do not
-/// share a claim.
+/// share a claim. An id only a parent carries names no conversation here;
+/// [`sessions_for`] says when.
 fn session_holder(seat: &str) -> Option<(String, String)> {
-    let (id, keys) = session_actor()?;
+    let (id, keys) = resolve_conversation()?;
     if keys == "LJOS_SESSION_ID" {
         return Some((id, keys));
     }
@@ -2311,8 +2343,8 @@ fn spawn_while_busy<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io
 }
 
 /// What the call this process answers said of its conversation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CallConversation {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum CallConversation {
     /// No hook call, or one whose payload has no session key.
     Unbound,
     /// A `conversation_id` that names nobody: `-`, null, short, not a
@@ -2352,7 +2384,7 @@ pub fn usable_session_id(id: &str) -> Option<&str> {
 /// the holder `ljos sitting` resolved there. The hook's own environment
 /// may belong to another conversation and is not read for a non-empty id.
 /// A blank `conversation_id` names nothing of its own: the id is read
-/// from the environment in [`session_actor`]'s order. A non-empty
+/// from the environment by [`resolve_conversation`]. A non-empty
 /// `conversation_id` that is unusable names nobody, and the environment
 /// does not stand in for it. Only `conversation_id` names a call's
 /// conversation here, never `session_id`. Another runner's
@@ -2364,8 +2396,9 @@ pub fn bind_call_conversation(raw: &str, call: &HookCall) {
     let cursor = matches!(call.shape, HookShape::Cursor | HookShape::CursorShell);
     let v = serde_json::from_str::<Value>(raw.trim()).unwrap_or(Value::Null);
     let has = |key: &str| v.get(key).is_some();
+    let env = || conversation_for(&CallConversation::Unbound);
     let bound = if has("conversation_id") && blank_conversation_value(&v["conversation_id"]) {
-        match blank_resolved() {
+        match env() {
             Some((id, keys)) if keys == "LJOS_SESSION_ID" => CallConversation::Kept(id),
             Some((id, _)) => CallConversation::Named(id),
             None if no_conversation_source(&v) => CallConversation::Unattributed,
@@ -2377,19 +2410,17 @@ pub fn bind_call_conversation(raw: &str, call: &HookCall) {
             None => CallConversation::Unusable,
         }
     } else if !cursor && call.session.is_none() && HOOK_SESSION_KEYS.iter().any(|key| has(key)) {
-        if no_conversation_source(&v) && blank_resolved().is_none() {
+        if no_conversation_source(&v) && env().is_none() {
             CallConversation::Unattributed
         } else {
             CallConversation::UnusableOther
         }
-    } else if no_conversation_source(&v) && blank_resolved().is_none() {
+    } else if no_conversation_source(&v) && env().is_none() {
         CallConversation::Unattributed
     } else {
         CallConversation::Unbound
     };
-    *CALL_CURSOR_CONVERSATION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = bound;
+    rebind_call_conversation(bound);
 }
 
 /// Whether `v` carries no conversation id: `conversation_id`,
@@ -2433,19 +2464,12 @@ pub fn blank_conversation_field(raw: &str) -> bool {
     blank_conversation_value(&v["conversation_id"])
 }
 
-/// The conversation a blank payload id resolves to, and the key it came
-/// from. Same order as [`session_actor`], read from [`stamp_env`] rather
-/// than the bound call. `the conversation id` keeps the place it has
-/// for the CLI.
-fn blank_resolved() -> Option<(String, String)> {
-    session_choice(stamped_env_sessions())
-}
-
-/// Put the id a blank `conversation_id` resolved to on `call`, so the
-/// book is keyed as it is when the payload carries that id. A call that
-/// already has a session, and a payload that is not blank, are left alone.
-/// Call after [`bind_call_conversation`].
-pub fn adopt_blank_conversation(raw: &str, call: &mut HookCall) {
+/// [`bind_call_conversation`], then key `call`'s book by the id a blank
+/// `conversation_id` resolved to, as it is when the payload carries that
+/// id. A call that already has a session, and a payload that is not
+/// blank, keep their own.
+pub fn bind_hook_call(raw: &str, call: &mut HookCall) {
+    bind_call_conversation(raw, call);
     if call
         .session
         .as_deref()
@@ -2456,12 +2480,21 @@ pub fn adopt_blank_conversation(raw: &str, call: &mut HookCall) {
     if !blank_conversation_field(raw) {
         return;
     }
-    if let Some(id) = call_cursor_conversation() {
+    if let Some((id, _)) = resolve_conversation() {
         call.session = Some(id);
     }
 }
 
-fn call_conversation() -> CallConversation {
+/// Answer as the bound call `bound` was, without reading the payload or
+/// the environment again. A queued book is applied in another process,
+/// and that process does not resolve the conversation a second time.
+pub(crate) fn rebind_call_conversation(bound: CallConversation) {
+    *CALL_CURSOR_CONVERSATION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = bound;
+}
+
+pub(crate) fn call_conversation() -> CallConversation {
     CALL_CURSOR_CONVERSATION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2486,7 +2519,7 @@ fn hold_env_allowed() -> bool {
             || (cursor_conversation().is_none()
                 && std::env::var_os("CURSOR_CONVERSATION_ID").is_none()
                 && std::env::var_os("CURSOR_AGENT").is_none()
-                && !stamp_env()
+                && !runner_stamp_env()
                     .iter()
                     .any(|(k, _)| k == "CURSOR_AGENT" || k == "CURSOR_CONVERSATION_ID")))
 }
@@ -2510,7 +2543,7 @@ pub fn call_unattributed() -> bool {
 /// Whether this process is in a `the runner mark` shell whose conversation
 /// id was stripped or is unusable.
 fn cursor_agent_without_id() -> bool {
-    let env = stamp_env();
+    let env = runner_stamp_env();
     let claude = std::env::var_os("CLAUDECODE").is_some()
         || env
             .iter()
@@ -2523,25 +2556,25 @@ fn cursor_agent_without_id() -> bool {
             || env.iter().any(|(k, _)| k == "CURSOR_AGENT"))
 }
 
-/// The conversation this process speaks for: the bound call's,
-/// else `the conversation id` from [`stamp_env`]. None for an unusable
-/// bound id.
+/// The conversation this process speaks for, when [`resolve_conversation`]
+/// found it in a bound call or in `the conversation id`. Another runner's
+/// session variable is not one, and neither is an unbound hook that
+/// `LJOS_HOLD` names the claimant of.
 fn cursor_conversation() -> Option<String> {
-    match call_conversation() {
-        CallConversation::Named(id) | CallConversation::Kept(id) => Some(id),
+    let bound = call_conversation();
+    if bound == CallConversation::Unbound
+        && named_var("LJOS_HOLD").is_some()
+        && std::env::args_os().nth(1).is_some_and(|a| a == "hook")
+    {
+        return None;
+    }
+    match &bound {
+        CallConversation::Named(id) | CallConversation::Kept(id) => Some(id.trim().to_string()),
         CallConversation::Unusable | CallConversation::Unattributed => None,
-        CallConversation::Unbound | CallConversation::UnusableOther => {
-            if call_conversation() == CallConversation::Unbound
-                && named_var("LJOS_HOLD").is_some()
-                && std::env::args_os().nth(1).is_some_and(|a| a == "hook")
-            {
-                return None;
-            }
-            stamp_env()
-                .into_iter()
-                .find(|(k, _)| k == "CURSOR_CONVERSATION_ID")
-                .and_then(|(_, v)| usable_session_id(&v).map(str::to_string))
-        }
+        CallConversation::Unbound | CallConversation::UnusableOther => sessions_for(&bound)
+            .into_iter()
+            .find(|(k, _)| k == "CURSOR_CONVERSATION_ID")
+            .map(|(_, v)| v),
     }
 }
 
@@ -3294,13 +3327,32 @@ pub fn tmux_spawn_socket_keys(line: &str, cwd: Option<&str>) -> Vec<String> {
 /// and nothing else. Otherwise it is every `*_SESSION_ID` the runner
 /// stamped into the environment but the login's.
 pub(crate) fn stamped_sessions() -> Vec<(String, String)> {
-    match call_conversation() {
-        CallConversation::Named(id) => return vec![("CURSOR_CONVERSATION_ID".to_string(), id)],
-        CallConversation::Kept(id) => return vec![("LJOS_SESSION_ID".to_string(), id)],
-        CallConversation::Unusable | CallConversation::Unattributed => return Vec::new(),
-        CallConversation::Unbound | CallConversation::UnusableOther => {}
+    sessions_for(&call_conversation())
+}
+
+/// [`stamped_sessions`] under `bound`. A process whose own environment
+/// carries no runner variable, such as one `env -i` started, is not under
+/// that runner: an id only a parent carries names nothing here. A process
+/// that unset the id but kept the runner's mark still reads its shell's.
+fn sessions_for(bound: &CallConversation) -> Vec<(String, String)> {
+    match bound {
+        CallConversation::Named(id) => vec![("CURSOR_CONVERSATION_ID".to_string(), id.clone())],
+        CallConversation::Kept(id) => vec![("LJOS_SESSION_ID".to_string(), id.clone())],
+        CallConversation::Unusable | CallConversation::Unattributed => Vec::new(),
+        CallConversation::Unbound | CallConversation::UnusableOther => stamped_env_sessions(),
     }
-    stamped_env_sessions()
+}
+
+/// [`stamp_env`] for a process under a runner, and nothing for one whose
+/// own environment carries no runner variable. Every read of whether this
+/// process is a runner's goes through here, so the hold a sitting writes
+/// and the reader that looks for it agree on the same process.
+fn runner_stamp_env() -> Vec<(String, String)> {
+    if runner_mark_set() {
+        stamp_env()
+    } else {
+        Vec::new()
+    }
 }
 
 /// Every usable session variable in this process's own environment,
@@ -3314,11 +3366,11 @@ pub(crate) fn own_stamped_sessions() -> Vec<(String, String)> {
     found
 }
 
-/// Every usable session variable in [`stamp_env`], sorted. This does not
-/// read the bound call, so a blank payload can resolve an id before the
-/// bind is stored.
+/// Every usable session variable in [`runner_stamp_env`], sorted. This
+/// does not read the bound call, so a blank payload can resolve an id
+/// before the bind is stored.
 fn stamped_env_sessions() -> Vec<(String, String)> {
-    let mut found: Vec<(String, String)> = stamp_env()
+    let mut found: Vec<(String, String)> = runner_stamp_env()
         .into_iter()
         .filter(|(k, v)| runner_session_var(k, v) && usable_session_id(v).is_some())
         .map(|(k, v)| (k, v.trim().to_string()))
@@ -3510,7 +3562,7 @@ pub fn conversation_id() -> Option<String> {
     CALL_CONVERSATION
         .try_with(Clone::clone)
         .ok()
-        .or_else(|| session_actor().map(|(id, _)| id))
+        .or_else(|| resolve_conversation().map(|(id, _)| id))
 }
 
 /// Run `f` as the seat this call named. Nest it inside [`as_thread`]: the
@@ -3554,7 +3606,7 @@ pub fn seat_for_thread(thread: &str) -> Seat {
         };
     }
     // SEAT@TAG of the thread, the holder a shell of the thread builds from
-    // the same id ([`session_actor`]), so the call and the shell hold as one.
+    // the same id ([`resolve_conversation`]), so the call and the shell hold as one.
     let found = Seat {
         holder: holder_for_session(&seat, thread),
         seat,
@@ -4773,13 +4825,7 @@ pub(crate) fn mapped_box_seat() -> Option<String> {
 #[must_use]
 pub fn missing_seat_value() -> String {
     named_var("CURSOR_CONVERSATION_ID")
-        .or_else(|| {
-            stamped_sessions()
-                .into_iter()
-                .map(|(_, id)| id)
-                .find(|id| !id.is_empty())
-        })
-        .or_else(cursor_conversation)
+        .or_else(|| resolve_conversation().map(|(id, _)| id))
         .unwrap_or_else(|| "unset".to_string())
 }
 
@@ -15475,11 +15521,9 @@ pub fn encoder_install_command() -> String {
         return "cargo install --locked packset-embed".to_string();
     }
     if on_path("curl") {
-        return "curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh"
-            .to_string();
+        return RELEASE_INSTALL_COMMAND.to_string();
     }
-    "wget https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh"
-        .to_string()
+    concat!("wget ", release_install_url!(), " && sh install.sh").to_string()
 }
 
 /// The encoder row opens with this when the last dense call did not answer.
@@ -24578,11 +24622,11 @@ pub fn plain_server_fault(err: &anyhow::Error) -> Option<String> {
 /// One line naming the program that is not on `PATH` and the install.
 fn missing_tool_line(text: &str) -> String {
     const TOOLS: &[(&str, &str)] = &[
-        ("vissue", "cargo install --locked vissue-cli"),
-        ("claimdag", "cargo install --locked claimdag-cli"),
-        ("deedar", "cargo install --locked deedar-cli"),
-        ("packsetd", "cargo install --locked packset"),
-        ("packset", "cargo install --locked packset"),
+        ("vissue", RELEASE_INSTALL_COMMAND),
+        ("claimdag", RELEASE_INSTALL_COMMAND),
+        ("deedar", RELEASE_INSTALL_COMMAND),
+        ("packsetd", RELEASE_INSTALL_COMMAND),
+        ("packset", RELEASE_INSTALL_COMMAND),
         ("ljos-policyd", "cargo install --locked ljos-policyd"),
         ("ljos-consensus", "cargo install --locked ljos-consensus"),
         ("ljos-hud", "cargo install --locked ljos-hud"),
@@ -34734,6 +34778,41 @@ const SEAT_BINS: &[(&str, &str)] = &[
     ("landscape", "landscape"),
 ];
 
+/// Sibling programs installed together by `install.sh`. A missing one
+/// names that install rather than an unpinned `cargo install`.
+const INSTALLER_SIBLINGS: &[&str] = &[
+    "vissue",
+    "vissue-mcp",
+    "deedar",
+    "claimdag",
+    "packset",
+    "packsetd",
+    "packset-embed",
+    "packset-mcp",
+];
+
+fn installer_sibling(bin: &str) -> bool {
+    INSTALLER_SIBLINGS.contains(&bin)
+}
+
+/// The releases `install.sh` installs by default, one `name version` per line.
+const RELEASE_PIN: &str = include_str!("../../../.github/release-pin");
+
+/// The version `install.sh` pins for `bin`. `vissue-mcp` ships in the
+/// vissue archive, so it follows vissue's pin. packset is not pinned:
+/// the installer takes its latest release.
+fn release_pin(bin: &str) -> Option<&'static str> {
+    let name = if bin == "vissue-mcp" { "vissue" } else { bin };
+    RELEASE_PIN
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .find_map(|line| {
+            let (pinned, version) = line.split_once(char::is_whitespace)?;
+            (pinned == name).then(|| version.trim())
+        })
+}
+
 /// First `N.N.N` in a `--version` line.
 #[must_use]
 pub fn parse_semver(text: &str) -> Option<&str> {
@@ -36224,7 +36303,8 @@ fn seat_binary_row() -> Habitat {
 
 /// A binary on PATH answers even when crates.io is ahead. Sitting refuses
 /// a missing required habitat, not a stale one. Behind and ahead are both
-/// said; a registry answer read from the day cache says so.
+/// said; a registry answer read from the day cache says so. A sibling at
+/// the release `install.sh` pins is not behind, and the row says so.
 fn bin_health(path: &str, have: Option<&str>, latest: Option<&CrateVersion>) -> (String, bool) {
     use std::cmp::Ordering;
     let ver = have.unwrap_or("?");
@@ -36236,13 +36316,21 @@ fn bin_health(path: &str, have: Option<&str>, latest: Option<&CrateVersion>) -> 
     } else {
         "crates.io"
     };
+    let bin = Path::new(path)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or(path);
+    let pinned = have
+        .zip(release_pin(bin))
+        .is_some_and(|(v, pin)| cmp_semver(v, pin) == Some(Ordering::Equal));
     let word = match have.and_then(|v| cmp_semver(v, &cr.version)) {
-        Some(Ordering::Less) => "behind ",
+        Some(Ordering::Less) if !pinned => "behind ",
         Some(Ordering::Greater) => "ahead of ",
         _ => "",
     };
+    let note = if pinned { ", pinned by install.sh" } else { "" };
     (
-        format!("{path}  {ver}  {word}{source} {}", cr.version),
+        format!("{path}  {ver}  {word}{source} {}{note}", cr.version),
         true,
     )
 }
@@ -36407,6 +36495,10 @@ pub fn doctor_seat() -> Vec<Habitat> {
             (None, _, _) if *bin == "landscape" => (
                 "not on PATH; install it from https://github.com/leidarljos/landscape."
                     .to_string(),
+                false,
+            ),
+            (None, _, _) if installer_sibling(bin) => (
+                format!("not on PATH, so run `{RELEASE_INSTALL_COMMAND}`."),
                 false,
             ),
             (None, _, Some(cr)) => (
@@ -36850,13 +36942,19 @@ fn habitat_down_state(name: &str, err: &anyhow::Error) -> String {
     state
 }
 
-/// `cargo install --locked CRATE` when `state` says a seat binary is not
-/// on `PATH`. `None` for any other refusal.
+/// The install for a seat binary `state` says is not on `PATH`:
+/// [`RELEASE_INSTALL_COMMAND`] for one `install.sh` installs, and
+/// `cargo install --locked CRATE` for any other. `None` for any other
+/// refusal.
 fn missing_bin_install(state: &str) -> Option<String> {
     SEAT_BINS.iter().find_map(|(bin, crate_name)| {
-        state
-            .contains(&format!("{bin} not on PATH"))
-            .then(|| format!("cargo install --locked {crate_name}"))
+        state.contains(&format!("{bin} not on PATH")).then(|| {
+            if installer_sibling(bin) {
+                RELEASE_INSTALL_COMMAND.to_string()
+            } else {
+                format!("cargo install --locked {crate_name}")
+            }
+        })
     })
 }
 
@@ -38554,6 +38652,9 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                 } else if l.starts_with("weak island") || l.starts_with("recall:") {
                     out.push_str(l);
                     out.push('\n');
+                    continued = false;
+                } else if *l == NO_MATCHING_MEMORIES_LINE.trim_end() {
+                    out.push_str(NO_MATCHING_MEMORIES_LINE);
                     continued = false;
                 } else {
                     continued = false;
@@ -46972,6 +47073,10 @@ fn claim_graph_marked_down() -> bool {
 /// not answer. `--verbose` keeps the section that failed.
 pub const MEMORY_DEGRADED_LINE: &str = "matched by words (encoder not installed)\n";
 
+/// The one line a sitting prints when its bounded search answered with no
+/// memories that match the task.
+pub const NO_MATCHING_MEMORIES_LINE: &str = "No matching memories for this task.\n";
+
 /// The atoms one sitting read, shared by due, recall, the playbook and
 /// the timeline. `ok` is false when that read did not answer; later
 /// sections then do not open another socket. `searched` is true when the
@@ -47495,6 +47600,11 @@ pub fn sitting_stream_started(
     // hits, with the same caps. The island's own ranking is a different
     // list and a sitting used to show fewer than recall.
     match recall_memories_with(issue, true, SITTING_WIDTH) {
+        Ok(text) if text.trim().is_empty() => {
+            if sitting_listing().is_none_or(|listing| listing.ok) {
+                piece.push_str(NO_MATCHING_MEMORIES_LINE);
+            }
+        }
         Ok(text) => piece.push_str(&text),
         Err(e) if is_pack_busy(&e) => {
             degraded::say(degraded::State::Busy);
@@ -64771,7 +64881,10 @@ mod tests {
             super::habitat_down_state("deed store", &anyhow::anyhow!("deedar not on PATH"));
         assert_eq!(
             install,
-            "deedar not on PATH, so run `cargo install --locked deedar-cli`."
+            format!(
+                "deedar not on PATH, so run `{}`.",
+                super::RELEASE_INSTALL_COMMAND
+            )
         );
 
         let seat = super::seat_source_row(&super::Seat::whole(
@@ -65296,6 +65409,122 @@ mod tests {
             std::env::remove_var("XDG_RUNTIME_DIR");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every reader of a conversation id answers as
+    /// [`super::resolve_conversation`]: the holder tag, a blank hook
+    /// payload and the book key it adopts, a hold record, the ballot
+    /// session and the id a call reports.
+    #[test]
+    fn every_conversation_reader_agrees_with_the_resolver() {
+        use super::{CallConversation, HookCall, HookShape};
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let id = "4eeb651b-18e3-4c42-910e-5e16f4f7825b";
+        unsafe {
+            std::env::remove_var("CODEX_THREAD_ID");
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            std::env::set_var("LJOS_SEAT", "saddle");
+            std::env::set_var("CURSOR_CONVERSATION_ID", id);
+        }
+        let agree = |what: &str| {
+            let (resolved, key) = super::resolve_conversation()
+                .unwrap_or_else(|| panic!("{what}: the resolver found nothing"));
+            assert_eq!(resolved, id, "{what}");
+            assert_eq!(
+                super::session_holder("saddle"),
+                Some((super::holder_for_session("saddle", id), key)),
+                "{what}"
+            );
+            assert_eq!(
+                holder_name(),
+                super::holder_for_session("saddle", id),
+                "{what}"
+            );
+            assert_eq!(super::cursor_conversation().as_deref(), Some(id), "{what}");
+            assert_eq!(super::runner_session_id().as_deref(), Some(id), "{what}");
+            assert_eq!(super::conversation_id().as_deref(), Some(id), "{what}");
+            assert!(super::hold_conversation_is_ours(Some(id)), "{what}");
+            assert!(
+                !super::hold_conversation_is_ours(Some("0199-another-conversation")),
+                "{what}"
+            );
+            assert_eq!(super::missing_seat_value(), id, "{what}");
+        };
+        agree("no hook call");
+        let thread = "0199-command-harness-thread";
+        unsafe { std::env::set_var("CODEX_THREAD_ID", thread) };
+        assert_eq!(
+            super::resolve_conversation(),
+            Some((thread.to_string(), "CODEX_THREAD_ID".to_string()))
+        );
+        assert_eq!(super::cursor_conversation().as_deref(), Some(id));
+        assert!(super::hold_conversation_is_ours(Some(id)));
+        assert!(!super::hold_conversation_is_ours(Some(
+            "0199-another-conversation"
+        )));
+        assert!(!super::cursor_agent_without_id());
+        unsafe { std::env::remove_var("CODEX_THREAD_ID") };
+        for raw in [
+            r#"{"conversation_id":"","cursor_version":"1"}"#,
+            r#"{"conversation_id":"   ","cursor_version":"1"}"#,
+        ] {
+            let mut call = HookCall {
+                event: "preToolUse".into(),
+                cue: String::new(),
+                session: None,
+                shape: HookShape::Cursor,
+            };
+            super::bind_hook_call(raw, &mut call);
+            assert_eq!(
+                super::call_conversation(),
+                CallConversation::Named(id.to_string()),
+                "{raw}"
+            );
+            assert_eq!(call.session.as_deref(), Some(id), "{raw}: the book key");
+            agree(raw);
+        }
+        let mut named = HookCall {
+            event: "preToolUse".into(),
+            cue: String::new(),
+            session: None,
+            shape: HookShape::Cursor,
+        };
+        super::bind_hook_call(
+            r#"{"conversation_id":"0199-payload-conversation","cursor_version":"1"}"#,
+            &mut named,
+        );
+        let (payload, _) = super::resolve_conversation().unwrap();
+        assert_eq!(payload, "0199-payload-conversation");
+        assert_eq!(
+            super::cursor_conversation().as_deref(),
+            Some(payload.as_str())
+        );
+        assert_eq!(
+            super::session_holder("saddle").map(|(holder, _)| holder),
+            Some(super::holder_for_session("saddle", &payload))
+        );
+        unsafe { std::env::remove_var("CURSOR_CONVERSATION_ID") };
+        let mut call = HookCall {
+            event: "preToolUse".into(),
+            cue: String::new(),
+            session: None,
+            shape: HookShape::Cursor,
+        };
+        super::bind_hook_call(r#"{"conversation_id":"","cursor_version":"1"}"#, &mut call);
+        assert_eq!(super::call_conversation(), CallConversation::Unattributed);
+        assert_eq!(super::resolve_conversation(), None);
+        assert_eq!(
+            call.session, None,
+            "a blank payload with no id keys nothing"
+        );
+        assert_eq!(super::session_holder("saddle"), None);
+        assert_eq!(super::cursor_conversation(), None);
+        super::rebind_call_conversation(CallConversation::Unbound);
+        unsafe {
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
     }
 
     #[test]
@@ -66245,13 +66474,22 @@ mod tests {
         let _g = env_guard();
         // A pronoun is treated as omitted: the holder is this conversation's,
         // whatever the tree above the test says the seat is. A name that is
-        // not a pronoun is a named worker and stands as given.
+        // not a pronoun is a named worker and stands as given. A login with
+        // no `USER` falls back to the placeholder, so the test names one.
+        let user = std::env::var_os("USER");
+        unsafe { std::env::remove_var("USER") };
+        assert_eq!(resolve_assignee(None), "seat");
+        unsafe { std::env::set_var("USER", "ada") };
         let holder = resolve_assignee(None);
         assert_eq!(resolve_assignee(Some("you")), holder);
         assert_eq!(resolve_assignee(Some("seat")), holder);
         assert_eq!(resolve_assignee(Some("agent")), holder);
         assert_ne!(holder, "seat");
         assert_eq!(resolve_assignee(Some("alice")), "alice");
+        match user {
+            Some(v) => unsafe { std::env::set_var("USER", v) },
+            None => unsafe { std::env::remove_var("USER") },
+        }
     }
 
     #[test]
@@ -76834,6 +77072,22 @@ What the seat remembers for this task:\n\
 Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sitting; `ljos sitting Software-x --verbose` prints every section.\n"
         );
         assert!(!short.contains("2 due"), "{short}");
+    }
+
+    #[test]
+    fn a_compact_sitting_keeps_the_no_matching_memories_line() {
+        let full = "\
+== island: Work
+No matching memories for this task.
+== claim
+claimed day-1 for ada
+";
+        let short = compact_sitting(full, "day-1");
+        assert_eq!(
+            short.matches(NO_MATCHING_MEMORIES_LINE.trim()).count(),
+            1,
+            "{short}"
+        );
     }
 
     #[test]
@@ -88719,11 +88973,11 @@ lesson, due yesterday, seat ada
             version: "0.9.5".into(),
             cached: false,
         };
-        let (state, ok) = super::bin_health("/bin/packsetd", Some("0.9.2"), Some(&latest));
+        let (state, ok) = super::bin_health("/bin/ljos-policyd", Some("0.9.2"), Some(&latest));
         assert!(ok, "{state}");
         assert!(state.contains("behind crates.io 0.9.5"), "{state}");
         let rows = vec![Habitat {
-            name: "packsetd",
+            name: "ljos-policyd",
             state,
             ok,
         }];
@@ -88731,6 +88985,42 @@ lesson, due yesterday, seat ada
             healthy(&rows),
             "sitting must not refuse a stale but answering bin"
         );
+    }
+
+    #[test]
+    fn only_a_sibling_at_its_install_pin_is_not_called_behind() {
+        let latest = super::CrateVersion {
+            version: "9.9.9".into(),
+            cached: true,
+        };
+        for bin in ["vissue", "vissue-mcp", "claimdag", "deedar"] {
+            let pin = super::release_pin(bin).unwrap_or_else(|| panic!("no pin for {bin}"));
+            let path = format!("/home/ada/.local/bin/{bin}");
+            let (state, ok) = super::bin_health(&path, Some(pin), Some(&latest));
+            assert!(ok, "{bin}: {state}");
+            assert_eq!(
+                state,
+                format!("{path}  {pin}  crates.io (cached) 9.9.9, pinned by install.sh"),
+                "{bin}"
+            );
+            let (older, _) = super::bin_health(&path, Some("0.0.1"), Some(&latest));
+            assert!(
+                older.contains("behind crates.io (cached) 9.9.9"),
+                "{bin}: {older}"
+            );
+            assert!(!older.contains("pinned"), "{bin}: {older}");
+        }
+        for bin in ["packset", "packsetd", "packset-embed", "packset-mcp"] {
+            assert_eq!(super::release_pin(bin), None, "{bin}");
+            let path = format!("/home/ada/.local/bin/{bin}");
+            let (state, ok) = super::bin_health(&path, Some("0.18.2"), Some(&latest));
+            assert!(ok, "{bin}: {state}");
+            assert!(
+                state.contains("behind crates.io (cached) 9.9.9"),
+                "{bin}: {state}"
+            );
+            assert!(!state.contains("pinned"), "{bin}: {state}");
+        }
     }
 
     #[test]

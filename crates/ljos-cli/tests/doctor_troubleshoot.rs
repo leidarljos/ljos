@@ -319,16 +319,112 @@ fn doctor_names_the_install_when_a_habitat_binary_is_missing() {
     );
     assert_eq!(out.status.code(), Some(1), "{text}");
     assert!(
-        text.contains("no\tdeedar\t")
-            && text.contains("so run `cargo install --locked deedar-cli`."),
+        text.contains(&format!(
+            "no\tdeedar\tnot on PATH, so run `{}`.\n",
+            ljos_cli::RELEASE_INSTALL_COMMAND
+        )),
         "{text}"
     );
     assert!(
-        text.contains(
-            "info\tdeeds\tdeedar not on PATH, so run `cargo install --locked deedar-cli`.\n"
+        text.contains(&format!(
+            "info\tdeeds\tdeedar not on PATH, so run `{}`.\n",
+            ljos_cli::RELEASE_INSTALL_COMMAND
+        )),
+        "{text}"
+    );
+}
+
+/// The troubleshooting page copies the missing-sibling rows doctor prints,
+/// so each names the release install. The memory row keeps its own line.
+#[test]
+fn the_troubleshooting_page_names_the_release_install_for_a_missing_sibling() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let install = format!("so run `{}`.", ljos_cli::RELEASE_INSTALL_COMMAND);
+    for rel in [
+        "docs/orgmode/howto-troubleshoot.org",
+        "docs/source/howto-troubleshoot.rst",
+    ] {
+        let body = std::fs::read_to_string(root.join(rel)).unwrap();
+        let rows: Vec<String> = body
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|line| line.contains(" not on PATH, "))
+            .filter(|line| {
+                [
+                    "packset",
+                    "packsetd",
+                    "deedar",
+                    "tickets",
+                    "claim graph",
+                    "deeds",
+                ]
+                .iter()
+                .any(|name| {
+                    line.starts_with(&format!("no {name} "))
+                        || line.starts_with(&format!("info {name} "))
+                })
+            })
+            .collect();
+        assert_eq!(rows.len(), 6, "{rel}: {rows:#?}");
+        for row in rows {
+            assert!(row.ends_with(&install), "{rel}: {row}");
+        }
+        for crate_name in ["deedar-cli", "vissue-cli", "claimdag-cli"] {
+            assert!(
+                !body.contains(&format!("cargo install --locked {crate_name}")),
+                "{rel} still names {crate_name}"
+            );
+        }
+        assert!(
+            body.contains("packset is not on PATH, so run `cargo install --locked packset`."),
+            "{rel}: the memory row"
+        );
+    }
+}
+
+/// The registry section names the install doctor prints for a missing
+/// packset while crates.io does not answer, not a crate install of it.
+#[test]
+fn the_troubleshooting_registry_section_names_the_release_install() {
+    let (home, bin) = layout("registry-packset");
+    let _ = std::fs::remove_file(bin.join("packset"));
+    let (_, text) = doctor(&home, &format!("{}:/usr/bin:/bin", bin.display()));
+    assert!(
+        text.contains("warn\tcrates.io\tdid not answer, so the version check was skipped\n"),
+        "{text}"
+    );
+    let printed = text
+        .lines()
+        .find_map(|line| line.strip_prefix("no\tpackset\t"))
+        .unwrap_or_else(|| panic!("no packset row:\n{text}"));
+    assert_eq!(
+        printed,
+        format!(
+            "not on PATH, so run `{}`.",
+            ljos_cli::RELEASE_INSTALL_COMMAND
         ),
         "{text}"
     );
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (rel, quote) in [
+        ("docs/orgmode/howto-troubleshoot.org", "="),
+        ("docs/source/howto-troubleshoot.rst", "``"),
+    ] {
+        let body = std::fs::read_to_string(root.join(rel)).unwrap();
+        let row = body
+            .lines()
+            .find(|line| line.starts_with("A missing binary then has no version in parentheses"))
+            .unwrap_or_else(|| panic!("{rel}: no registry row"));
+        assert_eq!(
+            row,
+            format!(
+                "A missing binary then has no version in parentheses: not on PATH, so run \
+                 {quote}{}{quote}.",
+                ljos_cli::RELEASE_INSTALL_COMMAND
+            ),
+            "{rel}"
+        );
+    }
 }
 
 #[test]

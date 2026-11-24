@@ -110,8 +110,8 @@ pub fn admit() {
     // binds the conversation from that record after this process exits.
     if !args.iter().any(|a| a == "--prompt") {
         if let Some((output, code)) = crate::cursor_side_answer(&input, event.as_deref()) {
-            let call = crate::hook_call_as(&input, event.as_deref());
-            crate::bind_call_conversation(&input, &call);
+            let mut call = crate::hook_call_as(&input, event.as_deref());
+            crate::bind_hook_call(&input, &mut call);
             let _ = crate::subagent::note_hook_call(&input, &call.event);
             std::process::exit(crate::emit_side_answer(
                 &input,

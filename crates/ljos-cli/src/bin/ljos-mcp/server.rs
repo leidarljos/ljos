@@ -2910,7 +2910,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to choose tracker work. It returns the first 20 tickets unless limit is set or all is true. This seat's claims come first, then unclaimed tickets by priority and newest activity, then other seats' claims, with long-stale claims last. The id breaks a tie. A short page ends with the flags that show more or narrow the list.",
+        description = "Call this to choose tracker work. It returns the first 20 tickets unless limit is set or all is true. This seat's claims come first, then unclaimed tickets by priority and newest activity, then other seats' claims, with long-stale claims last. The id breaks a tie. A truncated page ends with the flags that show more or narrow the list.",
         annotations(
             title = "List ready tickets",
             read_only_hint = true,

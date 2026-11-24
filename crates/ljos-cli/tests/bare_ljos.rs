@@ -41,19 +41,24 @@ fn run(root: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
 }
 
 fn screen(seat: &str) -> String {
+    let install = ljos_cli::RELEASE_INSTALL_COMMAND;
+    let width = install.len();
     format!(
         "\
 Memory, a work tracker and a command guard for coding runners.
 
 {seat}
 
-  sh install.sh --no-embed  install ljos
-  ljos doctor               check that ljos is ready
-  ljos remember TEXT        store one lesson
-  ljos search QUERY         find what is stored
+  {install:<width$}  install ljos
+  {doctor:<width$}  check that ljos is ready
+  {remember:<width$}  store one lesson
+  {search:<width$}  find what is stored
 
 The docs are at https://leidarljos.github.io/ljos/reference-commands.html.
-"
+",
+        doctor = "ljos doctor",
+        remember = "ljos remember TEXT",
+        search = "ljos search QUERY",
     )
 }
 

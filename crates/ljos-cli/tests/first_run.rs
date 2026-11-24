@@ -920,9 +920,10 @@ fn expect_documented(command: &str, output: &str) {
             "{command}\nencoder row is not between the seat and the gate:\n{output}"
         );
         assert!(
-            output.contains(
-                "not installed. Search matches words, so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`."
-            ),
+            output.contains(&format!(
+                "not installed. Search matches words, so run `{}`.",
+                ljos_cli::RELEASE_INSTALL_COMMAND
+            )),
             "{command}\n{output}"
         );
         assert!(
@@ -1175,6 +1176,24 @@ fn the_getting_started_plan_sample_prints_next_once() {
             block.matches("next: day-cd34  measure the files").count(),
             1,
             "{rel} printed the plan's next line more than once:\n{block}"
+        );
+    }
+}
+
+#[test]
+fn the_getting_started_page_names_both_empty_memory_outcomes() {
+    for rel in [
+        "../../docs/source/getting-started.rst",
+        "../../docs/orgmode/getting-started.org",
+    ] {
+        let text = repo_file(rel);
+        assert!(
+            text.contains(ljos_cli::NO_MATCHING_MEMORIES_LINE.trim_end()),
+            "{rel} does not name an answering search with no matches"
+        );
+        assert!(
+            text.contains("matched by words (encoder not installed)"),
+            "{rel} does not name the no-encoder path"
         );
     }
 }
