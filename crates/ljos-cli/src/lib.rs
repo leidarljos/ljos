@@ -14291,11 +14291,7 @@ pub fn hook_trace(input: &str, call: &HookCall, subagent: Option<&str>) {
         return;
     };
     line.push('\n');
-    let _ = append_locked_row(
-        &dir.join("hook-trace.jsonl"),
-        line.as_bytes(),
-        Durability::BestEffort,
-    );
+    let _ = append_atomic_row(&dir.join("hook-trace.jsonl"), line.as_bytes());
 }
 
 /// The holders the seat records above this process name, nearest first,
@@ -35371,6 +35367,35 @@ impl Durability {
             Self::BestEffort => ROW_LOCK_WAIT,
         }
     }
+}
+
+/// Append `bytes` in one `write_all` call on an `O_APPEND` descriptor.
+///
+/// Trace rows use this instead of the best-effort lock: a burst of hooks
+/// must not lose a row while waiting for another row's lock. The kernel
+/// chooses the append offset for the write, so concurrent rows stay whole.
+fn append_atomic_row(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, name) = open_state_dir(path)?;
+    let mut tries = 0;
+    let mut file = loop {
+        match open_regular_at(
+            &dir,
+            &name,
+            path,
+            libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT,
+            0o600,
+        ) {
+            Err(err) if err.raw_os_error() == Some(libc::ENOENT) && tries < 5 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            other => break other?,
+        }
+    };
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(bytes)
 }
 
 /// Append `bytes` as one row. The caller includes the trailing newline.
