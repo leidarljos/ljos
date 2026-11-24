@@ -106,6 +106,120 @@ fn a_parent_cursor_id_and_its_session_record_do_not_name_this_ljos() {
 }
 
 #[test]
+fn a_parent_cursor_id_in_the_same_home_does_not_tag_a_named_seat_under_env_i() {
+    let world = World::new();
+    let home = world.home();
+    let run = world.run();
+    let bin = env!("CARGO_BIN_EXE_ljos");
+    // The trailing `exit` keeps bash from exec'ing `env`, so the shell
+    // that carries the id stays the parent of this `ljos`.
+    let script = format!(
+        "env -i HOME='{home}' XDG_CONFIG_HOME='{home}/.config' \
+         XDG_STATE_HOME='{home}/.local/state' XDG_RUNTIME_DIR='{run}' \
+         PATH=/usr/bin:/bin LJOS_OFF=1 LJOS_HOOKD=off PACKSET_URL=off \
+         LJOS_SEAT=alice {bin} seat; exit $?",
+        home = home.display(),
+        run = run.display(),
+    );
+    let mut cmd = ljos_cli::program("bash").unwrap();
+    seat_env::clear(&mut cmd);
+    cmd.args(["--noprofile", "--norc", "-c", &script])
+        .env("CURSOR_CONVERSATION_ID", "0199c0de-cursor-parent-only")
+        .env("CURSOR_AGENT", "1")
+        .env("HOME", &home)
+        .env("XDG_RUNTIME_DIR", &run)
+        .stdin(Stdio::null());
+    let out = cmd.output().unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(field(&stdout, "seat"), "alice", "{text}");
+    assert_eq!(field(&stdout, "holder"), "alice", "{text}");
+    assert!(
+        !field(&stdout, "source").contains("CURSOR_CONVERSATION_ID"),
+        "{text}"
+    );
+}
+
+/// A program on `PATH` for the sitting below.
+fn script(dir: &std::path::Path, name: &str, body: &str) {
+    ljos_cli::install_executable(&dir.join(name), body).unwrap();
+}
+
+#[test]
+fn a_parent_cursor_id_does_not_attribute_a_sitting_under_env_i() {
+    let world = World::new();
+    let root = world.root.path();
+    let home = world.home();
+    let run = world.run();
+    let bin_dir = root.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let tracker = root.join("tracker");
+    std::fs::create_dir_all(tracker.join("Software")).unwrap();
+    script(
+        &bin_dir,
+        "vissue",
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  show) printf '%s\\n' '{{\"id\":\"probe-sit\",\"title\":\"probe\",\"state\":\"TODO\"}}' ;;\n  identity) printf '%s\\n' 'vissue test' 'root={}' 'prefix=Software' ;;\nesac\nexit 0\n",
+            tracker.display()
+        ),
+    );
+    script(
+        &bin_dir,
+        "claimdag",
+        "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
+    );
+    script(&bin_dir, "deedar", "#!/bin/sh\necho head\nexit 0\n");
+    let layout = vissue_core::Layout::new(&tracker, "Software");
+    vissue_core::ops::create(&layout, "probe", "probe work", Default::default()).unwrap();
+    let doc =
+        vissue_core::IssueDoc::parse_file("probe", &layout.project_issues_path("probe")).unwrap();
+    let issue = doc.headings[0].id.clone();
+    let parent_id = "0199c0de-cursor-parent-only";
+    let bin = env!("CARGO_BIN_EXE_ljos");
+    // The trailing `exit` keeps bash from exec'ing `env`, as above.
+    let script = format!(
+        "env -i HOME='{home}' XDG_CONFIG_HOME='{home}/.config' \
+         XDG_STATE_HOME='{home}/.local/state' XDG_RUNTIME_DIR='{run}' \
+         PATH='{path}:/usr/bin:/bin' VISSUE_ROOT='{tracker}' VISSUE_NO_ROUTE=1 \
+         LJOS_TRACKER_GIT=off LJOS_HOOKD=off PACKSET_URL=off LJOS_SEAT=alice \
+         {bin} sitting {issue}; exit $?",
+        home = home.display(),
+        run = run.display(),
+        path = bin_dir.display(),
+        tracker = tracker.display(),
+    );
+    let mut cmd = ljos_cli::program("bash").unwrap();
+    seat_env::clear(&mut cmd);
+    cmd.args(["--noprofile", "--norc", "-c", &script])
+        .env("CURSOR_CONVERSATION_ID", parent_id)
+        .env("CURSOR_AGENT", "1")
+        .env("HOME", &home)
+        .env("XDG_RUNTIME_DIR", &run)
+        .stdin(Stdio::null());
+    let out = cmd.output().unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    let holds: Vec<String> = std::fs::read_dir(run.join("ljos"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("hold-"))
+        .map(|e| std::fs::read_to_string(e.path()).unwrap())
+        .collect();
+    assert!(!holds.is_empty(), "the sitting wrote no hold\n{text}");
+    for hold in &holds {
+        let lines: Vec<&str> = hold.lines().collect();
+        assert_eq!(lines.first(), Some(&"alice"), "{hold}\n{text}");
+        assert_eq!(
+            lines.get(8),
+            Some(&""),
+            "the hold names a conversation: {hold}"
+        );
+        assert!(!hold.contains(parent_id), "{hold}");
+    }
+}
+
+#[test]
 fn a_parent_cursor_id_in_another_home_does_not_leak_after_a_write_without_xdg_runtime_dir() {
     let parent_root = tempfile::tempdir().unwrap();
     let child_root = tempfile::tempdir().unwrap();

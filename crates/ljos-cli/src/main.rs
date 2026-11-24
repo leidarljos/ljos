@@ -4523,8 +4523,7 @@ fn run_hook(hook: HookArgs) -> Result<()> {
     if !prompt {
         ljos_cli::hook_timed("arm_gate", || ljos_cli::arm_gate(&input, event.as_deref()));
     }
-    ljos_cli::bind_call_conversation(&input, &call);
-    ljos_cli::adopt_blank_conversation(&input, &mut call);
+    ljos_cli::bind_hook_call(&input, &mut call);
     ljos_cli::ballot_sig::export_hook_session(call.session.as_deref());
     if ljos_cli::subagent::note_hook_call(&input, &call.event) {
         // the editor harness blocks a permission hook that prints nothing.
