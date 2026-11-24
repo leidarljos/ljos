@@ -19,6 +19,9 @@ The line says what went wrong and the command that fixes it.
 A word that is not a command names the verb it was reaching for as a line that runs: a mistyped name, a name with an ending such as =searches=, the start of one verb such as =prop=, or a name with a part that is a verb such as =search-lessons=. A start that two verbs share is not guessed. =lessons=, =lesson= and =learnings= are not commands, and the line names =ljos search= to find a lesson, =ljos remember= to save one and =ljos proposals= to review the ones waiting. Words after =lessons= become the query of the search line.
 =-p= and =--project= name a project on =calibrate=, =claims=, =file=, =list=, =ready=, =remember=, =search= and =sitting --plan=. On another verb the error names those verbs.
 =LJOS_DEBUG=1= or =--verbose= prints the cause chain after that line.
+A negative number on a numeric flag is read as that flag's value and then refused, and the line names the flag and the value.
+That includes =--anchor=, =-n= / =--limit=, =--rounds=, =--timeout=, =--designers=, =--slack=, =--beta=, =--share=, =--failures= and every other numeric flag.
+A habit reading may be negative, and the number is stored.
 A flag given another flag of the same command as the next word is missing that value, and the line names the flag.
 A value joined to its flag with an equals sign is that value, even when the text looks like a flag.
 Free text may start with a hyphen. That includes a lesson, a query, a note, a title, a body and the other wording a command stores.
