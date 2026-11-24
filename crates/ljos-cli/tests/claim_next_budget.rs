@@ -1,4 +1,4 @@
-//! `ljos claim` with no id stops when the claim graph does not answer
+//! `ljos claim --next` stops when the claim graph does not answer
 //! within the sitting claim budget. A ready row that answers at once is
 //! claimed.
 
@@ -97,7 +97,7 @@ fn a_slow_ready_exits_inside_the_claim_budget() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("claimdag.log");
     slow_ready(dir.path(), &log);
-    let (out, took) = ljos(dir.path(), Some(CLAIM_WAIT_SECS), &["claim"]);
+    let (out, took) = ljos(dir.path(), Some(CLAIM_WAIT_SECS), &["claim", "--next"]);
     let err = stderr_of(&out);
     let bound = Duration::from_secs(CLAIM_WAIT_SECS + START_SLACK_SECS);
     assert!(
@@ -121,7 +121,7 @@ fn a_ready_row_is_claimed() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("claimdag.log");
     one_ready_row(dir.path(), &log);
-    let (out, took) = ljos(dir.path(), None, &["claim"]);
+    let (out, took) = ljos(dir.path(), None, &["claim", "--next"]);
     let err = stderr_of(&out);
     assert!(
         out.status.success(),

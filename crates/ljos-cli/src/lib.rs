@@ -42004,40 +42004,48 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
             let held: Vec<String> = text
                 .split_whitespace()
                 .filter(|w| w.len() == 32 && w.chars().all(|c| c.is_ascii_hexdigit()))
-                .map(str::to_string)
+                .map(|hex| {
+                    run_captured("claimdag", &["get", hex])
+                        .ok()
+                        .and_then(|s| {
+                            s.stdout
+                                .lines()
+                                .next()
+                                .and_then(|l| l.split_whitespace().last())
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_else(|| hex.to_string())
+                })
                 .collect();
-            let mut lines = vec![format!(
-                "claim: {assignee} already holds a live node; one live claim per assignee."
-            )];
-            for hex in &held {
-                let name = run_captured("claimdag", &["get", hex])
-                    .ok()
-                    .and_then(|s| {
-                        s.stdout
-                            .lines()
-                            .next()
-                            .and_then(|l| l.split_whitespace().last())
-                            .map(str::to_string)
-                    })
-                    .unwrap_or_else(|| hex.clone());
-                lines.push(format!(
-                    "  holds {name}: `ljos complete {name} --status done` finishes it, \
-                     `ljos release {name} --assignee {assignee}` hands it back"
-                ));
-            }
-            Err(policy_label::labelled("claim-conflict", lines.join("\n")))
+            Err(busy_refusal(assignee, &held))
         }
     }
 }
 
+/// The refusal for a name that already holds a live claim, with the two
+/// verbs that free each ticket it holds.
+fn busy_refusal(assignee: &str, held: &[String]) -> anyhow::Error {
+    let mut lines = vec![format!(
+        "claim: {assignee} already holds a live node; one live claim per assignee."
+    )];
+    for name in held {
+        lines.push(format!(
+            "  holds {name}: `ljos complete {name} --status done` finishes it, \
+             `ljos release {name} --assignee {assignee}` hands it back"
+        ));
+    }
+    policy_label::labelled("claim-conflict", lines.join("\n"))
+}
+
 /// Claim the ready node the claim graph puts first for `assignee`, through
-/// [`claim`]. A node another conversation took first is passed over.
+/// [`claim`]. A node another conversation took first is passed over. This
+/// is `ljos claim --next`, which ranks by `--role` and `--slack`.
 ///
 /// # Errors
 ///
-/// Nothing is ready, every ready node was taken first, the claim graph
-/// did not answer within the sitting's claim budget, or it refused for
-/// some other reason.
+/// The seat has no claim graph yet, nothing is ready, every ready node was
+/// taken first, the claim graph did not answer within the sitting's claim
+/// budget, or it refused for some other reason.
 pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> Result<String> {
     let assignee = claim_holder(assignee)?;
     let assignee = assignee.as_str();
@@ -42056,7 +42064,7 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
     if let Some(slack) = slack.as_deref() {
         args.extend(["--slack", slack]);
     }
-    // Bare `ljos claim` has no sitting wall. This is the bound a sitting
+    // A claim outside a sitting has no sitting wall. This is the bound a sitting
     // already uses for its claim ([`sitting_claim_wait`]): the first third
     // of the documented `timeout -k 5 30`. Every claimdag call from here,
     // and the claim lock, stops at it. `LJOS_SITTING_CLAIM_WAIT` raises it.
@@ -42068,6 +42076,9 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
                 "`claimdag ready` did not answer within the claim budget",
             ));
         }
+        Err(err) if claim_graph_absent(&format!("{err:#}")).is_some() => {
+            bail!("claim --next: nothing has been claimed on this seat yet, so run `ljos claim`.");
+        }
         Err(err) => return Err(err),
     };
     let rows: Vec<Value> =
@@ -42075,7 +42086,7 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
     if rows.is_empty() {
         return Err(policy_label::labelled(
             "claim-conflict",
-            "claim --next: nothing in the claim graph is ready",
+            "claim --next: nothing in the claim graph is ready, so run `ljos claim`.",
         ));
     }
     for row in &rows {
@@ -42092,7 +42103,7 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
         };
         match claim(node, assignee) {
             Ok(said) => return Ok(format!("{node}  {said}")),
-            Err(e) if taken_first(&e.to_string()) => continue,
+            Err(e) if taken_first(&e) => continue,
             Err(e) if claim_budget_spent(&e) => {
                 return Err(claim_graph_slow(
                     "a claimdag call did not answer within the claim budget",
@@ -42111,12 +42122,14 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
 }
 
 /// Whether a refusal means the graph moved since the listing.
-fn taken_first(text: &str) -> bool {
+fn taken_first(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}");
     [
         "held by another",
         "status claimed",
         "status running",
         "deps unsatisfied",
+        "upsert: node is claimed; use completeWork",
     ]
     .iter()
     .any(|said| text.contains(said))
@@ -42134,9 +42147,59 @@ fn claim_budget_spent(err: &anyhow::Error) -> bool {
 /// `LJOS_SITTING_CLAIM_WAIT`.
 fn claim_graph_slow(which: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "claim --next: the claim graph is slow ({which}); \
+        "claim: the claim graph is slow ({which}); \
          claim a named id with `ljos claim ID`, or raise LJOS_SITTING_CLAIM_WAIT"
     )
+}
+
+/// What a bare `ljos claim` says when no ticket is left for this seat.
+const NO_READY_TICKET: &str =
+    "claim: no ticket is ready on this seat, so file one with `ljos file \"TITLE\" -p PROJECT`";
+
+/// Claim the first ticket `ljos ready` lists that `assignee` can take,
+/// through [`claim`]. This is `ljos claim` with no id.
+///
+/// The list is the tracker's, so a ticket filed before the claim graph
+/// existed is there, and the claim creates the graph. A name that already
+/// holds a ready ticket gets the busy refusal. A ticket another seat holds
+/// is refused by [`claim`] and passed over, and so is one another
+/// conversation took first.
+///
+/// # Errors
+///
+/// The tracker is missing or cannot be read, the name already holds a
+/// ticket, no ticket is left, the claim graph did not answer within the
+/// claim budget, or the claim was refused.
+pub fn claim_first_ready(assignee: &str) -> Result<String> {
+    let assignee = claim_holder(assignee)?;
+    let assignee = assignee.as_str();
+    let (rows, _) = ready_rows(None)?;
+    let held: Vec<String> = rows
+        .iter()
+        .filter(|row| {
+            row.claimed_by
+                .as_deref()
+                .is_some_and(|who| same_claimed_seat(who, assignee, &row.id))
+        })
+        .map(|row| row.id.clone())
+        .collect();
+    if !held.is_empty() {
+        return Err(busy_refusal(assignee, &held));
+    }
+    let _wall = arm_wall_budget_for(sitting_claim_wait(), "claim wall budget");
+    for row in &rows {
+        match claim(&row.id, assignee) {
+            Ok(said) => return Ok(format!("{}  {said}", row.id)),
+            Err(e) if taken_first(&e) => continue,
+            Err(e) if claim_budget_spent(&e) => {
+                return Err(claim_graph_slow(
+                    "a claimdag call did not answer within the claim budget",
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    bail!(NO_READY_TICKET)
 }
 
 /// A release that would refuse after minting a node. Another seat's tracker
@@ -46011,13 +46074,7 @@ pub fn ready_view(
     all: bool,
     width: Width,
 ) -> Result<String> {
-    let layout = vissue_core::Layout::resolve(None, None)?;
-    layout.require_tracker()?;
-    let recs = vissue_core::catalog::load_recs(&layout)?;
-    let mut rows = vissue_core::catalog::CatalogService::from_recs(&recs)
-        .ready(project)
-        .map_err(anyhow::Error::from)?;
-    order_ready(&mut rows, &recs);
+    let (mut rows, recs) = ready_rows(project)?;
     let total = rows.len();
     let page = if all {
         None
@@ -46037,6 +46094,24 @@ pub fn ready_view(
     }
     let raw = ready_lines(&rows, &recs, claim_age::now_here());
     Ok(scan::ready_page(&raw, page, width))
+}
+
+/// The tickets `ljos ready` lists, in its order, and the records they
+/// came from.
+fn ready_rows(
+    project: Option<&str>,
+) -> Result<(
+    Vec<vissue_core::views::IssueRow>,
+    Vec<vissue_core::views::IssueRec>,
+)> {
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    layout.require_tracker()?;
+    let recs = vissue_core::catalog::load_recs(&layout)?;
+    let mut rows = vissue_core::catalog::CatalogService::from_recs(&recs)
+        .ready(project)
+        .map_err(anyhow::Error::from)?;
+    order_ready(&mut rows, &recs);
+    Ok((rows, recs))
 }
 
 /// This seat's claims, then free tickets, then another seat's claims.

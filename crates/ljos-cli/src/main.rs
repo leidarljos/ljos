@@ -1909,6 +1909,10 @@ enum Cmd {
     },
     /// Take a ticket so this seat is the one working on it.
     ///
+    /// With no id, this claims the first ready ticket in `ljos ready` order
+    /// that no other seat holds, and the first claim creates the claim graph.
+    /// When no ticket is left, one line names `ljos file "TITLE" -p PROJECT`.
+    ///
     /// One live claim per name. The tracker stores that claim as a session
     /// node, which is its record of who holds the ticket.
     ///
@@ -1933,11 +1937,11 @@ enum Cmd {
         /// Claim the first ready node in the claim graph's order for this name.
         #[arg(long)]
         next: bool,
-        /// Desired role affinity when claiming next work ('explore', 'architect', 'implementor', 'verifier', 'orchestrator', 'general').
-        #[arg(long)]
+        /// Desired role affinity when claiming next work ('explore', 'architect', 'implementor', 'verifier', 'orchestrator', 'general'). Needs `--next`.
+        #[arg(long, requires = "next")]
         role: Option<String>,
-        /// How far from the best next ticket the claim may reach. A larger number considers more tickets.
-        #[arg(long)]
+        /// How far from the best next ticket the claim may reach. A larger number considers more tickets. Needs `--next`.
+        #[arg(long, requires = "next")]
         slack: Option<usize>,
     },
     /// Give a ticket back. It is open again, and the claim generation moves.
@@ -7247,7 +7251,11 @@ fn run_command() -> Result<()> {
                     }
                 }
                 None => {
-                    let said = claim_next(&assignee, role.as_deref(), slack)?;
+                    let said = if next {
+                        claim_next(&assignee, role.as_deref(), slack)?
+                    } else {
+                        ljos_cli::claim_first_ready(&assignee)?
+                    };
                     let taken = said.split_whitespace().next().unwrap_or("").to_string();
                     ljos_cli::tell_raw!("{said}");
                     if !taken.is_empty() {
