@@ -372,7 +372,7 @@ fn a_quoted_grant_closes_own_tickets_and_a_hand_edit_does_not() {
     );
     let said = text(&other);
     assert_eq!(other.status.code(), Some(1), "other ticket closed: {said}");
-    assert!(!said.contains("label close-unverified"), "{said}");
+    assert!(said.contains("label close-unverified:"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
     assert!(
         said.contains("not papers's to close") || said.contains("not papers"),
@@ -400,7 +400,7 @@ fn a_quoted_grant_closes_own_tickets_and_a_hand_edit_does_not() {
     );
     let said = text(&ungranted);
     assert_eq!(ungranted.status.code(), Some(1), "ungranted closed: {said}");
-    assert!(!said.contains("label close-unverified"), "{said}");
+    assert!(said.contains("label close-unverified:"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");
     assert!(said.contains("a person closes a ticket"), "{said}");
@@ -451,7 +451,7 @@ fn a_quoted_grant_closes_own_tickets_and_a_hand_edit_does_not() {
     );
     let said = text(&handed);
     assert_eq!(handed.status.code(), Some(1), "hand edit closed: {said}");
-    assert!(!said.contains("label close-unverified"), "{said}");
+    assert!(said.contains("label close-unverified:"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");
     assert!(
@@ -548,7 +548,7 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
     let unlisted = finish_close(&w, "papers", "proj-own");
     let said = text(&unlisted);
     assert_eq!(unlisted.status.code(), Some(1), "unlisted closed: {said}");
-    assert!(!said.contains("label close-unverified"), "{said}");
+    assert!(said.contains("label close-unverified:"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
     assert!(
         said.contains("not papers's to close") || said.contains("not papers"),
@@ -631,7 +631,7 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
         Some(1),
         "file grant closed another id: {said}"
     );
-    assert!(!said.contains("label close-unverified"), "{said}");
+    assert!(said.contains("label close-unverified:"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
     assert_eq!(log_updates(&w, "proj-own"), 0);
 
@@ -668,7 +668,7 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
     let handed = finish_close(&w, "scribe", "proj-scribe");
     let said = text(&handed);
     assert_eq!(handed.status.code(), Some(1), "hand edit closed: {said}");
-    assert!(!said.contains("label close-unverified"), "{said}");
+    assert!(said.contains("label close-unverified:"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");
     assert_eq!(
@@ -679,7 +679,7 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
     let edited = finish_close(&w, "papers", "proj-own");
     let said = text(&edited);
     assert_eq!(edited.status.code(), Some(1), "edited list closed: {said}");
-    assert!(!said.contains("label close-unverified"), "{said}");
+    assert!(said.contains("label close-unverified:"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");
     assert_eq!(log_updates(&w, "proj-own"), 0, "a hand-edited list closed");
     let before = log_updates(&w, "proj-else");
@@ -691,7 +691,7 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
         text(&again)
     );
     assert!(
-        !text(&again).contains("label close-unverified")
+        text(&again).contains("label close-unverified:")
             && text(&again).contains("Nothing was written."),
         "{}",
         text(&again)
@@ -765,7 +765,7 @@ fn a_granted_close_passes_the_hook_and_an_ungranted_close_stays_open() {
         Some(1),
         "ungranted close wrote: {said}"
     );
-    assert!(!said.contains("label close-unverified"), "{said}");
+    assert!(said.contains("label close-unverified:"), "{said}");
     assert!(said.contains("a person closes a ticket"), "{said}");
     assert!(said.contains("ljos seat grant"), "{said}");
     assert!(said.contains("Nothing was written."), "{said}");

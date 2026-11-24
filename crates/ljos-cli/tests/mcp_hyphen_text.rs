@@ -22,9 +22,10 @@ fn issue_file(project: &Path, id: &str) {
 
 #[test]
 fn mcp_note_file_options_and_vote_keep_hyphen_leading_values() {
-    if tools::halt(tools::Tool::Vissue) {
+    if tools::halt(tools::Tool::Vissue) || tools::halt(tools::Tool::Packsetd) {
         return;
     }
+    let pack = ljos_test_boot::Packsetd::open();
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let tracker = root.path().join("tracker");
@@ -62,7 +63,7 @@ fn mcp_note_file_options_and_vote_keep_hyphen_leading_values() {
         .env("LJOS_SEAT", "alice")
         .env("LJOS_HARNESS_SESSION", "hyphen-mcp-session")
         .env("LJOS_TRACKER_GIT", "off")
-        .env("PACKSET_URL", "off")
+        .env("PACKSET_URL", pack.url())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -82,6 +83,8 @@ fn mcp_note_file_options_and_vote_keep_hyphen_leading_values() {
             "name":"ljos_options","arguments":{"seat":"alice","issue":"demo-a1b2","options":["-left","right"]}}}),
         serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
             "name":"ljos_vote","arguments":{"seat":"alice","issue":"demo-a1b2","choice":"-left","used":"none"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{
+            "name":"ljos_remember","arguments":{"seat":"alice","text":""}}}),
     ];
     let mut stdin = child.stdin.take().unwrap();
     for request in requests {
@@ -107,6 +110,14 @@ fn mcp_note_file_options_and_vote_keep_hyphen_leading_values() {
             .unwrap_or_else(|| panic!("missing answer {id}: {answers:?}\n{stderr}"));
         assert_ne!(answer["result"]["isError"], true, "{answer}\n{stderr}");
     }
+    let empty = answers
+        .get(&6)
+        .unwrap_or_else(|| panic!("missing answer 6: {answers:?}\n{stderr}"));
+    assert_eq!(empty["result"]["isError"], false, "{empty}\n{stderr}");
+    assert!(
+        empty.to_string().contains("empty-input"),
+        "{empty}\n{stderr}"
+    );
 
     let demo = std::fs::read_to_string(tracker.join("Software/demo/issues.org")).unwrap();
     assert!(demo.contains("-note text"), "{demo}");

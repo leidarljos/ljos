@@ -1,7 +1,7 @@
 //! A policy check that used to stop a command.
 //!
-//! The attempted input is stored. The command prints `label <name>:` and
-//! exits 0. The effect the check was guarding does not run.
+//! The attempted input is stored. The command prints `label <name>:` on
+//! stderr. The effect the check was guarding does not run.
 //! A missing file, a failed read, or a failed authentication is not one of
 //! these: that stays a non-zero exit, with the same stored label.
 
