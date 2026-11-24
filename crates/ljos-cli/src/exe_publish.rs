@@ -336,18 +336,20 @@ pub fn copy_executable_new(src: &Path, dest: &Path) -> Result<(), Error> {
         committed: false,
     };
     std::io::copy(&mut source, &mut fresh.file).map_err(|err| named(err, "copy", src))?;
-    let mode = (source_stat.st_mode as u32) & 0o777;
+    let mode = mode_bits(source_stat.st_mode) & 0o777;
     #[expect(
         clippy::disallowed_methods,
         reason = "sets the fresh rollback descriptor mode before its directory sync"
     )]
-    rustix::fs::fchmod(&fresh.file, rustix::fs::Mode::from_raw_mode(mode)).map_err(|err| {
-        named(
-            Error::from_raw_os_error(err.raw_os_error()),
-            "mark executable",
-            dest,
-        )
-    })?;
+    rustix::fs::fchmod(&fresh.file, rustix::fs::Mode::from_raw_mode(raw_mode(mode))).map_err(
+        |err| {
+            named(
+                Error::from_raw_os_error(err.raw_os_error()),
+                "mark executable",
+                dest,
+            )
+        },
+    )?;
     fresh
         .file
         .flush()
@@ -580,7 +582,7 @@ impl HeldDirectory {
         file.read_to_end(&mut bytes)?;
         Ok(Some(DirectoryEntry {
             bytes,
-            mode: st.st_mode & 0o777,
+            mode: mode_bits(st.st_mode) & 0o777,
         }))
     }
 
@@ -735,6 +737,40 @@ pub(crate) fn fixture_mode(path: &Path, mode: u32) {
         .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
 }
 
+/// Permission bits of a `mode_t`, kept as `u32` in this module.
+///
+/// `st_mode` is a `u16` on macOS and a `u32` on Linux.
+#[cfg(unix)]
+fn mode_bits(mode: libc::mode_t) -> u32 {
+    #[allow(
+        clippy::useless_conversion,
+        reason = "mode_t is u16 on macOS and u32 on Linux"
+    )]
+    {
+        u32::from(mode)
+    }
+}
+
+/// `bits` as [`rustix::fs::RawMode`].
+///
+/// Rustix's raw mode is `mode_t`, so [`rustix::fs::Mode::from_raw_mode`]
+/// takes a `u16` on macOS and a `u32` on Linux. Callers hold permission
+/// bits in a `u32`. At most twelve bits are kept (`0o7777`), and those fit
+/// in either width.
+#[cfg(unix)]
+fn raw_mode(bits: u32) -> rustix::fs::RawMode {
+    let bits = bits & 0o7777;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::unnecessary_cast,
+        reason = "RawMode is mode_t: u16 on macOS and u32 on Linux, and 0o7777 fits in both"
+    )]
+    {
+        let mode: libc::mode_t = bits as libc::mode_t;
+        mode as rustix::fs::RawMode
+    }
+}
+
 #[cfg(unix)]
 fn fchmod_checked(file: &File, mode: u32, path: &Path) -> Result<(), Error> {
     let st = stat(file).map_err(|err| moded(err, "read", path))?;
@@ -743,7 +779,7 @@ fn fchmod_checked(file: &File, mode: u32, path: &Path) -> Result<(), Error> {
         clippy::disallowed_methods,
         reason = "the descriptor mode change change_mode and change_mode_of make after refuse_exec"
     )]
-    rustix::fs::fchmod(file, rustix::fs::Mode::from_raw_mode(mode & 0o7777)).map_err(|err| {
+    rustix::fs::fchmod(file, rustix::fs::Mode::from_raw_mode(raw_mode(mode))).map_err(|err| {
         moded(
             Error::from_raw_os_error(err.raw_os_error()),
             "change the mode of",
@@ -759,11 +795,7 @@ fn refuse_exec(st: &libc::stat, mode: u32, path: &Path) -> Result<(), Error> {
     if st.st_mode & libc::S_IFMT == libc::S_IFDIR {
         return Ok(());
     }
-    #[allow(
-        clippy::useless_conversion,
-        reason = "st_mode is a u16 on macOS and a u32 on Linux"
-    )]
-    let now = u32::from(st.st_mode) & 0o7777;
+    let now = mode_bits(st.st_mode) & 0o7777;
     let mode = mode & 0o7777;
     let added = mode & !now;
     if added & 0o111 != 0 || (mode & 0o111 != 0 && added & 0o6000 != 0) {
@@ -994,13 +1026,15 @@ impl Stage {
             clippy::disallowed_methods,
             reason = "the mode of the staged file, through its descriptor, before the rename"
         )]
-        rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(mode)).map_err(|err| {
-            named(
-                Error::from_raw_os_error(err.raw_os_error()),
-                "mark executable",
-                &tmp,
-            )
-        })?;
+        rustix::fs::fchmod(&file, rustix::fs::Mode::from_raw_mode(raw_mode(mode))).map_err(
+            |err| {
+                named(
+                    Error::from_raw_os_error(err.raw_os_error()),
+                    "mark executable",
+                    &tmp,
+                )
+            },
+        )?;
         flush(&file, &tmp).map_err(|err| named(err, "flush", &tmp))?;
         drop(file);
         #[cfg(test)]
