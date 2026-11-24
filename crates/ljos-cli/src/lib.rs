@@ -19847,6 +19847,20 @@ fn random_state_name() -> String {
     format!("ljos-state-{token}")
 }
 
+/// Another user may rename entries in a directory anyone can write that
+/// lacks the sticky bit, and so swap the new state root for one they own
+/// after the post-create check. Such a parent is refused.
+fn temp_parent_is_safe(parent: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::metadata(parent).map_err(|err| no_home_message(&err.to_string()))?;
+    if meta.mode() & 0o1002 == 0o002 {
+        return Err(no_home_message(
+            "refusing a temporary directory any user can write that has no sticky bit",
+        ));
+    }
+    Ok(())
+}
+
 /// A private state directory under `parent`, and the `ljos` directory inside it.
 ///
 /// Dropping this removes both. The name is not `ljos-no-home-<uid>`.
@@ -19862,6 +19876,7 @@ impl EphemeralState {
                 "the temporary directory is not an absolute path",
             ));
         }
+        temp_parent_is_safe(parent)?;
         for _ in 0..8 {
             let root = parent.join(random_state_name());
             match claim_new_private_dir(&root) {
@@ -20085,6 +20100,26 @@ mod ephemeral_state_tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[test]
+    fn a_world_writable_parent_without_the_sticky_bit_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        crate::change_mode(parent.path(), 0o777).unwrap();
+        let Err(err) = EphemeralState::create(parent.path()) else {
+            panic!("a world-writable parent with no sticky bit was used");
+        };
+        assert!(err.contains("sticky"), "{err}");
+        assert!(err.contains("HOME"), "{err}");
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_sticky_world_writable_parent_is_used() {
+        let parent = tempfile::tempdir().unwrap();
+        crate::change_mode(parent.path(), 0o1777).unwrap();
+        let state = EphemeralState::create(parent.path()).unwrap();
+        assert_eq!(mode_of(state.path()), 0o700);
     }
 
     #[test]
