@@ -188,7 +188,7 @@ fn a_mistyped_flag_names_the_closest_and_exits_2() {
     let line = one_line(&out.stderr);
     assert_eq!(
         line,
-        "ljos: search has no flag --limt, and the closest is --limit, so run `ljos search --limit 5 kiln`."
+        "ljos: search has no flag --limt, and the closest is --limit, so run `ljos search --limit 5 kiln`; pass `--` before text that starts with `-`."
     );
 }
 
