@@ -3,8 +3,10 @@
     "What a seat must see for each prompt, worked by hand from the rule each case's why names.",
     "The lessons are posted in this order, each a standing lesson with its id and stamp.",
     "The lookalikes tie on every word the pack and the hook score, and are posted in reverse id order, so only packset's order for a tie, by id, puts look-00 first.",
-    "A case's shows lists the lessons the hook prints, in the order it prints them."
+    "A case's shows lists the lessons the hook prints, in the order it prints them.",
+    "The stamps are written as of now. The seat moves every stamp by the pack's clock less now before it posts them, so each lesson is as old at every hour the test runs as it is here: the lookalikes eighteen days, ci-secret and pnpm about ten months."
   ],
+  "now": "2026-11-17T09:00:00.000Z",
   "encoder": {
     "about": [
       "A stand-in for packset-embed: a text's vector counts its words in each group.",
@@ -50,10 +52,10 @@
       "prompt": "the registry rejected my token",
       "shows": ["look-00", "look-01", "look-02"],
       "why": [
-        "No word of the prompt is in an encoder group, so the hook ranks by words.",
-        "ci-secret, pnpm and every lookalike say registry, rejected and token, and BM25 puts ci-secret, the shortest, first.",
-        "The lookalikes tie on words and length, so packset's order for a tie, by id, puts look-00 and look-01 next, and the hook hands over three.",
-        "Printed oldest first: ci-secret from January, then the two lookalikes, which share a stamp and keep their order."
+        "No word of the prompt is in an encoder group, so the pack sends no dense ballot.",
+        "ci-secret, pnpm and every lookalike say registry, rejected and token. Each lexical ballot adds a fourteen-day half-life, 0.41 for an eighteen-day lookalike and next to nothing for ci-secret and pnpm, so the twenty the hook asks for are all lookalikes.",
+        "The lookalikes tie on words, length and stamp, so packset's order for a tie, by id, puts look-00, look-01 and look-02 first.",
+        "The hook keeps the pack's fused order and hands over three."
       ]
     },
     {
@@ -61,10 +63,10 @@
       "prompt": "yarn: the registry rejected my token",
       "shows": ["look-00", "look-01", "look-02"],
       "why": [
-        "yarn and pnpm are one alias group in the hook's subject test, so pnpm covers the most of the prompt.",
-        "pnpm is the longest lesson, so only the pack's lexical ballot keeps it, last of the twenty the hook asks for, as the tied lesson whose id sorts first.",
-        "ci-secret comes next by BM25 and look-00 by id.",
-        "Printed oldest first: ci-secret from January, pnpm from February, look-00 from October."
+        "yarn and pnpm are one alias group, so the hook's query also asks for pnpm, and pnpm comes first out of the pack's fuse.",
+        "The fuse is then scaled by retrievability: (1 + 19/81 * 18)^-0.5 = 0.44 for a lookalike, and the floor, 0.25, for pnpm, written ten months ago. That puts pnpm at 20 * 0.25 = 5.0, under the lookalikes behind it, from 19 * 0.44 = 8.31 down. Diversity lifts it past the seventh, at 13 * 0.44 = 5.69, but not past the sixth, at 14 * 0.44 = 6.13, so it is seventh.",
+        "The lookalikes tie, so look-00, look-01 and look-02 lead by id, and the hook keeps that order.",
+        "As the lookalikes age, diversity lifts pnpm further, and between 32 and 34 days it is third. The moved stamps keep that age at 18."
       ]
     },
     {
@@ -72,8 +74,12 @@
       "failure": {"command": "yarn publish", "error": "E401: the registry rejected the token"},
       "shows": ["look-00", "look-01", "look-02"],
       "why": [
-        "The note searches on the command and its error, so it reads the window alias-in-a-full-window reads.",
-        "It prints the most relevant first and does not sort by age: pnpm by its alias, ci-secret by BM25, look-00 by id."
+        "The note searches on the command and its error, with the alias words alias-in-a-full-window adds, and asks for twelve.",
+        "Of the hits that pass its word tests it shows the highest scores first, not the order the pack lists them in.",
+        "The fuse weighs the k-th of the twelve 13 - k: pnpm, first, 12, look-00 11, look-01 10 and on. Retrievability then scales pnpm by the floor to 12 * 0.25 = 3.0 and each lookalike by 0.44: look-00 4.81, look-01 4.38, look-02 3.94, look-03 3.5, look-04 3.06.",
+        "Diversity lists pnpm fourth, but by score it is sixth, so the note shows look-00, look-01 and look-02.",
+        "The stored atoms the note adds after the pack's twelve carry no score, so they come last.",
+        "pnpm passes look-02 only when a lookalike's retrievability falls under 3.0 / 9 = 1/3, at an age of 34 days. The moved stamps keep that age at 18."
       ]
     },
     {
