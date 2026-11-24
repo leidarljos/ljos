@@ -180,11 +180,7 @@ pub struct Review {
 /// The file the verdicts are kept in.
 #[must_use]
 pub fn reviews_path() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos/memory-reviews.jsonl")
+    crate::state_base_dir().join("memory-reviews.jsonl")
 }
 
 /// The latest verdict per id.

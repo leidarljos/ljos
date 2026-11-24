@@ -190,4 +190,61 @@ mod tests {
         assert_eq!(label.label, "graph-cycle");
         assert!(err.to_string().contains("cannot block itself"), "{err}");
     }
+
+    /// [`labelled`] stores the attempt under the state directory.
+    /// An empty `XDG_STATE_HOME` used to be the relative directory `ljos`,
+    /// and a missing home used to be `.local/state/ljos`. `cargo test` runs
+    /// in this package, so both were written into the crate.
+    #[test]
+    fn an_empty_state_home_does_not_write_the_package() {
+        let _env = crate::test_env_lock();
+        let package = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let previous = std::env::current_dir().expect("working directory");
+        struct Back(std::path::PathBuf);
+        impl Drop for Back {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        let _back = Back(previous);
+        std::env::set_current_dir(&package).expect("package directory");
+
+        let stray = package.join("ljos");
+        let dot = package.join(".local");
+        assert!(
+            !stray.exists(),
+            "the package already holds {}",
+            stray.display()
+        );
+        assert!(!dot.exists(), "the package already holds {}", dot.display());
+
+        let write = |xdg: Option<&std::ffi::OsStr>| {
+            crate::with_env_mutation(|| {
+                // SAFETY: test_env_lock is held and puts the process environment back.
+                unsafe {
+                    match xdg {
+                        Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+                        None => std::env::remove_var("XDG_STATE_HOME"),
+                    }
+                    std::env::remove_var("HOME");
+                    std::env::remove_var("VISSUE_ROOT");
+                }
+            });
+            let _ = labelled("input-warning", "state stays out of the package directory");
+            crate::memories::bump_recalls(&["state-tree".to_string()]);
+            let dir = crate::state_base_dir();
+            assert!(dir.is_absolute(), "{}", dir.display());
+            assert!(
+                !dir.starts_with(&package),
+                "state dir {} is inside the package",
+                dir.display()
+            );
+            assert!(!stray.exists(), "wrote {}", stray.display());
+            assert!(!dot.exists(), "wrote {}", dot.display());
+        };
+
+        write(Some(std::ffi::OsStr::new("")));
+        write(None);
+        write(Some(package.as_os_str()));
+    }
 }

@@ -5918,12 +5918,7 @@ pub fn registered_seat(seat: &str) -> Result<()> {
 /// what a reader matches, so a command and a tool call count the same
 /// way. Best effort: a log that cannot be written never fails the call.
 pub fn log_recall(verb: &str, what: &str) {
-    let dir = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos");
-    log_recall_in(&dir, verb, what);
+    log_recall_in(&state_base_dir(), verb, what);
     if verb == "recall" {
         panel_gate::note_tracker_read(what);
     }
@@ -5939,16 +5934,20 @@ pub fn log_recall_in(dir: &Path, verb: &str, what: &str) {
         .take(120)
         .collect();
     let line = format!("{} {} {verb} {what}\n", now_utc(), seat_name());
+    let path = dir.join("recall.log");
     #[expect(
         clippy::disallowed_methods,
         reason = "opens a path that is not a git hook"
     )]
     let _ = std::fs::create_dir_all(dir).and_then(|()| {
-        std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dir.join("recall.log"))?
-            .write_all(line.as_bytes())
+            .open(&path)?;
+        // A new file is 0644 under a usual umask. recall.log is seat state,
+        // so the mode is 0600 whether or not this directory is ephemeral.
+        let _ = change_mode_of(&file, 0o600);
+        file.write_all(line.as_bytes())
     });
 }
 
@@ -19713,13 +19712,428 @@ fn probe_lists_ljos(argv: &[String]) -> std::result::Result<(), String> {
     answer
 }
 
-/// `$XDG_STATE_HOME/ljos`, else `~/.local/state/ljos`.
-pub(crate) fn state_base_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
+/// `$XDG_STATE_HOME` when it is an absolute path, else `$HOME/.local/state`
+/// when `HOME` is absolute.
+///
+/// An empty value is unset, as the XDG base directory spec says. A relative
+/// value is refused. `PathBuf::from("").join("ljos")` is the relative
+/// directory `ljos`, and `cargo test` runs with this package as its working
+/// directory, so that fallback wrote memory, sync and mail state into the
+/// crate.
+pub(crate) fn absolute_state_base() -> Option<PathBuf> {
+    let xdg = std::env::var_os("XDG_STATE_HOME")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos")
+        .filter(|path| path.is_absolute());
+    if let Some(xdg) = xdg {
+        return Some(xdg);
+    }
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .map(|home| home.join(".local/state"))
+}
+
+/// `$XDG_STATE_HOME/ljos`, else `~/.local/state/ljos`.
+///
+/// Both of those are absolute. A missing or relative home does not become
+/// `./ljos` or `./.local/state/ljos` in the working directory. Tests keep
+/// that state in a private temporary directory, including when the resolved
+/// path would sit inside this package. A seat outside tests gets a new
+/// private directory, and is told that this state is temporary.
+pub(crate) fn state_base_dir() -> PathBuf {
+    if let Some(dir) = absolute_state_base().map(|base| base.join("ljos")) {
+        #[cfg(test)]
+        if state_under_package(&dir) {
+            return fallback_state_base();
+        }
+        return dir;
+    }
+    fallback_state_base()
+}
+
+/// Where state goes when [`absolute_state_base`] has nowhere absolute to put it.
+fn fallback_state_base() -> PathBuf {
+    #[cfg(test)]
+    {
+        isolated_state_dir()
+    }
+    #[cfg(not(test))]
+    {
+        held_ephemeral_state()
+    }
+}
+
+/// The line shown when state has nowhere durable to live.
+const EPHEMERAL_STATE_WARNING: &str = "ljos: state is in a temporary directory and will be discarded; set HOME or XDG_STATE_HOME to an absolute path";
+
+fn no_home_message(why: &str) -> String {
+    format!("ljos: {why}; set HOME or XDG_STATE_HOME to an absolute path")
+}
+
+fn show_ephemeral_warning() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        say!("{EPHEMERAL_STATE_WARNING}");
+        #[cfg(test)]
+        EPHEMERAL_WARNINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
+#[cfg(test)]
+static EPHEMERAL_WARNINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A directory this process just made is usable only when it is not a
+/// symlink, is owned by this user, and is mode `0700`.
+fn created_dir_is_private(path: &Path) -> Result<(), String> {
+    created_dir_is_private_for(path, euid())
+}
+
+fn created_dir_is_private_for(path: &Path, owner: u32) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::symlink_metadata(path).map_err(|err| no_home_message(&err.to_string()))?;
+    if meta.file_type().is_symlink() {
+        return Err(no_home_message("refusing a symlinked state directory"));
+    }
+    if !meta.is_dir() || meta.uid() != owner || meta.mode() & 0o777 != 0o700 {
+        return Err(no_home_message(
+            "refusing a state directory with the wrong owner or mode",
+        ));
+    }
+    Ok(())
+}
+
+/// Create `path` as a new directory mode `0700`.
+///
+/// A path that already exists is refused, and so is a symlink: either one
+/// may have been planted before this process started. The directory is
+/// removed again when the mode or the owner does not check.
+pub(crate) fn claim_new_private_dir(path: &Path) -> Result<(), String> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(no_home_message("refusing a symlinked state directory"));
+        }
+        return Err(no_home_message("refusing a pre-existing state directory"));
+    }
+    std::fs::create_dir(path).map_err(|err| no_home_message(&err.to_string()))?;
+    if let Err(err) = change_mode(path, 0o700) {
+        let _ = std::fs::remove_dir(path);
+        return Err(no_home_message(&err.to_string()));
+    }
+    if let Err(err) = created_dir_is_private(path) {
+        let _ = std::fs::remove_dir(path);
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn random_state_name() -> String {
+    let mut bytes = [0u8; 8];
+    let drew = std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut bytes))
+        .is_ok();
+    if !drew {
+        let tick = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|dur| dur.as_nanos())
+            .unwrap_or(0);
+        bytes.copy_from_slice(&tick.to_le_bytes()[..8]);
+    }
+    let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("ljos-state-{token}")
+}
+
+/// A private state directory under `parent`, and the `ljos` directory inside it.
+///
+/// Dropping this removes both. The name is not `ljos-no-home-<uid>`.
+pub(crate) struct EphemeralState {
+    root: PathBuf,
+    ljos: PathBuf,
+}
+
+impl EphemeralState {
+    fn create(parent: &Path) -> Result<Self, String> {
+        if !parent.is_absolute() {
+            return Err(no_home_message(
+                "the temporary directory is not an absolute path",
+            ));
+        }
+        for _ in 0..8 {
+            let root = parent.join(random_state_name());
+            match claim_new_private_dir(&root) {
+                Ok(()) => {}
+                Err(err) if err.contains("pre-existing") => continue,
+                Err(err) => return Err(err),
+            }
+            let ljos = root.join("ljos");
+            if let Err(err) = claim_new_private_dir(&ljos) {
+                let _ = std::fs::remove_dir(&root);
+                return Err(err);
+            }
+            show_ephemeral_warning();
+            return Ok(Self { root, ljos });
+        }
+        Err(no_home_message(
+            "could not create a private state directory",
+        ))
+    }
+
+    fn path(&self) -> &Path {
+        &self.ljos
+    }
+
+    fn cleanup(&self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+impl Drop for EphemeralState {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+/// One ephemeral state directory for the life of a seat that has no absolute home.
+#[cfg(not(test))]
+static HELD_EPHEMERAL_STATE: std::sync::OnceLock<Result<EphemeralState, String>> =
+    std::sync::OnceLock::new();
+
+#[cfg(not(test))]
+extern "C" fn cleanup_held_ephemeral_state() {
+    if let Some(Ok(state)) = HELD_EPHEMERAL_STATE.get() {
+        state.cleanup();
+    }
+}
+
+/// One ephemeral state directory for the life of a seat that has no absolute home.
+#[cfg(not(test))]
+fn held_ephemeral_state() -> PathBuf {
+    let tmp = std::env::temp_dir();
+    let tmp = if tmp.is_absolute() {
+        tmp
+    } else {
+        PathBuf::from("/tmp")
+    };
+    match HELD_EPHEMERAL_STATE.get_or_init(|| match EphemeralState::create(&tmp) {
+        Ok(state) => {
+            // SAFETY: the callback has C linkage, captures nothing, and only
+            // reads the process-lifetime OnceLock above.
+            if unsafe { libc::atexit(cleanup_held_ephemeral_state) } != 0 {
+                return Err(no_home_message(
+                    "could not register temporary state cleanup",
+                ));
+            }
+            Ok(state)
+        }
+        Err(err) => {
+            say!("{err}");
+            Err(err)
+        }
+    }) {
+        Ok(state) => state.path().to_path_buf(),
+        Err(_) => PathBuf::from("/dev/null/ljos-no-state"),
+    }
+}
+
+/// Whether `dir` would land inside this package. A relative path would, because
+/// the test process's working directory is the package.
+#[cfg(test)]
+fn state_under_package(dir: &Path) -> bool {
+    if !dir.is_absolute() {
+        return true;
+    }
+    dir.starts_with(Path::new(env!("CARGO_MANIFEST_DIR")))
+}
+
+/// One absolute state directory for tests that have no absolute home.
+#[cfg(test)]
+fn isolated_state_dir() -> PathBuf {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    DIR.get_or_init(|| {
+        tempfile::Builder::new()
+            .prefix("ljos-isolated-state-")
+            .tempdir()
+            .expect("isolated state directory")
+    })
+    .path()
+    .join("ljos")
+}
+
+#[cfg(test)]
+mod ephemeral_state_tests {
+    use super::{
+        claim_new_private_dir, created_dir_is_private, created_dir_is_private_for, log_recall_in,
+        EphemeralState, EPHEMERAL_STATE_WARNING, EPHEMERAL_WARNINGS,
+    };
+    use std::os::unix::fs::MetadataExt as _;
+    use std::path::Path;
+
+    fn mode_of(path: &Path) -> u32 {
+        std::fs::symlink_metadata(path).unwrap().mode() & 0o777
+    }
+
+    #[test]
+    fn a_precreated_fallback_directory_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        let planted = parent
+            .path()
+            .join(format!("ljos-no-home-{}", super::euid()));
+        std::fs::create_dir(&planted).unwrap();
+        crate::write_file(planted.join("marker"), b"planted").unwrap();
+        let err = claim_new_private_dir(&planted).unwrap_err();
+        assert!(err.contains("pre-existing"), "{err}");
+        assert!(err.contains("HOME"), "{err}");
+        assert!(err.contains("XDG_STATE_HOME"), "{err}");
+        assert_eq!(
+            std::fs::read(planted.join("marker")).unwrap(),
+            b"planted",
+            "a pre-created directory was written"
+        );
+    }
+
+    #[test]
+    fn a_symlinked_fallback_directory_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        let outside = parent.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        crate::write_file(outside.join("marker"), b"outside").unwrap();
+        let link = parent.path().join("linked-state");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test plants a symlink to prove the state directory refuses it"
+        )]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let err = claim_new_private_dir(&link).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(err.contains("HOME"), "{err}");
+        assert!(err.contains("XDG_STATE_HOME"), "{err}");
+        assert_eq!(std::fs::read(outside.join("marker")).unwrap(), b"outside");
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn the_post_create_check_refuses_a_symlink() {
+        let parent = tempfile::tempdir().unwrap();
+        let outside = parent.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        crate::change_mode(&outside, 0o700).unwrap();
+        let link = parent.path().join("linked-state");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test plants a symlink to exercise the post-create check"
+        )]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let err = created_dir_is_private(&link).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+    }
+
+    #[test]
+    fn the_post_create_check_refuses_another_owner() {
+        let parent = tempfile::tempdir().unwrap();
+        let private = parent.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        crate::change_mode(&private, 0o700).unwrap();
+        let another_owner = super::euid().wrapping_add(1);
+        let err = created_dir_is_private_for(&private, another_owner).unwrap_err();
+        assert!(err.contains("owner"), "{err}");
+    }
+
+    #[test]
+    fn a_wide_directory_is_not_a_private_state_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let wide = parent.path().join("wide");
+        std::fs::create_dir(&wide).unwrap();
+        crate::change_mode(&wide, 0o755).unwrap();
+        let err = created_dir_is_private(&wide).unwrap_err();
+        assert!(err.contains("mode"), "{err}");
+        assert!(err.contains("HOME"), "{err}");
+        assert!(err.contains("XDG_STATE_HOME"), "{err}");
+    }
+
+    #[test]
+    fn an_ephemeral_state_dir_is_0700_and_recall_log_is_0600() {
+        let parent = tempfile::tempdir().unwrap();
+        let state = EphemeralState::create(parent.path()).unwrap();
+        let dir = state.path();
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert_ne!(
+            dir,
+            parent
+                .path()
+                .join(format!("ljos-no-home-{}", super::euid()))
+                .join("ljos")
+        );
+        assert!(!parent
+            .path()
+            .join(format!("ljos-no-home-{}", super::euid()))
+            .exists());
+        assert_eq!(mode_of(dir), 0o700, "ljos dir");
+        assert_eq!(mode_of(dir.parent().unwrap()), 0o700, "state root");
+        assert_eq!(std::fs::symlink_metadata(dir).unwrap().uid(), super::euid());
+        log_recall_in(dir, "recall", "ephemeral mode");
+        let log = dir.join("recall.log");
+        assert_eq!(mode_of(&log), 0o600, "recall.log");
+        assert!(!std::fs::symlink_metadata(&log)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn a_missing_home_warns_that_state_is_temporary() {
+        let parent = tempfile::tempdir().unwrap();
+        let _state = EphemeralState::create(parent.path()).unwrap();
+        assert!(
+            EPHEMERAL_WARNINGS.load(std::sync::atomic::Ordering::Relaxed) >= 1,
+            "the temporary-state warning was not shown"
+        );
+        assert!(
+            EPHEMERAL_STATE_WARNING.contains("temporary"),
+            "{EPHEMERAL_STATE_WARNING}"
+        );
+        assert!(
+            EPHEMERAL_STATE_WARNING.contains("HOME"),
+            "{EPHEMERAL_STATE_WARNING}"
+        );
+        assert!(
+            EPHEMERAL_STATE_WARNING.contains("XDG_STATE_HOME"),
+            "{EPHEMERAL_STATE_WARNING}"
+        );
+    }
+
+    #[test]
+    fn absolute_state_resolution_rejects_empty_and_relative_values() {
+        let _env = crate::test_env_lock();
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: test_env_lock serialises environment changes and restores them.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", "");
+            std::env::set_var("HOME", "relative-home");
+        }
+        assert_eq!(super::absolute_state_base(), None);
+
+        // SAFETY: test_env_lock serialises environment changes and restores them.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", "relative-state");
+            std::env::set_var("HOME", home.path());
+        }
+        assert_eq!(
+            super::absolute_state_base(),
+            Some(home.path().join(".local/state"))
+        );
+
+        // SAFETY: test_env_lock serialises environment changes and restores them.
+        unsafe {
+            std::env::remove_var("XDG_STATE_HOME");
+            std::env::set_var("HOME", "");
+        }
+        assert_eq!(super::absolute_state_base(), None);
+    }
 }
 
 /// Make the state directory a seat setup uses. A dry run writes nothing.
@@ -37963,14 +38377,17 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.name == "search" && !row.ok {
         return "warn";
     }
-    // The encoder is loading or the last encode failed. Recall still runs,
-    // on words alone, and the seat still starts. A failed row names the
-    // command that replaces the writer. A loading row says when to rerun.
+    // A loading encoder still answers by words, and the load finishes on
+    // its own. The short doctor prints the row as info, so it is not one
+    // of the rows the summary says need action.
+    if row.name == "encoder" && !row.ok && row.state.starts_with("loading") {
+        return "info";
+    }
+    // The last encode failed. Recall still runs, on words alone, and the
+    // seat still starts. The row names the command that replaces the writer.
     if row.name == "encoder"
         && !row.ok
-        && (row.state.starts_with(ENCODER_DEGRADED)
-            || row.state.starts_with("failed:")
-            || row.state.starts_with("loading"))
+        && (row.state.starts_with(ENCODER_DEGRADED) || row.state.starts_with("failed:"))
     {
         return "warn";
     }
@@ -38129,8 +38546,8 @@ pub fn doctor_summary(rows: &[Habitat]) -> String {
 /// Whether a row in the short doctor asks the person to do something.
 fn doctor_needs_action(row: &Habitat) -> bool {
     // The number in the summary is the warn and no rows the short report
-    // prints. An info row, including an encoder that is not installed, is
-    // printed on its own and is not part of that number.
+    // prints. An info row, including an encoder that is not installed or
+    // still loading, is printed on its own and is not part of that number.
     matches!(doctor_word(row), "no" | "warn")
 }
 
@@ -38335,11 +38752,13 @@ pub fn doctor_shows_in_short(row: &Habitat) -> bool {
     shown_short(doctor_word(row), row.name) || plain_encoder_row(row)
 }
 
-/// The not-installed encoder, which plain `ljos doctor` prints so a
-/// word-only search has a command to run. Loading and failed rows are
-/// already `warn` and pass [`shown_short`].
+/// An encoder plain `ljos doctor` prints while search is not using the
+/// model yet. Not installed names the install command. Loading names the
+/// wait and is info: the load finishes on its own. A failed row is `warn`
+/// and passes [`shown_short`] on its own.
 fn plain_encoder_row(row: &Habitat) -> bool {
-    row.name == "encoder" && row.state.starts_with("not installed")
+    row.name == "encoder"
+        && (row.state.starts_with("not installed") || row.state.starts_with("loading"))
 }
 
 /// Whether the short doctor prints a row, from its word and name. An
@@ -42102,40 +42521,48 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
             let held: Vec<String> = text
                 .split_whitespace()
                 .filter(|w| w.len() == 32 && w.chars().all(|c| c.is_ascii_hexdigit()))
-                .map(str::to_string)
+                .map(|hex| {
+                    run_captured("claimdag", &["get", hex])
+                        .ok()
+                        .and_then(|s| {
+                            s.stdout
+                                .lines()
+                                .next()
+                                .and_then(|l| l.split_whitespace().last())
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_else(|| hex.to_string())
+                })
                 .collect();
-            let mut lines = vec![format!(
-                "claim: {assignee} already holds a live node; one live claim per assignee."
-            )];
-            for hex in &held {
-                let name = run_captured("claimdag", &["get", hex])
-                    .ok()
-                    .and_then(|s| {
-                        s.stdout
-                            .lines()
-                            .next()
-                            .and_then(|l| l.split_whitespace().last())
-                            .map(str::to_string)
-                    })
-                    .unwrap_or_else(|| hex.clone());
-                lines.push(format!(
-                    "  holds {name}: `ljos complete {name} --status done` finishes it, \
-                     `ljos release {name} --assignee {assignee}` hands it back"
-                ));
-            }
-            Err(policy_label::labelled("claim-conflict", lines.join("\n")))
+            Err(busy_refusal(assignee, &held))
         }
     }
 }
 
+/// The refusal for a name that already holds a live claim, with the two
+/// verbs that free each ticket it holds.
+fn busy_refusal(assignee: &str, held: &[String]) -> anyhow::Error {
+    let mut lines = vec![format!(
+        "claim: {assignee} already holds a live node; one live claim per assignee."
+    )];
+    for name in held {
+        lines.push(format!(
+            "  holds {name}: `ljos complete {name} --status done` finishes it, \
+             `ljos release {name} --assignee {assignee}` hands it back"
+        ));
+    }
+    policy_label::labelled("claim-conflict", lines.join("\n"))
+}
+
 /// Claim the ready node the claim graph puts first for `assignee`, through
-/// [`claim`]. A node another conversation took first is passed over.
+/// [`claim`]. A node another conversation took first is passed over. This
+/// is `ljos claim --next`, which ranks by `--role` and `--slack`.
 ///
 /// # Errors
 ///
-/// Nothing is ready, every ready node was taken first, the claim graph
-/// did not answer within the sitting's claim budget, or it refused for
-/// some other reason.
+/// The seat has no claim graph yet, nothing is ready, every ready node was
+/// taken first, the claim graph did not answer within the sitting's claim
+/// budget, or it refused for some other reason.
 pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> Result<String> {
     let assignee = claim_holder(assignee)?;
     let assignee = assignee.as_str();
@@ -42154,7 +42581,7 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
     if let Some(slack) = slack.as_deref() {
         args.extend(["--slack", slack]);
     }
-    // Bare `ljos claim` has no sitting wall. This is the bound a sitting
+    // A claim outside a sitting has no sitting wall. This is the bound a sitting
     // already uses for its claim ([`sitting_claim_wait`]): the first third
     // of the documented `timeout -k 5 30`. Every claimdag call from here,
     // and the claim lock, stops at it. `LJOS_SITTING_CLAIM_WAIT` raises it.
@@ -42166,6 +42593,9 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
                 "`claimdag ready` did not answer within the claim budget",
             ));
         }
+        Err(err) if claim_graph_absent(&format!("{err:#}")).is_some() => {
+            bail!("claim --next: nothing has been claimed on this seat yet, so run `ljos claim`.");
+        }
         Err(err) => return Err(err),
     };
     let rows: Vec<Value> =
@@ -42173,7 +42603,7 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
     if rows.is_empty() {
         return Err(policy_label::labelled(
             "claim-conflict",
-            "claim --next: nothing in the claim graph is ready",
+            "claim --next: nothing in the claim graph is ready, so run `ljos claim`.",
         ));
     }
     for row in &rows {
@@ -42190,7 +42620,7 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
         };
         match claim(node, assignee) {
             Ok(said) => return Ok(format!("{node}  {said}")),
-            Err(e) if taken_first(&e.to_string()) => continue,
+            Err(e) if taken_first(&e) => continue,
             Err(e) if claim_budget_spent(&e) => {
                 return Err(claim_graph_slow(
                     "a claimdag call did not answer within the claim budget",
@@ -42209,12 +42639,14 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
 }
 
 /// Whether a refusal means the graph moved since the listing.
-fn taken_first(text: &str) -> bool {
+fn taken_first(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}");
     [
         "held by another",
         "status claimed",
         "status running",
         "deps unsatisfied",
+        "upsert: node is claimed; use completeWork",
     ]
     .iter()
     .any(|said| text.contains(said))
@@ -42232,9 +42664,59 @@ fn claim_budget_spent(err: &anyhow::Error) -> bool {
 /// `LJOS_SITTING_CLAIM_WAIT`.
 fn claim_graph_slow(which: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "claim --next: the claim graph is slow ({which}); \
+        "claim: the claim graph is slow ({which}); \
          claim a named id with `ljos claim ID`, or raise LJOS_SITTING_CLAIM_WAIT"
     )
+}
+
+/// What a bare `ljos claim` says when no ticket is left for this seat.
+const NO_READY_TICKET: &str =
+    "claim: no ticket is ready on this seat, so file one with `ljos file \"TITLE\" -p PROJECT`";
+
+/// Claim the first ticket `ljos ready` lists that `assignee` can take,
+/// through [`claim`]. This is `ljos claim` with no id.
+///
+/// The list is the tracker's, so a ticket filed before the claim graph
+/// existed is there, and the claim creates the graph. A name that already
+/// holds a ready ticket gets the busy refusal. A ticket another seat holds
+/// is refused by [`claim`] and passed over, and so is one another
+/// conversation took first.
+///
+/// # Errors
+///
+/// The tracker is missing or cannot be read, the name already holds a
+/// ticket, no ticket is left, the claim graph did not answer within the
+/// claim budget, or the claim was refused.
+pub fn claim_first_ready(assignee: &str) -> Result<String> {
+    let assignee = claim_holder(assignee)?;
+    let assignee = assignee.as_str();
+    let (rows, _) = ready_rows(None)?;
+    let held: Vec<String> = rows
+        .iter()
+        .filter(|row| {
+            row.claimed_by
+                .as_deref()
+                .is_some_and(|who| same_claimed_seat(who, assignee, &row.id))
+        })
+        .map(|row| row.id.clone())
+        .collect();
+    if !held.is_empty() {
+        return Err(busy_refusal(assignee, &held));
+    }
+    let _wall = arm_wall_budget_for(sitting_claim_wait(), "claim wall budget");
+    for row in &rows {
+        match claim(&row.id, assignee) {
+            Ok(said) => return Ok(format!("{}  {said}", row.id)),
+            Err(e) if taken_first(&e) => continue,
+            Err(e) if claim_budget_spent(&e) => {
+                return Err(claim_graph_slow(
+                    "a claimdag call did not answer within the claim budget",
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    bail!(NO_READY_TICKET)
 }
 
 /// A release that would refuse after minting a node. Another seat's tracker
@@ -46114,13 +46596,7 @@ pub fn ready_view(
     all: bool,
     width: Width,
 ) -> Result<String> {
-    let layout = vissue_core::Layout::resolve(None, None)?;
-    layout.require_tracker()?;
-    let recs = vissue_core::catalog::load_recs(&layout)?;
-    let mut rows = vissue_core::catalog::CatalogService::from_recs(&recs)
-        .ready(project)
-        .map_err(anyhow::Error::from)?;
-    order_ready(&mut rows, &recs);
+    let (mut rows, recs) = ready_rows(project)?;
     let total = rows.len();
     let page = if all {
         None
@@ -46140,6 +46616,24 @@ pub fn ready_view(
     }
     let raw = ready_lines(&rows, &recs, claim_age::now_here());
     Ok(scan::ready_page(&raw, page, width))
+}
+
+/// The tickets `ljos ready` lists, in its order, and the records they
+/// came from.
+fn ready_rows(
+    project: Option<&str>,
+) -> Result<(
+    Vec<vissue_core::views::IssueRow>,
+    Vec<vissue_core::views::IssueRec>,
+)> {
+    let layout = vissue_core::Layout::resolve(None, None)?;
+    layout.require_tracker()?;
+    let recs = vissue_core::catalog::load_recs(&layout)?;
+    let mut rows = vissue_core::catalog::CatalogService::from_recs(&recs)
+        .ready(project)
+        .map_err(anyhow::Error::from)?;
+    order_ready(&mut rows, &recs);
+    Ok((rows, recs))
 }
 
 /// This seat's claims, then free tickets, then another seat's claims.
@@ -76924,16 +77418,31 @@ mod tests {
             "remaining_ms": 2500
         }));
         assert!(!loading.ok);
-        assert_eq!(doctor_word(&loading), "warn");
+        assert_eq!(doctor_word(&loading), "info");
+        assert!(
+            doctor_shows_in_short(&loading),
+            "a loading encoder stays on the short doctor"
+        );
         assert_eq!(
             loading.state,
             "loading, about 3 s left. Search matches words until then."
+        );
+        let seat = Habitat {
+            name: "seat source",
+            state: "no seat is set; reads use every seat, so run `export LJOS_SEAT=NAME`.".into(),
+            ok: false,
+        };
+        let summary = doctor_summary(&[seat, loading]);
+        assert!(
+            summary.contains("1 row needs action"),
+            "a loading encoder is not an action: {summary}"
         );
         let loading_quiet = row(serde_json::json!({
             "available": true,
             "answering": null
         }));
-        assert_eq!(doctor_word(&loading_quiet), "warn");
+        assert_eq!(doctor_word(&loading_quiet), "info");
+        assert!(doctor_shows_in_short(&loading_quiet));
         assert_eq!(
             loading_quiet.state,
             "loading. Search matches words until it is ready."

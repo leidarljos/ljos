@@ -192,11 +192,11 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
         let doctor_row = match *name {
             "ready" => None,
             "loading with remaining_ms" => Some((
-                "warn",
+                "info",
                 "loading, about 120 s left. Search matches words until then.".to_string(),
             )),
             "loading without remaining_ms" => Some((
-                "warn",
+                "info",
                 "loading. Search matches words until it is ready.".to_string(),
             )),
             "failed" => Some((

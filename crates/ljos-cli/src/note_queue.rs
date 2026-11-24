@@ -105,15 +105,10 @@ pub struct SetAside {
     pub bytes: usize,
 }
 
-/// The state dir that holds the queue: `$XDG_STATE_HOME/ljos`, else
-/// `~/.local/state/ljos`.
+/// The state dir that holds the queue: [`crate::state_base_dir`].
 #[must_use]
 pub fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos")
+    crate::state_base_dir()
 }
 
 fn queue_file(dir: &Path) -> PathBuf {

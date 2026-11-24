@@ -289,6 +289,7 @@ A plan files one parent and its checklist in a single tracker commit, claims the
 
 ``ljos ready`` without ``--mine`` prints the first 20 open tickets, headed ``ready  shown X of Y``, and ends a truncated page with a hint naming ``--limit``, ``--all``, ``-p`` and ``--mine``. It omits the hint when every ticket fits.
 This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last.
+``ljos claim`` with no id claims the first ready ticket in ``ljos ready`` order that no other seat holds, and the first claim creates the claim graph. After ``ljos file "Pick a codec" -p demo``, that claim takes the ticket just filed. A seat that already holds a ready ticket is refused, and the refusal names how to finish or release it. When no ticket is left, the line is ``claim: no ticket is ready on this seat, so file one with `ljos file "TITLE" -p PROJECT` ``.
 ``--all`` prints every ticket, and ``--limit N`` prints N.
 
 ``ljos list`` and ``ljos ls`` are the same command. They take the same flags, including ``-p PROJECT``, and print the same page.
