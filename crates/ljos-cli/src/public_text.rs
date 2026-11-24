@@ -3018,10 +3018,17 @@ fn digits_at(chars: &[char], start: usize) -> usize {
 /// `...10.0.0.5`, `e.g.10.0.0.1` and `v10.0.0.1` are read and `1.10.0.0.5`
 /// is one five-part run.
 fn number_start(chars: &[char], start: usize) -> bool {
-    chars.get(start).is_some_and(char::is_ascii_digit)
-        && !chars[..start]
-            .iter()
-            .rfind(|c| **c != '.')
+    if !chars.get(start).is_some_and(char::is_ascii_digit) {
+        return false;
+    }
+    let dots = chars[..start]
+        .iter()
+        .rev()
+        .take_while(|c| **c == '.')
+        .count();
+    dots >= 2
+        || !chars[..start - dots]
+            .last()
             .is_some_and(char::is_ascii_digit)
 }
 
@@ -3188,7 +3195,7 @@ fn fixed_exempt(value: u32) -> bool {
 /// number of one to three parts, or a bare integer, is an address when an
 /// address word, a port, `//` or `@` sits on either side of it. A public quad
 /// is an address unless it is a decimal resolver, netmask or version. A
-/// version word does not spare a non-public value. `0.0.0.0` is a netmask.
+/// version word does not spare a non-public value.
 fn ipv4_hit(chars: &[char]) -> bool {
     (0..chars.len())
         .filter(|&start| number_start(chars, start))
@@ -3203,9 +3210,6 @@ fn ipv4_hit(chars: &[char]) -> bool {
                 .split('.')
                 .all(|part| part.len() == 1 || !part.starts_with('0'));
             if non_public_v4(Ipv4Addr::from(value)) {
-                if quad && decimal && fixed_exempt(value) {
-                    return false;
-                }
                 // `inet_aton` of a short `0` is `0.0.0.0`. That mask is not a
                 // short private number, so a look-alike dot stays a character.
                 if !quad && value == 0 {
@@ -3329,26 +3333,18 @@ fn window_is_ipv6(chars: &[char], start: usize, end: usize) -> bool {
 /// single colon.
 fn candidate_at(chars: &[char], start: usize, at: usize) -> bool {
     if at == start {
-        return at == 0 || !word_char(chars[at - 1]);
+        return true;
     }
-    match chars[at - 1] {
-        '.' | '%' => true,
-        ':' => at.checked_sub(2).and_then(|index| chars.get(index)) != Some(&':'),
-        _ => false,
-    }
+    matches!(chars[at - 1], '.' | '%' | ':')
 }
 
 fn candidate_is_ipv6(chars: &[char], at: usize, end: usize) -> bool {
     for stop in at + 2..=end.min(at + MAX_ADDRESS) {
-        if stop == end {
-            if !ipv6_end_ok(chars, stop) {
-                continue;
-            }
-        } else if chars[stop] == ':' {
+        if stop < end && chars[stop] == ':' {
             if chars.get(stop + 1) == Some(&':') {
                 continue;
             }
-        } else if chars[stop] != '.' && chars[stop] != '%' {
+        } else if stop < end && chars[stop] != '.' && chars[stop] != '%' {
             continue;
         }
         let raw: String = chars[at..stop].iter().collect();
@@ -3365,10 +3361,16 @@ fn candidate_is_ipv6(chars: &[char], at: usize, end: usize) -> bool {
         if non_public(IpAddr::V6(address)) {
             return true;
         }
+        if stop == end && !ipv6_end_ok(chars, stop) {
+            continue;
+        }
         if title_case_path(bare) {
             continue;
         }
         let bare_end = at + bare.chars().count();
+        if rust_path_literal(chars, at, bare_end) {
+            continue;
+        }
         if bare.chars().any(|c| c.is_ascii_digit()) || digit_free_address(chars, at, bare_end) {
             return true;
         }
@@ -3426,6 +3428,17 @@ fn rust_path(after: &[char]) -> bool {
         Some('(') => name > 0,
         _ => false,
     }
+}
+
+fn rust_path_literal(chars: &[char], at: usize, stop: usize) -> bool {
+    if chars.get(stop.saturating_sub(2)..stop) == Some(&[':', ':']) && rust_path(&chars[stop..]) {
+        return true;
+    }
+    let text: String = chars[at..stop].iter().collect();
+    text.split_once("::").is_some_and(|(left, right)| {
+        left.chars().any(|c| c.is_ascii_digit())
+            && right.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+    })
 }
 
 fn ipv6_end_ok(chars: &[char], stop: usize) -> bool {
@@ -4140,6 +4153,51 @@ mod tests {
     }
 
     #[test]
+    fn a_non_public_address_is_not_hidden_by_a_separator_or_word_edge() {
+        for text in [
+            "Iface::Fe80::Be",
+            "crate::fd00::1",
+            "ip::fe80::1",
+            "fe80::idle",
+            "fe80::badge",
+            "fd00::new()",
+            "fdab::new()",
+            "fe80::1x",
+            "xfe80::1",
+        ] {
+            assert_all_screens_refuse(text);
+        }
+    }
+
+    #[test]
+    fn a_private_quad_is_not_hidden_by_version_punctuation() {
+        for text in [
+            "1..10.0.0.1",
+            "v1..10.0.0.1",
+            "2..192.168.1.1",
+            "1...10.0.0.1",
+        ] {
+            assert_all_screens_refuse(text);
+        }
+    }
+
+    #[test]
+    fn a_rust_path_with_a_digit_in_its_first_segment_is_not_an_address() {
+        let screen = bare();
+        for text in [
+            "use bb8::{Pool};",
+            "d3::<T>",
+            "use ab12::{A}",
+            "b2::B",
+            "f64::E",
+        ] {
+            assert_eq!(classify(text, &screen), None, "{text:?}");
+            assert!(crate::scrub::scan_body(text, 1).is_empty(), "{text:?}");
+            assert!(crate::scrub::scan_public(text).is_empty(), "{text:?}");
+        }
+    }
+
+    #[test]
     fn every_non_public_range_is_refused_in_any_case_and_after_any_separator() {
         let spellings = [
             "127.0.0.1",
@@ -4223,6 +4281,11 @@ mod tests {
             }
         }
         for text in [
+            "0.0.0.0",
+            "ssh 0.0.0.0",
+            "0.0.0.0:8080",
+            "224.0.0.0",
+            "ssh 224.0.0.0",
             "a.fe80::1",
             "cafe.fd00::1",
             "see db.fe80::1 now",
@@ -4300,12 +4363,7 @@ mod tests {
             assert_all_screens_refuse(text);
         }
         let screen = bare();
-        for text in [
-            "255.255.240.0",
-            "255.255.255.255",
-            "255.255.255.0",
-            "0.0.0.0",
-        ] {
+        for text in ["255.255.240.0", "255.255.255.255", "255.255.255.0"] {
             assert_eq!(classify(text, &screen), None, "{text:?}");
             assert!(crate::scrub::scan_body(text, 1).is_empty(), "{text:?}");
             assert!(crate::scrub::scan_public(text).is_empty(), "{text:?}");
@@ -4370,8 +4428,6 @@ mod tests {
             "8.8.8.8",
             "1.1.1.1",
             "use 8.8.8.8 or 1.1.1.1.",
-            "0.0.0.0",
-            "bind to 0.0.0.0.",
             "255.255.255.0",
             "the netmask is 255.255.255.0.",
             "3.2.1",
