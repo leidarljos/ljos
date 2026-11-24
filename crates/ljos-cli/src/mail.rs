@@ -183,12 +183,13 @@ pub const MAIL_BODY_CAP: usize = 16_000;
 fn check_length(verb: &str, body: &str) -> Result<()> {
     let n = body.chars().count();
     if n > MAIL_BODY_CAP {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "message-input-warning",
             format!(
                 "{verb}: the message is {n} characters, past {MAIL_BODY_CAP}; write it to a file, \
              `deedar create file --path FILE --agent SEAT`, and send the accession it prints. Nothing was sent"
             ),
+            1,
         ));
     }
     Ok(())
@@ -558,13 +559,14 @@ pub fn check_known(seat: &str, known: &BTreeSet<String>, new_seat: bool) -> Resu
     if new_seat || known.contains(seat) {
         return Ok(());
     }
-    Err(crate::policy_label::labelled(
+    Err(crate::policy_label::refused(
         "recipient-unseen",
         format!(
             "send: no seat named {seat} has written to this pack, so the message would wait unread. \
          {} Pass --new-seat to write to a seat that has not started yet",
             seat_hint(seat, known)
         ),
+        1,
     ))
 }
 
@@ -673,9 +675,10 @@ pub fn recipients(
 ) -> Result<Vec<String>> {
     if let Some(group) = group {
         if seat.is_some() {
-            return Err(crate::policy_label::labelled(
+            return Err(crate::policy_label::refused(
                 "routing-warning",
                 "send: name a seat or a group",
+                1,
             ));
         }
         let to: Vec<String> = members
@@ -684,24 +687,27 @@ pub fn recipients(
             .cloned()
             .collect();
         if to.is_empty() {
-            return Err(crate::policy_label::labelled(
+            return Err(crate::policy_label::refused(
                 "routing-warning",
                 format!("send: {group} has no other member"),
+                1,
             ));
         }
         return Ok(to);
     }
     let Some(seat) = seat.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "routing-warning",
             "send: name a seat or a group",
+            1,
         ));
     };
     let seat = check_name("send", seat)?;
     if seat == from {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "routing-warning",
             format!("send: {seat} is this seat"),
+            1,
         ));
     }
     Ok(vec![seat])
@@ -736,9 +742,10 @@ fn ensure_mail(client: &crate::PacksetClient, verb: &str) -> Result<()> {
     if let Some(version) = writer_version(client) {
         match super::cmp_semver(&version, MAIL_PACKSET) {
             Some(std::cmp::Ordering::Less) => {
-                return Err(crate::policy_label::labelled(
+                return Err(crate::policy_label::refused(
                     "writer-version-warning",
                     format!("{verb}: {}", unsupported_mail(Some(&version))),
+                    1,
                 ));
             }
             Some(_) => return Ok(()),
@@ -759,9 +766,10 @@ fn ensure_mail(client: &crate::PacksetClient, verb: &str) -> Result<()> {
             Probe::Kept => Ok(()),
             Probe::Refused => {
                 let version = writer_version(client);
-                Err(crate::policy_label::labelled(
+                Err(crate::policy_label::refused(
                     "writer-version-warning",
                     format!("{verb}: {}", unsupported_mail(version.as_deref())),
+                    1,
                 ))
             }
             Probe::Store => Err(mail_store_error(err)),
@@ -834,9 +842,10 @@ pub fn send(args: &Send<'_>) -> Result<String> {
     let _clock = super::arm_cmd_pack();
     let text = args.text.trim();
     if text.is_empty() {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "message-input-warning",
             "send: empty text",
+            1,
         ));
     }
     check_length("send", text)?;
@@ -1068,9 +1077,10 @@ pub fn read(id: &str) -> Result<String> {
     let seat = super::seat_name();
     let letter = find_letter(&atoms, id).context("read")?;
     if !letter.to.iter().any(|to| to == &seat) {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "message-owner-warning",
             format!("read: {id} is not for {seat}"),
+            1,
         ));
     }
     if already_read(&atoms, id, &seat) {
@@ -1127,9 +1137,10 @@ pub fn reply(id: &str, text: &str, interrupt: bool) -> Result<String> {
     let parent = find_letter(&atoms, id).context("reply")?;
     let from = super::seat_name();
     if parent.from == from {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "message-owner-warning",
             format!("reply: {id} is from this seat"),
+            1,
         ));
     }
     let issue = parent.issue.clone();

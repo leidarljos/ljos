@@ -456,7 +456,7 @@ fn a_ballot_or_a_withdrawal_as_another_persona_is_recorded() {
     let persona = "persona:saddle:inky";
     assert!(
         calls.contains(&format!(
-            "vissue vote proj-aaaa --for accept --used none VISSUE_AGENT={persona}"
+            "vissue vote proj-aaaa --for=accept --used=none VISSUE_AGENT={persona}"
         )),
         "{calls}"
     );
@@ -492,7 +492,7 @@ fn an_assignee_that_is_another_seat_is_refused() {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        assert!(out.status.success(), "{args:?} went through: {err}");
+        assert_eq!(out.status.code(), Some(1), "{args:?} went through: {err}");
         assert!(err.contains("label assignee-mismatch"), "{args:?}: {err}");
         assert!(
             err.contains("stranger is not this seat, saddle"),
@@ -852,7 +852,7 @@ fn seat_add_writes_the_roster_row_and_that_seat_can_file_and_note() {
         String::from_utf8_lossy(&noted.stderr)
     );
     assert!(
-        b.calls().contains("vissue note proj-aaaa progress"),
+        b.calls().contains("vissue note proj-aaaa -- progress"),
         "{}",
         b.calls()
     );

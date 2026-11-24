@@ -1296,7 +1296,7 @@ pub fn write(issue: &str, seat: &str, model: &str, run: &str, run_key: &str) -> 
         &launcher,
     );
     if ballot_sig::write_sig_note(issue, &note).is_err() {
-        crate::run_captured("vissue", &["note", issue, &note])?;
+        crate::run_captured("vissue", &["note", issue, "--", &note])?;
     }
     Ok(format!(
         "slot: {seat} on {issue} for run {}, model {}, run key {}…, signed by {launcher} with key {}…\n",

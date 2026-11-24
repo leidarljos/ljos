@@ -805,7 +805,7 @@ impl SessionBallot {
         }
         for id in &self.authored {
             let label = authorship_label(id);
-            let _ = crate::run_captured("vissue", &["note", &self.issue, &label]);
+            let _ = crate::run_captured("vissue", &["note", &self.issue, "--", &label]);
         }
         let mcp = std::env::current_exe().ok().is_some_and(|path| {
             path.file_name()
@@ -883,18 +883,19 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
                 replace_hint(issue, voter)
             )
         });
-        return Err(crate::policy_label::labelled("repeated-ballot", why));
+        return Err(crate::policy_label::refused("repeated-ballot", why, 1));
     }
     let mark = format!("{}\n{voter}", issue.trim());
     let mut held = CAST.lock().unwrap_or_else(|e| e.into_inner());
     if !held.insert(mark.clone()) {
         ballot_sig::end_cast();
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "repeated-ballot",
             format!(
                 "{voter} already cast a ballot on {issue} in this process. Nothing was cast. {}",
                 replace_hint(issue, voter)
             ),
+            1,
         ));
     }
     drop(held);
@@ -1600,13 +1601,18 @@ pub fn record_candidate(
     let saw = reads_that_spoil(&key, &reads, &others);
     let seat = crate::seat_name();
     let note = ballot_sig::sign_candidate(id, &seat, &ident, &saw)?;
-    crate::run_captured("vissue", &["note", id, &note])?;
+    crate::run_captured("vissue", &["note", id, "--", &note])?;
     let mut out = format!("candidate {id} bound to session {key}\n");
     if !saw.is_empty() {
         let line = blind_sentence(id, &key, &saw);
         let _ = crate::run_captured(
             "vissue",
-            &["note", id, &format!("design-seen: {id} {}", saw.join(" "))],
+            &[
+                "note",
+                id,
+                "--",
+                &format!("design-seen: {id} {}", saw.join(" ")),
+            ],
         );
         out.push_str(&format!("blind design: {line}\n"));
     }

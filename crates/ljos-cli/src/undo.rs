@@ -172,7 +172,7 @@ pub fn withdraw_note(issue: &str, seat: &str, which: &str) -> Result<String> {
         return Ok(format!("{issue}: that note was taken back already\n"));
     }
     let note = withdrawn_note(seat, &text);
-    crate::run_captured("vissue", &["note", issue, &note])
+    crate::run_captured("vissue", &["note", issue, "--", &note])
         .with_context(|| format!("withdraw: the note on {issue} was not written"))?;
     let mut out = format!("{issue}: took back {text:?}\n");
     out.push_str("the note stays on the logbook, with the withdrawal under it\n");

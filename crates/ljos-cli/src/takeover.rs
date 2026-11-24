@@ -99,7 +99,7 @@ pub(crate) fn stale_refusal(node: &str, assignee: &str, held: &str, quiet: u64) 
 }
 
 fn refused(detail: String) -> anyhow::Error {
-    policy_label::labelled("claim-conflict", detail)
+    policy_label::refused("claim-conflict", detail, 1)
 }
 
 /// Take `node` over from a holder that looks gone, as `assignee`.
@@ -179,7 +179,7 @@ pub fn claim_takeover(node: &str, assignee: &str) -> Result<String> {
         "took over from {old} (seat {seat}), claim quiet {}, past the {lease}s lease",
         span_words(quiet)
     );
-    match crate::run_captured_as("vissue", &["note", node, &note], Some(assignee)) {
+    match crate::run_captured_as("vissue", &["note", node, "--", &note], Some(assignee)) {
         Ok(_) => out.push_str(&format!("noted on {node}: {note}\n")),
         Err(e) => out.push_str(&format!(
             "note: {node} took over but the note failed ({e:#})\n"

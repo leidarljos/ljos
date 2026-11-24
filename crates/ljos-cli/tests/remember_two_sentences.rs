@@ -157,7 +157,8 @@ fn serve(listener: TcpListener, posts: Arc<Mutex<Vec<String>>>, refuse_second: b
             } else if path == "/v1/status" {
                 (
                     200,
-                    r#"{"embedder":{"available":true,"answering":true,"enabled":true}}"#.to_string(),
+                    r#"{"embedder":{"available":true,"answering":true,"enabled":true}}"#
+                        .to_string(),
                 )
             } else if path == "/v1/atoms" {
                 (200, r#"{"atoms":[]}"#.to_string())
@@ -334,18 +335,25 @@ fn json_names_the_stored_claim_when_a_later_chunk_fails() {
         .unwrap_or_else(|err| panic!("stdout is not one JSON document: {err}\n{said}"));
     let claims = page["claims"].as_array().expect(&said);
     assert_eq!(claims.len(), 1, "{said}");
-    assert_eq!(claims[0]["id"], "4d2243d2aaaaaaaaaaaaaaaaaaaaaaaa", "{said}");
+    assert_eq!(
+        claims[0]["id"], "4d2243d2aaaaaaaaaaaaaaaaaaaaaaaa",
+        "{said}"
+    );
     let failed = page["failed"].as_array().expect(&said);
     assert_eq!(failed.len(), 1, "{said}");
     let failed_text = failed[0]["text"].as_str().unwrap_or("");
+    assert!(failed_text.contains("Write the batch number"), "{said}");
     assert!(
-        failed_text.contains("Write the batch number"),
-        "{said}"
-    );
-    assert!(
-        failed[0]["error"].as_str().unwrap_or("").contains("credential-shaped"),
+        failed[0]["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("credential-shaped"),
         "{said}"
     );
     let posts = seat.posts.lock().unwrap().clone();
-    assert_eq!(posts.len(), 2, "a later chunk was still posted:\n{posts:?}\n{said}");
+    assert_eq!(
+        posts.len(),
+        2,
+        "a later chunk was still posted:\n{posts:?}\n{said}"
+    );
 }

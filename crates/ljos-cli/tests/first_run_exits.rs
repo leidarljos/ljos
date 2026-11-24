@@ -332,7 +332,7 @@ fn a_note_with_only_text_uses_the_held_issue() {
     assert!(out.status.success(), "note failed:\n{said}");
     assert!(
         seat.calls()
-            .contains(&format!("vissue note {} did a thing", seat.issue)),
+            .contains(&format!("vissue note {} -- did a thing", seat.issue)),
         "the note did not land on the held issue:\n{}",
         seat.calls()
     );
