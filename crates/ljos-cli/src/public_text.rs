@@ -1,7 +1,8 @@
 //! Whether author text may appear on a public page.
 //!
 //! The screen detects and refuses. It never rewrites: a caller that gets a
-//! class back keeps its original string and leaves the item out.
+//! class back keeps its original string and writes nothing. The handbook
+//! export and `workflow render` refuse the whole page.
 //!
 //! Each line is read through [`text_canon::canonical`], the reading every
 //! public-text screen shares: one escape layer decoded,
@@ -2964,7 +2965,7 @@ fn address_hit(prep: &Prep) -> bool {
         .iter()
         .map(|c| c.to_lowercase().next().unwrap_or(*c))
         .collect();
-    ipv4_hit(&net) || dashed_hit(&net) || ipv6_hit(&fold) || private_host(&net)
+    ipv4_hit(&net) || literal_hit(&fold) || dashed_hit(&net) || private_host(&net)
 }
 
 /// `[.]`, `(.)`, `{.}`, `\.`, `[dot]` and ` dot ` between digits read as `.`.
@@ -3013,44 +3014,87 @@ fn digits_at(chars: &[char], start: usize) -> usize {
         .count()
 }
 
-/// A number starts at a digit with no digit before it, past any dots, so
-/// `...10.0.0.5`, `e.g.10.0.0.1` and `v10.0.0.1` are read and `1.10.0.0.5`
-/// is one five-part run.
-fn number_start(chars: &[char], start: usize) -> bool {
-    if !chars.get(start).is_some_and(char::is_ascii_digit) {
-        return false;
-    }
-    let dots = chars[..start]
-        .iter()
-        .rev()
-        .take_while(|c| **c == '.')
-        .count();
-    dots >= 2
-        || !chars[..start - dots]
-            .last()
-            .is_some_and(char::is_ascii_digit)
+/// One dot-separated part of a number as `inet_aton` reads it, at
+/// `chars[start..end]`: `0x` and hex digits, a leading `0` and octal
+/// digits, or decimal digits, of any length. `value` is `None` for a bad
+/// octal digit or a value past `u64`.
+#[derive(Debug, Clone, Copy)]
+struct Part {
+    start: usize,
+    end: usize,
+    value: Option<u64>,
+    decimal: bool,
 }
 
-/// Reads `text` as `inet_aton` does: one to four parts split by dots, each a
-/// `0x` hex, a leading-zero octal or a decimal number of any length, the last
-/// part filling the bytes the others leave. A bad digit, or a part too large
-/// for its bytes, is `None`.
-fn inet_aton(text: &str) -> Option<u32> {
-    let parts: Vec<&str> = text.split('.').collect();
-    if parts.len() > 4 {
+fn radix_value(digits: &[char], radix: u32) -> Option<u64> {
+    if digits.is_empty() {
+        return None;
+    }
+    digits.iter().try_fold(0u64, |value, c| {
+        value
+            .checked_mul(u64::from(radix))?
+            .checked_add(u64::from(c.to_digit(radix)?))
+    })
+}
+
+/// The part that starts at the digit `chars[start]`. A hex part takes every
+/// hex digit after `0x`; any other part takes every decimal digit, so the
+/// part ends before a letter that is not one of its digits.
+fn part_at(chars: &[char], start: usize) -> Part {
+    let hex = chars[start] == '0'
+        && matches!(chars.get(start + 1), Some('x' | 'X'))
+        && chars.get(start + 2).is_some_and(char::is_ascii_hexdigit);
+    if hex {
+        let mut end = start + 2;
+        while chars.get(end).is_some_and(char::is_ascii_hexdigit) {
+            end += 1;
+        }
+        return Part {
+            start,
+            end,
+            value: radix_value(&chars[start + 2..end], 16),
+            decimal: false,
+        };
+    }
+    let end = start + digits_at(chars, start);
+    let digits = &chars[start..end];
+    let octal = digits.len() > 1 && digits[0] == '0';
+    Part {
+        start,
+        end,
+        value: if octal {
+            radix_value(&digits[1..], 8)
+        } else {
+            radix_value(digits, 10)
+        },
+        decimal: !octal,
+    }
+}
+
+/// The parts of the dotted run that starts at the digit `chars[start]`:
+/// each next part follows a single dot and starts with a digit.
+fn dotted_run(chars: &[char], start: usize) -> Vec<Part> {
+    let mut parts = vec![part_at(chars, start)];
+    loop {
+        let end = parts[parts.len() - 1].end;
+        if chars.get(end) == Some(&'.') && chars.get(end + 1).is_some_and(char::is_ascii_digit) {
+            parts.push(part_at(chars, end + 1));
+        } else {
+            return parts;
+        }
+    }
+}
+
+/// The address `inet_aton` reads from one to four parts: each part but the
+/// last fills one byte and the last fills the bytes left. A missing value,
+/// or a part too large for its bytes, is `None`.
+fn aton(parts: &[Part]) -> Option<u32> {
+    if parts.is_empty() || parts.len() > 4 {
         return None;
     }
     let mut value = 0u64;
     for (index, part) in parts.iter().enumerate() {
-        let (digits, radix) = match part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
-            Some(hex) => (hex, 16),
-            None if part.len() > 1 && part.starts_with('0') => (&part[1..], 8),
-            None => (*part, 10),
-        };
-        if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
-            return None;
-        }
-        let number = u64::from_str_radix(digits, radix).ok()?;
+        let number = part.value?;
         let bits = if index + 1 == parts.len() {
             8 * (4 - index)
         } else {
@@ -3064,20 +3108,21 @@ fn inet_aton(text: &str) -> Option<u32> {
     u32::try_from(value).ok()
 }
 
-/// The end of the letters, digits and dots from `start`, taking a dot only
-/// when a digit follows it.
-fn ipv4_end(chars: &[char], start: usize) -> usize {
-    let mut at = start;
-    loop {
-        while chars.get(at).is_some_and(|c| c.is_alphanumeric()) {
-            at += 1;
-        }
-        if chars.get(at) == Some(&'.') && chars.get(at + 1).is_some_and(char::is_ascii_digit) {
-            at += 1;
-        } else {
-            return at;
-        }
+/// Reads `text` as `inet_aton` does: one to four parts split by dots, each a
+/// `0x` hex, a leading-zero octal or a decimal number of any length, the last
+/// part filling the bytes the others leave. A bad digit, or a part too large
+/// for its bytes, is `None`.
+#[cfg(test)]
+fn inet_aton(text: &str) -> Option<u32> {
+    let chars: Vec<char> = text.chars().collect();
+    if !chars.first().is_some_and(char::is_ascii_digit) {
+        return None;
     }
+    let parts = dotted_run(&chars, 0);
+    if parts[parts.len() - 1].end != chars.len() {
+        return None;
+    }
+    aton(&parts)
 }
 
 fn words_before(chars: &[char], start: usize, count: usize) -> Vec<String> {
@@ -3190,34 +3235,48 @@ fn fixed_exempt(value: u32) -> bool {
     value.leading_ones() + value.trailing_zeros() == 32 || PUBLIC_RESOLVERS.contains(&octets)
 }
 
-/// A number `inet_aton` reads. A non-public quad is an address. A non-public
-/// number of one to three parts, or a bare integer, is an address when an
-/// address word, a port, `//` or `@` sits on either side of it. A public quad
-/// is an address unless it is a decimal resolver, netmask or version. A
-/// version word does not spare a non-public value.
+/// Every dotted run of numbers, each part read once as `inet_aton` reads
+/// it, so the scan is linear in the text. A run of four parts is a quad: a
+/// non-public quad is an address, and a public one is an address unless it
+/// is a decimal resolver, netmask or version. In a longer run, such as
+/// `1.10.0.0.5` or an OID, every four parts in a row are read as a quad and
+/// a non-public one is an address. A non-public run of one to three parts,
+/// or a bare integer, is an address when an address word, a port, `//` or
+/// `@` sits on either side of it. A version word does not spare a
+/// non-public value.
 fn ipv4_hit(chars: &[char]) -> bool {
-    (0..chars.len())
-        .filter(|&start| number_start(chars, start))
-        .any(|start| {
-            let end = ipv4_end(chars, start);
-            let text: String = chars[start..end].iter().collect();
-            let Some(value) = inet_aton(&text) else {
-                return false;
-            };
-            let quad = text.split('.').count() == 4;
-            let decimal = text
-                .split('.')
-                .all(|part| part.len() == 1 || !part.starts_with('0'));
-            if non_public_v4(Ipv4Addr::from(value)) {
+    let mut at = 0;
+    while at < chars.len() {
+        if !chars[at].is_ascii_digit() {
+            at += 1;
+            continue;
+        }
+        let parts = dotted_run(chars, at);
+        let start = parts[0].start;
+        let end = parts[parts.len() - 1].end;
+        let hit = match parts.len() {
+            1..=3 => aton(&parts).is_some_and(|value| {
                 // `inet_aton` of a short `0` is `0.0.0.0`. That mask is not a
                 // short private number, so a look-alike dot stays a character.
-                if !quad && value == 0 {
-                    return false;
-                }
-                return quad || port_follows(chars, end) || address_context(chars, start, end, 2);
-            }
-            quad && !(decimal && public_exempt(value, chars, start, end))
-        })
+                value != 0
+                    && non_public_v4(Ipv4Addr::from(value))
+                    && (port_follows(chars, end) || address_context(chars, start, end, 2))
+            }),
+            4 => aton(&parts).is_some_and(|value| {
+                non_public_v4(Ipv4Addr::from(value))
+                    || !(parts.iter().all(|part| part.decimal)
+                        && public_exempt(value, chars, start, end))
+            }),
+            _ => parts
+                .windows(4)
+                .any(|quad| aton(quad).is_some_and(|value| non_public_v4(Ipv4Addr::from(value)))),
+        };
+        if hit {
+            return true;
+        }
+        at = end;
+    }
+    false
 }
 
 /// A public quad that reads as a mask, a resolver or a version. A version
@@ -3286,184 +3345,212 @@ fn private_host(chars: &[char]) -> bool {
     })
 }
 
-/// The longest IPv6 text that parses: eight groups and an IPv4 tail.
-const MAX_ADDRESS: usize = 45;
+/// The longest text [`Ipv4Addr`] or [`Ipv6Addr`] parses, as in
+/// `ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255`. No longer piece of a
+/// run can be an address, so a run of any length is read in linear time.
+const MAX_LITERAL: usize = 45;
 
-fn ipv6_char(c: char) -> bool {
-    c.is_ascii_hexdigit() || matches!(c, ':' | '.' | '%')
+fn run_char(c: char) -> bool {
+    c.is_ascii_hexdigit() || matches!(c, ':' | '.')
 }
 
-/// A letter or digit. `_` is a boundary, as it is for an IPv4 literal.
-fn word_char(c: char) -> bool {
-    c.is_alphanumeric()
+/// A letter, digit or `_`: a character of a Rust identifier.
+fn path_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
-/// Whether the text contains an IPv6 address, with or without a zone.
+/// Whether the text holds an address literal that the standard parsers read.
 ///
-/// Each maximal run of hex digits, colons, dots and `%` is scanned. A
-/// candidate starts at the run and after every non-hex mark in it: a `.`,
-/// a `%`, or a `:`. A zone
-/// suffix is stripped before parsing. Letter case does not change the
-/// parse. [`non_public`] is refused with no path exemption. A Rust path or
-/// Title Case words spare only an address that is not in that range.
-fn ipv6_hit(chars: &[char]) -> bool {
+/// Each maximal run of hex digits, colons and dots is cut at every start and
+/// every end up to [`MAX_LITERAL`] apart, and each piece that [`Ipv4Addr`]
+/// or [`Ipv6Addr`] parses is tried, so no character before or after a
+/// literal can hide it. A run that cannot hold an address (fewer than two
+/// colons and fewer than three dots) is skipped.
+fn literal_hit(chars: &[char]) -> bool {
     let mut index = 0;
     while index < chars.len() {
-        if !ipv6_char(chars[index]) {
+        if !run_char(chars[index]) {
             index += 1;
             continue;
         }
         let start = index;
-        while index < chars.len() && ipv6_char(chars[index]) {
+        while index < chars.len() && run_char(chars[index]) {
             index += 1;
         }
-        if window_is_ipv6(chars, start, index) {
+        if literal_run_hit(chars, start, index) {
             return true;
         }
     }
     false
 }
 
-fn window_is_ipv6(chars: &[char], start: usize, end: usize) -> bool {
-    (start..end).any(|at| candidate_at(chars, start, at) && candidate_is_ipv6(chars, at, end))
-}
-
-/// The run start and the character after `.`, `%` or `:`.
-fn candidate_at(chars: &[char], start: usize, at: usize) -> bool {
-    if at == start {
-        return true;
-    }
-    matches!(chars[at - 1], '.' | '%' | ':')
-}
-
-fn candidate_is_ipv6(chars: &[char], at: usize, end: usize) -> bool {
-    for stop in at + 2..=end.min(at + MAX_ADDRESS) {
-        if stop < end && chars[stop] == ':' {
-            if chars.get(stop + 1) == Some(&':') {
-                continue;
-            }
-        } else if stop < end && chars[stop] != '.' && chars[stop] != '%' {
-            continue;
-        }
-        let raw: String = chars[at..stop].iter().collect();
-        let bare = raw.split('%').next().unwrap_or(raw.as_str());
-        if bare.matches(':').count() < 2 {
-            continue;
-        }
-        let Ok(address) = bare.parse::<Ipv6Addr>() else {
-            continue;
-        };
-        if bare == "::" && (lone_double_colon(chars, at) || rust_path(&chars[at + 2..])) {
-            continue;
-        }
-        if non_public(IpAddr::V6(address)) {
-            return true;
-        }
-        if stop == end && !ipv6_end_ok(chars, stop) {
-            continue;
-        }
-        if title_case_path(bare) {
-            continue;
-        }
-        let bare_end = at + bare.chars().count();
-        if rust_path_literal(chars, at, bare_end) {
-            continue;
-        }
-        if bare.chars().any(|c| c.is_ascii_digit()) || digit_free_address(chars, at, bare_end) {
-            return true;
-        }
-    }
-    false
-}
-
-/// A `::` with no hex digit on either side inside the same token is not an
-/// address (`term :: description`, `` `::` ``). `=::` is unspecified.
-fn lone_double_colon(chars: &[char], at: usize) -> bool {
-    if at > 0 && chars[at - 1] == '=' {
+fn literal_run_hit(chars: &[char], start: usize, end: usize) -> bool {
+    let run: String = chars[start..end].iter().collect();
+    if run.matches(':').count() < 2 && run.matches('.').count() < 3 {
         return false;
     }
-    let mut left = at;
-    while left > 0 && !chars[left - 1].is_whitespace() {
-        left -= 1;
-    }
-    let mut right = at + 2;
-    while right < chars.len() && !chars[right].is_whitespace() {
-        right += 1;
-    }
-    !chars[left..right].iter().any(|c| c.is_ascii_hexdigit())
-}
-
-fn title_case_path(text: &str) -> bool {
-    text.split_once("::").is_some_and(|(left, right)| {
-        [left, right].into_iter().all(|word| {
-            word.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
-                && word.as_bytes()[1..].iter().all(u8::is_ascii_lowercase)
+    let octets = colon_octet_run(run.trim_end_matches('.'));
+    (0..run.len()).any(|from| {
+        (from + 2..=run.len().min(from + MAX_LITERAL)).any(|to| {
+            if octets {
+                run[from..to].parse::<Ipv6Addr>().is_ok_and(non_public_v6)
+            } else {
+                piece_refused(chars, start + from, start + to, &run[from..to])
+            }
         })
     })
 }
 
-/// A literal with no digit is an address when it opens or closes with `::`
-/// or every group is four or more digits (`dead::beef`). An edge `::` before
-/// `<`, `{` or a name and `(` is a Rust path, and a lone `::` between spaces
-/// is a separator (`term :: description`). Any other edge `::` is an address.
-fn digit_free_address(chars: &[char], at: usize, stop: usize) -> bool {
-    let text: String = chars[at..stop].iter().collect();
-    let spaced = at > 0 && chars[at - 1] == ' ' && chars.get(stop) == Some(&' ');
-    if text == "::" && spaced {
-        return false;
-    }
-    let edge = |colons: usize| !rust_path(&chars[colons + 2..]);
-    let groups: Vec<&str> = text.split(':').filter(|group| !group.is_empty()).collect();
-    (text.starts_with("::") && edge(at))
-        || (text.ends_with("::") && edge(stop - 2))
-        || (groups.len() >= 2 && groups.iter().all(|group| group.len() >= 4))
+/// Six or more two-digit hex groups split by single colons, as a MAC
+/// address or a key fingerprint is written. A sentence's closing dot after
+/// the last group is not part of it.
+fn colon_octet_run(run: &str) -> bool {
+    !run.contains("::")
+        && run.split(':').count() >= 6
+        && run
+            .split(':')
+            .all(|piece| piece.len() == 2 && piece.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
-fn rust_path(after: &[char]) -> bool {
-    let name = after.iter().take_while(|c| ident_char(**c)).count();
-    match after.get(name) {
-        Some('<' | '{') => name == 0,
-        Some('(') => name > 0,
+/// One parsed piece of a run, at `chars[at..stop]`.
+///
+/// A non-public address is refused, and no path or version rule spares it.
+/// The one exception is the unspecified `::` standing alone, which every
+/// Rust path contains ([`lone_double_colon`]). A public IPv6 piece that
+/// starts and ends at a hex-word edge is an address when it has a digit or
+/// reads as one ([`digit_free_address`]), unless its `::` is a Rust path
+/// ([`rust_path`]). A public dotted quad is left to [`ipv4_hit`], which knows
+/// versions, resolvers and netmasks.
+fn piece_refused(chars: &[char], at: usize, stop: usize, text: &str) -> bool {
+    if !text.contains(':') {
+        return text.parse::<Ipv4Addr>().is_ok_and(non_public_v4);
+    }
+    let Ok(address) = text.parse::<Ipv6Addr>() else {
+        return false;
+    };
+    let hex_or_colon = |c: Option<&char>| c.is_some_and(|c| c.is_ascii_hexdigit() || *c == ':');
+    let before = at.checked_sub(1).and_then(|left| chars.get(left));
+    let after = chars.get(stop);
+    if text == "::" {
+        return !hex_or_colon(before) && !hex_or_colon(after) && !lone_double_colon(chars, at);
+    }
+    if non_public(IpAddr::V6(address)) {
+        return true;
+    }
+    let hex_edge = |c: Option<&char>| c.is_some_and(char::is_ascii_hexdigit);
+    if hex_edge(before) || hex_edge(after) {
+        return false;
+    }
+    let path = text
+        .find("::")
+        .is_some_and(|colons| rust_path(chars, at + colons));
+    (text.chars().any(|c| c.is_ascii_digit()) || digit_free_address(text)) && !path
+}
+
+/// The separators after which a lone `::` is punctuation, as in
+/// `term :: description`, `x/::`, `` `::` `` and Org's `~::~`.
+const LONE_COLONS_AFTER: &[char] = &['/', '(', '[', ',', '\'', '"', '`', '~'];
+
+/// A `::` with no hex digit, colon or dot on either side is the unspecified
+/// address, and it is spared in three places: after the start of the line,
+/// a space or one of [`LONE_COLONS_AFTER`]; as a Rust path ([`rust_path`]);
+/// and after a word with a letter outside `a`-`f` when a space or the end
+/// follows, as in the Org list tag `term:: description`. After `=`, a dot or
+/// any other mark it is refused, so `addr=::` is.
+fn lone_double_colon(chars: &[char], at: usize) -> bool {
+    let Some(&before) = at.checked_sub(1).and_then(|left| chars.get(left)) else {
+        return true;
+    };
+    if before.is_whitespace() || LONE_COLONS_AFTER.contains(&before) {
+        return true;
+    }
+    if rust_path(chars, at) {
+        return true;
+    }
+    let word = left_word(chars, at);
+    chars.get(at + 2).is_none_or(|c| c.is_whitespace())
+        && chars[word..at].iter().any(|c| !c.is_ascii_hexdigit())
+}
+
+/// Where the identifier that ends at `end` starts.
+fn left_word(chars: &[char], end: usize) -> usize {
+    let mut left = end;
+    while left > 0 && path_char(chars[left - 1]) {
+        left -= 1;
+    }
+    left
+}
+
+/// Whether the `::` at `chars[at..at + 2]` is a Rust path separator.
+///
+/// The left side is a closing `>` of generics, or an identifier with a letter
+/// that a single `:` does not precede. The right side starts with `<`, `{`
+/// or an uppercase letter, or is a lowercase name that a `(` follows or that
+/// sits in a path with a character other than a hex digit. So `bb8::{Pool}`,
+/// `d3::<T>`, `f64::E`, `dead::Beef`, `std::fmt` and `<T>::bad()` are paths,
+/// and `dead::beef` and `ip:dead::beef` are not.
+fn rust_path(chars: &[char], at: usize) -> bool {
+    let left = left_word(chars, at);
+    let left_ok = if left == at {
+        at > 0 && chars[at - 1] == '>'
+    } else {
+        chars[left..at].iter().any(|c| c.is_alphabetic())
+            && !(left > 0 && chars[left - 1] == ':' && (left < 2 || chars[left - 2] != ':'))
+    };
+    if !left_ok {
+        return false;
+    }
+    let right = at + 2;
+    match chars.get(right) {
+        None => true,
+        Some('<' | '{') => true,
+        Some(c)
+            if c.is_whitespace()
+                || matches!(
+                    c,
+                    ')' | ']' | '}' | ',' | '.' | ';' | '!' | '?' | '\'' | '"' | '`'
+                ) =>
+        {
+            true
+        }
+        Some(c) if c.is_uppercase() => true,
+        Some(c) if c.is_alphabetic() => {
+            let mut end = right;
+            while end < chars.len() && path_char(chars[end]) {
+                end += 1;
+            }
+            chars.get(end) == Some(&'(') || path_has_non_hex(chars, left, end)
+        }
         _ => false,
     }
 }
 
-fn rust_path_literal(chars: &[char], at: usize, stop: usize) -> bool {
-    if chars.get(stop.saturating_sub(2)..stop) == Some(&[':', ':']) && rust_path(&chars[stop..]) {
-        return true;
+/// Whether the path that `chars[from..to]` belongs to, read on through `::`
+/// on both sides, has a character other than a hex digit and `::`.
+fn path_has_non_hex(chars: &[char], from: usize, to: usize) -> bool {
+    let mut start = from;
+    while start >= 2 && chars[start - 2..start] == [':', ':'] {
+        start = left_word(chars, start - 2);
     }
-    if rust_path_token(chars, at, stop) {
-        return true;
+    let mut end = to;
+    while chars.get(end..end + 2) == Some(&[':', ':']) {
+        end += 2;
+        while end < chars.len() && path_char(chars[end]) {
+            end += 1;
+        }
     }
-    let text: String = chars[at..stop].iter().collect();
-    text.split_once("::").is_some_and(|(left, right)| {
-        left.chars().any(|c| c.is_ascii_digit())
-            && right.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-    })
+    chars[start..end]
+        .iter()
+        .any(|c| *c != ':' && !c.is_ascii_hexdigit())
 }
 
-fn rust_path_token(chars: &[char], at: usize, stop: usize) -> bool {
-    let mut left = at;
-    while left > 0 && (ident_char(chars[left - 1]) || chars[left - 1] == ':') {
-        left -= 1;
-    }
-    let mut right = stop;
-    while right < chars.len() && (ident_char(chars[right]) || chars[right] == ':') {
-        right += 1;
-    }
-    let text: String = chars[left..right].iter().collect();
-    let parts: Vec<&str> = text.split("::").collect();
-    parts.len() >= 2
-        && parts
-            .iter()
-            .all(|part| !part.is_empty() && part.chars().all(ident_char))
-}
-
-fn ipv6_end_ok(chars: &[char], stop: usize) -> bool {
-    match chars.get(stop) {
-        None | Some('%') => true,
-        Some(c) => !word_char(*c),
-    }
+/// A public IPv6 piece with no digit is an address when it opens or closes
+/// with `::` or has two or more groups of four hex letters (`dead::beef`).
+fn digit_free_address(text: &str) -> bool {
+    let groups: Vec<&str> = text.split(':').filter(|group| !group.is_empty()).collect();
+    text.starts_with("::")
+        || text.ends_with("::")
+        || (groups.len() >= 2 && groups.iter().all(|group| group.len() >= 4))
 }
 
 // ---------------------------------------------------------------------------
@@ -4194,8 +4281,33 @@ mod tests {
             "v1..10.0.0.1",
             "2..192.168.1.1",
             "1...10.0.0.1",
+            "1.10.0.0.5",
+            "build 1.10.0.0.5",
         ] {
             assert_all_screens_refuse(text);
+        }
+    }
+
+    #[test]
+    fn a_letter_or_hex_digit_after_a_literal_does_not_hide_it() {
+        for text in [
+            "10.0.0.1x",
+            "192.168.1.1s",
+            "127.0.0.1th",
+            "10.0.0.1e",
+            "10.0.0.1ABC",
+            "fc00::abcdabc",
+            "fd00::1234abc",
+            "fe80::1beefcafe",
+            "0177.0.0.1x",
+            "curl 0x7f000001g/",
+            "ping 127.1th",
+        ] {
+            assert_all_screens_refuse(text);
+        }
+        let screen = bare();
+        for text in ["a 0x7fff5fbff8a0 pointer", "took 127.5ms", "1.5x faster"] {
+            assert_eq!(classify(text, &screen), None, "{text:?}");
         }
     }
 
@@ -4208,6 +4320,8 @@ mod tests {
             "use ab12::{A}",
             "b2::B",
             "f64::E",
+            "use dead::Beef;",
+            "crate::de::ad1",
         ] {
             assert_eq!(classify(text, &screen), None, "{text:?}");
             assert!(crate::scrub::scan_body(text, 1).is_empty(), "{text:?}");
@@ -4338,7 +4452,6 @@ mod tests {
             "at 10.05",
             "10.00",
             "Ubuntu 10.04.1",
-            "1.10.0.0.5",
             "term :: description",
             "- term ::",
             "- Abc ::",
@@ -4452,7 +4565,6 @@ mod tests {
             "see section 3.2.1.",
             "version 3.2.1.4",
             "v1.10.0.0",
-            "1.10.0.0.5",
             "2026-11-23",
             "2026.11.23",
             "the date is 2026.11.23.",

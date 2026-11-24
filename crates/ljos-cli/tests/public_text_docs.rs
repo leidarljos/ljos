@@ -54,6 +54,9 @@ const QUOTED_SHAPES: &[&str] = &[
     "addr=::",
     "0x7f",
     "127.1",
+    "0177.0.0.1",
+    "1.012.0.0.1",
+    "1.10.0.0.5",
     "alice",
     "@example.com",
     "GITHUB_TOKEN = x",
@@ -218,15 +221,13 @@ fn address_and_workflow_trust_docs_match_the_rules() {
     let workflow = std::fs::read_to_string(root.join("orgmode/howto-workflow.org")).unwrap();
     let workflow_rst = std::fs::read_to_string(root.join("source/howto-workflow.rst")).unwrap();
     assert!(
-        handbook.contains(
-            "A run longer than 64 characters with a\nhex digit and either two colons or three dots"
-        ),
+        handbook
+            .contains("A piece is at most 45 characters, the\nlongest address the parsers read"),
         "{handbook}"
     );
     assert!(
-        handbook_rst.contains(
-            "A run longer than 64 characters with a\nhex digit and either two colons or three dots"
-        ),
+        handbook_rst
+            .contains("A piece is at most 45 characters, the\nlongest address the parsers read"),
         "{handbook_rst}"
     );
     assert!(

@@ -3510,6 +3510,21 @@ fn render_refuses_a_hidden_quad_and_a_var_that_is_not_a_pair() {
     ]);
     assert!(err.contains("address"), "{err}");
     assert!(!out.exists(), "a refused quad wrote {}", out.display());
+    for value in ["version=10.0.0.1x", "version=fd00::1234abc"] {
+        let err = board.fail(&[
+            "workflow",
+            "render",
+            "release",
+            "--file",
+            path.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--var",
+            value,
+        ]);
+        assert!(err.contains("address"), "{value}: {err}");
+        assert!(!out.exists(), "{value} wrote {}", out.display());
+    }
     let err = board.fail(&[
         "workflow",
         "render",

@@ -222,39 +222,59 @@ private IPv4, link-local IPv4, IPv6 link-local =fe80::/10=, unique local
 =fc00::/7=, site-local =fec0::/10=, multicast, the documentation ranges
 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 and =2001:db8::/32=,
 benchmarking, carrier-grade NAT =100.64.0.0/10=, and the IPv4-mapped or
-IPv4-compatible form of any of those. A zone suffix after =%= is stripped
-before the address is read. A Rust path, a version string or Title Case
-words spare a candidate only when that test is false, so =Face::Fade= and
-=Dead::Beef= stay, and =fd00:Beef::1=, =fe80::1= and =2001:db8::Dead= are
-refused. Letter case does not change the parse.
-A candidate starts at the beginning of a run of hex digits, colons, dots
-and a zone mark, and after every separator in that run. So =a.fe80::1=,
-=cafe.fd00::1=, =crate::fd00::1= and =add.fe80::1%eth0= are refused.
-A non-public address is refused before a word-edge or path exemption is
-considered. A double colon directly before =<=, ={= or a name and =(= is a
-Rust path when the parsed address is public, so =Face::<T>::new()=,
-=use Face::{A, B}= and =use bb8::{Pool}= stay.
-A lone ~::~ with no hex digit on either side inside the same token is not
-an address, so =- term ::=, =Notes ::=, the =`::`= token and
-=term :: description= stay. ~addr=::~, ~ip=::~, =::a= between backticks and
-~addr=::1~ are refused. An IPv4
-address is read as the C library's =inet_aton= reads it: one to four parts,
-each hex after =0x=, octal after a leading zero, or decimal, of any length,
-with the last part filling the bytes left. Every private dotted quad is
-refused. A public dotted quad is refused unless it is a resolver, a netmask
-or a version-context quad written in decimal. A netmask is ones then zeros,
-as in 255.255.240.0, so 255.0.255.0 is refused. Version context is a
-version word before or after the quad, or a =v= glued to it, as in
-=v1.10.0.0=. A private dotted quad is refused even in version context, so
-=v10.0.0.1= is refused. A private number of one to three parts, or a bare integer,
+IPv4-compatible form of any of those. A zone suffix after =%= does
+not hide the address. Letter case does not change the parse.
+The screen reads every run of hex digits, colons and dots, cuts it at every
+start and every end, and asks the standard IPv4 and IPv6 parsers about each
+piece. No character before or after a literal hides it, so =10.0.0.1x=,
+=a10.0.0.1=, =1.10.0.0.5=, =fd00::1234abc=, =a.fe80::1=, =crate::fd00::1=
+and =add.fe80::1%eth0= are refused. A piece is at most 45 characters, the
+longest address the parsers read, so a run of any length is read piece by
+piece, and an OID, a dot leader or a dotted hex dump is refused only when a
+piece of it is an address. Six or more two-digit hex groups split by single
+colons, as a MAC address or a key fingerprint is written, are refused only
+for a non-public piece, with or without a full stop after them. A piece in a non-public range
+is refused, and no path, version or word rule spares it, so =fd00:Beef::1=,
+=fe80::1=, =2001:db8::Dead= and =v10.0.0.1= are refused.
+The one exception is a lone double colon with no hex digit, colon or dot
+touching it. It is punctuation at the start of a line or after a space, a
+slash, an opening parenthesis or bracket, a comma, a quote, a backtick or a
+tilde, as in =term :: description=, =Notes ::= and =x/::=. It is also
+punctuation after a word with a letter other than a to f when a space or the
+end of the line follows, as in =term:: description=, and in a Rust path.
+After an equals sign or a dot it is the unspecified address, so
+~addr=::~ and ~ip=::~ are refused.
+A public IPv6 piece is refused when it has a digit, or when it has none and
+opens or closes with a double colon or has two groups of four hex letters,
+as =dead::beef= and =::a= do. A Rust path spares it. The left side of a path
+is an identifier with a letter, or the =>= that closes generics. The right
+side starts with =<=, ={= or a capital letter, or is a lowercase name that
+=(= follows or that sits in a path with a letter other than a to f. So
+=Face::Fade=, =dead::Beef=, =f64::E=, =d3::<T>=, =use bb8::{Pool}=,
+=std::fmt= and =Face::<T>::new()= stay. An IPv4
+address is read as the C library's =inet_aton= reads it. Each run of numbers
+joined by single dots is cut into parts, and each part is read once: hex
+after =0x=, octal after a leading zero, or decimal, of any length. A part
+ends before a letter that is not one of its digits, so =0177.0.0.1x= is
+read. A run of four parts is a quad, and in a longer run every four parts
+in a row are read as a quad, so =1.012.0.0.1=, =9.0x0a.0.0.1= and
+=1.10.0.0.5= are refused. Every private quad is refused, in any run and
+even in version context, so =v10.0.0.1= is refused. A run of exactly four
+parts that is public is refused unless it is a resolver, a netmask or a
+version-context quad written in decimal. A netmask is ones then zeros, as
+in 255.255.240.0, so 255.0.255.0 is refused. Version context is a version
+word before or after the quad, or a =v= glued to it, as in =v1.10.0.0=.
+Four public parts inside a longer run, as in the OID =1.3.6.1.4.1.311=, stay.
+A private number of one to three parts, read with the last part filling the
+bytes left, or a bare integer,
 is an address only beside an address word, a port, =//= or =@=, as in
 =ip 10.1=, =ping 167772161= or =127.1 host=. The address word, =//= and =@=
 may come before or after the number, so =10.1@= and =10.1//= are refused.
 A letter directly before a private dotted quad does not hide it, so
 =x10.0.0.1= is refused. A leading zero does not make it an address,
 so =10.05=, =10.00= and =Ubuntu 10.04 LTS= stay. A number may start after
-a dot that follows a letter, so =e.g.10.0.0.1= is refused. A run of five
-dotted numbers, such as =1.10.0.0.5=, is a version and not an address. Addresses are
+a dot that follows a letter, so =e.g.10.0.0.1= is refused.
+Addresses are
 found within one line. An address broken across lines on purpose is not
 caught. An email address is refused, and so is one written with the at sign
 spelled out in words, brackets or parentheses.
