@@ -149,17 +149,7 @@ impl Journal {
 }
 
 fn state_root() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".local/state"))
-        })
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos")
-        .join("onboard")
+    crate::state_base_dir().join("onboard")
 }
 
 fn manifest_path() -> PathBuf {

@@ -557,13 +557,7 @@ fn push_mode() -> bool {
 }
 
 fn log_path() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos")
-        .join("mail")
-        .join("wake.log")
+    crate::state_base_dir().join("mail").join("wake.log")
 }
 
 fn log(line: &str) {

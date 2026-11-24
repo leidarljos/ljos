@@ -646,9 +646,7 @@ fn first_prompt_start_line(runner: &str, raw: &str, input: &str) -> Option<Strin
     if sid.is_empty() {
         return None;
     }
-    let state = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/state")))?;
+    let state = crate::absolute_state_base()?;
     let mark = state.join("ljos/openhands-started").join(&sid);
     if mark.exists() {
         return None;

@@ -85,14 +85,7 @@ fn declared_tools() -> Vec<Tool> {
 /// and keeps its session.
 #[must_use]
 pub fn home(name: &str) -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos")
-        .join("personas")
-        .join(name)
+    crate::state_base_dir().join("personas").join(name)
 }
 
 /// The script a persona's pane runs: the runner as the seat named after

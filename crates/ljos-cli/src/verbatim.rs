@@ -38,12 +38,7 @@ fn id_for(text: &str) -> String {
 }
 
 fn dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos")
-        .join("verbatim")
+    crate::state_base_dir().join("verbatim")
 }
 
 /// Store `atom` with its text unchanged and `warning` as the prose label.

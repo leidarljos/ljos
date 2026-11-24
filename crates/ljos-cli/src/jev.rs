@@ -1651,13 +1651,7 @@ pub fn audit_reason(a: &Audit, test_ran: bool) -> Option<String> {
 }
 
 fn state_dir() -> Option<PathBuf> {
-    Some(
-        std::env::var_os("XDG_STATE_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?
-            .join("ljos"),
-    )
+    Some(crate::absolute_state_base()?.join("ljos"))
 }
 
 /// The judge log, one JSON object per line. Missing file is an empty log.

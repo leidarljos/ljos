@@ -186,12 +186,7 @@ pub fn facts(transcript: &str, kept: &BTreeSet<String>) -> Vec<String> {
 }
 
 fn ledger() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
-        })?;
-    Some(base.join("ljos").join("extracted"))
+    Some(crate::absolute_state_base()?.join("ljos").join("extracted"))
 }
 
 /// The normalized forms already kept on this machine.

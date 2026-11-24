@@ -330,14 +330,18 @@ pub fn write_stub(path: &Path) -> std::io::Result<()> {
 }
 
 fn xdg(var: &str, under_home: &str) -> Option<PathBuf> {
-    std::env::var_os(var)
-        .filter(|v| !v.is_empty())
+    let named = std::env::var_os(var)
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|v| !v.is_empty())
-                .map(|h| PathBuf::from(h).join(under_home))
-        })
+        .filter(|path| path.is_absolute());
+    if let Some(named) = named {
+        return Some(named);
+    }
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .map(|home| home.join(under_home))
 }
 
 /// The directories the seat and its guard write under the XDG homes.

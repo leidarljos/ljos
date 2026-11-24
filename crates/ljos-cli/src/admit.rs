@@ -113,12 +113,7 @@ fn origin_cache() -> &'static Mutex<BTreeMap<String, bool>> {
 }
 
 fn proposals_path() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos")
-        .join("proposals.jsonl")
+    crate::state_base_dir().join("proposals.jsonl")
 }
 
 /// The marker that says no proposal is left open to import.
