@@ -24598,11 +24598,11 @@ pub fn plain_server_fault(err: &anyhow::Error) -> Option<String> {
 /// One line naming the program that is not on `PATH` and the install.
 fn missing_tool_line(text: &str) -> String {
     const TOOLS: &[(&str, &str)] = &[
-        ("vissue", "cargo install --locked vissue-cli"),
-        ("claimdag", "cargo install --locked claimdag-cli"),
-        ("deedar", "cargo install --locked deedar-cli"),
-        ("packsetd", "cargo install --locked packset"),
-        ("packset", "cargo install --locked packset"),
+        ("vissue", RELEASE_INSTALL_COMMAND),
+        ("claimdag", RELEASE_INSTALL_COMMAND),
+        ("deedar", RELEASE_INSTALL_COMMAND),
+        ("packsetd", RELEASE_INSTALL_COMMAND),
+        ("packset", RELEASE_INSTALL_COMMAND),
         ("ljos-policyd", "cargo install --locked ljos-policyd"),
         ("ljos-consensus", "cargo install --locked ljos-consensus"),
         ("ljos-hud", "cargo install --locked ljos-hud"),
@@ -34754,6 +34754,41 @@ const SEAT_BINS: &[(&str, &str)] = &[
     ("landscape", "landscape"),
 ];
 
+/// Sibling programs installed together by `install.sh`. A missing one
+/// names that install rather than an unpinned `cargo install`.
+const INSTALLER_SIBLINGS: &[&str] = &[
+    "vissue",
+    "vissue-mcp",
+    "deedar",
+    "claimdag",
+    "packset",
+    "packsetd",
+    "packset-embed",
+    "packset-mcp",
+];
+
+fn installer_sibling(bin: &str) -> bool {
+    INSTALLER_SIBLINGS.contains(&bin)
+}
+
+/// The releases `install.sh` installs by default, one `name version` per line.
+const RELEASE_PIN: &str = include_str!("../../../.github/release-pin");
+
+/// The version `install.sh` pins for `bin`. `vissue-mcp` ships in the
+/// vissue archive, so it follows vissue's pin. packset is not pinned:
+/// the installer takes its latest release.
+fn release_pin(bin: &str) -> Option<&'static str> {
+    let name = if bin == "vissue-mcp" { "vissue" } else { bin };
+    RELEASE_PIN
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .find_map(|line| {
+            let (pinned, version) = line.split_once(char::is_whitespace)?;
+            (pinned == name).then(|| version.trim())
+        })
+}
+
 /// First `N.N.N` in a `--version` line.
 #[must_use]
 pub fn parse_semver(text: &str) -> Option<&str> {
@@ -36244,7 +36279,8 @@ fn seat_binary_row() -> Habitat {
 
 /// A binary on PATH answers even when crates.io is ahead. Sitting refuses
 /// a missing required habitat, not a stale one. Behind and ahead are both
-/// said; a registry answer read from the day cache says so.
+/// said; a registry answer read from the day cache says so. A sibling at
+/// the release `install.sh` pins is not behind, and the row says so.
 fn bin_health(path: &str, have: Option<&str>, latest: Option<&CrateVersion>) -> (String, bool) {
     use std::cmp::Ordering;
     let ver = have.unwrap_or("?");
@@ -36256,13 +36292,21 @@ fn bin_health(path: &str, have: Option<&str>, latest: Option<&CrateVersion>) -> 
     } else {
         "crates.io"
     };
+    let bin = Path::new(path)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or(path);
+    let pinned = have
+        .zip(release_pin(bin))
+        .is_some_and(|(v, pin)| cmp_semver(v, pin) == Some(Ordering::Equal));
     let word = match have.and_then(|v| cmp_semver(v, &cr.version)) {
-        Some(Ordering::Less) => "behind ",
+        Some(Ordering::Less) if !pinned => "behind ",
         Some(Ordering::Greater) => "ahead of ",
         _ => "",
     };
+    let note = if pinned { ", pinned by install.sh" } else { "" };
     (
-        format!("{path}  {ver}  {word}{source} {}", cr.version),
+        format!("{path}  {ver}  {word}{source} {}{note}", cr.version),
         true,
     )
 }
@@ -36427,6 +36471,10 @@ pub fn doctor_seat() -> Vec<Habitat> {
             (None, _, _) if *bin == "landscape" => (
                 "not on PATH; install it from https://github.com/leidarljos/landscape."
                     .to_string(),
+                false,
+            ),
+            (None, _, _) if installer_sibling(bin) => (
+                format!("not on PATH, so run `{RELEASE_INSTALL_COMMAND}`."),
                 false,
             ),
             (None, _, Some(cr)) => (
@@ -36874,9 +36922,13 @@ fn habitat_down_state(name: &str, err: &anyhow::Error) -> String {
 /// on `PATH`. `None` for any other refusal.
 fn missing_bin_install(state: &str) -> Option<String> {
     SEAT_BINS.iter().find_map(|(bin, crate_name)| {
-        state
-            .contains(&format!("{bin} not on PATH"))
-            .then(|| format!("cargo install --locked {crate_name}"))
+        state.contains(&format!("{bin} not on PATH")).then(|| {
+            if installer_sibling(bin) {
+                RELEASE_INSTALL_COMMAND.to_string()
+            } else {
+                format!("cargo install --locked {crate_name}")
+            }
+        })
     })
 }
 
@@ -88739,11 +88791,11 @@ lesson, due yesterday, seat ada
             version: "0.9.5".into(),
             cached: false,
         };
-        let (state, ok) = super::bin_health("/bin/packsetd", Some("0.9.2"), Some(&latest));
+        let (state, ok) = super::bin_health("/bin/ljos-policyd", Some("0.9.2"), Some(&latest));
         assert!(ok, "{state}");
         assert!(state.contains("behind crates.io 0.9.5"), "{state}");
         let rows = vec![Habitat {
-            name: "packsetd",
+            name: "ljos-policyd",
             state,
             ok,
         }];
@@ -88751,6 +88803,42 @@ lesson, due yesterday, seat ada
             healthy(&rows),
             "sitting must not refuse a stale but answering bin"
         );
+    }
+
+    #[test]
+    fn only_a_sibling_at_its_install_pin_is_not_called_behind() {
+        let latest = super::CrateVersion {
+            version: "9.9.9".into(),
+            cached: true,
+        };
+        for bin in ["vissue", "vissue-mcp", "claimdag", "deedar"] {
+            let pin = super::release_pin(bin).unwrap_or_else(|| panic!("no pin for {bin}"));
+            let path = format!("/home/ada/.local/bin/{bin}");
+            let (state, ok) = super::bin_health(&path, Some(pin), Some(&latest));
+            assert!(ok, "{bin}: {state}");
+            assert_eq!(
+                state,
+                format!("{path}  {pin}  crates.io (cached) 9.9.9, pinned by install.sh"),
+                "{bin}"
+            );
+            let (older, _) = super::bin_health(&path, Some("0.0.1"), Some(&latest));
+            assert!(
+                older.contains("behind crates.io (cached) 9.9.9"),
+                "{bin}: {older}"
+            );
+            assert!(!older.contains("pinned"), "{bin}: {older}");
+        }
+        for bin in ["packset", "packsetd", "packset-embed", "packset-mcp"] {
+            assert_eq!(super::release_pin(bin), None, "{bin}");
+            let path = format!("/home/ada/.local/bin/{bin}");
+            let (state, ok) = super::bin_health(&path, Some("0.18.2"), Some(&latest));
+            assert!(ok, "{bin}: {state}");
+            assert!(
+                state.contains("behind crates.io (cached) 9.9.9"),
+                "{bin}: {state}"
+            );
+            assert!(!state.contains("pinned"), "{bin}: {state}");
+        }
     }
 
     #[test]

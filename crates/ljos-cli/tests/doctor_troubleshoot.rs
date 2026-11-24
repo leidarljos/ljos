@@ -319,16 +319,67 @@ fn doctor_names_the_install_when_a_habitat_binary_is_missing() {
     );
     assert_eq!(out.status.code(), Some(1), "{text}");
     assert!(
-        text.contains("no\tdeedar\t")
-            && text.contains("so run `cargo install --locked deedar-cli`."),
+        text.contains(&format!(
+            "no\tdeedar\tnot on PATH, so run `{}`.\n",
+            ljos_cli::RELEASE_INSTALL_COMMAND
+        )),
         "{text}"
     );
     assert!(
-        text.contains(
-            "info\tdeeds\tdeedar not on PATH, so run `cargo install --locked deedar-cli`.\n"
-        ),
+        text.contains(&format!(
+            "info\tdeeds\tdeedar not on PATH, so run `{}`.\n",
+            ljos_cli::RELEASE_INSTALL_COMMAND
+        )),
         "{text}"
     );
+}
+
+/// The troubleshooting page copies the missing-sibling rows doctor prints,
+/// so each names the release install. The memory row keeps its own line.
+#[test]
+fn the_troubleshooting_page_names_the_release_install_for_a_missing_sibling() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let install = format!("so run `{}`.", ljos_cli::RELEASE_INSTALL_COMMAND);
+    for rel in [
+        "docs/orgmode/howto-troubleshoot.org",
+        "docs/source/howto-troubleshoot.rst",
+    ] {
+        let body = std::fs::read_to_string(root.join(rel)).unwrap();
+        let rows: Vec<String> = body
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|line| line.contains(" not on PATH, "))
+            .filter(|line| {
+                [
+                    "packset",
+                    "packsetd",
+                    "deedar",
+                    "tickets",
+                    "claim graph",
+                    "deeds",
+                ]
+                .iter()
+                .any(|name| {
+                    line.starts_with(&format!("no {name} "))
+                        || line.starts_with(&format!("info {name} "))
+                })
+            })
+            .collect();
+        assert_eq!(rows.len(), 6, "{rel}: {rows:#?}");
+        for row in rows {
+            assert!(row.ends_with(&install), "{rel}: {row}");
+        }
+        for crate_name in ["deedar-cli", "vissue-cli", "claimdag-cli"] {
+            assert!(
+                !body.contains(&format!("cargo install --locked {crate_name}")),
+                "{rel} still names {crate_name}"
+            );
+        }
+        assert!(
+            body.contains("packset is not on PATH, so run `cargo install --locked packset`."),
+            "{rel}: the memory row"
+        );
+    }
 }
 
 #[test]
