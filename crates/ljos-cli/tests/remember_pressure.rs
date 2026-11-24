@@ -250,9 +250,25 @@ fn json_for_one_queued_claim_is_one_document() {
     assert!(out.status.success(), "{said}");
     let claim: serde_json::Value =
         serde_json::from_str(&stdout).unwrap_or_else(|err| panic!("{err}\n{said}"));
-    assert_eq!(claim["queued"], true, "{said}");
+    for (key, want) in [
+        ("queued", serde_json::json!(true)),
+        ("kind", serde_json::json!("lesson")),
+        ("text", serde_json::json!("Fire the kiln before dusk.")),
+    ] {
+        assert_eq!(claim[key], want, "{key}\n{said}");
+    }
+    assert!(claim.get("prose").is_some(), "{said}");
+    assert!(claim.get("id").is_none(), "{said}");
     assert!(stderr.contains(ljos_cli::REMEMBER_QUEUED_LINE), "{said}");
     assert!(!stdout.contains("Memory busy:"), "{said}");
+
+    let help = remember_with(port, &["remember", "--help"]);
+    let help = String::from_utf8_lossy(&help.stdout);
+    let help_line = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        help_line.contains("A queued claim has `queued`, `kind`, `text` and `prose`, and no `id`."),
+        "{help}"
+    );
 }
 
 /// A pack that stores the first post and drops the socket on every later
