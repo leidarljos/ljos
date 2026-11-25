@@ -1,0 +1,2 @@
+The identity check takes the GitHub <noreply@github.com> committer only on a merge whose one signature `gpg` reports with a `VALIDSIG` primary key fingerprint the gate pins, so a pull request merged on github.com passes and a GitHub-committed commit that is not such a merge fails.
+A merge signed by a key the gate does not pin, or by an expired or revoked key, fails with a message that names the commit, the key and the files to update when GitHub changes its web-flow key.

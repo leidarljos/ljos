@@ -37,7 +37,16 @@ Run the suite from a shell with no `LJOS_OFF` set and outside an agent runner.
 
 A push, a tag push or a pull request checks every commit reachable from that commit, and skips none.
 GitHub starts no run for a `[skip ci]` push, so the next push, tag or release run catches its commits.
-The check fails when an author is not Rohit Goswami <rgoswami@ieee.org>, a committer is neither that identity nor GitHub <noreply@github.com>, or a message has a Co-authored-by or Signed-off-by trailer, a generated-with line, or the machine-account text named in the identity script.
+The check fails when an author is not Rohit Goswami <rgoswami@ieee.org>, a committer is not that identity, or a message has a Co-authored-by or Signed-off-by trailer, a generated-with line, or the machine-account text named in the identity script.
+The one other committer it takes is GitHub <noreply@github.com> on a merge of two or more parents, which is the commit github.com writes when a pull request is merged there.
+That merge must carry one signature, and `gpg` must report it with `GOODSIG` and a `VALIDSIG` line whose primary key fingerprint is one that `webflow_fprs` in [`scripts/identity-gate.sh`](scripts/identity-gate.sh) pins.
+The pin is GitHub's web-flow key 968479A1AFF927E37D1A566BB5690EEEBB952194, and [`scripts/github-web-flow.asc`](scripts/github-web-flow.asc) holds it.
+`gpg` checks the signature in a temporary `GNUPGHOME` that holds only that file, so no other keyring is read, and a key file that lacks a pinned key fails the check.
+A GitHub commit that is not a merge, is unsigned, is signed by another key, or is signed by an expired or revoked key fails, and so does a signed merge with any other committer.
+GitHub's older web-flow key 5DE3E0509C47EA3CF04A42D34AEE18F83AFDEB23 expired on 16 January 2024, signs no commit on `develop` or `main`, and is not pinned.
+When GitHub changes its key, the failure names the commit and the key that signed it.
+Check that key at <https://github.com/web-flow.gpg>, add it to `scripts/github-web-flow.asc`, and add its primary fingerprint to `webflow_fprs`.
+The check runs `gpg`, and a missing `gpg` fails it.
 Commit dates are not read.
 A git error fails the check.
-The identity test covers a clean range, a wrong author, a wrong committer, the GitHub web-flow committer, a differing committer date, a foreign commit, a trailer, no exclusion list, a bad commit that is never skipped, a bad commit on a branch, a tag and a pull request, a later push after a `[skip ci]` bad commit, a re-run after the branches are deleted and created again, a release merge, and one push of a bad commit to main and develop.
+The identity test covers a clean range, a wrong author, a wrong committer, a GitHub merge signed by a throwaway key the test pins, the same merge under GitHub's key, an unsigned GitHub merge, a GitHub commit that is not a merge, a signed merge with another committer, a merge signed by an unpinned key whose user ID says GitHub, a pin that names a signing subkey, a subkey of an unpinned primary key, a subkey of a pinned primary key, a merge signed by a key the key file lacks, a merge signed by an expired pinned key, a key file that lacks a pinned key, 1dd43134 as github.com signed it and with its message edited, a differing committer date, a foreign commit, a trailer, no exclusion list, a bad commit that is never skipped, a bad commit on a branch, a tag and a pull request, a later push after a `[skip ci]` bad commit, a re-run after the branches are deleted and created again, a release merge, and one push of a bad commit to main and develop.
