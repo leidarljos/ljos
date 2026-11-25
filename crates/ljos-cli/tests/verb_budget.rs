@@ -4,6 +4,11 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/sibling.rs"]
+mod sibling;
+#[path = "common/tools.rs"]
+mod tools;
+
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -183,7 +188,7 @@ fn a_silent_pack_does_not_hold_a_remember() {
     );
     assert!(out.status.success(), "{said}");
     assert!(
-        said.contains("Memory busy: queued 1 write, it will be saved on a later call."),
+        said.contains("Memory busy: queued 1 write. A later ljos call from any seat will try to save it, and the pack may still refuse it."),
         "{said}"
     );
 }
@@ -245,7 +250,7 @@ fn a_note_returns_when_claimdag_never_answers() {
         dir.path(),
         "vissue",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+            "#!/bin/sh\nif [ \"$1\" = show ]; then echo '{{\"id\":\"demo-n\",\"logbook\":[]}}'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
             noted.display()
         ),
     );
@@ -268,7 +273,11 @@ fn a_note_returns_when_claimdag_never_answers() {
 #[test]
 fn a_note_returns_when_the_tracker_does_not_answer() {
     let dir = tempfile::tempdir().unwrap();
-    script(dir.path(), "vissue", "#!/bin/sh\nexec sleep 60\n");
+    script(
+        dir.path(),
+        "vissue",
+        "#!/bin/sh\nif [ \"$1\" = show ]; then echo '{\"id\":\"demo-n\",\"logbook\":[]}' ; exit 0; fi\nexec sleep 60\n",
+    );
     let home = home_of(dir.path());
     let path = format!(
         "{}:{}",
@@ -307,28 +316,62 @@ fn a_note_returns_when_the_tracker_does_not_answer() {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect();
-    assert_eq!(lines, ["tracker did not answer after 2 retries"], "{said}");
+    assert_eq!(out.status.code(), Some(ljos_cli::NOTE_WRITE_UNCERTAIN_EXIT));
+    assert_eq!(
+        lines,
+        ["the note on demo-n may or may not have been written; run `ljos show demo-n` to check"],
+        "{said}"
+    );
 }
 
-#[test]
-fn a_tracker_timeout_then_retry_writes_one_note() {
+fn timed_note(mode: &str, timeout: u64, real: &Path) -> (std::process::Output, String, usize) {
     let dir = tempfile::tempdir().unwrap();
+    let tracker = dir.path().join("tracker");
+    let layout = vissue_core::Layout::new(&tracker, "Software");
+    std::fs::create_dir_all(layout.projects_dir()).unwrap();
+    let issue = vissue_core::ops::create(
+        &layout,
+        "demo",
+        "A slow note",
+        vissue_core::CreateOpts {
+            quiet: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let issue = issue.trim();
+    if mode == "old" {
+        let seeded = ljos_cli::program(real)
+            .unwrap()
+            .args(["note", issue, "--", "hello"])
+            .env("VISSUE_ROOT", &tracker)
+            .env("VISSUE_NO_ROUTE", "1")
+            .env("VISSUE_AGENT", "ada")
+            .output()
+            .unwrap();
+        assert!(
+            seeded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&seeded.stderr)
+        );
+    }
     let noted = dir.path().join("noted");
-    let state = dir.path().join("first");
     script(
         dir.path(),
         "vissue",
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = note ]; then\n  if [ ! -f '{}' ]; then\n    : > '{}'\n    sleep 2\n    exit 0\n  fi\n  printf '%s\\n' \"$*\" >> '{}'\n  exit 0\nfi\nexit 0\n",
-            state.display(),
-            state.display(),
-            noted.display()
+            "#!/bin/sh\nif [ \"$1\" = note ]; then\n  printf '%s\\n' \"$*\" >> '{}'\n  if [ '{}' = landed ]; then '{}' \"$@\"; fi\n  sleep 60\n  exit 0\nfi\nexec '{}' \"$@\"\n",
+            noted.display(),
+            mode,
+            real.display(),
+            real.display()
         ),
     );
     let home = home_of(dir.path());
     let path = format!(
-        "{}:{}",
+        "{}:{}:{}",
         dir.path().display(),
+        real.parent().unwrap().display(),
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
     );
     let started = Instant::now();
@@ -337,29 +380,78 @@ fn a_tracker_timeout_then_retry_writes_one_note() {
         reason = "starts a program outside git hook code"
     )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
-        .args(["note", "demo-n", "hello"])
+        .args(["note", issue, "hello"])
         .current_dir(dir.path())
         .env("PATH", &path)
         .env("HOME", &home)
         .env("XDG_RUNTIME_DIR", &home)
-        .env("VISSUE_ROOT", home.join("tracker"))
+        .env("VISSUE_ROOT", &tracker)
+        .env("VISSUE_NO_ROUTE", "1")
         .env("PACKSET_URL", "http://127.0.0.1:9")
         .env("LJOS_SEAT", "ada")
         .env("LJOS_HOOKD", "off")
         .env("LJOS_TRACKER_GIT", "off")
-        .env("LJOS_TRACKER_LOCK_WAIT", "1")
+        .env("LJOS_TRACKER_LOCK_WAIT", "4")
+        .env("LJOS_CALL_TIMEOUT", timeout.to_string())
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    let took = started.elapsed();
-    let said = text_of(&out);
-    assert!(out.status.success(), "{said}");
-    assert!(
-        took < Duration::from_secs(8),
-        "note retry exceeded budget: {took:?}\n{said}"
-    );
+    let _took = started.elapsed();
     let wrote = std::fs::read_to_string(&noted).unwrap_or_default();
-    let notes: Vec<&str> = wrote.lines().collect();
-    assert_eq!(notes.len(), 1, "{wrote}");
-    assert_eq!(notes[0], "note demo-n hello", "{wrote}");
+    let doc =
+        vissue_core::IssueDoc::parse_file("demo", &layout.project_issues_path("demo")).unwrap();
+    let card = doc
+        .headings
+        .iter()
+        .find(|heading| heading.id == issue)
+        .unwrap();
+    let hello = card
+        .logbook
+        .iter()
+        .filter_map(|entry| entry.note.as_deref())
+        .filter(|note| *note == "hello")
+        .count();
+    (out, wrote, hello)
+}
+
+#[test]
+fn a_timed_out_note_is_checked_once_and_never_sent_again() {
+    if tools::halt(tools::Tool::Vissue) {
+        return;
+    }
+    let real = sibling::require("vissue").unwrap_or_else(|line| panic!("{line}"));
+    for timeout in 1..=4 {
+        let (landed, calls, hello) = timed_note("landed", timeout, &real);
+        let said = text_of(&landed);
+        assert!(landed.status.success(), "timeout {timeout}: {said}");
+        assert!(
+            said.contains("the note is in the logbook"),
+            "timeout {timeout}: {said}"
+        );
+        assert!(!said.contains("run it again"), "timeout {timeout}: {said}");
+        assert_eq!(calls.lines().count(), 1, "timeout {timeout}: {calls}");
+        assert_eq!(hello, 1, "timeout {timeout}");
+    }
+
+    let (uncertain, calls, hello) = timed_note("missing", 1, &real);
+    let said = text_of(&uncertain);
+    assert_eq!(
+        uncertain.status.code(),
+        Some(ljos_cli::NOTE_WRITE_UNCERTAIN_EXIT),
+        "{said}"
+    );
+    assert!(said.contains("may or may not have been written"), "{said}");
+    assert!(said.contains("`ljos show "), "{said}");
+    assert_eq!(calls.lines().count(), 1, "{calls}");
+    assert_eq!(hello, 0);
+
+    let (uncertain, calls, hello) = timed_note("old", 1, &real);
+    let said = text_of(&uncertain);
+    assert_eq!(
+        uncertain.status.code(),
+        Some(ljos_cli::NOTE_WRITE_UNCERTAIN_EXIT),
+        "{said}"
+    );
+    assert_eq!(calls.lines().count(), 1, "{calls}");
+    assert_eq!(hello, 1, "the old matching note remains");
 }

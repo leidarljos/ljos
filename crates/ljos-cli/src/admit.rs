@@ -254,9 +254,10 @@ fn write_fitted(
     let text = atom["text"].as_str().unwrap_or("").trim().to_string();
     if text.is_empty() {
         crate::memory_port::keep_empty("lesson");
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "empty-input",
             "remember: empty text is not a claim",
+            1,
         ));
     }
     let refused = (held && atom["kind"].as_str() != Some(packset_core::record::NOTE_KIND))
@@ -315,9 +316,10 @@ pub(crate) fn write_agent_one(client: &PacksetClient, mut atom: Value) -> Result
     let text = atom["text"].as_str().unwrap_or("").trim();
     if text.is_empty() {
         crate::memory_port::keep_empty("lesson");
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "empty-input",
             "remember: empty text is not a claim",
+            1,
         ));
     }
     stamp_origin(&mut atom, ORIGIN_AGENT);
@@ -372,9 +374,10 @@ fn post_live(client: &PacksetClient, atom: Value) -> Result<Value> {
 pub fn store_labelled(client: &PacksetClient, mut atom: Value) -> Result<Value> {
     if atom["text"].as_str().unwrap_or("").trim().is_empty() {
         crate::memory_port::keep_empty("lesson");
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "empty-input",
             "store: empty text is not a claim",
+            1,
         ));
     }
     if atom
@@ -1778,9 +1781,9 @@ mod tests {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe {
-            std::env::set_var("XDG_STATE_HOME", dir.path());
-            std::env::set_var("LJOS_SEAT", "saddle");
-            std::env::remove_var("PACKSET_URL");
+            crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", dir.path());
+            crate::test_env_guards::set_var_unchecked("LJOS_SEAT", "saddle");
+            crate::test_env_guards::remove_var_unchecked("PACKSET_URL");
         }
         let filed = file_open("Fire the kiln only after the shelf is cool.", "lesson").unwrap();
         assert!(!filed.trim().is_empty(), "{filed}");
@@ -1798,7 +1801,7 @@ mod tests {
     fn concurrent_proposal_rows_each_parse_and_stay_private() {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("XDG_STATE_HOME", dir.path()) };
+        unsafe { crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", dir.path()) };
         const THREADS: usize = 16;
         const EACH: usize = 8;
         let handles: Vec<_> = (0..THREADS)
@@ -1834,7 +1837,7 @@ mod tests {
     fn a_torn_last_proposal_leaves_the_others() {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("XDG_STATE_HOME", dir.path()) };
+        unsafe { crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", dir.path()) };
         append(&record("a".into())).unwrap();
         let path = proposals_path();
         let mut bytes = std::fs::read(&path).unwrap();
@@ -1853,7 +1856,7 @@ mod tests {
     fn a_symlinked_proposals_file_is_refused() {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("XDG_STATE_HOME", dir.path()) };
+        unsafe { crate::test_env_guards::set_var_unchecked("XDG_STATE_HOME", dir.path()) };
         let path = proposals_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let outside = dir.path().join("outside");
@@ -1892,10 +1895,10 @@ mod tests {
                 .collect();
             unsafe {
                 for key in CLEAR {
-                    std::env::remove_var(key);
+                    crate::test_env_guards::remove_var_unchecked(key);
                 }
                 for (key, value) in pairs {
-                    std::env::set_var(key, value);
+                    crate::test_env_guards::set_var_unchecked(key, value);
                 }
             }
             Self { saved }
@@ -1907,8 +1910,8 @@ mod tests {
             for (key, value) in &self.saved {
                 unsafe {
                     match value {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
+                        Some(value) => crate::test_env_guards::set_var_unchecked(key, value),
+                        None => crate::test_env_guards::remove_var_unchecked(key),
                     }
                 }
             }
@@ -2183,7 +2186,7 @@ mod tests {
         assert!(first.contains("already in pack"), "{first}");
 
         let slow = SlowPack::start();
-        unsafe { std::env::set_var("PACKSET_URL", &slow.url) };
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_URL", &slow.url) };
         let started = std::time::Instant::now();
         let second = list_proposals(None, None);
         let took = started.elapsed();

@@ -805,7 +805,7 @@ impl SessionBallot {
         }
         for id in &self.authored {
             let label = authorship_label(id);
-            let _ = crate::run_captured("vissue", &["note", &self.issue, &label]);
+            let _ = crate::run_captured("vissue", &["note", &self.issue, "--", &label]);
         }
         let mcp = std::env::current_exe().ok().is_some_and(|path| {
             path.file_name()
@@ -883,18 +883,19 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
                 replace_hint(issue, voter)
             )
         });
-        return Err(crate::policy_label::labelled("repeated-ballot", why));
+        return Err(crate::policy_label::refused("repeated-ballot", why, 1));
     }
     let mark = format!("{}\n{voter}", issue.trim());
     let mut held = CAST.lock().unwrap_or_else(|e| e.into_inner());
     if !held.insert(mark.clone()) {
         ballot_sig::end_cast();
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "repeated-ballot",
             format!(
                 "{voter} already cast a ballot on {issue} in this process. Nothing was cast. {}",
                 replace_hint(issue, voter)
             ),
+            1,
         ));
     }
     drop(held);
@@ -1600,13 +1601,18 @@ pub fn record_candidate(
     let saw = reads_that_spoil(&key, &reads, &others);
     let seat = crate::seat_name();
     let note = ballot_sig::sign_candidate(id, &seat, &ident, &saw)?;
-    crate::run_captured("vissue", &["note", id, &note])?;
+    crate::run_captured("vissue", &["note", id, "--", &note])?;
     let mut out = format!("candidate {id} bound to session {key}\n");
     if !saw.is_empty() {
         let line = blind_sentence(id, &key, &saw);
         let _ = crate::run_captured(
             "vissue",
-            &["note", id, &format!("design-seen: {id} {}", saw.join(" "))],
+            &[
+                "note",
+                id,
+                "--",
+                &format!("design-seen: {id} {}", saw.join(" ")),
+            ],
         );
         out.push_str(&format!("blind design: {line}\n"));
     }
@@ -2045,18 +2051,18 @@ mod tests {
         assert!(session_cast_refusal("demo-ind1", "sess-bob-0001", "bob", &own, &family).is_none());
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("VISSUE_ROOT", dir.path());
-        std::env::set_var("LJOS_HARNESS_SESSION", "sess-live-0001");
-        std::env::set_var("LJOS_PROCESS_NONCE", "nonce-live-0001");
+        crate::test_env_guards::set_var("VISSUE_ROOT", dir.path());
+        crate::test_env_guards::set_var("LJOS_HARNESS_SESSION", "sess-live-0001");
+        crate::test_env_guards::set_var("LJOS_PROCESS_NONCE", "nonce-live-0001");
         let first = claim_session_ballot("probe-seat-1", "saddle").unwrap();
         let second = claim_session_ballot("probe-seat-1", "other");
         assert!(second.is_ok(), "{second:?}");
         let again = claim_session_ballot("probe-seat-1", "saddle").unwrap_err();
         assert!(again.to_string().contains("already cast"), "{again:#}");
         first.keep();
-        std::env::remove_var("VISSUE_ROOT");
-        std::env::remove_var("LJOS_HARNESS_SESSION");
-        std::env::remove_var("LJOS_PROCESS_NONCE");
+        crate::test_env_guards::remove_var("VISSUE_ROOT");
+        crate::test_env_guards::remove_var("LJOS_HARNESS_SESSION");
+        crate::test_env_guards::remove_var("LJOS_PROCESS_NONCE");
     }
 
     #[test]

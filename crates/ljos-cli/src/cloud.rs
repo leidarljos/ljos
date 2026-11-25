@@ -80,6 +80,10 @@ pub fn up(force: bool) -> Result<String> {
 /// # Errors
 ///
 /// As [`up`]. A second repository is left unrecorded when `repoint` is false.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "cloud setup exports the environment it writes for later steps"
+)]
 pub fn up_at(force: bool, repoint: bool) -> Result<String> {
     let home = crate::home().context("cloud up: HOME is unset")?;
     let bin_dir = bin_dir(&home);
@@ -400,6 +404,16 @@ pub fn merge_org_cli(base: &Path, ours: &Path, theirs: &Path) -> Result<()> {
     crate::tracker_push::merge_org_files(base, ours, theirs).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// Whether `taken` is at least `lease` seconds before `now`.
+/// A lease that does not fit in a timestamp is not elapsed: casting it to
+/// `i64` would make it negative and every claim would look idle.
+fn claim_past_lease(taken: i64, lease: u64, now: i64) -> bool {
+    let Ok(lease) = i64::try_from(lease) else {
+        return false;
+    };
+    taken.saturating_add(lease) <= now
+}
+
 /// Hand back `STARTED` claims this machine made whose owner is gone and
 /// whose claim is older than `lease` seconds. A claim is this machine's
 /// when a hold record here names it. Another machine's claim has no record
@@ -438,7 +452,7 @@ pub fn reap_gone_owners(seat: Option<&str>, lease: u64) -> String {
             continue;
         }
         let idle = match heading.claimed_at().and_then(crate::reap::org_ts) {
-            Some(taken) => taken.saturating_add(lease as i64) <= now,
+            Some(taken) => claim_past_lease(taken, lease, now),
             None => true,
         };
         if !idle {
@@ -3640,6 +3654,10 @@ fn ensure_path_file(path: &Path, bin_dir: &Path, before_interactive_guard: bool)
 
 /// Put `bin_dir` first on this process's PATH and drop a later copy.
 /// Presence is not enough: an earlier directory hides this install.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "cloud setup must use the installed binaries in later steps"
+)]
 fn ensure_process_path(bin_dir: &Path) -> String {
     let dir = bin_dir.display().to_string();
     let current = std::env::var("PATH").unwrap_or_default();
@@ -4396,6 +4414,93 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn a_lease_that_does_not_fit_does_not_idle_a_fresh_claim() {
+        let now = 1_700_000_000;
+        assert!(!claim_past_lease(now, u64::MAX, now));
+        assert!(!claim_past_lease(now - 10, u64::MAX, now));
+        assert!(claim_past_lease(now - 1_000, 10, now));
+        assert!(!claim_past_lease(now, 10, now));
+    }
+
+    #[test]
+    fn reap_keeps_a_fresh_claim_when_the_lease_does_not_fit() {
+        crate::with_env_mutation(|| {
+            const KEYS: &[&str] = &[
+                "HOME",
+                "XDG_CONFIG_HOME",
+                "XDG_RUNTIME_DIR",
+                "VISSUE_ROOT",
+                "ISSUE_ROOT",
+                "VISSUE_NO_ROUTE",
+                "LJOS_TRACKER_GIT",
+            ];
+            let saved: Vec<_> = KEYS
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect();
+            let root = tempfile::tempdir().unwrap();
+            let home = root.path().join("home");
+            let tracker = root.path().join("tracker");
+            let run = root.path().join("run");
+            fs::create_dir_all(&home).unwrap();
+            fs::create_dir_all(&run).unwrap();
+            unsafe {
+                crate::test_env_guards::set_var_unchecked("HOME", &home);
+                crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", home.join(".config"));
+                crate::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", &run);
+                crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", &tracker);
+                crate::test_env_guards::set_var_unchecked("ISSUE_ROOT", &tracker);
+                crate::test_env_guards::set_var_unchecked("VISSUE_NO_ROUTE", "1");
+                crate::test_env_guards::set_var_unchecked("LJOS_TRACKER_GIT", "push");
+            }
+
+            let layout = vissue_core::Layout::new(&tracker, "Software");
+            fs::create_dir_all(layout.projects_dir()).unwrap();
+            let id = vissue_core::ops::create(
+                &layout,
+                "work",
+                "fresh claim",
+                vissue_core::CreateOpts {
+                    quiet: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let id = id.trim();
+            vissue_core::ops::claim_as(&layout, id, false, "ada").unwrap();
+            fs::create_dir_all(crate::runtime_dir()).unwrap();
+            crate::write_file(
+                crate::runtime_dir().join("hold-ada"),
+                format!("ada\nada\n{}\ngone\n2026-11-20T00:00:00Z\n{id}\n", u32::MAX),
+            )
+            .unwrap();
+
+            let said = reap_gone_owners(Some("ada"), u64::MAX);
+            let (_, path, project) = vissue_core::store::find_by_id(&layout, id)
+                .unwrap()
+                .expect("fresh claim");
+            let doc = vissue_core::IssueDoc::parse_file(&project, &path).unwrap();
+            let heading = doc
+                .headings
+                .iter()
+                .find(|heading| heading.id == id)
+                .unwrap();
+            assert!(said.is_empty(), "{said}");
+            assert_eq!(heading.state, "STARTED");
+            assert_eq!(heading.claimed_by(), Some("ada"));
+
+            unsafe {
+                for (key, value) in saved {
+                    match value {
+                        Some(value) => crate::test_env_guards::set_var_unchecked(key, value),
+                        None => crate::test_env_guards::remove_var_unchecked(key),
+                    }
+                }
+            }
+        });
+    }
+
     const SECRET: &str = "AGE-SECRET-KEY-1PLANTED\n";
 
     /// `install_binary` copied to `.NAME.tmp-PID` and renamed that name
@@ -4915,8 +5020,11 @@ mod tests {
         crate::with_env_mutation(|| {
             // SAFETY: this test has the process environment lock.
             unsafe {
-                std::env::set_var("LJOS_WAKE_INKY_URL", "https://example.org/hooks/inky");
-                std::env::set_var("LJOS_WAKE_INKY_KEY", "secret");
+                crate::test_env_guards::set_var_unchecked(
+                    "LJOS_WAKE_INKY_URL",
+                    "https://example.org/hooks/inky",
+                );
+                crate::test_env_guards::set_var_unchecked("LJOS_WAKE_INKY_KEY", "secret");
             }
         });
         let lines = ensure_wakes().unwrap();

@@ -77,7 +77,8 @@ skill for one runner. =NAME= is a name =ljos onboard --example= prints, among th
 =windsurf=, =factory=, =kiro=, =cline=, =qwen=, =crush=, =zed=, =vscode=,
 =claude-desktop=, =amazonq=, =aider= (conventions file, advisory), =auggie=, =amp=, =goose=, =openhands=,
 =continue=, =roo=, =kilo=, =example-host= or =shell=. The contract is the
-same everywhere and the envelope differs:
+same everywhere and the envelope differs. Running onboard again repairs an
+older ljos hook command, including an unquoted program path with spaces.
 
 | Runner | Memory injection | Shell check | Warning shows as | Notes |
 |---+---+---+---+---|
@@ -113,7 +114,8 @@ it can see one.
 
 The runners from Copilot down call =ljos hook --runner NAME=. That
 command reads the runner's payload as the terminal harness's, runs the same hook,
-and writes the answer back in the runner's field names, with exit 0. By default the answer
+and writes the answer back in the runner's field names, with exit 0.
+Auggie's command is quoted for the shell. The ljos executable is also quoted in Cline's scripts when its path contains spaces. Amp's delegate names the script as a raw path. Re-onboarding repairs every Auggie group, Windsurf entry or Amp permission that ljos owns and leaves unrelated entries in place. Ownership is read from the hook's command or the delegate path, not from a note beside it. By default the answer
 never denies, asks or blocks, apart from a cloud seat's push rule; a rule that fires is one
 warning line in the column above. The cloud seat push rule is that runner's own deny, with exit 2 where the runner
 reads a deny from the exit code. A policyd deny is the warning, and the call runs.

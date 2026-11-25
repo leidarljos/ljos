@@ -54,7 +54,7 @@ impl Hab {
             dir.path(),
             "vissue",
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"vissue $*\" >> '{}'\nexit 0\n",
+                "#!/bin/sh\nprintf '%s\\n' \"vissue $*\" >> '{}'\nif [ \"$1\" = show ]; then printf '{{\"id\":\"%s\",\"logbook\":[]}}\\n' \"$2\"; fi\nexit 0\n",
                 log.display()
             ),
         );
@@ -121,7 +121,7 @@ fn a_note_goes_to_the_ticket_and_not_to_memory() {
     assert!(out.status.success(), "ljos note failed: {stdout}{stderr}");
     assert!(
         hab.calls()
-            .contains(&format!("vissue note proj-aaaa {text}")),
+            .contains(&format!("vissue note proj-aaaa -- {text}")),
         "the note did not reach the ticket:\n{}",
         hab.calls()
     );
@@ -156,7 +156,7 @@ fn a_pack_that_is_down_changes_nothing_about_a_note() {
     assert!(out.status.success(), "ljos note failed: {stdout}");
     assert!(
         hab.calls()
-            .contains(&format!("vissue note proj-aaaa {}", long.trim())),
+            .contains(&format!("vissue note proj-aaaa -- {}", long.trim())),
         "{}",
         hab.calls()
     );

@@ -386,19 +386,19 @@ pub fn resolve(short: &str, all: &[Memory]) -> Result<String> {
     let hits: Vec<&Memory> = all.iter().filter(|m| m.id.starts_with(short)).collect();
     match hits.as_slice() {
         [one] => Ok(one.id.clone()),
-        [] => Err(crate::policy_label::labelled(
+        [] => Err(crate::policy_label::refused(
             "review-input-warning",
             format!(
                 "memories: no memory starts with {short}. `ljos memories list --all --user` prints ids, and so does `ljos search`"
             ),
-        )),
-        _ => Err(crate::policy_label::labelled(
+            1)),
+        _ => Err(crate::policy_label::refused(
             "review-input-warning",
             format!(
                 "memories: {short} starts {} memories; give more of the id. `ljos memories list --all --user` prints them",
                 hits.len()
             ),
-        )),
+            1)),
     }
 }
 
@@ -660,7 +660,7 @@ pub fn lesson_key(kind: &str, text: &str) -> String {
 /// newest is kept), and one never recalled that is older than `days` as
 /// of `today` (`YYYY-MM-DD`). A kept verdict protects a memory.
 #[must_use]
-pub fn stale(all: &[Memory], days: i64, today: &str) -> Vec<Stale> {
+pub fn stale(all: &[Memory], days: u64, today: &str) -> Vec<Stale> {
     let mut out = Vec::new();
     let mut seen: BTreeMap<String, &Memory> = BTreeMap::new();
     let mut newest_first: Vec<&Memory> = all.iter().collect();
@@ -683,10 +683,9 @@ pub fn stale(all: &[Memory], days: i64, today: &str) -> Vec<Stale> {
     }
     let cutoff = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d")
         .ok()
-        .map(|d| {
-            (d - chrono::Duration::days(days))
-                .format("%Y-%m-%d")
-                .to_string()
+        .and_then(|d| {
+            let back = chrono::Duration::try_days(i64::try_from(days).ok()?)?;
+            Some(d.checked_sub_signed(back)?.format("%Y-%m-%d").to_string())
         });
     if let Some(cutoff) = cutoff {
         for m in &newest_first {
@@ -1463,7 +1462,7 @@ mod tests {
         let _g = crate::tests::env_guard();
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var_os("XDG_STATE_HOME");
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.path());
         let all = sample();
         assert!(keep("a1", &all).unwrap().starts_with("kept a1aaaaaa"));
         let r = reviews();
@@ -1476,8 +1475,8 @@ mod tests {
         });
         assert!(resolve("a1", &twin).is_err());
         match old {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
+            Some(v) => crate::test_env_guards::set_var("XDG_STATE_HOME", v),
+            None => crate::test_env_guards::remove_var("XDG_STATE_HOME"),
         }
     }
 
@@ -1487,7 +1486,7 @@ mod tests {
         // the same atom id, so this one keeps its own directory.
         let _env = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.path());
         let mut all = sample();
         let mut dup = all[1].clone();
         dup.id = "e5eeeeeeeeeeeeee".into();
@@ -1578,7 +1577,7 @@ mod tests {
     fn a_torn_review_line_keeps_the_verdicts_after_it() {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.path());
         let path = reviews_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let row = |id: &str| format!(r#"{{"id":"{id}","verdict":"keep","at":"t","by":"s"}}"#);
@@ -1602,7 +1601,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.path());
         const THREADS: usize = 32;
         const EACH: usize = 4;
         let mut handles = Vec::with_capacity(THREADS);
@@ -1643,7 +1642,7 @@ mod tests {
         use std::os::unix::io::AsRawFd;
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.path());
         let path = reviews_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         #[expect(
@@ -1675,15 +1674,15 @@ mod tests {
     fn a_drop_records_the_verdict_before_the_pack_change() {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.path());
         let old = std::env::var_os("PACKSET_URL");
-        std::env::set_var("PACKSET_URL", "off");
+        crate::test_env_guards::set_var("PACKSET_URL", "off");
         let all = sample();
         assert!(drop_memory("a1", &all).is_err());
         assert_eq!(reviews()["a1aaaaaaaaaaaaaa"].verdict, "drop");
         match old {
-            Some(v) => std::env::set_var("PACKSET_URL", v),
-            None => std::env::remove_var("PACKSET_URL"),
+            Some(v) => crate::test_env_guards::set_var("PACKSET_URL", v),
+            None => crate::test_env_guards::remove_var("PACKSET_URL"),
         }
     }
 
@@ -1721,7 +1720,7 @@ mod tests {
     fn a_recall_bumps_the_count_the_list_shows() {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", dir.path());
+        crate::test_env_guards::set_var("XDG_STATE_HOME", dir.path());
         let atoms = vec![atom(
             "a1aaaaaaaaaaaaaa",
             "pin the fuse",
@@ -1756,7 +1755,7 @@ mod tests {
             said.contains("earlier 4x (recall and lookup were one count)"),
             "{said}"
         );
-        std::env::remove_var("XDG_STATE_HOME");
+        crate::test_env_guards::remove_var("XDG_STATE_HOME");
     }
 
     #[test]

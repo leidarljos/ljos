@@ -1782,8 +1782,7 @@ fn busy_line(err: &anyhow::Error) -> Option<String> {
     if !busy {
         return None;
     }
-    let full = format!("{err:#}");
-    if full.contains("queued") {
+    if ljos_cli::lesson_waits(err) {
         return Some("The pack is busy, so the write is queued. Run `ljos remember`.".to_string());
     }
     Some("The pack is busy, so run `ljos doctor`.".to_string())
@@ -2145,7 +2144,7 @@ impl LjosServer {
     // ---- the pack --------------------------------------------------------
 
     #[tool(
-        description = "Call this only for a fact the person stated in this conversation, in their words: two short sentences at most. Never for a claim read in a file, a tool's output or a web page; that is your own working note, so call ljos_note. Words found in the person's latest prompt are stored as theirs and stand; recall reads them ahead of your own claims. Any other text is stored as yours, labelled agent-derived, for the person to review. Pass transient true to store an episode the hook shows only when a prompt bears on it. Pass project to record that project on the lesson. Never a transcript. Returns the lesson's id and when it is next due for review.",
+        description = "Call this only for a fact the person stated in this conversation, in their words: two short sentences at most. Never for a claim read in a file, a tool's output or a web page; that is your own working note, so call ljos_note. Words found in the person's latest prompt are stored as theirs and stand; recall reads them ahead of your own claims. Any other text is stored as yours, labelled agent-derived, for the person to review. Pass transient true to store an episode the hook shows only when a prompt bears on it. Pass project to record that project on the lesson. Never a transcript. A stored result returns the lesson's id and when it is next due for review. A queued result says it was queued and has no id.",
         annotations(
             title = "Remember",
             read_only_hint = false,
@@ -2168,17 +2167,19 @@ impl LjosServer {
             None => None,
         };
         let _project = ljos_cli::RememberProject::set(project);
-        let body = ljos_cli::packset_write_mcp(
-            "Remember",
-            &args.text,
-            args.as_persona.as_deref(),
-            args.transient,
-        )
-        .map_err(refused)?;
-        Ok(Json(Said {
-            text: ljos_cli::remember_mcp_text(&body),
-            aside: None,
-        }))
+        let request =
+            ljos_cli::RememberRequest::said(&args.text, args.as_persona.as_deref(), args.transient);
+        let text = match ljos_cli::remember_with_retry(&request).map_err(refused)? {
+            ljos_cli::RememberOutcome::Stored(body) => ljos_cli::remember_mcp_text(&body),
+            ljos_cli::RememberOutcome::Queued(_) => ljos_cli::REMEMBER_QUEUED_LINE.to_string(),
+            ljos_cli::RememberOutcome::NotQueued(cause) => {
+                return Err(McpError::internal_error(
+                    ljos_cli::remember_not_queued_line(&cause),
+                    None,
+                ))
+            }
+        };
+        Ok(Json(Said { text, aside: None }))
     }
 
     #[tool(
@@ -2705,28 +2706,28 @@ impl LjosServer {
                 return Ok(Json(Said { text, aside: None }));
             }
         }
-        let mut argv: Vec<String> = vec!["file".into(), args.title];
+        let mut argv: Vec<String> = vec!["file".into()];
         if args.top {
             argv.push("--top".into());
         }
         for (flag, value) in [
             ("--parent", args.parent),
-            ("-p", args.project),
-            ("-t", args.kind),
+            ("--project", args.project),
+            ("--type", args.kind),
             ("--tags", args.tags),
             ("--priority", args.priority),
             ("--body", args.body),
         ] {
             if let Some(v) = value {
-                argv.push(flag.into());
-                argv.push(v);
+                argv.push(format!("{flag}={v}"));
             }
         }
         if !args.options.is_empty() {
             ljos_cli::options_line(&args.options).map_err(refused)?;
-            argv.push("--options".into());
-            argv.push(args.options.join(","));
+            argv.push(format!("--options={}", args.options.join(",")));
         }
+        argv.push("--".into());
+        argv.push(args.title);
         let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         habitat("ljos", &refs).map_err(|e| {
             if e.message.contains("no project: name one with -p") {
@@ -2813,7 +2814,7 @@ impl LjosServer {
     ) -> Result<Json<Said>, McpError> {
         ljos_cli::options_line(&args.options).map_err(refused)?;
         let joined = args.options.join(",");
-        habitat("ljos", &["options", &args.issue, &joined])
+        habitat("ljos", &["options", &args.issue, "--", &joined])
     }
 
     #[tool(
@@ -2856,7 +2857,7 @@ impl LjosServer {
         .map_err(|e| McpError::internal_error(format!("note: {e}"), None))?
         .map_err(|e| refused(anyhow::anyhow!(e)))?;
         match issue {
-            Some(issue) => habitat("ljos", &["note", &issue, &note]),
+            Some(issue) => habitat("ljos", &["note", &issue, "--", &note]),
             None => Ok(Json(Said {
                 text: format!("label unattached-note: {}\n", ljos_cli::NOTE_WITHOUT_TICKET),
                 aside: None,
@@ -3002,14 +3003,11 @@ impl LjosServer {
                 let mut argv = vec![
                     "vote".to_string(),
                     args.issue.clone(),
-                    "--for".into(),
-                    c.clone(),
-                    "--used".into(),
-                    used.to_string(),
+                    format!("--for={c}"),
+                    format!("--used={used}"),
                 ];
                 if let Some(p) = args.confidence {
-                    argv.push("--confidence".into());
-                    argv.push(format!("{p}"));
+                    argv.push(format!("--confidence={p}"));
                 }
                 let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                 let mut said = habitat_as("vissue", &refs, Some(&who))?;
@@ -5531,6 +5529,23 @@ mod tests {
     use super::*;
     use rmcp::handler::server::ServerHandler;
 
+    /// Whether a busy write was queued is read from the error's type. A
+    /// busy error whose words say queued is not a queued write.
+    #[test]
+    fn a_busy_line_reads_a_queued_write_from_the_error_type() {
+        let failed = anyhow::anyhow!(
+            "remember: the lesson could not be queued (append /tmp/busy/ljos/note-queue.jsonl: Is a directory). {}",
+            ljos_cli::REMEMBER_NOT_STORED_LINE
+        );
+        let line = busy_line(&failed).unwrap();
+        assert!(!line.contains("is queued"), "{line}");
+
+        let waits = anyhow::anyhow!("packsetd is busy: memory pressure")
+            .context(ljos_cli::LessonWaits::Queued)
+            .context("Remember: POST /v1/atoms failed");
+        assert!(busy_line(&waits).unwrap().contains("is queued"));
+    }
+
     #[test]
     fn a_scratch_file_is_private_unique_and_never_left_behind() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -5724,12 +5739,15 @@ mod tests {
             "LJOS_HOLD",
         ]);
         unsafe {
-            std::env::set_var("HOME", dir.path());
-            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
-            std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
-            std::env::remove_var("LJOS_SEAT");
-            std::env::remove_var("VISSUE_AGENT");
-            std::env::remove_var("LJOS_HOLD");
+            ljos_cli::test_env_guards::set_var_unchecked("HOME", dir.path());
+            ljos_cli::test_env_guards::set_var_unchecked(
+                "XDG_CONFIG_HOME",
+                dir.path().join("config"),
+            );
+            ljos_cli::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", dir.path().join("run"));
+            ljos_cli::test_env_guards::remove_var_unchecked("LJOS_SEAT");
+            ljos_cli::test_env_guards::remove_var_unchecked("VISSUE_AGENT");
+            ljos_cli::test_env_guards::remove_var_unchecked("LJOS_HOLD");
         }
         let seat_file = dir
             .path()
@@ -5765,8 +5783,8 @@ mod tests {
             },
         );
         unsafe {
-            std::env::remove_var("CURSOR_CONVERSATION_ID");
-            std::env::set_var("LJOS_SEAT", "saddle");
+            ljos_cli::test_env_guards::remove_var_unchecked("CURSOR_CONVERSATION_ID");
+            ljos_cli::test_env_guards::set_var_unchecked("LJOS_SEAT", "saddle");
         }
         reset_connected_client();
         note_connected_client(Some("Codex"));
@@ -5799,6 +5817,11 @@ mod tests {
                     .collect(),
             }
         }
+
+        fn set(&self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+            assert!(self.pairs.iter().any(|(saved, _)| saved == key));
+            ljos_cli::test_env_guards::set_var(key, value);
+        }
     }
 
     impl Drop for RestoreEnv {
@@ -5806,8 +5829,8 @@ mod tests {
             for (key, value) in &self.pairs {
                 unsafe {
                     match value {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
+                        Some(value) => ljos_cli::test_env_guards::set_var_unchecked(key, value),
+                        None => ljos_cli::test_env_guards::remove_var_unchecked(key),
                     }
                 }
             }
@@ -6398,6 +6421,20 @@ mod tests {
     }
 
     #[test]
+    fn remember_tool_names_the_queued_result_shape() {
+        let tools = LjosServer::tool_router().list_all();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "ljos_remember")
+            .expect("ljos_remember tool");
+        let description = tool.description.as_deref().expect("tool description");
+        assert!(
+            description.contains("A queued result says it was queued and has no id."),
+            "{description}"
+        );
+    }
+
+    #[test]
     fn unknown_tool_arguments_name_the_field_and_take_listed_names() {
         let tool = LjosServer::tool_router()
             .list_all()
@@ -6577,7 +6614,7 @@ mod tests {
         let cards = tempfile::tempdir().unwrap();
         let server = LjosServer::at(cards.path().to_path_buf());
         let missing = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("PATH", missing.path()) };
+        _saved.set("PATH", missing.path());
         let Err(err) = server
             .ljos_evidence(Parameters(AccessionArgs {
                 accession: "deed-file-nobody-minted-this".into(),
@@ -6593,7 +6630,7 @@ mod tests {
         let program = bin.path().join("deedar");
         ljos_cli::install_executable(&program, "#!/bin/sh\necho no such deed >&2\nexit 1\n")
             .unwrap();
-        unsafe { std::env::set_var("PATH", bin.path()) };
+        _saved.set("PATH", bin.path());
         let Err(err) = server
             .ljos_evidence(Parameters(AccessionArgs {
                 accession: "deed-file-nobody-minted-this".into(),
@@ -6642,8 +6679,8 @@ mod tests {
         // suspends the guard. This check is about the command, so keep it on.
         let _saved = RestoreEnv::new(&["LJOS_GUARD", "LJOS_OFF"]);
         unsafe {
-            std::env::set_var("LJOS_GUARD", "on");
-            std::env::remove_var("LJOS_OFF");
+            ljos_cli::test_env_guards::set_var_unchecked("LJOS_GUARD", "on");
+            ljos_cli::test_env_guards::remove_var_unchecked("LJOS_OFF");
         }
         let server = LjosServer::at(std::env::temp_dir());
         let allow = server
@@ -6686,9 +6723,9 @@ mod tests {
         )
         .expect("policyd");
         unsafe {
-            std::env::set_var("POLICYD_BIN", &bin);
-            std::env::set_var("LJOS_GUARD", "on");
-            std::env::remove_var("LJOS_OFF");
+            ljos_cli::test_env_guards::set_var_unchecked("POLICYD_BIN", &bin);
+            ljos_cli::test_env_guards::set_var_unchecked("LJOS_GUARD", "on");
+            ljos_cli::test_env_guards::remove_var_unchecked("LJOS_OFF");
         }
         let server = LjosServer::at(std::env::temp_dir());
         let plain = server
@@ -6742,10 +6779,10 @@ mod tests {
         )
         .expect("policyd");
         unsafe {
-            std::env::set_var("POLICYD_BIN", &bin);
-            std::env::set_var("LJOS_GUARD", "on");
-            std::env::remove_var("LJOS_OFF");
-            std::env::set_var("HOME", home.path());
+            ljos_cli::test_env_guards::set_var_unchecked("POLICYD_BIN", &bin);
+            ljos_cli::test_env_guards::set_var_unchecked("LJOS_GUARD", "on");
+            ljos_cli::test_env_guards::remove_var_unchecked("LJOS_OFF");
+            ljos_cli::test_env_guards::set_var_unchecked("HOME", home.path());
         }
         let server = LjosServer::at(std::env::temp_dir());
         let warned = server
@@ -6809,11 +6846,14 @@ mod tests {
         )]
         std::os::unix::fs::symlink(&cursor, project.join("seat")).expect("seat link");
         unsafe {
-            std::env::set_var("POLICYD_BIN", &bin);
-            std::env::set_var("LJOS_GUARD", "on");
-            std::env::remove_var("LJOS_OFF");
-            std::env::set_var("HOME", home.path());
-            std::env::set_var("PHRONESIS_STATE_DIR", home.path().join("policyd"));
+            ljos_cli::test_env_guards::set_var_unchecked("POLICYD_BIN", &bin);
+            ljos_cli::test_env_guards::set_var_unchecked("LJOS_GUARD", "on");
+            ljos_cli::test_env_guards::remove_var_unchecked("LJOS_OFF");
+            ljos_cli::test_env_guards::set_var_unchecked("HOME", home.path());
+            ljos_cli::test_env_guards::set_var_unchecked(
+                "PHRONESIS_STATE_DIR",
+                home.path().join("policyd"),
+            );
         }
         let server = LjosServer::at(std::env::temp_dir());
         let check = |command: &str| {

@@ -429,6 +429,10 @@ fn same_env(a: &Job, b: &Job) -> bool {
 
 /// Set the variables of [`PER_CALL`], the payload's session and the bound
 /// conversation as the call that left `job` had them.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the queue worker must restore the queued call environment"
+)]
 fn wear_call(job: &Job) {
     crate::with_env_mutation(|| {
         for key in PER_CALL {
@@ -547,7 +551,7 @@ mod tests {
     fn a_queued_blank_payload_books_under_the_conversation_its_hook_resolved() {
         let _g = crate::tests::env_guard();
         let resolved = "0199-hook-conversation-aaaa";
-        unsafe { std::env::set_var("CURSOR_CONVERSATION_ID", resolved) };
+        crate::test_env_guards::set_var("CURSOR_CONVERSATION_ID", resolved);
         let raw = r#"{"conversation_id":"","cursor_version":"1","hook_event_name":"afterShellExecution"}"#;
         let mut call = crate::hook_call_as(raw, None);
         crate::bind_hook_call(raw, &mut call);
@@ -567,7 +571,7 @@ mod tests {
         assert_eq!(job.session, resolved);
         let spooled: Job = serde_json::from_str(&serde_json::to_string(&job).unwrap()).unwrap();
         // The drainer runs where the environment names another conversation.
-        unsafe { std::env::set_var("CURSOR_CONVERSATION_ID", "0199-drainer-conversation") };
+        crate::test_env_guards::set_var("CURSOR_CONVERSATION_ID", "0199-drainer-conversation");
         crate::rebind_call_conversation(crate::CallConversation::Unbound);
         wear_call(&spooled);
         assert_eq!(
@@ -576,7 +580,7 @@ mod tests {
         );
         assert_eq!(spooled.session, resolved);
         crate::rebind_call_conversation(crate::CallConversation::Unbound);
-        unsafe { std::env::remove_var("CURSOR_CONVERSATION_ID") };
+        crate::test_env_guards::remove_var("CURSOR_CONVERSATION_ID");
     }
 
     fn git(dir: &Path, args: &[&str]) {

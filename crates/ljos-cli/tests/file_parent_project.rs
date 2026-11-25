@@ -61,11 +61,11 @@ fn a_child_is_filed_in_its_parents_project() {
         .collect();
     assert_eq!(creates.len(), 2, "{creates:?}");
     assert!(
-        creates[0].starts_with("vissue create -p ljos --parent ljos-gkq2"),
+        creates[0].starts_with("vissue create --project=ljos --parent=ljos-gkq2"),
         "{creates:?}"
     );
     assert!(
-        creates[1].starts_with("vissue create -p ljos-policyd --parent ljos-policyd-ab12"),
+        creates[1].starts_with("vissue create --project=ljos-policyd --parent=ljos-policyd-ab12"),
         "{creates:?}"
     );
 }

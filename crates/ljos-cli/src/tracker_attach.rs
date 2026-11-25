@@ -388,11 +388,12 @@ pub(crate) fn refuse_secret_rewrite(url: &str, shown: &str) -> Result<()> {
         .context("git ls-remote --get-url")?;
     let expanded = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if out.status.success() && expanded != url && split_userinfo(&expanded).1.is_some() {
-        return Err(crate::policy_label::labelled(
+        return Err(crate::policy_label::refused(
             "tracker-location-warning",
             format!(
                 "tracker: a url.*.insteadOf rule in git config rewrites {shown} to a URL with a password, so it was not cloned; remove that rule"
             ),
+            1,
         ));
     }
     Ok(())
@@ -563,7 +564,7 @@ mod tests {
         let dest = dir.path().join("dest");
         checkout(&dest, "/elsewhere/product.git", &[boards]);
         let before = std::env::var_os("LJOS_TRACKER_SEARCH");
-        std::env::set_var("LJOS_TRACKER_SEARCH", &workspace);
+        crate::test_env_guards::set_var("LJOS_TRACKER_SEARCH", &workspace);
         let refused = find(None, &dest);
         checkout(
             &workspace.join("tracker"),
@@ -572,8 +573,8 @@ mod tests {
         );
         let found = find(None, &dest).map(|remote| remote.shown);
         match before {
-            Some(v) => std::env::set_var("LJOS_TRACKER_SEARCH", v),
-            None => std::env::remove_var("LJOS_TRACKER_SEARCH"),
+            Some(v) => crate::test_env_guards::set_var("LJOS_TRACKER_SEARCH", v),
+            None => crate::test_env_guards::remove_var("LJOS_TRACKER_SEARCH"),
         }
         assert_eq!(refused, None);
         assert_eq!(found.as_deref(), Some("/elsewhere/tracker.git"));

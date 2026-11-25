@@ -228,7 +228,7 @@ fn next_with_nothing_ready_names_a_bare_claim() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let said = format!("{stdout}{stderr}");
-    assert!(out.status.success(), "{said}");
+    assert_eq!(out.status.code(), Some(1), "{said}");
     assert!(
         said.contains("label claim-conflict:")
             && said.contains("nothing in the claim graph is ready")

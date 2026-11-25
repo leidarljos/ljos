@@ -71,6 +71,14 @@ impl Home {
         std::fs::write(self.root.join("tracker/Software/demo/issues.org"), body).unwrap();
     }
 
+    fn script(&self, name: &str, body: &str) -> PathBuf {
+        let bin = self.root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let path = bin.join(name);
+        ljos_cli::install_executable(&path, body).unwrap();
+        bin
+    }
+
     fn run(&self, args: &[&str], extra: &[(&str, &str)]) -> Output {
         let home = self.root.join("home");
         #[expect(
@@ -172,7 +180,7 @@ fn a_slow_writer_names_search_and_exits_75() {
     assert!(out.status.success(), "{said}");
     assert_eq!(
         one_line(&out.stdout),
-        "Memory busy: queued 1 write, it will be saved on a later call."
+        "Memory busy: queued 1 write. A later ljos call from any seat will try to save it, and the pack may still refuse it."
     );
     assert!(out.stderr.is_empty(), "{said}");
 }
@@ -401,6 +409,20 @@ fn a_bad_limit_names_help_and_exits_2() {
     assert_eq!(
         one_line(&out.stderr),
         "search: --limit does not accept nope. The values it takes are in `ljos search --help`."
+    );
+}
+
+#[test]
+fn a_limit_without_a_value_names_the_long_flag() {
+    let home = Home::new();
+    let out = home.run(&["search", "kiln", "-n"], &[("LJOS_SEAT", "alice")]);
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert_eq!(
+        one_line(&out.stderr),
+        "search: --limit needs a value",
+        "{said}"
     );
 }
 
@@ -788,10 +810,14 @@ fn impossible_as_of_dates_exit_2() {
 #[test]
 fn invalid_flag_values_on_search_and_remember_exit_2() {
     let home = Home::new();
-    let cases: [(&[&str], &str); 5] = [
+    let cases: [(&[&str], &str); 6] = [
         (
             &["search", "kiln", "--min-score=-1"],
             "search: --min-score takes a number from 0 up, not -1.",
+        ),
+        (
+            &["search", "kiln", "--min-score", "inf"],
+            "search: --min-score needs a finite number, not inf.",
         ),
         (
             &["search", "kiln", "--as-of", "bogus"],
@@ -828,5 +854,862 @@ fn invalid_flag_values_on_search_and_remember_exit_2() {
         assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
         assert!(out.stdout.is_empty(), "{args:?}\n{said}");
         assert_eq!(one_line(&out.stderr), want, "{args:?}\n{said}");
+    }
+}
+#[test]
+fn equals_binds_a_hyphen_leading_lesson_value() {
+    let home = Home::new();
+    let out = home.run(
+        &["finish", "demo-kiln", "--lesson=--json"],
+        &[("LJOS_SEAT", "alice")],
+    );
+    let said = text(&out);
+    assert_ne!(out.status.code(), Some(2), "{said}");
+    assert!(!said.contains("--lesson needs a value"), "{said}");
+}
+
+#[test]
+fn a_negative_on_every_remaining_numeric_flag_names_the_value() {
+    let home = Home::new();
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &["panel", "demo-kiln", "--designers", "-1"],
+            "panel: --designers takes a number from 0 up, not -1.",
+        ),
+        (
+            &["claim", "--slack", "-1"],
+            "claim: --slack takes a number from 0 up, not -1.",
+        ),
+        (
+            &["learn", "demo-kiln", "--outcome", "keep", "--beta", "-0.5"],
+            "learn: --beta takes a number in (0, 1), not -0.5.",
+        ),
+        (
+            &["learn", "demo-kiln", "--outcome", "keep", "--share", "-1"],
+            "learn: --share takes a number in [0, 1), not -1.",
+        ),
+        (
+            &["finish", "demo-kiln", "--beta", "-0.5"],
+            "finish: --beta takes a number in (0, 1), not -0.5.",
+        ),
+        (
+            &["trust", "alice", "bob", "-0.5"],
+            "trust: weight takes a number in (0, 1], not -0.5.",
+        ),
+        (
+            &[
+                "persona",
+                "reviewer",
+                "--anchor",
+                "-0.5",
+                "--view",
+                "reads diffs",
+            ],
+            "persona: --anchor takes a number in [0, 1], not -0.5.",
+        ),
+        (
+            &[
+                "persona",
+                "reviewer",
+                "--anchor=-0.5",
+                "--view",
+                "reads diffs",
+            ],
+            "persona: --anchor takes a number in [0, 1], not -0.5.",
+        ),
+        (
+            &[
+                "supervise",
+                "worker",
+                "--harness",
+                "codex",
+                "--exit",
+                "clean",
+                "--at",
+                "-1",
+            ],
+            "supervise: --at takes a number from 0 up, not -1.",
+        ),
+        (
+            &[
+                "supervise",
+                "worker",
+                "--harness",
+                "codex",
+                "--exit",
+                "clean",
+                "--at",
+                "0",
+                "--max-restarts",
+                "-1",
+            ],
+            "supervise: --max-restarts takes a number from 0 up, not -1.",
+        ),
+        (
+            &[
+                "supervise",
+                "worker",
+                "--harness",
+                "codex",
+                "--exit",
+                "clean",
+                "--at",
+                "0",
+                "--window",
+                "-5",
+            ],
+            "supervise: --window takes a number from 0 up, not -5.",
+        ),
+        (
+            &[
+                "supervise",
+                "worker",
+                "--harness",
+                "codex",
+                "--exit",
+                "clean",
+                "--at",
+                "0",
+                "--failures",
+                "-1",
+            ],
+            "supervise: --failures takes a number from 0 up, not -1.",
+        ),
+        (
+            &[
+                "supervise",
+                "worker",
+                "--harness",
+                "codex",
+                "--exit",
+                "clean",
+                "--at",
+                "0",
+                "--failures=-1",
+            ],
+            "supervise: --failures takes a number from 0 up, not -1.",
+        ),
+        (
+            &["complete", "demo-kiln", "--gen", "-1"],
+            "complete: --gen takes a number from 0 up, not -1.",
+        ),
+        (
+            &["finish", "demo-kiln", "--gen", "-2"],
+            "finish: --gen takes a number from 0 up, not -2.",
+        ),
+        (
+            &[
+                "handover",
+                "--out",
+                "bag",
+                "--issue",
+                "demo-kiln",
+                "--since-size",
+                "-1",
+            ],
+            "handover: --since-size takes a number from 0 up, not -1.",
+        ),
+        (
+            &["table", "demo-kiln", "--show", "scores", "--version", "-1"],
+            "table: --version takes a number from 0 up, not -1.",
+        ),
+        (
+            &["table", "demo-kiln", "--show", "scores", "--version=-1"],
+            "table: --version takes a number from 0 up, not -1.",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert_eq!(one_line(&out.stderr), *want, "{args:?}\n{said}");
+        assert!(
+            !said.contains("has no flag") && !said.contains("unexpected argument"),
+            "a negative was read as a flag:\n{said}"
+        );
+    }
+    let habit = home.run(&["habit", "temp", "-5"], &[("LJOS_SEAT", "alice")]);
+    let said = text(&habit);
+    assert!(
+        !said.contains("has no flag") && !said.contains("unexpected argument"),
+        "a habit reading was read as a flag:\n{said}"
+    );
+}
+
+#[test]
+fn negative_zero_reaches_every_documented_numeric_flag() {
+    let home = Home::new();
+    let cases: &[(&[&str], bool)] = &[
+        (
+            &[
+                "persona",
+                "reviewer",
+                "--anchor",
+                "-0",
+                "--view",
+                "reads diffs",
+            ],
+            true,
+        ),
+        (&["ready", "-n", "-0"], true),
+        (&["search", "kiln", "--limit", "-0"], true),
+        (&["calibrate", "-p", "demo", "--rounds", "-0"], true),
+        (
+            &["wake", "alice", "--command", "true", "--timeout", "-0"],
+            true,
+        ),
+        (
+            &["panel", "demo-kiln", "--designers", "-0", "--dry-run"],
+            true,
+        ),
+        (&["claim", "--next", "--slack", "-0"], true),
+        (
+            &["learn", "demo-kiln", "--outcome", "keep", "--beta", "-0"],
+            false,
+        ),
+        (
+            &["learn", "demo-kiln", "--outcome", "keep", "--share", "-0"],
+            true,
+        ),
+        (
+            &[
+                "supervise",
+                "worker",
+                "--harness",
+                "codex",
+                "--exit",
+                "clean",
+                "--at",
+                "0",
+                "--failures",
+                "-0",
+            ],
+            true,
+        ),
+        (&["memories", "prune", "--stale", "--days", "-0"], true),
+        (&["claims", "--stale", "--days", "-0"], true),
+        (&["release", "--stale", "--days", "-0", "--yes"], true),
+        (
+            &["vote", "demo-kiln", "--for", "keep", "--confidence", "-0"],
+            false,
+        ),
+        (
+            &[
+                "file",
+                "Title",
+                "-p",
+                "demo",
+                "--quorum",
+                "-0",
+                "--deadline",
+                "2030-01-01T00:00:00Z",
+            ],
+            true,
+        ),
+        (
+            &["table", "demo-kiln", "--show", "scores", "--version", "-0"],
+            true,
+        ),
+    ];
+    for (args, zero_is_in_range) in cases {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        if *zero_is_in_range {
+            assert_ne!(out.status.code(), Some(2), "{args:?}\n{said}");
+        }
+        assert!(!said.contains("does not accept -0"), "{args:?}\n{said}");
+        assert!(!said.contains("has no flag"), "{args:?}\n{said}");
+        assert!(!said.contains("unexpected argument"), "{args:?}\n{said}");
+    }
+
+    let huge = home.run(
+        &[
+            "memories",
+            "prune",
+            "--stale",
+            "--days",
+            "9223372036854775808",
+        ],
+        &[("LJOS_SEAT", "alice")],
+    );
+    let said = text(&huge);
+    assert_ne!(huge.status.code(), Some(2), "{said}");
+    assert!(!said.contains("does not accept"), "{said}");
+}
+
+#[test]
+fn positional_flags_seat_values_and_negative_zero_are_unambiguous() {
+    let home = Home::new();
+    let cases: &[(&[&str], Option<i32>, &str)] = &[
+        (
+            &["file", "-hello", "-p", "demo"],
+            Some(2),
+            "pass `--` before text that starts with `-`",
+        ),
+        (&["file", "-task", "-p", "demo"], Some(2), "<TITLE>"),
+        (
+            &["finish", "demo-kiln", "-hello"],
+            Some(2),
+            "pass `--` before text that starts with `-`",
+        ),
+        (
+            &["file", "--unknown-flag"],
+            Some(2),
+            "pass `--` before text that starts with `-`",
+        ),
+        (&["search", "kiln", "--limit", "-0"], None, ""),
+        (&["conflicts", "--limit", "-0"], None, ""),
+        (
+            &["panel", "demo-kiln", "--designers", "-0", "--dry-run"],
+            None,
+            "",
+        ),
+    ];
+    for (args, status, want) in cases {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        if let Some(status) = status {
+            assert_eq!(out.status.code(), Some(*status), "{args:?}\n{said}");
+            assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+            assert!(one_line(&out.stderr).contains(want), "{args:?}\n{said}");
+        } else {
+            assert_ne!(out.status.code(), Some(2), "{args:?}\n{said}");
+            assert!(
+                !said.contains("takes a number from 0 up"),
+                "{args:?}\n{said}"
+            );
+            assert!(!said.contains("Usage:"), "{args:?}\n{said}");
+            assert!(!said.contains("needs a value"), "{args:?}\n{said}");
+        }
+    }
+}
+
+#[test]
+fn forwarded_argv_skips_ljos_short_flag_checks() {
+    let home = Home::new();
+    for args in [
+        &["git-hook", "pre-push", "-x", "origin"][..],
+        &["git-hook", "pre-push", "--bogus", "origin"][..],
+        &["evidence", "-x"][..],
+        &["evidence", "--bogus"][..],
+    ] {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_ne!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(!said.contains("has no flag"), "{args:?}\n{said}");
+        assert!(!said.contains("needs a value"), "{args:?}\n{said}");
+    }
+}
+
+#[test]
+fn non_text_hyphen_values_name_the_whole_value_flag() {
+    let home = Home::new();
+    for (args, flag, fragment) in [
+        (&["file", "-p", "-demo", "Title"][..], "--project", "-d"),
+        (
+            &["file", "-t", "-bug", "-p", "demo", "Title"][..],
+            "--type",
+            "-b",
+        ),
+    ] {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert_eq!(
+            one_line(&out.stderr),
+            format!("file: {flag} needs a value"),
+            "{args:?}\n{said}"
+        );
+        assert!(!said.contains(&format!("has no flag {fragment}")), "{said}");
+    }
+}
+
+#[test]
+fn clap_metadata_disambiguates_attached_flags_values_and_positionals() {
+    let home = Home::new();
+    for args in [
+        &["file", "-p", "demo", "-tbug", "Title"][..],
+        &["file", "--body", "-hello", "-p", "demo", "Title"][..],
+        &["finish", "demo-1", "--lesson", "-hello"][..],
+        &["file", "--body", "-quick", "-p", "demo", "Title"][..],
+    ] {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_ne!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(!said.contains("Usage:"), "{args:?}\n{said}");
+        assert!(!said.contains("needs a value"), "{args:?}\n{said}");
+    }
+
+    for (args, command) in [
+        (&["search", "file", "-hello"][..], "search"),
+        (&["file", "-p", "demo", "-hello", "--", "Title"][..], "file"),
+    ] {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        let line = one_line(&out.stderr);
+        assert!(
+            line.starts_with(&format!("ljos: {command}")),
+            "{args:?}\n{said}"
+        );
+        assert!(
+            line.contains("pass `--` before text that starts with `-`"),
+            "{args:?}\n{said}"
+        );
+    }
+}
+
+#[test]
+fn a_blank_rule_pattern_exits_1() {
+    let home = Home::new();
+    let out = home.run(
+        &["rule", " ", "--why", "the command is named"],
+        &[("LJOS_SEAT", "alice")],
+    );
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("label rule-input-warning:"), "{said}");
+    assert!(
+        stderr.contains("a pattern over the command line is required"),
+        "{said}"
+    );
+    assert!(out.stdout.is_empty(), "{said}");
+}
+#[test]
+fn no_write_send_and_options_refusals_exit_1_on_stderr() {
+    let home = Home::new();
+    for (args, label) in [
+        (&["send", "bob", ""][..], "label message-input-warning:"),
+        (
+            &["options", "demo-kiln", "only"][..],
+            "label panel-incomplete:",
+        ),
+    ] {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(1), "{args:?}\n{said}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(label),
+            "{args:?}\n{said}"
+        );
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+    }
+}
+
+#[test]
+fn policy_refusals_use_stderr_and_leave_stdout_empty() {
+    if tools::halt(tools::Tool::Packsetd) || tools::halt(tools::Tool::Vissue) {
+        return;
+    }
+    let pack = ljos_test_boot::Packsetd::open();
+    let long_message = "x".repeat(16_001);
+    let cases = vec![
+        (vec!["send", "bob", ""], "message-input-warning"),
+        (vec!["send", "bob", "   "], "message-input-warning"),
+        (
+            vec!["send", "bob", long_message.as_str()],
+            "message-input-warning",
+        ),
+        (vec!["send", "alice", "hello"], "routing-warning"),
+        (vec!["options", "demo-kiln", ""], "panel-incomplete"),
+        (vec!["options", "demo-kiln", "only"], "panel-incomplete"),
+        (
+            vec!["rule", " ", "--why", "the command is named"],
+            "rule-input-warning",
+        ),
+        (
+            vec!["rule", "git status", "--why", ""],
+            "rule-input-warning",
+        ),
+        (
+            vec!["rule", "git status", "--verdict", "maybe", "--why", "test"],
+            "rule-input-warning",
+        ),
+        (
+            vec!["rule", "git push*", "--why", "name the branch"],
+            "rule-input-warning",
+        ),
+        (vec!["playbook", "demo-kiln", ""], "playbook-warning"),
+        (
+            vec!["playbook", "demo-kiln", "not-a-playbook"],
+            "playbook-warning",
+        ),
+        (
+            vec!["persona", "", "--view", "reads diffs"],
+            "persona-owner-warning",
+        ),
+        (
+            vec!["persona", "reviewer", "--view", ""],
+            "persona-owner-warning",
+        ),
+        (
+            vec!["persona", "missing", "--retire"],
+            "persona-owner-warning",
+        ),
+        (
+            vec![
+                "memories",
+                "review",
+                "--edit",
+                "deadbeef",
+                "--text",
+                "replacement",
+            ],
+            "review-input-warning",
+        ),
+        (
+            vec!["accept", "deadbeef", "--quote", "yes", "--via", "alice"],
+            "approval-unverified",
+        ),
+        (
+            vec![
+                "accept",
+                "deadbeef",
+                "--quote",
+                "yes",
+                "--at",
+                "2026-11-20T00:00:00Z",
+            ],
+            "approval-unverified",
+        ),
+        (
+            vec![
+                "accept",
+                "deadbeef",
+                "--quote",
+                "yes",
+                "--at",
+                "2026-11-20T00:00:00Z",
+                "--via",
+                "alice",
+            ],
+            "approval-unverified",
+        ),
+        (
+            vec![
+                "seat",
+                "grant",
+                "bob",
+                "close=own",
+                "--quote",
+                "",
+                "--at",
+                "2026-11-20T00:00:00Z",
+                "--via",
+                "alice",
+            ],
+            "grant-unverified",
+        ),
+        (
+            vec![
+                "seat",
+                "grant",
+                "bob",
+                "close=own",
+                "--quote",
+                "yes, grant it",
+                "--at",
+                "not-a-time",
+                "--via",
+                "alice",
+            ],
+            "grant-unverified",
+        ),
+        (
+            vec![
+                "seat",
+                "grant",
+                "alice",
+                "close=own",
+                "--quote",
+                "yes, grant it",
+                "--at",
+                "2026-11-20T00:00:00Z",
+                "--via",
+                "alice",
+            ],
+            "grant-unverified",
+        ),
+        (vec!["graded", "deadbeef"], "review-not-shown"),
+        (
+            vec!["claim", "demo-kiln", "--assignee", "bob"],
+            "assignee-mismatch",
+        ),
+    ];
+    for (args, label) in cases {
+        let home = Home::new();
+        let out = home.run(
+            &args,
+            &[("LJOS_SEAT", "alice"), ("PACKSET_URL", pack.url())],
+        );
+        let said = text(&out);
+        assert!(!out.status.success(), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(&format!("label {label}:")),
+            "{args:?}\n{said}"
+        );
+    }
+
+    let path = std::env::var("PATH").unwrap();
+    for (args, label, seat) in [
+        (
+            &["block", "demo-kiln", "--on", "demo-kiln"][..],
+            "graph-cycle",
+            Some("alice"),
+        ),
+        (&["reopen", "demo-kiln"], "reopen-warning", Some("alice")),
+        (
+            &["claim", "demo-kiln", "--assignee", "example-host-sand-sub"],
+            "seat-unresolved",
+            Some("alice"),
+        ),
+    ] {
+        let home = Home::new();
+        let mut env = vec![("PACKSET_URL", pack.url()), ("PATH", path.as_str())];
+        if let Some(seat) = seat {
+            env.push(("LJOS_SEAT", seat));
+        }
+        let out = home.run(args, &env);
+        let said = text(&out);
+        assert!(!out.status.success(), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(&format!("label {label}:")),
+            "{args:?}\n{said}"
+        );
+    }
+
+    let home = Home::new();
+    ljos_cli::write_file(
+        home.root.join("tracker/vissue.toml"),
+        "prefix = \"Software\"\nseats = [\"alice\"]\n",
+    )
+    .unwrap();
+    let out = home.run(
+        &["claim", "demo-kiln"],
+        &[
+            ("LJOS_SEAT", "stranger"),
+            ("PACKSET_URL", pack.url()),
+            ("PATH", path.as_str()),
+        ],
+    );
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("label seat-unlisted:"),
+        "{said}"
+    );
+
+    let home = Home::new();
+    let bin = home.script("claimdag", "#!/bin/sh\nprintf '[]\\n'\n");
+    let stub_path = format!("{}:{path}", bin.display());
+    let out = home.run(
+        &["claim", "--next"],
+        &[
+            ("LJOS_SEAT", "alice"),
+            ("PACKSET_URL", pack.url()),
+            ("PATH", &stub_path),
+        ],
+    );
+    let said = text(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).starts_with("label claim-conflict:"),
+        "{said}"
+    );
+
+    let home = Home::new();
+    let tracker = home.root.join("tracker");
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.name", "test"],
+        &["config", "user.email", "test@example.invalid"],
+        &["config", "commit.gpgsign", "false"],
+        &["add", "."],
+        &["commit", "-q", "-m", "seed"],
+    ] {
+        let out = ljos_cli::program("git")
+            .unwrap()
+            .args(args)
+            .current_dir(&tracker)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", text(&out));
+    }
+    let common = [("PACKSET_URL", pack.url()), ("PATH", path.as_str())];
+    for seat in ["alice", "bob"] {
+        let added = home.run(
+            &["seat", "add", seat],
+            &[common[0], common[1], ("LJOS_SEAT", "alice")],
+        );
+        assert!(added.status.success(), "{seat}: {}", text(&added));
+    }
+    let granted = home.run(
+        &[
+            "seat",
+            "grant",
+            "bob",
+            "close=demo-kiln",
+            "--quote",
+            "yes, bob may close it",
+            "--at",
+            "2026-11-20T00:00:00Z",
+            "--via",
+            "alice",
+        ],
+        &[common[0], common[1], ("LJOS_SEAT", "alice")],
+    );
+    assert!(granted.status.success(), "{}", text(&granted));
+    let issue_path = tracker.join("Software/demo/issues.org");
+    let mut issues = std::fs::read_to_string(&issue_path).unwrap();
+    issues.push_str(
+        "\n* TODO [#C] Cool the kiln\n:PROPERTIES:\n:ID: demo-cool\n:PARENT: demo-kiln\n:END:\n",
+    );
+    home.write_issues(&issues);
+    let claimed = home.run(
+        &["claim", "demo-kiln"],
+        &[common[0], common[1], ("LJOS_SEAT", "bob")],
+    );
+    assert!(claimed.status.success(), "{}", text(&claimed));
+    let out = home.run(
+        &["finish", "demo-kiln", "--close"],
+        &[common[0], common[1], ("LJOS_SEAT", "bob")],
+    );
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).starts_with("label children-open:"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_very_long_idle_span_does_not_overflow() {
+    let home = Home::new();
+    let out = home.run(
+        &["reap", "--idle", "99999999999999999d"],
+        &[("LJOS_SEAT", "alice")],
+    );
+    let said = text(&out);
+    assert_ne!(out.status.code(), Some(101), "{said}");
+    assert!(!said.contains("panicked"), "{said}");
+}
+
+#[test]
+fn an_empty_value_on_a_count_flag_is_named() {
+    let home = Home::new();
+    let out = home.run(
+        &["search", "kiln", "--limit", ""],
+        &[("LJOS_SEAT", "alice")],
+    );
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert_eq!(
+        one_line(&out.stderr),
+        "search: --limit does not accept \"\". The values it takes are in `ljos search --help`.",
+        "{said}"
+    );
+}
+
+#[test]
+fn wake_refuses_a_timeout_that_does_not_fit_toml() {
+    let home = Home::new();
+    let out = home.run(
+        &[
+            "wake",
+            "alice",
+            "--command",
+            "true",
+            "--timeout",
+            "18446744073709551615",
+        ],
+        &[("LJOS_SEAT", "alice")],
+    );
+    let said = text(&out);
+    assert_eq!(out.status.code(), Some(2), "{said}");
+    assert!(out.stdout.is_empty(), "{said}");
+    assert_eq!(
+        one_line(&out.stderr),
+        "wake: --timeout takes a number no larger than 9223372036854775807, not 18446744073709551615.",
+        "{said}"
+    );
+}
+
+#[test]
+fn a_span_flag_that_is_not_a_span_exits_2() {
+    let home = Home::new();
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &["reap", "--idle", "-1"],
+            "reap: --idle \"-1\" wants a number and s, m, h or d",
+        ),
+        (
+            &["reap", "--idle=-1h"],
+            "reap: --idle \"-1h\" wants a number and s, m, h or d",
+        ),
+        (
+            &["reap", "--idle", "0"],
+            "reap: --idle \"0\" must be at least 1m because claim times have minute resolution",
+        ),
+        (
+            &["reap", "--idle=0s"],
+            "reap: --idle \"0s\" must be at least 1m because claim times have minute resolution",
+        ),
+        (
+            &["reap", "--idle", "59s"],
+            "reap: --idle \"59s\" must be at least 1m because claim times have minute resolution",
+        ),
+        (
+            &["release", "--stale", "--older-than", "-1"],
+            "release: --older-than wants a duration such as 900, 15m, 6h or 2d",
+        ),
+        (
+            &["release", "--stale", "--older-than=-1h"],
+            "release: --older-than wants a duration such as 900, 15m, 6h or 2d",
+        ),
+        (
+            &["habit", "temp", "5", "--every", "-1"],
+            "habit: --every must be positive",
+        ),
+        (
+            &["habit", "temp", "5", "--every=0d"],
+            "habit: --every must be positive",
+        ),
+        (
+            &["habit", "temp", "5", "--every=9223372036854775807w"],
+            "habit: --every \"9223372036854775807w\" is too long; write 7d, 24h, 2w or 30m",
+        ),
+        (
+            &["reap", "--idle", "18446744073709551615h"],
+            "reap: --idle \"18446744073709551615h\" does not fit in a timestamp",
+        ),
+        (
+            &["reap", "--idle=18446744073709551615h", "--apply"],
+            "reap: --idle \"18446744073709551615h\" does not fit in a timestamp",
+        ),
+        (
+            &[
+                "release",
+                "--stale",
+                "--older-than",
+                "18446744073709551615h",
+            ],
+            "release: --older-than \"18446744073709551615h\" does not fit in a timestamp",
+        ),
+    ];
+    for (args, want) in cases {
+        let out = home.run(args, &[("LJOS_SEAT", "alice")]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert_eq!(one_line(&out.stderr), *want, "{args:?}\n{said}");
     }
 }

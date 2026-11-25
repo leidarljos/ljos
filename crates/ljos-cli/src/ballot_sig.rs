@@ -1006,6 +1006,10 @@ fn codex_thread(parent: &str) -> Option<String> {
 /// Remember the hook payload's session for this process, and export it for
 /// a child when the environment has not already named one. An id that
 /// names nobody ([`crate::usable_session_id`]) is no session.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the hook session must reach child processes"
+)]
 pub fn export_hook_session(id: Option<&str>) {
     crate::with_env_mutation(|| {
         let id = id.and_then(crate::usable_session_id).map(field);
@@ -1529,7 +1533,7 @@ pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
         sign_bound(&key, issue, voter, choice, &id.harness, &id.nonce)
     };
     if write_sig_note(issue, &note).is_err() {
-        crate::run_captured("vissue", &["note", issue, &note])?;
+        crate::run_captured("vissue", &["note", issue, "--", &note])?;
     }
     let session = if id.harness == "-" {
         format!("nonce {}", &id.nonce[..12.min(id.nonce.len())])
@@ -1562,7 +1566,7 @@ pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
     };
     let from = provenance_line(&persona, &caster, &parent);
     if write_sig_note(issue, &from).is_err() {
-        let _ = crate::run_captured("vissue", &["note", issue, &from]);
+        let _ = crate::run_captured("vissue", &["note", issue, "--", &from]);
     }
     said.push_str(&format!("{persona} cast by {caster}, parent {parent}\n"));
     Ok(said)
@@ -1704,7 +1708,7 @@ pub fn note_withdrawn_on(
 ) -> Result<String> {
     let id = identity();
     let note = withdrawn_line_on(voter, &id.harness, &id.nonce, Some(withdrawn_issue));
-    crate::run_captured("vissue", &["note", logbook_issue, &note]).with_context(|| {
+    crate::run_captured("vissue", &["note", logbook_issue, "--", &note]).with_context(|| {
         format!("ballot withdrawn; the note on {logbook_issue} was not written")
     })?;
     Ok(note)
@@ -2029,7 +2033,7 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         crate::with_env_mutation(|| {
             // SAFETY: this test has the process environment lock.
-            unsafe { std::env::set_var("XDG_DATA_HOME", data.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("XDG_DATA_HOME", data.path()) };
         });
         let folded = data.path().join("ljos/seats/.dotseat/ballot.key");
         std::fs::create_dir_all(folded.parent().unwrap()).unwrap();
@@ -2049,7 +2053,7 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         crate::with_env_mutation(|| {
             // SAFETY: this test has the process environment lock.
-            unsafe { std::env::set_var("XDG_DATA_HOME", data.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("XDG_DATA_HOME", data.path()) };
         });
         let folded = data.path().join("ljos/seats/judge_model-1.5/ballot.key");
         std::fs::create_dir_all(folded.parent().unwrap()).unwrap();

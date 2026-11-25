@@ -3793,7 +3793,7 @@ mod tests {
         let lock = crate::test_env_lock();
         // SAFETY: the lock restores the process environment.
         unsafe {
-            std::env::set_var("PACKSET_URL", "off");
+            crate::test_env_guards::set_var_unchecked("PACKSET_URL", "off");
         }
         lock
     }
@@ -4997,7 +4997,7 @@ mod tests {
         let _env = pack_aside();
         // SAFETY: the lock above restores the process environment.
         unsafe {
-            std::env::set_var("LJOS_SEARCH_WAIT", "30");
+            crate::test_env_guards::set_var_unchecked("LJOS_SEARCH_WAIT", "30");
         }
         let (dir, target) = place("round");
         let handoff = dir.path().join("handoff");
@@ -5187,8 +5187,8 @@ mod tests {
             }
             unsafe {
                 match self.previous_url.take() {
-                    Some(value) => std::env::set_var("PACKSET_URL", value),
-                    None => std::env::remove_var("PACKSET_URL"),
+                    Some(value) => crate::test_env_guards::set_var_unchecked("PACKSET_URL", value),
+                    None => crate::test_env_guards::remove_var_unchecked("PACKSET_URL"),
                 }
             }
         }
@@ -5201,7 +5201,10 @@ mod tests {
         let port = listener.local_addr().ok()?.port();
         let previous_url = std::env::var_os("PACKSET_URL");
         unsafe {
-            std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
+            crate::test_env_guards::set_var_unchecked(
+                "PACKSET_URL",
+                format!("http://127.0.0.1:{port}"),
+            );
         }
         let _ = listener.set_nonblocking(true);
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

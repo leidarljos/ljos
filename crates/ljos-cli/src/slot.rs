@@ -1296,7 +1296,7 @@ pub fn write(issue: &str, seat: &str, model: &str, run: &str, run_key: &str) -> 
         &launcher,
     );
     if ballot_sig::write_sig_note(issue, &note).is_err() {
-        crate::run_captured("vissue", &["note", issue, &note])?;
+        crate::run_captured("vissue", &["note", issue, "--", &note])?;
     }
     Ok(format!(
         "slot: {seat} on {issue} for run {}, model {}, run key {}…, signed by {launcher} with key {}…\n",
@@ -2157,8 +2157,8 @@ mod tests {
             reason = "writes a file that is not a git hook"
         )]
         std::fs::write(&cfg, b"").unwrap();
-        std::env::set_var("GIT_CONFIG_GLOBAL", &cfg);
-        std::env::set_var("GIT_CONFIG_SYSTEM", &cfg);
+        crate::test_env_guards::set_var("GIT_CONFIG_GLOBAL", &cfg);
+        crate::test_env_guards::set_var("GIT_CONFIG_SYSTEM", &cfg);
     }
 
     #[test]
@@ -2389,7 +2389,7 @@ mod tests {
         pinned_before_slots(&origin);
         let shallow = shallow_of(root.path(), &origin);
         git_ok(&shallow, &["remote", "remove", "origin"]);
-        std::env::set_var("VISSUE_ROOT", &shallow);
+        crate::test_env_guards::set_var("VISSUE_ROOT", &shallow);
 
         let err = starts().unwrap_err();
         assert!(err.contains("tracker history incomplete"), "{err}");
@@ -2452,7 +2452,7 @@ mod tests {
     }
 
     fn assert_real_order(dir: &std::path::Path) {
-        std::env::set_var("VISSUE_ROOT", dir);
+        crate::test_env_guards::set_var("VISSUE_ROOT", dir);
         let at = starts().unwrap().expect("a git tracker");
         assert!(
             !stood(&at, "eessi", "aa").unwrap(),
@@ -2628,7 +2628,7 @@ mod tests {
     fn a_note_removed_and_added_again_does_not_let_the_later_pin_stand() {
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
+        crate::test_env_guards::set_var("XDG_STATE_HOME", root.path().join("state"));
         let repo = root.path().join("repo");
         init_repo(&repo);
         #[expect(
@@ -2688,7 +2688,7 @@ mod tests {
     fn a_note_merged_through_a_later_fork_is_read() {
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
+        crate::test_env_guards::set_var("XDG_STATE_HOME", root.path().join("state"));
         let repo = root.path().join("repo");
         init_repo(&repo);
         #[expect(
@@ -2768,7 +2768,7 @@ mod tests {
         let _budget = BudgetReset;
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
-        std::env::set_var("XDG_STATE_HOME", &state);
+        crate::test_env_guards::set_var("XDG_STATE_HOME", &state);
         let repo = root.path().join("repo");
         init_repo(&repo);
         #[expect(
@@ -2832,7 +2832,7 @@ mod tests {
         let _lock = crate::test_env_lock();
         let _budget = BudgetReset;
         let root = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
+        crate::test_env_guards::set_var("XDG_STATE_HOME", root.path().join("state"));
         let repo = root.path().join("repo");
         init_repo(&repo);
         #[expect(
@@ -2847,8 +2847,8 @@ mod tests {
         )]
         std::fs::write(repo.join(".ljos-seat-keys"), "postslot kk\n").unwrap();
         commit_all(&repo, "pin");
-        std::env::set_var("VISSUE_ROOT", &repo);
-        std::env::set_var("LJOS_SEAT", "ada");
+        crate::test_env_guards::set_var("VISSUE_ROOT", &repo);
+        crate::test_env_guards::set_var("LJOS_SEAT", "ada");
         override_lookup_budget_for_test(Some(0));
         let who = crate::ballot_voter("vote", Some("postslot")).expect("the vote was refused");
         assert_eq!(who, "persona:ada:postslot", "{who}");
@@ -2861,7 +2861,7 @@ mod tests {
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
-        std::env::set_var("XDG_STATE_HOME", &state);
+        crate::test_env_guards::set_var("XDG_STATE_HOME", &state);
         let repo = root.path().join("repo");
         init_repo(&repo);
         #[expect(
@@ -2926,7 +2926,7 @@ mod tests {
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
-        std::env::set_var("XDG_STATE_HOME", &state);
+        crate::test_env_guards::set_var("XDG_STATE_HOME", &state);
         let repo = root.path().join("repo");
         init_repo(&repo);
         #[expect(
@@ -2980,7 +2980,7 @@ mod tests {
         let _fail = FailReset;
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
-        std::env::set_var("XDG_STATE_HOME", &state);
+        crate::test_env_guards::set_var("XDG_STATE_HOME", &state);
         let repo = root.path().join("repo");
         init_repo(&repo);
         #[expect(
@@ -3021,8 +3021,8 @@ mod tests {
         let err = starts_in(&repo).unwrap_err();
         assert!(err.contains(SLOT_HISTORY_PARTIAL), "{err}");
 
-        std::env::set_var("VISSUE_ROOT", &repo);
-        std::env::set_var("LJOS_SEAT", "ada");
+        crate::test_env_guards::set_var("VISSUE_ROOT", &repo);
+        crate::test_env_guards::set_var("LJOS_SEAT", "ada");
         let who = crate::ballot_voter("vote", Some("postslot")).expect("the vote was refused");
         assert_eq!(who, "persona:ada:postslot", "{who}");
     }
@@ -3036,7 +3036,7 @@ mod tests {
         let _budget = BudgetReset;
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
-        std::env::set_var("XDG_STATE_HOME", &state);
+        crate::test_env_guards::set_var("XDG_STATE_HOME", &state);
         let repo = root.path().join("repo");
         init_repo(&repo);
         #[expect(

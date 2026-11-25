@@ -148,7 +148,9 @@ Session two stores a lesson, so the pack has heard from it. ``ljos send`` prints
    receipt …   claude-dxw6sq4j7l   …
 
    $ CLAUDE_CODE_SESSION_ID=0199a1b2-claude-session-one ljos send claude "the build is red"
-   label recipient-unseen: send: no seat named claude has written to this pack, so the message would wait unread. Did you mean claude-dxw6sq4j7l? Other seats: claude-f2pu9d56g0. Pass --new-seat to write to a seat that has not started yet
+   label recipient-unseen: send: no seat named claude has written to this pack, so
+   the message would wait unread. Did you mean claude-dxw6sq4j7l? Other seats:
+   claude-f2pu9d56g0. Pass --new-seat to write to a seat that has not started yet
 
 .. END ljos-sample agents-mail
 

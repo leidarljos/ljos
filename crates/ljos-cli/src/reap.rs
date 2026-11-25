@@ -25,13 +25,27 @@ pub fn parse_idle(s: &str) -> Result<Duration> {
         .parse()
         .map_err(|_| anyhow::anyhow!("reap: --idle {s:?} wants a number and s, m, h or d"))?;
     let secs = match unit {
-        "s" => n,
-        "m" | "" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86400,
+        "s" => Some(n),
+        "m" | "" => n.checked_mul(60),
+        "h" => n.checked_mul(3_600),
+        "d" => n.checked_mul(86_400),
         _ => bail!("reap: --idle {s:?} wants a number and s, m, h or d"),
     };
+    // A product that does not fit in i64 casts to a negative cutoff, and
+    // `reap --apply` then releases every claim.
+    let Some(secs) = secs.filter(|secs| i64::try_from(*secs).is_ok()) else {
+        bail!("reap: --idle {s:?} does not fit in a timestamp");
+    };
     Ok(Duration::from_secs(secs))
+}
+
+/// A reap window, whose tracker timestamps have one-minute resolution.
+pub fn parse_reap_idle(s: &str) -> Result<Duration> {
+    let idle = parse_idle(s)?;
+    if idle < Duration::from_secs(60) {
+        bail!("reap: --idle {s:?} must be at least 1m because claim times have minute resolution");
+    }
+    Ok(idle)
 }
 
 /// The tracker's `[2026-10-13 Tue 16:01]`, read in this machine's zone.
@@ -84,8 +98,14 @@ pub fn held_from_json(json: &str) -> Result<Vec<Held>> {
 }
 
 /// The claims idle past `idle` at `now`. A claim with no time is idle.
+/// A duration that does not fit in a timestamp matches nothing.
 pub fn idle_claims(held: &[Held], idle: Duration, now: i64) -> Vec<Held> {
-    let cut = now - idle.as_secs() as i64;
+    let Ok(secs) = i64::try_from(idle.as_secs()) else {
+        return Vec::new();
+    };
+    let Some(cut) = now.checked_sub(secs) else {
+        return held.iter().filter(|h| h.last.is_none()).cloned().collect();
+    };
     held.iter()
         .filter(|h| h.last.is_none_or(|t| t < cut))
         .cloned()
@@ -111,6 +131,9 @@ fn when(t: Option<i64>) -> String {
 /// Release every claim idle past `idle` and mail its seat. Without
 /// `apply`, print what would happen and write nothing.
 pub fn reap(idle: Duration, apply: bool) -> Result<String> {
+    if i64::try_from(idle.as_secs()).is_err() {
+        bail!("reap: --idle is longer than a timestamp can hold");
+    }
     let said = crate::run_captured("vissue", &["claims", "--json"])?;
     let mut held = held_from_json(&said.stdout)?;
     for h in &mut held {
@@ -269,7 +292,7 @@ pub fn gate_quorum(id: &str, needed: usize, deadline: Option<&str>) -> Result<Qu
     }
     if !quorum_already_noted(id) {
         let note = format!("quorum timed out: {have} of {needed}");
-        crate::run_captured("vissue", &["note", id, &note])
+        crate::run_captured("vissue", &["note", id, "--", &note])
             .map_err(|e| anyhow::anyhow!("quorum: the lapse on {id} was not noted: {e:#}"))?;
     }
     Ok(QuorumGate::Lapsed { have, needed })
@@ -341,6 +364,42 @@ mod tests {
         assert_eq!(parse_idle("2d").unwrap().as_secs(), 172800);
         assert!(parse_idle("6x").is_err());
         assert!(parse_idle("h").is_err());
+    }
+
+    #[test]
+    fn reap_idle_needs_one_minute() {
+        for value in ["0", "0s", "59s"] {
+            let err = parse_reap_idle(value).unwrap_err().to_string();
+            assert!(err.contains("must be at least 1m"), "{value}: {err}");
+        }
+        assert_eq!(parse_reap_idle("1m").unwrap(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_huge_idle_does_not_fit_in_a_timestamp() {
+        let err = parse_idle("18446744073709551615h").unwrap_err().to_string();
+        assert!(err.contains("does not fit in a timestamp"), "{err}");
+        assert!(parse_idle("18446744073709551615s").is_err());
+        assert!(parse_idle("18446744073709551615").is_err());
+    }
+
+    #[test]
+    fn a_huge_idle_does_not_release_a_fresh_claim() {
+        let now = 1_700_000_000;
+        let held = vec![Held {
+            id: "fresh".into(),
+            holder: "ada".into(),
+            title: "new".into(),
+            last: Some(now),
+        }];
+        let ids: Vec<_> = idle_claims(&held, Duration::from_secs(u64::MAX), now)
+            .into_iter()
+            .map(|h| h.id)
+            .collect();
+        assert!(
+            !ids.iter().any(|id| id == "fresh"),
+            "a duration that does not fit idled a fresh claim: {ids:?}"
+        );
     }
 
     #[test]

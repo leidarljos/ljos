@@ -34,7 +34,8 @@ path = "src/bin/ljos-mcp/main.rs"
 
 [features]
 # For this package's own tests only, through the dev-dependency below. A
-# release build leaves it off, so no ljos binary can move the person key.
+# release build leaves it off, so no ljos binary can move the person key,
+# and the library does not export the test env guards.
 test-hooks = []
 
 [dependencies]

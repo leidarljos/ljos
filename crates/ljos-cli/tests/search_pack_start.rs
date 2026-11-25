@@ -268,14 +268,14 @@ fn remember_names_a_pack_that_stays_not_ready() {
 fn the_mcp_search_returns_the_starting_sentence() {
     let seat = serve(None, hits_body());
     let home = seat.home.path();
-    std::env::set_var("PACKSET_URL", &seat.url);
-    std::env::set_var("PACKSET_WORKSPACE", "seat");
-    std::env::set_var("PACKSET_AUTH", "off");
-    std::env::set_var("LJOS_NO_AUTOSTART", "1");
-    std::env::set_var("LJOS_SEARCH_WARMUP_WAIT", "1");
-    std::env::set_var("LJOS_SEARCH_WAIT", "0");
-    std::env::set_var("HOME", home);
-    std::env::set_var("LJOS_SEAT", "travel");
+    ljos_cli::test_env_guards::set_var("PACKSET_URL", &seat.url);
+    ljos_cli::test_env_guards::set_var("PACKSET_WORKSPACE", "seat");
+    ljos_cli::test_env_guards::set_var("PACKSET_AUTH", "off");
+    ljos_cli::test_env_guards::set_var("LJOS_NO_AUTOSTART", "1");
+    ljos_cli::test_env_guards::set_var("LJOS_SEARCH_WARMUP_WAIT", "1");
+    ljos_cli::test_env_guards::set_var("LJOS_SEARCH_WAIT", "0");
+    ljos_cli::test_env_guards::set_var("HOME", home);
+    ljos_cli::test_env_guards::set_var("LJOS_SEAT", "travel");
     let err = ljos_cli::search_ranked("kiln", 5).unwrap_err();
     let said = format!("{err:#}");
     assert!(said.contains(STARTING), "{said}");

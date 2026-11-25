@@ -522,7 +522,7 @@ fn walk_commands(seat: &Seat, case: &Case, dead: u16) {
         .collect();
     assert_eq!(
         remembered_lines,
-        ["Memory busy: queued 1 write, it will be saved on a later call."],
+        ["Memory busy: queued 1 write. A later ljos call from any seat will try to save it, and the pack may still refuse it."],
         "remember {} was not one line:\n{remembered}",
         case.name
     );
@@ -677,6 +677,22 @@ fn walk_mcp(seat: &Seat, case: &Case, dead: u16) {
     ] {
         let call = by_id(id);
         let said = mcp_text(call);
+        if name == "ljos_remember" {
+            // The CLI queues the lesson and exits 0. The tool answers the
+            // same way, not with an error.
+            assert!(
+                call.get("error").is_none() && call["result"]["isError"] != true,
+                "{name} {}: {said}",
+                case.name
+            );
+            assert_eq!(
+                call["result"]["structuredContent"]["text"],
+                "Memory busy: queued 1 write. A later ljos call from any seat will try to save it, and the pack may still refuse it.",
+                "{name} {}: {said}",
+                case.name
+            );
+            continue;
+        }
         assert!(
             said.contains(&case.phrase) && said.contains(case.command),
             "{name} {}: {said}",
@@ -688,12 +704,6 @@ fn walk_mcp(seat: &Seat, case: &Case, dead: u16) {
             !first.contains('\n'),
             "{name} was more than one line: {first}"
         );
-        if name == "ljos_remember" {
-            assert!(
-                first.contains("1 lesson is queued for the next send"),
-                "{name}: {first}"
-            );
-        }
     }
     let queued = std::fs::read_to_string(state.join("ljos/note-queue.jsonl")).unwrap_or_default();
     assert!(
@@ -924,7 +934,7 @@ fn a_queued_lesson_reaches_the_pack_on_the_next_run() {
     );
     assert!(
         String::from_utf8_lossy(&remember.stdout)
-            .contains("Memory busy: queued 1 write, it will be saved on a later call."),
+            .contains("Memory busy: queued 1 write. A later ljos call from any seat will try to save it, and the pack may still refuse it."),
         "{said}"
     );
     let queue = state.join("ljos/note-queue.jsonl");
@@ -954,6 +964,103 @@ fn a_queued_lesson_reaches_the_pack_on_the_next_run() {
         !left.contains(LESSON),
         "the lesson stayed queued\n{left}\n{said}"
     );
+}
+
+/// A queue file that cannot take the row is not a queued lesson. The CLI
+/// and the MCP tool both say nothing was stored and name the retry.
+#[test]
+fn a_lesson_the_queue_cannot_hold_is_not_called_queued() {
+    let seat = Seat::new("unqueued");
+    let held = refused_port::RefusedPort::reserve();
+    let dead = held.port();
+    // The cause names a busy path, so only the outcome type says unqueued.
+    let state = seat.root.join("busy-state");
+    std::fs::create_dir_all(state.join("ljos/note-queue.jsonl")).unwrap();
+
+    let remember = ljos(
+        &seat,
+        &seat.path_with_packset(),
+        &state,
+        dead,
+        &["remember", LESSON],
+    )
+    .output()
+    .unwrap();
+    let said = text_of(&remember);
+    assert!(!remember.status.success(), "{said}");
+    assert!(!said.contains("queued 1 write"), "{said}");
+    assert!(
+        stderr_lines(&remember)
+            .iter()
+            .any(|line| line.contains(ljos_cli::REMEMBER_NOT_STORED_LINE)),
+        "{said}"
+    );
+
+    let mut child = ljos_cli::program(env!("CARGO_BIN_EXE_ljos-mcp"))
+        .unwrap()
+        .env_clear()
+        .env("HOME", seat.home())
+        .env("PATH", seat.path_with_packset())
+        .env("USER", "ada")
+        .env("LOGNAME", "ada")
+        .env("LJOS_SEAT", "ada")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("LJOS_MCP_TOOLS", "all")
+        .env("PACKSET_PORT", dead.to_string())
+        .env("PACKSET_AUTH", "off")
+        .env("PACKSET_TIMEOUT_MS", "400")
+        .env("LJOS_PACK_TIMEOUT_MS", "400")
+        .env("XDG_STATE_HOME", &state)
+        .env("XDG_CONFIG_HOME", seat.root.join("config"))
+        .env("XDG_DATA_HOME", seat.root.join("data"))
+        .env("XDG_RUNTIME_DIR", seat.root.join("run"))
+        .env("TMPDIR", seat.root.join("tmp"))
+        .env("VISSUE_ROOT", seat.root.join("tracker"))
+        .env("VISSUE_NO_ROUTE", "1")
+        .current_dir(seat.home())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(90));
+        let _ = ljos_cli::program("kill")
+            .unwrap()
+            .arg(pid.to_string())
+            .status();
+    });
+    let mut stdin = child.stdin.take().unwrap();
+    for line in [
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-06-18","capabilities":{},
+            "clientInfo":{"name":"unqueued","version":"1"}
+        }}),
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name": "ljos_remember", "arguments": {"text": LESSON, "seat": "ada"}
+        }}),
+    ] {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let call: serde_json::Value = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|answer| answer["id"] == 2)
+        .unwrap_or_else(|| panic!("no mcp answer\n{stdout}"));
+    let said = mcp_text(&call);
+    assert!(
+        call.get("error").is_some() || call["result"]["isError"] == true,
+        "{call}"
+    );
+    assert!(!said.contains("queued 1 write"), "{call}");
+    assert!(!said.contains("is queued"), "{call}");
+    assert!(said.contains("could not be queued"), "{call}");
+    assert!(said.contains(ljos_cli::REMEMBER_NOT_STORED_LINE), "{call}");
 }
 
 #[test]

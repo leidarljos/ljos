@@ -30,6 +30,88 @@ pub struct PacksetClient {
     token: Mutex<Option<String>>,
 }
 
+/// A pack write failure, classified at the client boundary.
+#[derive(Debug)]
+pub enum PackWriteError {
+    BusyOrQueuedByServer(Error),
+    MemoryPressure(Error),
+    Unavailable503(Error),
+    Other(Error),
+}
+
+impl PackWriteError {
+    /// Whether a remember can keep the write for a later pack call.
+    #[must_use]
+    pub fn queueable(&self) -> bool {
+        match self {
+            Self::BusyOrQueuedByServer(_) | Self::MemoryPressure(_) | Self::Unavailable503(_) => {
+                true
+            }
+            Self::Other(Error::Http(_) | Error::Io(_) | Error::NoUrl) => true,
+            Self::Other(_) => false,
+        }
+    }
+}
+
+impl std::fmt::Display for PackWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BusyOrQueuedByServer(err)
+            | Self::MemoryPressure(err)
+            | Self::Unavailable503(err)
+            | Self::Other(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for PackWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::BusyOrQueuedByServer(err)
+            | Self::MemoryPressure(err)
+            | Self::Unavailable503(err)
+            | Self::Other(err) => Some(err),
+        }
+    }
+}
+
+fn status_code(why: &str) -> Option<u16> {
+    why.split(": ").find_map(|part| {
+        part.trim()
+            .strip_prefix("status code ")
+            .unwrap_or(part.trim())
+            .parse()
+            .ok()
+    })
+}
+
+fn memory_pressure_line(line: &str) -> bool {
+    let line = line.trim().to_ascii_lowercase();
+    line == "memory pressure"
+        || line.starts_with("memory pressure;")
+        || line.starts_with("packsetd is busy: memory pressure")
+}
+
+fn classify_write_error(err: Error) -> PackWriteError {
+    if matches!(
+        &err,
+        Error::Io(io)
+            if io
+                .get_ref()
+                .is_some_and(|inner| inner.is::<crate::PackReportedBusy>())
+    ) {
+        return PackWriteError::BusyOrQueuedByServer(err);
+    }
+    match &err {
+        Error::Unavailable(line) if memory_pressure_line(line) => {
+            PackWriteError::MemoryPressure(err)
+        }
+        Error::Unavailable(_) => PackWriteError::Unavailable503(err),
+        Error::Bad(why) if status_code(why) == Some(503) => PackWriteError::Unavailable503(err),
+        _ => PackWriteError::Other(err),
+    }
+}
+
 impl Clone for PacksetClient {
     fn clone(&self) -> Self {
         Self {
@@ -2011,16 +2093,21 @@ impl PacksetClient {
         self.json_ok("/v1/status", answer)
     }
 
-    pub fn post_atom(&self, atom: &Value) -> Result<Value, Error> {
-        let bytes = serde_json::to_vec(atom)?;
-        let answer = self.tried(
-            "POST",
-            "/v1/atoms",
-            &[],
-            Some(&bytes),
-            super::REMEMBER_BUDGET,
-        )?;
+    pub fn post_atom(&self, atom: &Value) -> Result<Value, PackWriteError> {
+        let bytes = serde_json::to_vec(atom)
+            .map_err(Error::from)
+            .map_err(classify_write_error)?;
+        let answer = self
+            .tried(
+                "POST",
+                "/v1/atoms",
+                &[],
+                Some(&bytes),
+                super::REMEMBER_BUDGET,
+            )
+            .map_err(classify_write_error)?;
         self.json_ok("/v1/atoms", answer)
+            .map_err(classify_write_error)
     }
 
     pub fn delete_atom(
@@ -2386,7 +2473,7 @@ mod tests {
     fn a_search_reads_the_port_owner_once_for_each_url() {
         let _g = crate::tests::env_guard();
         // SAFETY: under the lock every environment-reading test takes.
-        unsafe { std::env::remove_var("LJOS_IN_HOOK") };
+        unsafe { crate::test_env_guards::remove_var_unchecked("LJOS_IN_HOOK") };
         let (url, other) = ("http://127.0.0.1:9", "http://127.0.0.1:10");
         let start = reads();
         foreign(url);
@@ -2699,12 +2786,12 @@ mod tests {
     fn quiet_pack() -> tempfile::TempDir {
         let home = tempfile::tempdir().unwrap();
         unsafe {
-            std::env::remove_var("PACKSET_TOKEN");
-            std::env::remove_var("PACKSET_TOKEN_FILE");
-            std::env::remove_var("PACKSET_TIMEOUT_MS");
-            std::env::remove_var("PACKSET_WORKSPACE");
-            std::env::remove_var("LJOS_IN_HOOK");
-            std::env::set_var("PACKSET_HOME", home.path());
+            crate::test_env_guards::remove_var_unchecked("PACKSET_TOKEN");
+            crate::test_env_guards::remove_var_unchecked("PACKSET_TOKEN_FILE");
+            crate::test_env_guards::remove_var_unchecked("PACKSET_TIMEOUT_MS");
+            crate::test_env_guards::remove_var_unchecked("PACKSET_WORKSPACE");
+            crate::test_env_guards::remove_var_unchecked("LJOS_IN_HOOK");
+            crate::test_env_guards::set_var_unchecked("PACKSET_HOME", home.path());
         }
         home
     }
@@ -2802,8 +2889,8 @@ mod tests {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
         unsafe {
-            std::env::set_var("PACKSET_TIMEOUT_MS", "45000");
-            std::env::set_var("LJOS_MCP_TIMEOUT", "60");
+            crate::test_env_guards::set_var_unchecked("PACKSET_TIMEOUT_MS", "45000");
+            crate::test_env_guards::set_var_unchecked("LJOS_MCP_TIMEOUT", "60");
         }
         let _bound = crate::tool_bound::arm(std::time::Duration::from_secs(60));
         let (client, seen) = serve(|_, _| (200, r#"{"hits":[]}"#.into(), None));
@@ -2838,7 +2925,7 @@ mod tests {
     fn a_bare_read_on_another_thread_leaves_this_threads_answer_proven() {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
-        unsafe { std::env::set_var("PACKSET_TOKEN", "pin-token") };
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_TOKEN", "pin-token") };
         let (client, _) = serve(|_, req| {
             let shown = req.lines().any(|line| {
                 line.split_once(':').is_some_and(|(name, value)| {
@@ -3061,7 +3148,7 @@ mod tests {
     fn a_search_asks_a_busy_writer_again_and_then_reads() {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
-        unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "seat") };
         let _retry = super::BusyRetry::enter();
         let (client, seen) = busy_then_hit(3);
         let started = std::time::Instant::now();
@@ -3090,7 +3177,7 @@ mod tests {
     fn a_search_that_stays_busy_stops_inside_the_budget() {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
-        unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "seat") };
         let _retry = super::BusyRetry::enter();
         let (client, seen) = serve(|_, req| {
             if req.lines().next().unwrap_or("").contains("GET /v1/search") {
@@ -3161,7 +3248,7 @@ mod tests {
     fn a_search_waits_out_retry_after() {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
-        unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "seat") };
         let _retry = super::BusyRetry::enter();
         let (client, seen) = serve(|n, req| {
             let search = req.lines().next().unwrap_or("").contains("GET /v1/search");
@@ -3200,7 +3287,7 @@ mod tests {
     fn a_search_waits_out_retry_ms() {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
-        unsafe { std::env::set_var("PACKSET_WORKSPACE", "seat") };
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_WORKSPACE", "seat") };
         let _retry = super::BusyRetry::enter();
         let (client, seen) = serve(|n, req| {
             let search = req.lines().next().unwrap_or("").contains("GET /v1/search");
@@ -3297,14 +3384,19 @@ mod tests {
             fn drop(&mut self) {
                 unsafe {
                     match &self.0 {
-                        Some(value) => std::env::set_var("LJOS_SEARCH_BUSY_WAIT", value),
-                        None => std::env::remove_var("LJOS_SEARCH_BUSY_WAIT"),
+                        Some(value) => crate::test_env_guards::set_var_unchecked(
+                            "LJOS_SEARCH_BUSY_WAIT",
+                            value,
+                        ),
+                        None => {
+                            crate::test_env_guards::remove_var_unchecked("LJOS_SEARCH_BUSY_WAIT")
+                        }
                     }
                 }
             }
         }
         let _restore = Restore(std::env::var_os("LJOS_SEARCH_BUSY_WAIT"));
-        unsafe { std::env::set_var("LJOS_SEARCH_BUSY_WAIT", "0") };
+        unsafe { crate::test_env_guards::set_var_unchecked("LJOS_SEARCH_BUSY_WAIT", "0") };
         let _retry = super::BusyRetry::enter();
         let (client, seen) = serve(|_, req| {
             if req.lines().next().unwrap_or("").contains("GET /v1/search") {

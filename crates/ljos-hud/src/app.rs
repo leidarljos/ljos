@@ -666,8 +666,8 @@ mod tests {
         let _guard = crate::env_lock();
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-boot");
-            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
+            crate::test_env_guards::set_var_unchecked("XDG_ACTIVATION_TOKEN", "tok-boot");
+            crate::test_env_guards::set_var_unchecked("DESKTOP_STARTUP_ID", "startup");
         }
         let app = HudApp::new(true, None);
         assert_eq!(app.pending_activation_token.as_deref(), Some("tok-boot"));
@@ -680,8 +680,8 @@ mod tests {
         let _guard = crate::env_lock();
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var("XDG_ACTIVATION_TOKEN", "tok-hid");
-            std::env::set_var("DESKTOP_STARTUP_ID", "startup");
+            crate::test_env_guards::set_var_unchecked("XDG_ACTIVATION_TOKEN", "tok-hid");
+            crate::test_env_guards::set_var_unchecked("DESKTOP_STARTUP_ID", "startup");
         }
         let app = HudApp::new(false, None);
         assert_eq!(app.pending_activation_token, None);

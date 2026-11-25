@@ -179,7 +179,7 @@ fn a_repeated_org_segment_is_the_project_name() {
     let creates = seat.creates();
     assert_eq!(creates.len(), 1, "{creates:?}");
     assert!(
-        creates[0].starts_with("vissue create -p hle-mm "),
+        creates[0].starts_with("vissue create --project=hle-mm "),
         "{creates:?}"
     );
     assert!(!creates[0].contains("Software/"), "{creates:?}");
@@ -214,7 +214,7 @@ fn a_missing_hold_is_cleared_and_the_ticket_is_filed_at_the_top() {
     let creates = seat.creates();
     assert_eq!(creates.len(), 1, "{creates:?}");
     assert!(
-        creates[0].starts_with("vissue create -p hle-mm "),
+        creates[0].starts_with("vissue create --project=hle-mm "),
         "{creates:?}"
     );
     assert!(!creates[0].contains("--parent"), "{creates:?}");
@@ -288,7 +288,8 @@ fn a_held_alias_files_under_the_id_on_disk() {
     let creates = seat.creates();
     assert_eq!(creates.len(), 1, "{creates:?}");
     assert!(
-        creates[0].contains("-p hle-mm ") && creates[0].contains("--parent Software/hle-mm-yled"),
+        creates[0].contains("--project=hle-mm ")
+            && creates[0].contains("--parent=Software/hle-mm-yled"),
         "{creates:?}"
     );
 }

@@ -32,10 +32,10 @@ fn search_names_finish_with_a_lesson_when_the_top_ticket_is_yours() {
     write_hold(&home, "demo-kiln");
     // SAFETY: scoped to this test.
     unsafe {
-        std::env::set_var("HOME", &home);
-        std::env::set_var("XDG_RUNTIME_DIR", home.join("run"));
-        std::env::set_var("LJOS_SEAT", "ada");
-        std::env::set_var("LJOS_HOLD", "ada");
+        ljos_cli::test_env_guards::set_var_unchecked("HOME", &home);
+        ljos_cli::test_env_guards::set_var_unchecked("XDG_RUNTIME_DIR", home.join("run"));
+        ljos_cli::test_env_guards::set_var_unchecked("LJOS_SEAT", "ada");
+        ljos_cli::test_env_guards::set_var_unchecked("LJOS_HOLD", "ada");
     }
     let hit = Hit {
         id: Some("demo-kiln".to_string()),
@@ -116,7 +116,10 @@ fn file_top_defaults_to_the_seat_project() {
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
     assert_eq!(id, "kiln-ab12");
     let creates = std::fs::read_to_string(seat.dir.path().join("calls.log")).unwrap();
-    assert!(creates.contains("vissue create -p demo"), "{creates}");
+    assert!(
+        creates.contains("vissue create --project=demo"),
+        "{creates}"
+    );
 }
 
 #[test]

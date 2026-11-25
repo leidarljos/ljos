@@ -449,12 +449,7 @@ fn a_busy_pack_names_the_search_to_run_again() {
         serde_json::json!({"text": "Seat the kiln door only when cold.", "seat": "ada"}),
     );
     let line = first_line(&remember);
-    assert!(
-        line.contains("The pack is busy")
-            && (line.contains("`ljos remember`") || line.contains("`ljos doctor`")),
-        "{line}"
-    );
-    assert!(!line.contains('\n'), "{line}");
+    assert_eq!(line, ljos_cli::REMEMBER_NOT_STORED_LINE, "{remember}");
     assert!(session.alive());
 }
 

@@ -35,11 +35,15 @@ impl Seat {
         ] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
+        Self::bind(root, false)
+    }
+
+    fn bind(root: PathBuf, refuse_second: bool) -> Self {
         let posts = Arc::new(Mutex::new(Vec::new()));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let recorded = Arc::clone(&posts);
-        thread::spawn(move || serve(listener, recorded));
+        thread::spawn(move || serve(listener, recorded, refuse_second));
         Self {
             root,
             url: format!("http://127.0.0.1:{port}"),
@@ -48,13 +52,17 @@ impl Seat {
     }
 
     fn remember(&self, text: &str) -> Output {
+        self.remember_args(&["remember", text])
+    }
+
+    fn remember_args(&self, args: &[&str]) -> Output {
         let home = self.root.join("home");
         #[expect(
             clippy::disallowed_methods,
             reason = "starts a program outside git hook code"
         )]
         return Command::new(env!("CARGO_BIN_EXE_ljos"))
-            .args(["remember", text])
+            .args(args)
             .current_dir(self.root.join("work"))
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -82,7 +90,7 @@ impl Seat {
     }
 }
 
-fn serve(listener: TcpListener, posts: Arc<Mutex<Vec<String>>>) {
+fn serve(listener: TcpListener, posts: Arc<Mutex<Vec<String>>>, refuse_second: bool) {
     let ids = [
         "4d2243d2aaaaaaaaaaaaaaaaaaaaaaaa",
         "0119a00abbbbbbbbbbbbbbbbbbbbbbbb",
@@ -123,27 +131,43 @@ fn serve(listener: TcpListener, posts: Arc<Mutex<Vec<String>>>) {
             } else {
                 String::new()
             };
-            let body = if method == "POST" && path == "/v1/atoms" {
+            let (status, body) = if method == "POST" && path == "/v1/atoms" {
                 let text = json_string(&raw_body, "text");
                 posts.lock().unwrap().push(text.clone());
                 let mut slot = next.lock().unwrap();
-                let id = ids.get(*slot).copied().unwrap_or(ids[1]);
+                let n = *slot;
                 *slot += 1;
-                let kind = json_string(&raw_body, "kind");
-                let kind = if kind.is_empty() { "lesson" } else { &kind };
-                format!(
-                    r#"{{"id":"{id}","kind":"{kind}","text":{}}}"#,
-                    json_quote(&text)
-                )
+                if refuse_second && n >= 1 {
+                    (
+                        400,
+                        r#"{"error":"credential-shaped text is refused"}"#.to_string(),
+                    )
+                } else {
+                    let id = ids.get(n).copied().unwrap_or(ids[1]);
+                    let kind = json_string(&raw_body, "kind");
+                    let kind = if kind.is_empty() { "lesson" } else { &kind };
+                    (
+                        200,
+                        format!(
+                            r#"{{"id":"{id}","kind":"{kind}","text":{}}}"#,
+                            json_quote(&text)
+                        ),
+                    )
+                }
             } else if path == "/v1/status" {
-                r#"{"embedder":{"available":true,"answering":true,"enabled":true}}"#.to_string()
+                (
+                    200,
+                    r#"{"embedder":{"available":true,"answering":true,"enabled":true}}"#
+                        .to_string(),
+                )
             } else if path == "/v1/atoms" {
-                r#"{"atoms":[]}"#.to_string()
+                (200, r#"{"atoms":[]}"#.to_string())
             } else {
-                r#"{"ok":true}"#.to_string()
+                (200, r#"{"ok":true}"#.to_string())
             };
+            let reason = if status == 200 { "OK" } else { "Bad Request" };
             let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             let _ = sock.write_all(resp.as_bytes());
@@ -282,4 +306,54 @@ fn a_longer_lesson_prints_every_stored_id_and_text() {
         .find("Sweep the floor after the last tray.")
         .expect("second text");
     assert!(dusk < sweep, "{stdout}");
+}
+
+#[test]
+fn json_names_the_stored_claim_when_a_later_chunk_fails() {
+    let root = tempfile::tempdir().unwrap().keep();
+    for sub in [
+        "home/.config/ljos",
+        "home/.local/state/ljos",
+        "home/.local/share",
+        "run",
+        "work",
+    ] {
+        std::fs::create_dir_all(root.join(sub)).unwrap();
+    }
+    let seat = Seat::bind(root, true);
+    let mut args = vec!["remember", "--json"];
+    args.push(FOUR);
+    let out = seat.remember_args(&args);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let said = format!(
+        "status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    let page: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|err| panic!("stdout is not one JSON document: {err}\n{said}"));
+    let claims = page["claims"].as_array().expect(&said);
+    assert_eq!(claims.len(), 1, "{said}");
+    assert_eq!(
+        claims[0]["id"], "4d2243d2aaaaaaaaaaaaaaaaaaaaaaaa",
+        "{said}"
+    );
+    let failed = page["failed"].as_array().expect(&said);
+    assert_eq!(failed.len(), 1, "{said}");
+    let failed_text = failed[0]["text"].as_str().unwrap_or("");
+    assert!(failed_text.contains("Write the batch number"), "{said}");
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("credential-shaped"),
+        "{said}"
+    );
+    let posts = seat.posts.lock().unwrap().clone();
+    assert_eq!(
+        posts.len(),
+        2,
+        "a later chunk was still posted:\n{posts:?}\n{said}"
+    );
 }

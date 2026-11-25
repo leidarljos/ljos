@@ -205,7 +205,7 @@ fn check(pack: &str) {
         "{done_said}"
     );
     assert!(
-        done_said.contains("Memory busy: queued 1 write, it will be saved on a later call.")
+        done_said.contains("Memory busy: queued 1 write. A later ljos call from any seat will try to save it, and the pack may still refuse it.")
             || done_said.contains("claim graph did not answer"),
         "{done_said}"
     );

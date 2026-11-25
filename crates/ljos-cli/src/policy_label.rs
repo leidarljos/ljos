@@ -1,7 +1,7 @@
 //! A policy check that used to stop a command.
 //!
-//! The attempted input is stored. The command prints `label <name>:` and
-//! exits 0. The effect the check was guarding does not run.
+//! The attempted input is stored. The command prints `label <name>:` on
+//! stderr. The effect the check was guarding does not run.
 //! A missing file, a failed read, or a failed authentication is not one of
 //! these: that stays a non-zero exit, with the same stored label.
 
@@ -12,6 +12,8 @@ use std::fmt;
 pub struct PolicyLabel {
     pub label: &'static str,
     pub detail: String,
+    /// Process status. 0 leaves the note as a note. Any other value is the exit.
+    pub status: u8,
 }
 
 impl fmt::Display for PolicyLabel {
@@ -25,9 +27,19 @@ impl std::error::Error for PolicyLabel {}
 /// Store `detail` under `label` and return it as a policy result.
 /// Callers that use `?` stop before the effect. The CLI prints the label.
 pub fn labelled(label: &'static str, detail: impl Into<String>) -> anyhow::Error {
+    refused(label, detail, 0)
+}
+
+/// Store `detail` under `label` and return it with `status`.
+/// The CLI prints the label and exits with that status.
+pub fn refused(label: &'static str, detail: impl Into<String>, status: u8) -> anyhow::Error {
     let detail = detail.into();
     crate::memory_port::record_label(label, &detail, "labelled");
-    anyhow::Error::new(PolicyLabel { label, detail })
+    anyhow::Error::new(PolicyLabel {
+        label,
+        detail,
+        status,
+    })
 }
 
 /// Store `label` on a real failure and return `err` unchanged.
@@ -50,9 +62,10 @@ mod tests {
 
     #[test]
     fn a_policy_label_keeps_its_sentence_and_its_name() {
-        let err = labelled("seat-unresolved", "pass seat, your own bot name");
+        let err = refused("seat-unresolved", "pass seat, your own bot name", 1);
         let label = as_policy(&err).expect("label");
         assert_eq!(label.label, "seat-unresolved");
+        assert_eq!(label.status, 1);
         assert!(err.to_string().contains("pass seat"), "{err}");
     }
 
@@ -219,17 +232,12 @@ mod tests {
         assert!(!dot.exists(), "the package already holds {}", dot.display());
 
         let write = |xdg: Option<&std::ffi::OsStr>| {
-            crate::with_env_mutation(|| {
-                // SAFETY: test_env_lock is held and puts the process environment back.
-                unsafe {
-                    match xdg {
-                        Some(value) => std::env::set_var("XDG_STATE_HOME", value),
-                        None => std::env::remove_var("XDG_STATE_HOME"),
-                    }
-                    std::env::remove_var("HOME");
-                    std::env::remove_var("VISSUE_ROOT");
-                }
-            });
+            match xdg {
+                Some(value) => crate::test_env_guards::set_var("XDG_STATE_HOME", value),
+                None => crate::test_env_guards::remove_var("XDG_STATE_HOME"),
+            }
+            crate::test_env_guards::remove_var("HOME");
+            crate::test_env_guards::remove_var("VISSUE_ROOT");
             let _ = labelled("input-warning", "state stays out of the package directory");
             crate::memories::bump_recalls(&["state-tree".to_string()]);
             let dir = crate::state_base_dir();

@@ -37,7 +37,8 @@ fn a_recall_sent_after_a_note_lists_the_note() {
         r#"#!/bin/sh
 if [ "$1" = note ]; then
   sleep 1
-  printf '[note, today] %s\n' "$3" >> "$NOTES"
+  if [ "$3" = -- ]; then text=$4; else text=$3; fi
+  printf '[note, today] %s\n' "$text" >> "$NOTES"
   echo "$2: noted"
   exit 0
 fi

@@ -233,8 +233,26 @@ fn a_mistyped_lesson_flag_names_lesson_and_exits_2() {
     assert!(out.stdout.is_empty(), "{said}");
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "ljos: finish has no flag --lesons, and the closest is --lesson, so run `ljos finish --lesson`.\n"
+        "ljos: finish has no flag --lesons, and the closest is --lesson, so run `ljos finish --lesson`; pass `--` before text that starts with `-`.\n"
     );
+}
+
+#[test]
+fn file_and_finish_do_not_take_unknown_flags_as_text() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        &["file", "--unknown-flag"][..],
+        &["finish", "demo-1", "--unknown-flag"][..],
+    ] {
+        let out = run(dir.path(), args, &[]);
+        let said = text(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
+        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("has no flag --unknown-flag"),
+            "{args:?}\n{said}"
+        );
+    }
 }
 
 /// The line a person reads. Stdout stays empty and the status is 2.
@@ -253,7 +271,7 @@ const TYPO_LINES: &[(&[&str], &str)] = &[
     ),
     (
         &["search", "--josn", "kiln"],
-        "ljos: search has no flag --josn, and the closest is --json, so run `ljos search --json kiln`.\n",
+        "ljos: search has no flag --josn, and the closest is --json, so run `ljos search --json kiln`; pass `--` before text that starts with `-`.\n",
     ),
     (
         &["find", "kiln"],
@@ -273,7 +291,7 @@ const TYPO_LINES: &[(&[&str], &str)] = &[
     ),
     (
         &["search", "-x"],
-        "ljos: search has no flag -x, so run `ljos search --help`.\n",
+        "ljos: search has no flag -x, so run `ljos search --help`; pass `--` before text that starts with `-`.\n",
     ),
     (
         &["completions"],

@@ -90,7 +90,7 @@ pub fn unfinished(program: &str, args: &[impl AsRef<str>]) -> &'static str {
         _ => arg(args, 0),
     };
     match (base(program), verb) {
-        ("vissue", "note") => "the note was not written, so run it again",
+        ("vissue", "note") => "the note result is uncertain",
         ("vissue", "update" | "create" | "append" | "edit") => {
             "the tracker was not written, so run it again"
         }
@@ -165,7 +165,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_note_names_the_tracker_and_the_unwritten_note() {
+    fn a_note_names_the_tracker_and_the_uncertain_result() {
         let line = stall_line(
             "vissue",
             &["note", "demo", "hello"],
@@ -173,7 +173,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "tracker did not answer in 60s; the note was not written, so run it again"
+            "tracker did not answer in 60s; the note result is uncertain"
         );
     }
 

@@ -1180,12 +1180,12 @@ mod tests {
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
             unsafe {
-                std::env::set_var("XDG_DATA_HOME", home.path());
-                std::env::remove_var("LJOS_SEAT_KEY");
-                std::env::remove_var("LJOS_SEAT");
-                std::env::remove_var("VISSUE_AGENT");
-                std::env::remove_var("VISSUE_ROOT");
-                std::env::remove_var("CURSOR_AGENT_ID");
+                crate::test_env_guards::set_var_unchecked("XDG_DATA_HOME", home.path());
+                crate::test_env_guards::remove_var_unchecked("LJOS_SEAT_KEY");
+                crate::test_env_guards::remove_var_unchecked("LJOS_SEAT");
+                crate::test_env_guards::remove_var_unchecked("VISSUE_AGENT");
+                crate::test_env_guards::remove_var_unchecked("VISSUE_ROOT");
+                crate::test_env_guards::remove_var_unchecked("CURSOR_AGENT_ID");
             }
         });
         (lock, home)
@@ -1346,8 +1346,8 @@ mod tests {
                 // SAFETY: the caller holds the process environment lock.
                 unsafe {
                     match prev {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
+                        Some(value) => crate::test_env_guards::set_var_unchecked(key, value),
+                        None => crate::test_env_guards::remove_var_unchecked(key),
                     }
                 }
             }
@@ -1363,8 +1363,8 @@ mod tests {
             let _restore = RestoreEnv::capture(&["LJOS_SEAT_KEY", "CURSOR_AGENT_ID"]);
             // SAFETY: this test holds the process environment lock.
             unsafe {
-                std::env::set_var("LJOS_SEAT_KEY", &given);
-                std::env::set_var("CURSOR_AGENT_ID", "agent-run-1111");
+                crate::test_env_guards::set_var_unchecked("LJOS_SEAT_KEY", &given);
+                crate::test_env_guards::set_var_unchecked("CURSOR_AGENT_ID", "agent-run-1111");
             }
             crate::ballot_sig::seat_key_path("alpha/seat-a")
         });
@@ -2487,7 +2487,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root.path()) };
         });
         let entry = sign_as(
             ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
@@ -2516,7 +2516,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root.path()) };
         });
         let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
         #[expect(
@@ -2546,7 +2546,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root.path()) };
         });
         let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
         #[expect(
@@ -2573,7 +2573,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root.path()) };
         });
         let entry = sign_as(
             ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
@@ -2598,7 +2598,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root.path()) };
         });
         let pinned = sign_as(
             ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
@@ -2624,7 +2624,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root.path()) };
         });
         let at = "2026-10-21T10:00:00Z";
         let owner = sign_as(ballot_entry("alpha/inky", "accept", at), 1);
@@ -2657,7 +2657,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root.path()) };
         });
         let pinned = sign_as(
             ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
@@ -2684,7 +2684,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root.path()) };
         });
         let pinned = sign_as(
             ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
@@ -2725,7 +2725,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root.path()) };
         });
         let at = "2026-10-21T10:00:00Z";
         let key = sign_as(ballot_entry("beta/seat-b", "accept", at), 1)
@@ -2775,7 +2775,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root.path()) };
         });
         let pinned = sign_as(
             ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
@@ -2803,7 +2803,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root.path()) };
         });
         let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
         let at = "2026-10-21T10:00:00Z";
@@ -2849,7 +2849,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root.path()) };
         });
         let pinned = sign_as(
             ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
@@ -2880,7 +2880,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+            unsafe { crate::test_env_guards::set_var_unchecked("VISSUE_ROOT", root.path()) };
         });
         let pinned = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),

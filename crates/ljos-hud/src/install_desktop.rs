@@ -148,7 +148,7 @@ mod tests {
         let config = root.join("config");
         #[allow(unused_unsafe)]
         unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", &config);
+            crate::test_env_guards::set_var_unchecked("XDG_CONFIG_HOME", &config);
         }
         let report = install(root, &exe, Some(&data)).unwrap();
         assert!(report.wrote.iter().any(|p| p.ends_with("ljos-hud.desktop")));

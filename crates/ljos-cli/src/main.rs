@@ -1,4 +1,4 @@
-//! `ljos`: one seat over the habitats. Each habitat keeps its own crate.
+// `ljos`: one seat over the habitats. Each habitat keeps its own crate.
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -14,10 +14,10 @@ use ljos_cli::{
     format_remembered, format_seat_command, format_steps, graded, habit, habits, handover_scoped,
     healthy, hook_note, island_entities, join, learn_anchors, learn_and_write, learn_reading,
     learn_shared, mark_seen, now_utc, on_path, onboard_to, packset_consolidate, packset_forget,
-    packset_hubs, packset_island_as, packset_search_as_of, packset_write_as, panel, panel_steps,
-    parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout,
-    predictions_of, prompt_hook_stdout, protocol_brief, protocol_text, read_campaign, receive,
-    release, remember_findings, reopen, rows_about, run, run_as, run_captured, settle_discount,
+    packset_hubs, packset_island_as, packset_search_as_of, panel, panel_steps, parse_every,
+    personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of,
+    prompt_hook_stdout, protocol_brief, protocol_text, read_campaign, receive, release,
+    remember_findings, reopen, rows_about, run, run_as, run_captured, settle_discount,
     sitting_close, sitting_stream_started, stop_hook_stdout, timeline, topic_words,
     tracker_show_json, trim_num, trust_from_pack, uncite_deed, with_discount, write_outcome,
     write_persona_as, write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading,
@@ -149,7 +149,7 @@ enum MemCmd {
         #[arg(long, value_name = "ID")]
         merge: Vec<String>,
         /// Replacement text for `--edit`, or the text of the merged memory for `--merge`.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         text: Option<String>,
     },
     /// Browse, filter by seat or date, and prune memories in a terminal viewer.
@@ -168,8 +168,13 @@ enum MemCmd {
         #[arg(long)]
         stale: bool,
         /// How many days without a recall counts as never recalled. The default is 30.
-        #[arg(long, default_value_t = 30)]
-        days: i64,
+        #[arg(
+            long,
+            default_value_t = 30,
+            allow_hyphen_values = true,
+            value_parser = u64_with_negative_zero
+        )]
+        days: u64,
         /// Remove the memories the report names. Without this, the command only lists them.
         #[arg(long)]
         apply: bool,
@@ -478,7 +483,7 @@ enum SeatAction {
         #[arg(long, value_name = "PATH")]
         ids_file: Option<PathBuf>,
         /// The owner's yes, quoted as they said it.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         quote: String,
         /// When the owner said it, as RFC 3339.
         #[arg(long)]
@@ -498,7 +503,7 @@ enum ProposalCmd {
         /// Id or prefix of the proposal.
         id: String,
         /// The revised text. `-` reads it from stdin.
-        #[arg(long, value_name = "TEXT")]
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
         text: String,
     },
 }
@@ -508,7 +513,12 @@ enum ProposalCmd {
 #[derive(Args, Debug)]
 struct HookArgs {
     /// Most memories to inject per call; each is injected once between compactions.
-    #[arg(long, default_value_t = 5)]
+    #[arg(
+        long,
+        default_value_t = 5,
+        allow_hyphen_values = true,
+        value_parser = usize_with_negative_zero
+    )]
     limit: usize,
     /// The event, for a runner whose payload does not name it
     /// (`PreToolUse`, `PostToolUse`, `PreInvocation`, `Stop`).
@@ -597,7 +607,14 @@ struct ReadyArgs {
     #[arg(long, conflicts_with = "json")]
     mine: bool,
     /// How many tickets to print. `-n` is this flag. The default page prints 20.
-    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["all", "mine"])]
+    #[arg(
+        short = 'n',
+        long,
+        value_name = "N",
+        conflicts_with_all = ["all", "mine"],
+        allow_hyphen_values = true,
+        value_parser = usize_with_negative_zero
+    )]
     limit: Option<usize>,
     /// Print every ticket on the page.
     #[arg(long, conflicts_with_all = ["limit", "mine"])]
@@ -654,7 +671,11 @@ enum Cmd {
         /// Print a warning when a sentence is over 29 words. The memory is still stored.
         #[arg(long)]
         verbose: bool,
-        /// Print the stored lesson as JSON. The grade, the aim and the sentence that raised the grade are fields on it.
+        /// Print JSON. A stored or duplicate claim is that object, with `id` at the top.
+        /// A queued claim has `queued`, `kind`, `text` and `prose`, and no `id`.
+        /// A split into several claims is one document with a `claims` array, `stored` and `queued`.
+        /// The grade, the aim and the sentence that raised the grade are fields on each claim.
+        /// A duplicate of a split is in that array. A later chunk that fails is listed under `failed`.
         #[arg(long)]
         json: bool,
         /// The day (YYYY-MM-DD) the claim starts to hold in the world. `ljos search --valid-at` leaves it out before then.
@@ -685,16 +706,16 @@ enum Cmd {
         #[arg(long = "as")]
         as_persona: Option<String>,
         /// Also write a deny rule over this command pattern, with the preference as its reason, so the hook warns on what the preference forbids. Repeatable.
-        #[arg(long, value_name = "PATTERN")]
+        #[arg(long, value_name = "PATTERN", allow_hyphen_values = true)]
         deny: Vec<String>,
         /// Also write an ask rule over this command pattern, with the preference as its reason. Repeatable.
-        #[arg(long, value_name = "PATTERN")]
+        #[arg(long, value_name = "PATTERN", allow_hyphen_values = true)]
         ask: Vec<String>,
         /// Write a user rule in the user config, shared by every seat on this machine. It does not decay and it is not also stored as a seat preference.
         #[arg(long)]
         user: bool,
         /// Why this user rule stands. Required with `--user`.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         why: Option<String>,
         /// Copy this lesson into a user rule. The lesson stays stored. Pass `--user`.
         #[arg(long, value_name = "ID")]
@@ -789,7 +810,7 @@ enum Cmd {
         #[arg(required = true)]
         ids: Vec<String>,
         /// The person's own words accepting this lesson, as they said them. Needs --at and --via, and takes the place of a terminal of the person's own.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         quote: Option<String>,
         /// When the person said those words, RFC 3339, such as 2026-10-28T14:02:11Z.
         #[arg(long)]
@@ -907,7 +928,13 @@ enum Cmd {
         /// Words to look for.
         query: Vec<String>,
         /// Most hits to print.
-        #[arg(short = 'n', long, default_value_t = 10)]
+        #[arg(
+            short = 'n',
+            long,
+            default_value_t = 10,
+            allow_hyphen_values = true,
+            value_parser = u32_with_negative_zero
+        )]
         limit: u32,
         /// Score the top hits again, slower and sharper, by reading the text itself.
         #[arg(long)]
@@ -940,7 +967,12 @@ enum Cmd {
         #[arg(long)]
         attempts: bool,
         /// Lowest score to keep. 34 when omitted. 0 prints every row, including a weak word match.
-        #[arg(long, value_name = "SCORE", default_value = "34")]
+        #[arg(
+            long,
+            value_name = "SCORE",
+            default_value = "34",
+            allow_hyphen_values = true
+        )]
         min_score: f64,
         /// Only this project's tickets and lessons, plus lessons that name no project.
         /// One name. A leading segment that repeats the tracker directory or its org prefix is dropped. Any other slash is refused.
@@ -957,7 +989,13 @@ enum Cmd {
     /// Example: `ljos conflicts`
     Conflicts {
         /// Most pairs to print.
-        #[arg(short = 'n', long, default_value_t = 12)]
+        #[arg(
+            short = 'n',
+            long,
+            default_value_t = 12,
+            allow_hyphen_values = true,
+            value_parser = usize_with_negative_zero
+        )]
         limit: usize,
     },
     /// Close a memory that a later one rewrites.
@@ -1052,7 +1090,13 @@ enum Cmd {
     /// Example: `ljos hubs`
     Hubs {
         /// Most hubs to print.
-        #[arg(short = 'n', long, default_value_t = 10)]
+        #[arg(
+            short = 'n',
+            long,
+            default_value_t = 10,
+            allow_hyphen_values = true,
+            value_parser = usize_with_negative_zero
+        )]
         limit: usize,
         /// Print JSON. The human page is left off.
         #[arg(long)]
@@ -1164,7 +1208,7 @@ enum Cmd {
         #[arg(long, value_name = "NAME")]
         show: Option<String>,
         /// With `--show`, this version instead of the latest.
-        #[arg(long, value_name = "N", requires = "show")]
+        #[arg(long, value_name = "N", requires = "show", allow_hyphen_values = true)]
         version: Option<u32>,
         /// With `--show`, print the CSV as it was stored. The default.
         #[arg(long, requires = "show", conflicts_with = "json")]
@@ -1238,14 +1282,20 @@ enum Cmd {
         #[arg(long)]
         priority: Option<String>,
         /// Body prose under the heading. A decision's body names `Options: A, B`.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         body: Option<String>,
         /// Comma-separated options. Two or more become the first body line `Options: A, B`.
-        #[arg(long, value_name = "A,B")]
+        #[arg(long, value_name = "A,B", allow_hyphen_values = true)]
         options: Option<String>,
         /// Ballots the decision needs. With `--deadline`, `ljos reap --apply`
         /// lapses the vote once the deadline passes short of it.
-        #[arg(long, value_name = "N", requires = "deadline")]
+        #[arg(
+            long,
+            value_name = "N",
+            requires = "deadline",
+            allow_hyphen_values = true,
+            value_parser = usize_with_negative_zero
+        )]
         quorum: Option<usize>,
         /// RFC 3339 time the ballots are due, with `--quorum`.
         #[arg(long, value_name = "RFC3339", requires = "quorum")]
@@ -1270,6 +1320,7 @@ enum Cmd {
         /// The issue id.
         issue: String,
         /// The options, separated by commas.
+        #[arg(allow_hyphen_values = true)]
         options: String,
     },
     /// Open a panel for a decision prompt: file or reuse the issue, sit it, and start one headless member per brief.
@@ -1466,7 +1517,12 @@ enum Cmd {
         #[arg(long, requires = "webhook")]
         key_env: Option<String>,
         /// Seconds before a wake command is stopped (default 30).
-        #[arg(long, requires = "command")]
+        #[arg(
+            long,
+            requires = "command",
+            allow_hyphen_values = true,
+            value_parser = u64_with_negative_zero
+        )]
         timeout: Option<u64>,
         /// Remove the seat's wake.
         #[arg(long, conflicts_with = "fire")]
@@ -1600,7 +1656,7 @@ enum Cmd {
         #[arg(long, conflicts_with = "mine")]
         stale: bool,
         /// Days untouched before a claim is stale. The default is `LJOS_STALE_DAYS`, or 7.
-        #[arg(long, value_name = "N", requires = "stale")]
+        #[arg(long, value_name = "N", requires = "stale", allow_hyphen_values = true)]
         days: Option<i64>,
         /// Print the stale claims as a JSON array. With neither `--mine` nor `--stale`, passed to `vissue claims`.
         #[arg(long)]
@@ -1647,7 +1703,7 @@ enum Cmd {
     /// Example: `ljos reap`
     Reap {
         /// How long a claim may sit with no claim or tracker commit: 6h, 90m, 2d.
-        #[arg(long, default_value = "6h")]
+        #[arg(long, default_value = "6h", allow_hyphen_values = true)]
         idle: String,
         /// Release and mail. Absent: print what would happen.
         #[arg(long)]
@@ -1662,12 +1718,12 @@ enum Cmd {
         /// The ticket to vote on. With no `--for`, the tally is printed.
         issue: String,
         /// The option to vote for.
-        #[arg(long = "for")]
+        #[arg(long = "for", allow_hyphen_values = true)]
         choice: Option<String>,
         /// Probability in (0, 1] that the choice is the outcome. Recorded;
         /// `ljos learn` scores it once the outcome is named, and no settle
         /// or push cite weighs it.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         confidence: Option<f64>,
         /// Ids of stored files this ballot used, comma-separated, or `none`.
         /// Required when `--for` is set.
@@ -1676,7 +1732,7 @@ enum Cmd {
         /// The option you expect the others to pick, or a JSON object of
         /// option to share. Same command as the ballot, so the surprisingly
         /// popular reading has a forecast without a second verb.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         expect: Option<String>,
         /// The persona this ballot records. The casting seat and the parent
         /// session are stored with it. Consensus counts the ballot.
@@ -1696,7 +1752,7 @@ enum Cmd {
         withdraw: bool,
         /// Vote no. The text is why. A no ballot is cast only with `--child`
         /// naming an open child of this issue (`ljos file --parent ISSUE`).
-        #[arg(long, conflicts_with_all = ["choice", "jev"], value_name = "REASON")]
+        #[arg(long, conflicts_with_all = ["choice", "jev"], value_name = "REASON", allow_hyphen_values = true)]
         against: Option<String>,
         /// The open child a no ballot links. Filed with `ljos file --parent ISSUE`.
         #[arg(long, value_name = "ID", conflicts_with_all = ["choice", "jev"])]
@@ -1722,7 +1778,13 @@ enum Cmd {
         /// The tracker id of the issue.
         issue: String,
         /// Most events to print, the latest kept.
-        #[arg(short = 'n', long, default_value_t = 60)]
+        #[arg(
+            short = 'n',
+            long,
+            default_value_t = 60,
+            allow_hyphen_values = true,
+            value_parser = usize_with_negative_zero
+        )]
         limit: usize,
         /// Print JSON. The human page is left off.
         #[arg(long)]
@@ -1750,8 +1812,8 @@ enum Cmd {
         #[arg(long)]
         harness: Option<String>,
         /// How many designers `run` spawns. Each files one candidate from the brief alone.
-        #[arg(long, default_value_t = 3)]
-        designers: usize,
+        #[arg(long, default_value_t = 3, allow_hyphen_values = true)]
+        designers: i64,
         /// Print the sessions and prompts and do not spawn.
         #[arg(long)]
         dry_run: bool,
@@ -1769,10 +1831,10 @@ enum Cmd {
         /// Name of the voter.
         name: String,
         /// How far the persona moves off its ballot in a settle; 1 is a plain voter.
-        #[arg(long, default_value_t = 0.5)]
+        #[arg(long, default_value_t = 0.5, allow_hyphen_values = true)]
         anchor: f64,
         /// How this persona reads the work, in a sentence or two.
-        #[arg(long, required_unless_present = "retire")]
+        #[arg(long, required_unless_present = "retire", allow_hyphen_values = true)]
         view: Option<String>,
         /// Domains it speaks to, comma-separated, repeated, or several after one flag; a trust row scoped to one of them applies when the issue is about it.
         #[arg(long, value_delimiter = ',', num_args = 1..)]
@@ -1826,19 +1888,19 @@ enum Cmd {
         #[arg(long, default_value = "permanent")]
         restart: String,
         /// Restarts allowed inside the window before the supervisor gives up.
-        #[arg(long, default_value_t = 3)]
-        max_restarts: u32,
+        #[arg(long, default_value_t = 3, allow_hyphen_values = true)]
+        max_restarts: i64,
         /// The intensity window, in seconds.
-        #[arg(long, default_value_t = 60)]
-        window: u64,
+        #[arg(long, default_value_t = 60, allow_hyphen_values = true)]
+        window: i64,
         /// `clean` or `crash`.
         #[arg(long)]
         exit: String,
         /// Seconds since the epoch. The window is read from this clock.
-        #[arg(long)]
-        at: u64,
+        #[arg(long, allow_hyphen_values = true)]
+        at: i64,
         /// Earlier exits already counted, comma-separated seconds.
-        #[arg(long, default_value = "")]
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
         failures: String,
         /// The persona home herdr starts in.
         #[arg(long, default_value = ".")]
@@ -1942,8 +2004,8 @@ enum Cmd {
         #[arg(long, requires = "next")]
         role: Option<String>,
         /// How far from the best next ticket the claim may reach. A larger number considers more tickets. Needs `--next`.
-        #[arg(long, requires = "next")]
-        slack: Option<usize>,
+        #[arg(long, requires = "next", allow_hyphen_values = true)]
+        slack: Option<i64>,
     },
     /// Give a ticket back. It is open again, and the claim generation moves.
     ///
@@ -1969,13 +2031,18 @@ enum Cmd {
         #[arg(long)]
         stale: bool,
         /// Days untouched before a claim is stale. The default is `LJOS_STALE_DAYS`, or 7.
-        #[arg(long, value_name = "N", requires = "stale")]
+        #[arg(long, value_name = "N", requires = "stale", allow_hyphen_values = true)]
         days: Option<i64>,
         /// Hand the day-counted claims back. Without this, `--days` only prints them.
         #[arg(long, requires = "stale")]
         yes: bool,
         /// Quiet longer than this before a claim is released: `900`, `15m`, `6h` or `2d`. The default is `LJOS_LEASE_SECS`, 900 seconds.
-        #[arg(long, value_name = "DURATION", requires = "stale")]
+        #[arg(
+            long,
+            value_name = "DURATION",
+            requires = "stale",
+            allow_hyphen_values = true
+        )]
         older_than: Option<String>,
         /// Print what would be released and change nothing.
         #[arg(long, requires = "stale")]
@@ -1994,8 +2061,8 @@ enum Cmd {
         #[arg(long)]
         status: Option<String>,
         /// Claim generation recorded when the work was taken. Absent: the live one. A stale generation is refused.
-        #[arg(long)]
-        gen: Option<u64>,
+        #[arg(long, allow_hyphen_values = true)]
+        gen: Option<i64>,
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
@@ -2021,7 +2088,7 @@ enum Cmd {
         /// The ticket the forecast is about.
         issue: String,
         /// The option you expect to win, or a JSON object of option to share.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         expect: String,
         /// The persona this forecast records. Absent, the casting seat.
         #[arg(long = "as")]
@@ -2039,13 +2106,14 @@ enum Cmd {
     /// Example: `ljos rule "git push *" --why "name the branch"`
     Rule {
         /// A glob over the whole command line: `rm -rf *`, `*--force*`, `git push --force*`.
+        #[arg(allow_hyphen_values = true)]
         pattern: String,
         /// Label the warning deny or ask. With `--user`, at your own terminal, allow clears
         /// the seat's warnings for the matching lines.
         #[arg(long, default_value = "ask")]
         verdict: String,
         /// The reason a reader sees when the rule fires.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         why: String,
         /// Print the atom JSON. The default is one line: id, kind, due, text.
         #[arg(long)]
@@ -2157,7 +2225,12 @@ enum Cmd {
         no_file: bool,
         /// Ballots the decision needs. Short of it the reading says so and
         /// exits 1: nothing is decided yet.
-        #[arg(long, value_name = "N")]
+        #[arg(
+            long,
+            value_name = "N",
+            allow_hyphen_values = true,
+            value_parser = usize_with_negative_zero
+        )]
         quorum: Option<usize>,
         /// With `--quorum`, the RFC 3339 time the ballots were due. Past it
         /// and still short, the vote has lapsed: the tracker notes `quorum
@@ -2199,6 +2272,7 @@ enum Cmd {
         /// Who is being weighed. A seat or a persona name.
         to: String,
         /// How much FROM counts TO, from just above 0 up to 1.
+        #[arg(allow_hyphen_values = true)]
         weight: f64,
         /// Ids of stored files this row stands on. Repeat for several.
         #[arg(long)]
@@ -2374,8 +2448,8 @@ enum Cmd {
         #[arg(long)]
         to: Option<String>,
         /// The log size the receiver kept last time (`size=` in its kept head): the bag then carries the bridge from it.
-        #[arg(long)]
-        since_size: Option<u64>,
+        #[arg(long, allow_hyphen_values = true)]
+        since_size: Option<i64>,
         /// Carry only the atoms tagged `scope:NAME`, sealed with age to that scope's recipients in `.ljos/sync.toml`.
         #[arg(long, value_name = "NAME")]
         scope: Option<String>,
@@ -2468,12 +2542,13 @@ enum Cmd {
         /// The habit's name; absent, list every habit.
         name: Option<String>,
         /// The reading; absent, show the habit.
+        #[arg(allow_hyphen_values = true)]
         value: Option<f64>,
         /// The unit the reading is in, for the reader.
-        #[arg(long, default_value = "")]
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
         unit: String,
         /// How often a reading is taken: 7d, 24h, 2w, 30m. The next is due one cadence on.
-        #[arg(long, default_value = "7d")]
+        #[arg(long, default_value = "7d", allow_hyphen_values = true)]
         every: String,
         /// Where the reading came from: a job id, a run, a file.
         #[arg(long, default_value = "")]
@@ -2500,7 +2575,7 @@ enum Cmd {
         )]
         issue: Option<String>,
         /// File this parent and the items after `--`, then sit the parent.
-        #[arg(long, value_name = "TITLE")]
+        #[arg(long, value_name = "TITLE", allow_hyphen_values = true)]
         plan: Option<String>,
         /// No parent for the plan, even while an issue is held.
         #[arg(long, requires = "plan")]
@@ -2562,23 +2637,23 @@ enum Cmd {
         #[arg(long, default_value = "done")]
         status: String,
         /// The lesson this work taught, two sentences at most.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         lesson: Option<String>,
         /// The lesson given after the issue without `--lesson`, as agents often write it.
         #[arg(value_name = "LESSON", conflicts_with = "lesson")]
         lesson_text: Option<String>,
         /// The option that turned out right, when the ballots are in and the world has said.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         outcome: Option<String>,
         /// The outcome is none of the ballot's options: the person answered with a new one.
         #[arg(long, requires = "outcome")]
         new_option: bool,
         /// The factor a refuted voter shrinks by when an outcome is named.
-        #[arg(long, default_value_t = LEARN_BETA)]
+        #[arg(long, default_value_t = LEARN_BETA, allow_hyphen_values = true)]
         beta: f64,
         /// Claim generation recorded when the work was taken. Absent: the live one. A stale generation is refused.
-        #[arg(long)]
-        gen: Option<u64>,
+        #[arg(long, allow_hyphen_values = true)]
+        gen: Option<i64>,
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
@@ -2616,7 +2691,7 @@ enum Cmd {
         /// The tracker id of the issue.
         issue: String,
         /// The note to take back, whole or the part of it that names one note. Without this, the ballot is taken back.
-        #[arg(long, value_name = "TEXT")]
+        #[arg(long, value_name = "TEXT", allow_hyphen_values = true)]
         note: Option<String>,
         /// The name a ballot was cast under, for a persona's ballot.
         #[arg(long = "as", value_name = "NAME")]
@@ -2632,7 +2707,12 @@ enum Cmd {
         #[arg(short, long)]
         project: String,
         /// Expectation-maximisation rounds.
-        #[arg(long, default_value_t = 20)]
+        #[arg(
+            long,
+            default_value_t = 20,
+            allow_hyphen_values = true,
+            value_parser = usize_with_negative_zero
+        )]
         rounds: usize,
     },
     /// Record that one due review was graded.
@@ -2654,16 +2734,16 @@ enum Cmd {
         /// The ticket whose ballots to reweigh.
         id: String,
         /// The option that turned out right.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         outcome: String,
         /// The outcome is none of the ballot's options: the person answered with a new one.
         #[arg(long)]
         new_option: bool,
         /// The factor a refuted voter shrinks by.
-        #[arg(long, default_value_t = LEARN_BETA)]
+        #[arg(long, default_value_t = LEARN_BETA, allow_hyphen_values = true)]
         beta: f64,
         /// How far a voter who was wrong for a long time moves back toward a full vote after this step. 0 leaves the new weight as the step set it.
-        #[arg(long, default_value_t = 0.0)]
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
         share: f64,
         /// `record` (the default) counts each voter's hits and misses so far. `hedge` shrinks a voter who was wrong by `--beta`, then moves `--share` of the way back.
         #[arg(long, default_value = "record")]
@@ -2998,9 +3078,15 @@ fn flag_sentence(typed: &str, args: &[String]) -> String {
         Some(name) => {
             let flag = flag_text(typed, name, &here.flags);
             let rewritten = rewrite_arg(args, typed, flag);
-            format!(
-                "ljos: {where_} has no flag {typed}, and the closest is {flag}, so run `{rewritten}`."
-            )
+            if ljos_cli::output::machine_output() {
+                format!(
+                    "ljos: {where_} has no flag {typed}, and the closest is {flag}, so run `{rewritten}`."
+                )
+            } else {
+                format!(
+                    "ljos: {where_} has no flag {typed}, and the closest is {flag}, so run `{rewritten}`; pass `--` before text that starts with `-`."
+                )
+            }
         }
         None => {
             let help = if here.at.is_empty() {
@@ -3008,7 +3094,13 @@ fn flag_sentence(typed: &str, args: &[String]) -> String {
             } else {
                 format!("ljos {} --help", here.at.join(" "))
             };
-            format!("ljos: {where_} has no flag {typed}, so run `{help}`.")
+            if ljos_cli::output::machine_output() {
+                format!("ljos: {where_} has no flag {typed}, so run `{help}`.")
+            } else {
+                format!(
+                    "ljos: {where_} has no flag {typed}, so run `{help}`; pass `--` before text that starts with `-`."
+                )
+            }
         }
     }
 }
@@ -3052,9 +3144,14 @@ fn value_sentence(err: &clap::Error, args: &[String]) -> Option<String> {
 
 fn bad_value(err: &clap::Error, args: &[String]) -> Option<String> {
     use clap::error::ContextKind;
-    let value = context_one(err, ContextKind::InvalidValue)?;
     let flag = context_one(err, ContextKind::InvalidArg).unwrap_or_default();
     let flag = flag.split_whitespace().next().unwrap_or(flag.as_str());
+    let is_flag = flag.starts_with('-');
+    let value = match context_one(err, ContextKind::InvalidValue) {
+        Some(value) => value,
+        None if is_flag && err.get(ContextKind::InvalidValue).is_some() => "\"\"".to_string(),
+        None => return None,
+    };
     let flag = if flag.is_empty() {
         "value".to_string()
     } else if flag.starts_with('-') {
@@ -3063,6 +3160,14 @@ fn bad_value(err: &clap::Error, args: &[String]) -> Option<String> {
         format!("--{flag}")
     };
     let cmd = command_path_head(args);
+    if err.kind() == clap::error::ErrorKind::ValueValidation
+        && is_flag
+        && value.parse::<f64>().is_ok_and(|n| n < 0.0)
+    {
+        return Some(format!(
+            "{cmd}: {flag} takes a number from 0 up, not {value}."
+        ));
+    }
     let help = help_of(&cmd);
     Some(format!(
         "{cmd}: {flag} does not accept {value}. The values it takes are in `{help}`."
@@ -3200,7 +3305,7 @@ fn words_at(path: &[String]) -> UsageWords {
 }
 
 fn words_at_inner(path: &[String]) -> UsageWords {
-    let mut cmd = Cli::command();
+    let mut cmd = cli_command();
     cmd.build();
     let project_verbs = project_verb_names(&cmd);
     let mut at = Vec::new();
@@ -3897,8 +4002,8 @@ fn stored_claim(body: &serde_json::Value, fallback: &str) -> (String, String) {
 /// Stdout when one remember stored several claims. The first line says it
 /// was split. Each claim then names its id and its text, so the first
 /// sentence is not dropped from the page.
-fn split_claims_page(n: usize, rows: &[(String, String)]) -> String {
-    let mut out = ljos_cli::remember_split_line(n);
+fn split_claims_page(stored: usize, queued: usize, rows: &[(String, String)]) -> String {
+    let mut out = ljos_cli::remember_split_summary(stored, queued);
     out.push('\n');
     for (id, text) in rows {
         out.push_str("id ");
@@ -3944,7 +4049,11 @@ fn main() {
         std::process::exit(ljos_cli::hookd::serve());
     }
     ljos_cli::hookd::admit();
-    let ran = run_command();
+    let ran = run_command(argv);
+    finish_run(ran);
+}
+
+fn finish_run(ran: Result<()>) {
     if let Err(e) = &ran {
         if e.to_string().contains(ljos_cli::MEMORY_STARTING_LINE) {
             ljos_cli::say!("{}", ljos_cli::MEMORY_STARTING_LINE);
@@ -3953,16 +4062,12 @@ fn main() {
         let args: Vec<String> = std::env::args().skip(1).collect();
         ljos_cli::memory_port::record_memory_error(&args, &format!("{e:#}"));
         if let Some(label) = ljos_cli::policy_label::as_policy(e) {
-            if label.label == "close-unverified" {
-                ljos_cli::say!("{}", label.detail);
-            } else {
-                ljos_cli::emit!("label {}: {}", label.label, label.detail);
-            }
+            ljos_cli::say!("label {}: {}", label.label, label.detail);
             // A seat that was not resolved or is not on the roster, and
             // an unseen mail recipient, are failed commands. 2 is the
             // status a bad invocation already uses, so a script that
-            // checks the status sees the failure. Other labels are notes
-            // and still exit 0.
+            // checks the status sees the failure. A label's stored status
+            // decides whether every other policy result failed.
             if matches!(
                 label.label,
                 "seat-unresolved" | "seat-unlisted" | "recipient-unseen"
@@ -3970,6 +4075,12 @@ fn main() {
                 && label.detail.contains("name different seats"))
             {
                 std::process::exit(USAGE_STATUS);
+            }
+            if label.label == "claim-conflict" && label.status == 0 {
+                std::process::exit(1);
+            }
+            if label.status != 0 {
+                std::process::exit(i32::from(label.status));
             }
             return;
         }
@@ -4174,7 +4285,7 @@ fn root_help_only() -> bool {
 /// command's own help, hidden or not. A word that is not a command
 /// names the closest one and exits 2.
 fn show_help(all: bool, topic: &[String]) -> Result<()> {
-    let mut cmd = Cli::command();
+    let mut cmd = cli_command();
     cmd.build();
     if topic.is_empty() {
         ljos_cli::tell_raw!("{}", help_groups::render(&cmd, all));
@@ -4306,35 +4417,17 @@ fn queued_lesson_may_go(cmd: &Cmd) -> bool {
 /// Arguments for `ljos-mcp` when this process is `ljos mcp` and should
 /// serve. `None` for every other command, and for `ljos mcp --help`, which
 /// keeps the command page.
-fn mcp_serve_args() -> Option<Vec<std::ffi::OsString>> {
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    let mut index = 0;
-    while index < args.len() {
-        let word = args[index].to_string_lossy();
-        if word == "--" {
-            return None;
-        }
-        if word == "--seat" {
-            index += 2;
-            continue;
-        }
-        if let Some(value) = word.strip_prefix("--seat=") {
-            if value.is_empty() {
-                return None;
-            }
-            index += 1;
-            continue;
-        }
-        if word.starts_with('-') {
-            return None;
-        }
-        break;
+fn mcp_serve_args(raw: &[std::ffi::OsString]) -> Option<Vec<std::ffi::OsString>> {
+    let (_, args) = take_seat_flag(raw).ok()?;
+    let args = &args[1..];
+    let word = args.first()?.to_string_lossy();
+    if word == "--" || word.starts_with('-') {
+        return None;
     }
-    match args.get(index) {
-        Some(arg) if arg == "mcp" => {}
-        _ => return None,
+    if word != "mcp" {
+        return None;
     }
-    let rest = &args[index + 1..];
+    let rest = &args[1..];
     if rest.iter().any(|arg| arg == "--help" || arg == "-h") {
         return None;
     }
@@ -4344,22 +4437,10 @@ fn mcp_serve_args() -> Option<Vec<std::ffi::OsString>> {
 /// Pull `--seat NAME` off the command line. It names this process, and
 /// it wins over `LJOS_SEAT`. `log`, `memories` and `proposals` keep a
 /// `--seat` that comes after the command, because there it filters.
-fn take_seat_flag(args: &[std::ffi::OsString]) -> (Option<String>, Vec<std::ffi::OsString>) {
-    let mut command_at = None;
-    for (index, arg) in args.iter().enumerate().skip(1) {
-        if !arg.to_string_lossy().starts_with('-') {
-            command_at = Some(index);
-            break;
-        }
-    }
-    let command = command_at
-        .and_then(|index| args.get(index))
-        .map(|arg| arg.to_string_lossy().into_owned());
-    // These commands already use `--seat` for their own argument, after the command name.
-    let keep_later = matches!(
-        command.as_deref(),
-        Some("log" | "memories" | "proposals" | "mesh")
-    );
+fn take_seat_flag(
+    args: &[std::ffi::OsString],
+) -> Result<(Option<String>, Vec<std::ffi::OsString>), ()> {
+    let mut command = None;
     let mut seat = None;
     let mut kept = Vec::with_capacity(args.len());
     if let Some(first) = args.first() {
@@ -4368,24 +4449,74 @@ fn take_seat_flag(args: &[std::ffi::OsString]) -> (Option<String>, Vec<std::ffi:
     let mut index = 1;
     while index < args.len() {
         let arg = args[index].to_string_lossy();
-        let after = command_at.is_some_and(|at| index > at);
-        let steal = !(keep_later && after) && (arg == "--seat" || arg.starts_with("--seat="));
+        if arg == "--" {
+            kept.extend_from_slice(&args[index..]);
+            break;
+        }
+        let local = command
+            .as_deref()
+            .is_some_and(|name| matches!(name, "log" | "memories" | "proposals" | "mesh"));
+        let steal = !local && (arg == "--seat" || arg.starts_with("--seat="));
         if steal {
             if let Some(value) = arg.strip_prefix("--seat=") {
-                if !value.is_empty() {
-                    seat = Some(value.to_string());
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(());
                 }
-            } else if let Some(value) = args.get(index + 1) {
-                seat = Some(value.to_string_lossy().into_owned());
+                seat = Some(value.to_string());
+            } else {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(());
+                };
+                let value = value.to_string_lossy();
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(());
+                }
+                seat = Some(value.into_owned());
                 index += 1;
             }
             index += 1;
             continue;
         }
+        if command.is_none() && !arg.starts_with('-') {
+            command = Some(arg.into_owned());
+        }
         kept.push(args[index].clone());
         index += 1;
     }
-    (seat, kept)
+    Ok((seat, kept))
+}
+
+fn usize_with_negative_zero(value: &str) -> std::result::Result<usize, String> {
+    if value == "-0" {
+        Ok(0)
+    } else {
+        value.parse::<usize>().map_err(|error| error.to_string())
+    }
+}
+
+fn cli_command() -> clap::Command {
+    Cli::command().mut_subcommand("claim", |command| {
+        command.mut_arg("slack", |arg| {
+            arg.allow_hyphen_values(true)
+                .value_parser(clap::builder::ValueParser::new(usize_with_negative_zero))
+        })
+    })
+}
+
+fn u32_with_negative_zero(value: &str) -> std::result::Result<u32, String> {
+    if value == "-0" {
+        Ok(0)
+    } else {
+        value.parse::<u32>().map_err(|error| error.to_string())
+    }
+}
+
+fn u64_with_negative_zero(value: &str) -> std::result::Result<u64, String> {
+    if value == "-0" {
+        Ok(0)
+    } else {
+        value.parse::<u64>().map_err(|error| error.to_string())
+    }
 }
 
 /// Reads look at every seat when none of the rules match. The writes
@@ -4419,6 +4550,10 @@ fn seat_kind(cmd: &Cmd) -> ljos_cli::seat_resolve::Kind {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the hook flag must reach every child started by the hook"
+)]
 fn run_hook(hook: HookArgs) -> Result<()> {
     let HookArgs {
         limit,
@@ -5157,29 +5292,287 @@ fn dispatch_hook(seat_flag: Option<String>, hook: HookArgs) -> Result<()> {
     run_hook(hook)
 }
 
-fn run_command() -> Result<()> {
+fn refuse_range(line: String) -> ! {
+    ljos_cli::say!("{line}");
+    std::process::exit(USAGE_STATUS);
+}
+
+/// A span flag (`--idle`, `--older-than`, `--every`) whose text does not read
+/// as a span is a bad invocation: the line is printed and the command exits 2.
+fn span_or_refuse<T>(span: Result<T>) -> T {
+    span.unwrap_or_else(|err| refuse_range(err.to_string()))
+}
+
+fn count_from_zero(cmd: &str, flag: &str, n: i64) -> u64 {
+    if n < 0 {
+        refuse_range(format!("{cmd}: {flag} takes a number from 0 up, not {n}."));
+    }
+    n.unsigned_abs()
+}
+
+fn count_usize_flag(cmd: &str, flag: &str, n: i64) -> usize {
+    usize::try_from(count_from_zero(cmd, flag, n)).unwrap_or_else(|_| {
+        refuse_range(format!("{cmd}: {flag} takes a number from 0 up, not {n}."))
+    })
+}
+
+fn count_u32_flag(cmd: &str, flag: &str, n: i64) -> u32 {
+    u32::try_from(count_from_zero(cmd, flag, n)).unwrap_or_else(|_| {
+        refuse_range(format!("{cmd}: {flag} takes a number from 0 up, not {n}."))
+    })
+}
+
+fn open_unit(cmd: &str, flag: &str, value: f64) {
+    if !(value.is_finite() && value > 0.0 && value < 1.0) {
+        refuse_range(format!(
+            "{cmd}: {flag} takes a number in (0, 1), not {value}."
+        ));
+    }
+}
+
+fn unit_interval(cmd: &str, flag: &str, value: f64) {
+    if !(value.is_finite() && value > 0.0 && value <= 1.0) {
+        refuse_range(format!(
+            "{cmd}: {flag} takes a number in (0, 1], not {value}."
+        ));
+    }
+}
+
+fn share_gap(cmd: &str, flag: &str, value: f64) {
+    if !(value.is_finite() && (0.0..1.0).contains(&value)) {
+        refuse_range(format!(
+            "{cmd}: {flag} takes a number in [0, 1), not {value}."
+        ));
+    }
+}
+
+fn finite_number(cmd: &str, flag: &str, value: f64) {
+    if !value.is_finite() {
+        refuse_range(format!("{cmd}: {flag} takes a finite number, not {value}."));
+    }
+}
+
+fn closed_unit(cmd: &str, flag: &str, value: f64) {
+    if !(value.is_finite() && (0.0..=1.0).contains(&value)) {
+        refuse_range(format!(
+            "{cmd}: {flag} takes a number in [0, 1], not {value}."
+        ));
+    }
+}
+
+/// A value-taking flag whose next word is itself a flag of this command.
+/// An equals sign binds the text, so that text is the value.
+fn missing_flag_value(args: &[String]) -> Option<String> {
+    let args = args.to_vec();
+    std::thread::Builder::new()
+        .name("ljos-flag-value".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || missing_flag_value_inner(&args))
+        .expect("flag value thread")
+        .join()
+        .expect("flag value")
+}
+
+struct FlagTok {
+    name: String,
+    inline: Option<String>,
+    /// True when an equals sign joined the text to the flag.
+    bound: bool,
+}
+
+fn missing_flag_value_inner(args: &[String]) -> Option<String> {
+    let mut cmd = cli_command();
+    cmd.build();
+    let mut path = Vec::new();
+    let mut i = usize::from(args.first().is_some_and(|arg| !arg.starts_with('-')));
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            break;
+        }
+        if !arg.starts_with('-') {
+            if let Some(sub) = cmd.find_subcommand(arg).cloned() {
+                path.push(arg.clone());
+                cmd = sub;
+                if matches!(
+                    path.last().map(String::as_str),
+                    Some("evidence" | "git-hook")
+                ) {
+                    return None;
+                }
+                i += 1;
+                continue;
+            }
+            if path.is_empty() {
+                return None;
+            }
+            i += 1;
+            continue;
+        }
+        let Some(parsed) = parse_flag(arg, &cmd) else {
+            if arg.strip_prefix('-').is_some_and(|text| {
+                !text.starts_with('-') && text.chars().next().is_some_and(char::is_alphabetic)
+            }) {
+                return Some(flag_sentence(arg, &args[1..]));
+            }
+            i += 1;
+            continue;
+        };
+        let takes = find_flag(&cmd, &parsed.name).is_some_and(requires_value);
+        if takes {
+            let allows_hyphen =
+                find_flag(&cmd, &parsed.name).is_some_and(clap::Arg::is_allow_hyphen_values_set);
+            if let Some(value) = &parsed.inline {
+                if !parsed.bound && known_flag_token(value, &cmd) {
+                    return Some(missing_value_line(&path, &flag_label(&parsed.name, &cmd)));
+                }
+            } else if let Some(next) = args.get(i + 1) {
+                if known_flag_token(next, &cmd)
+                    || (!allows_hyphen && next.starts_with('-') && next != "-")
+                {
+                    return Some(missing_value_line(&path, &flag_label(&parsed.name, &cmd)));
+                }
+                i += 1;
+            } else {
+                return Some(missing_value_line(&path, &flag_label(&parsed.name, &cmd)));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn missing_value_line(path: &[String], flag: &str) -> String {
+    let cmd = path.last().map(String::as_str).unwrap_or("ljos");
+    format!("{cmd}: {flag} needs a value")
+}
+
+fn flag_label(name: &str, cmd: &clap::Command) -> String {
+    if let Some(long) = find_flag(cmd, name).and_then(clap::Arg::get_long) {
+        return format!("--{long}");
+    }
+    if name.chars().count() == 1 {
+        format!("-{name}")
+    } else {
+        format!("--{name}")
+    }
+}
+
+fn parse_flag(token: &str, cmd: &clap::Command) -> Option<FlagTok> {
+    if token == "-" || token == "--" || !token.starts_with('-') {
+        return None;
+    }
+    if let Some(rest) = token.strip_prefix("--") {
+        let (name, inline) = split_flag_eq(rest);
+        if name.is_empty() || find_flag(cmd, &name).is_none() {
+            return None;
+        }
+        let bound = inline.is_some();
+        return Some(FlagTok {
+            name,
+            inline,
+            bound,
+        });
+    }
+    let (body, inline_eq) = split_flag_eq(&token[1..]);
+    let shorts: Vec<char> = body.chars().collect();
+    let first = shorts.first()?.to_string();
+    for (at, short) in shorts.iter().enumerate() {
+        let name = short.to_string();
+        let arg = find_flag(cmd, &name)?;
+        if requires_value(arg) {
+            let attached: String = shorts[at + 1..].iter().collect();
+            let inline = if attached.is_empty() {
+                inline_eq.clone()
+            } else if let Some(value) = &inline_eq {
+                Some(format!("{attached}={value}"))
+            } else {
+                Some(attached)
+            };
+            return Some(FlagTok {
+                name,
+                inline,
+                bound: inline_eq.is_some(),
+            });
+        }
+    }
+    if inline_eq.is_some() {
+        return None;
+    }
+    Some(FlagTok {
+        name: first,
+        inline: None,
+        bound: false,
+    })
+}
+
+fn split_flag_eq(token: &str) -> (String, Option<String>) {
+    match token.split_once('=') {
+        Some((name, value)) => (name.to_string(), Some(value.to_string())),
+        None => (token.to_string(), None),
+    }
+}
+
+fn find_flag<'a>(cmd: &'a clap::Command, name: &str) -> Option<&'a clap::Arg> {
+    cmd.get_arguments().find(|arg| {
+        if arg.get_long() == Some(name) {
+            return true;
+        }
+        if arg
+            .get_all_aliases()
+            .is_some_and(|aliases| aliases.contains(&name))
+        {
+            return true;
+        }
+        let Some(ch) = name.chars().next().filter(|_| name.chars().count() == 1) else {
+            return false;
+        };
+        arg.get_short() == Some(ch)
+            || arg
+                .get_all_short_aliases()
+                .is_some_and(|shorts| shorts.contains(&ch))
+    })
+}
+
+fn requires_value(arg: &clap::Arg) -> bool {
+    if !arg.get_action().takes_values() {
+        return false;
+    }
+    match arg.get_num_args() {
+        Some(range) => range.min_values() >= 1,
+        None => true,
+    }
+}
+
+fn known_flag_token(token: &str, cmd: &clap::Command) -> bool {
+    token != "--" && parse_flag(token, cmd).is_some()
+}
+
+fn run_command(raw: Vec<std::ffi::OsString>) -> Result<()> {
     // The tool server answers before the seat, the tracker or the pack is
     // read. Those can exit, block or write, and `initialize` needs none of
     // them. `--help` stays here so the command page is this binary's.
-    if let Some(args) = mcp_serve_args() {
+    if let Some(args) = mcp_serve_args(&raw) {
         let err = ljos_cli::exec_server(&args);
         ljos_cli::say!("ljos: {err:#}");
         std::process::exit(1);
     }
     // `--help` exits before the seat is read. `ljos help` is a command.
     if root_help_only() {
-        ljos_cli::tell_raw!("{}", help_groups::render(&Cli::command(), false));
+        ljos_cli::tell_raw!("{}", help_groups::render(&cli_command(), false));
         return Ok(());
     }
-    if std::env::args_os().len() == 1 {
+    if raw.len() == 1 {
         // The same seat a read names, including where it came from.
         ljos_cli::load_seat_env();
         ljos_cli::seat_resolve::prepare(None, ljos_cli::seat_resolve::Kind::Read);
         ljos_cli::tell_raw!("{}", opening_screen());
         return Ok(());
     }
-    let raw: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    let (seat_flag, args) = take_seat_flag(&raw);
+    let (seat_flag, args) = take_seat_flag(&raw).unwrap_or_else(|()| {
+        ljos_cli::say!("ljos: --seat needs a value");
+        std::process::exit(USAGE_STATUS);
+    });
     ljos_cli::load_seat_env();
     ljos_cli::normalize_tracker_env();
     // A closed pipe ends the run quietly: `ljos learn | head` is not a panic.
@@ -5187,16 +5580,27 @@ fn run_command() -> Result<()> {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    // The full command tree builds every other command into one function.
-    // That function's frame is 2592 KB, and walking it faults code and
-    // help text a hook never reads. Help and a flag this parser rejects
-    // fall through, so those messages stay as they are.
+    // Keep the full command tree in another function. Its large stack frame
+    // is otherwise probed before this branch and becomes resident in every
+    // short-lived hook child.
     if let Some(hook) = hook_parsed_alone(&args) {
         return dispatch_hook(seat_flag, hook);
     }
+    run_full_command(seat_flag, args)
+}
+
+fn run_full_command(seat_flag: Option<String>, args: Vec<std::ffi::OsString>) -> Result<()> {
+    let flag_args: Vec<String> = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    if let Some(line) = missing_flag_value(&flag_args) {
+        ljos_cli::say!("{line}");
+        std::process::exit(USAGE_STATUS);
+    }
     // Help, version and a missing argument exit here, before any write.
     // A memory subcommand that clap cannot parse still records the error.
-    let parsed = Cli::command()
+    let parsed = cli_command()
         .try_get_matches_from(args)
         .and_then(|matches| Ok((Cli::from_arg_matches(&matches)?, matches)));
     let cmd = match parsed {
@@ -5321,7 +5725,7 @@ fn run_command() -> Result<()> {
     match cmd {
         Cmd::Help { all, command } => show_help(all, &command)?,
         Cmd::Completions { shell, candidates } => {
-            let mut cmd = Cli::command();
+            let mut cmd = cli_command();
             shell_complete::emit(shell, candidates, &mut cmd)?;
         }
         Cmd::Remember {
@@ -5374,48 +5778,59 @@ fn run_command() -> Result<()> {
             let chunks = ljos_cli::claim_chunks(&text);
             let split_n = chunks.len();
             let split = split_n > 1;
-            if split {
-                ljos_cli::say!("{}", ljos_cli::remember_split_line(chunks.len()));
-            }
             let mut stored: Vec<(String, String)> = Vec::new();
+            let mut queued_n = 0usize;
+            let mut json_bodies: Vec<serde_json::Value> = Vec::new();
+            let mut failed: Vec<serde_json::Value> = Vec::new();
+            let mut hard: Option<anyhow::Error> = None;
+            let mut not_queued: Option<String> = None;
             for text in chunks {
                 // A person at the terminal, and words from their latest
                 // prompt, are their lesson. Any other text is a standing
                 // lesson too, sitting or not, labelled agent-derived.
                 // A busy pack queues the lesson and this command exits 0.
-                let body = ljos_cli::remember_with_retry(&text, || {
-                    if ljos_cli::person_present() {
-                        let horizon = ljos_cli::remember_horizon(transient, standing, false);
-                        packset_write_as("Remember", &text, as_persona.as_deref(), horizon)
-                    } else if ljos_cli::capture::said_in_latest_prompt(&text) {
-                        let horizon = transient.then_some(true);
-                        ljos_cli::packset_write_mcp(
-                            "Remember",
-                            &text,
-                            as_persona.as_deref(),
-                            horizon,
-                        )
-                    } else {
-                        let horizon = if transient { Some(true) } else { Some(false) };
-                        ljos_cli::packset_write_agent(
-                            "Remember",
-                            &text,
-                            as_persona.as_deref(),
-                            horizon,
-                        )
+                let persona = as_persona.as_deref();
+                let request = if ljos_cli::person_present() {
+                    let horizon = ljos_cli::remember_horizon(transient, standing, false);
+                    ljos_cli::RememberRequest::typed(&text, persona, horizon)
+                } else if ljos_cli::capture::said_in_latest_prompt(&text) {
+                    ljos_cli::RememberRequest::said(&text, persona, transient.then_some(true))
+                } else {
+                    ljos_cli::RememberRequest::agent(&text, persona, Some(transient))
+                };
+                let (body, queued) = match ljos_cli::remember_with_retry(&request) {
+                    Ok(ljos_cli::RememberOutcome::Stored(body)) => (body, false),
+                    Ok(ljos_cli::RememberOutcome::Queued(body)) => (body, true),
+                    Ok(ljos_cli::RememberOutcome::NotQueued(cause)) => {
+                        let line = ljos_cli::remember_not_queued_line(&cause);
+                        if json {
+                            failed.push(serde_json::json!({
+                                "text": text,
+                                "error": line,
+                            }));
+                        }
+                        not_queued = Some(line);
+                        break;
                     }
-                })?;
+                    Err(err) => {
+                        // One document names what was stored and the chunk
+                        // that failed. Later chunks are not written.
+                        if json {
+                            failed.push(serde_json::json!({
+                                "text": text,
+                                "error": format!("{err:#}"),
+                            }));
+                        }
+                        hard = Some(err);
+                        break;
+                    }
+                };
                 let duplicate = body["duplicate"].as_bool() == Some(true);
-                let queued = body["queued"].as_bool() == Some(true);
+                if queued {
+                    queued_n += 1;
+                }
                 if split && (duplicate || !queued) {
                     stored.push(stored_claim(&body, &text));
-                }
-                if duplicate {
-                    continue;
-                }
-                if body["queued"].as_bool() == Some(true) {
-                    ljos_cli::tell!("{}", ljos_cli::REMEMBER_QUEUED_LINE);
-                    continue;
                 }
                 if json {
                     if let Some(note) = ljos_cli::prose_warning_shown(&body, verbose) {
@@ -5423,8 +5838,22 @@ fn run_command() -> Result<()> {
                     }
                     let mut printed = body.clone();
                     ljos_cli::readability::attach(&mut printed);
-                    ljos_cli::emit!("{}", serde_json::to_string_pretty(&printed)?);
-                } else if !split {
+                    json_bodies.push(printed);
+                }
+                if duplicate {
+                    continue;
+                }
+                if queued {
+                    // JSON stdout is always one document, so prose goes to
+                    // stderr for one claim and a split alike.
+                    if json {
+                        ljos_cli::say!("{}", ljos_cli::REMEMBER_QUEUED_LINE);
+                    } else {
+                        ljos_cli::tell!("{}", ljos_cli::REMEMBER_QUEUED_LINE);
+                    }
+                    continue;
+                }
+                if !json && !split {
                     ljos_cli::tell!("{}", write_ack(&body, verbose));
                 }
                 ljos_cli::say!("{}", ljos_cli::remember_note(&body));
@@ -5447,8 +5876,37 @@ fn run_command() -> Result<()> {
                     );
                 }
             }
-            if split && !json && !stored.is_empty() {
-                ljos_cli::tell_raw!("{}", split_claims_page(split_n, &stored));
+            if split
+                && hard.is_none()
+                && not_queued.is_none()
+                && (!stored.is_empty() || queued_n > 0)
+                && (json || stored.is_empty())
+            {
+                ljos_cli::say!(
+                    "{}",
+                    ljos_cli::remember_split_summary(stored.len(), queued_n)
+                );
+            }
+            if json && split {
+                ljos_cli::emit!("{}", ljos_cli::remember_json_page(&json_bodies, &failed)?);
+            } else if json {
+                // One claim is the claim object, the shape from before the
+                // split document. A hard failure prints nothing here and
+                // exits 1.
+                if failed.is_empty() {
+                    if let Some(body) = json_bodies.first() {
+                        ljos_cli::emit!("{}", serde_json::to_string_pretty(body)?);
+                    }
+                }
+            } else if split && !stored.is_empty() {
+                ljos_cli::tell_raw!("{}", split_claims_page(stored.len(), queued_n, &stored));
+            }
+            if let Some(line) = not_queued {
+                ljos_cli::say!("{line}");
+                std::process::exit(1);
+            }
+            if let Some(err) = hard {
+                return Err(err);
             }
         }
         Cmd::Prefer {
@@ -5840,7 +6298,11 @@ fn run_command() -> Result<()> {
             min_score,
             project,
         } => {
-            if !min_score.is_finite() || min_score < 0.0 {
+            if !min_score.is_finite() {
+                ljos_cli::say!("search: --min-score needs a finite number, not {min_score}.");
+                std::process::exit(USAGE_STATUS);
+            }
+            if min_score < 0.0 {
                 ljos_cli::say!("search: --min-score takes a number from 0 up, not {min_score}.");
                 std::process::exit(USAGE_STATUS);
             }
@@ -6587,7 +7049,7 @@ fn run_command() -> Result<()> {
             // `noted on` line used to follow it.
             let captured = ljos_cli::run_for(
                 "vissue",
-                &["note", &issue, &text],
+                &["note", &issue, "--", &text],
                 ljos_cli::tracker_verb_wait(),
             )?;
             ljos_cli::say_raw!("{}", captured.stderr);
@@ -6685,6 +7147,14 @@ fn run_command() -> Result<()> {
             issue,
             interrupt,
         } => {
+            if let Some(value) = timeout {
+                if i64::try_from(value).is_err() {
+                    refuse_range(format!(
+                        "wake: --timeout takes a number no larger than {}, not {value}.",
+                        i64::MAX
+                    ));
+                }
+            }
             let seat = seat.unwrap_or_else(ljos_cli::seat_name);
             let said = if let Some(command) = command {
                 ljos_cli::wake::set_command(&seat, &command, timeout)?
@@ -6760,6 +7230,9 @@ fn run_command() -> Result<()> {
             project,
             args,
         } => {
+            if let Some(n) = days {
+                count_from_zero("claims", "--days", n);
+            }
             let forwarded =
                 by.is_some() || agent.is_some() || project.is_some() || !args.is_empty();
             if (mine || stale) && forwarded {
@@ -6869,7 +7342,10 @@ fn run_command() -> Result<()> {
         Cmd::Reap { idle, apply } => {
             ljos_cli::tell_raw!(
                 "{}",
-                ljos_cli::reap::reap(ljos_cli::reap::parse_idle(&idle)?, apply)?
+                ljos_cli::reap::reap(
+                    span_or_refuse(ljos_cli::reap::parse_reap_idle(&idle)),
+                    apply
+                )?
             )
         }
         Cmd::Vote {
@@ -6884,6 +7360,9 @@ fn run_command() -> Result<()> {
             against,
             child,
         } => {
+            if let Some(c) = confidence {
+                unit_interval("vote", "--confidence", c);
+            }
             stop_ticket(&issue);
             let against_note = if let Some(reason) =
                 against.as_deref().map(str::trim).filter(|s| !s.is_empty())
@@ -6967,14 +7446,11 @@ fn run_command() -> Result<()> {
                     let mut args = vec![
                         "vote".to_string(),
                         issue.clone(),
-                        "--for".into(),
-                        c,
-                        "--used".into(),
-                        used.to_string(),
+                        format!("--for={c}"),
+                        format!("--used={used}"),
                     ];
                     if let Some(p) = confidence {
-                        args.push("--confidence".into());
-                        args.push(format!("{p}"));
+                        args.push(format!("--confidence={p}"));
                     }
                     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                     ljos_cli::hook_timed("vote_cast", || run_as("vissue", &refs, Some(&who)))?;
@@ -6983,19 +7459,19 @@ fn run_command() -> Result<()> {
                         ljos_cli::hook_timed("vote_readback", || {
                             ljos_cli::raw_ballot_rows(&issue).unwrap_or_default()
                         });
-                    if !ljos_cli::tracker_holds_ballot(&rows, &who, &args[3]) {
+                    if !ljos_cli::tracker_holds_ballot(&rows, &who, &c) {
                         bail!(
                         "the tracker does not hold a ballot from {who} for {} on {issue}: nothing was cast",
-                        args[3]
+                        c
                     );
                     }
-                    ljos_cli::tell!("recorded on the tracker: {who} for {} on {issue}", args[3]);
+                    ljos_cli::tell!("recorded on the tracker: {who} for {c} on {issue}");
                     cast.keep();
                     // Every ballot, a persona's included, is signed and bound to
                     // this connection. The push gate still counts only seat
                     // ballots; the panel gate counts the session, not the seat.
                     match ljos_cli::hook_timed("vote_sign", || {
-                        ljos_cli::ballot_sig::sign_ballot(&issue, &who, &args[3])
+                        ljos_cli::ballot_sig::sign_ballot(&issue, &who, &c)
                     }) {
                         Ok(said) => ljos_cli::tell_raw!("{said}"),
                         Err(e) => ljos_cli::say!("ljos vote: {e:#}"),
@@ -7010,7 +7486,7 @@ fn run_command() -> Result<()> {
                     ljos_cli::tell_raw!("{}", ljos_cli::persist_tracker(&issue, "ballot cast"));
                     if let Some((reason, child_id)) = &against_note {
                         let note = format!("{who}: against: {reason} (child {child_id})");
-                        run_as("vissue", &["note", &issue, &note], Some(&who))?;
+                        run_as("vissue", &["note", &issue, "--", &note], Some(&who))?;
                         ljos_cli::tell!(
                         "no ballot linked to child {child_id}. {issue} stays open while {child_id} is open. After `ljos finish {child_id} --close`, replace the ballot: `ljos vote {issue} --withdraw --as {who}` then `ljos vote {issue} --for OPTION --used none --as {who}`, then `ljos consensus {issue}`."
                     );
@@ -7045,6 +7521,7 @@ fn run_command() -> Result<()> {
             dry_run,
             cloud,
         } => {
+            let designers = count_usize_flag("panel", "--designers", designers);
             if cloud {
                 if issue == "run" || run_issue.is_some() {
                     bail!(
@@ -7082,6 +7559,7 @@ fn run_command() -> Result<()> {
             check,
             retire,
         } => {
+            closed_unit("persona", "--anchor", anchor);
             if retire {
                 ljos_cli::tell_raw!("{}", ljos_cli::retire_persona(&name, replace)?);
                 ljos_cli::refresh_agents();
@@ -7125,6 +7603,9 @@ fn run_command() -> Result<()> {
             cwd,
             script,
         } => {
+            let max_restarts = count_u32_flag("supervise", "--max-restarts", max_restarts);
+            let window = count_from_zero("supervise", "--window", window);
+            let at = count_from_zero("supervise", "--at", at);
             let restart = ljos_cli::plugin::Restart::parse(&restart).with_context(|| {
                 format!("restart {restart}: permanent, transient, or temporary")
             })?;
@@ -7135,9 +7616,18 @@ fn run_command() -> Result<()> {
                 .split(',')
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| {
-                    s.trim()
-                        .parse::<u64>()
-                        .with_context(|| format!("failure time {s}"))
+                    let s = s.trim();
+                    match s.parse::<i64>() {
+                        Ok(n) if n < 0 => {
+                            refuse_range(format!(
+                                "supervise: --failures takes a number from 0 up, not {n}."
+                            ));
+                        }
+                        Ok(n) => Ok(n as u64),
+                        Err(_) => s
+                            .parse::<u64>()
+                            .with_context(|| format!("failure time {s}")),
+                    }
                 })
                 .collect::<Result<Vec<_>>>()?;
             let mut sup = ljos_cli::plugin::Supervisor {
@@ -7227,6 +7717,7 @@ fn run_command() -> Result<()> {
             role,
             slack,
         } => {
+            let slack = slack.map(|n| count_usize_flag("claim", "--slack", n));
             let assignee = assignee_for("claim", assignee.as_deref(), false)?;
             match node.filter(|_| !next) {
                 Some(node) => {
@@ -7274,6 +7765,9 @@ fn run_command() -> Result<()> {
             dry_run,
             verbose,
         } => {
+            if let Some(n) = days {
+                count_from_zero("release", "--days", n);
+            }
             // `release HEX --assignee NAME` hands back a claim another
             // name still holds. `--stale` with an id is refused here, in
             // one line, rather than as a flag conflict.
@@ -7298,10 +7792,9 @@ fn run_command() -> Result<()> {
                         );
                     }
                 }
-                let window = match older_than.as_deref() {
-                    Some(raw) => Some(ljos_cli::quiet_claims::parse_older_than(raw)?),
-                    None => None,
-                };
+                let window = older_than
+                    .as_deref()
+                    .map(|raw| span_or_refuse(ljos_cli::quiet_claims::parse_older_than(raw)));
                 ljos_cli::tell_raw!(
                     "{}",
                     ljos_cli::quiet_claims::release_quiet(
@@ -7335,6 +7828,7 @@ fn run_command() -> Result<()> {
             gen,
             assignee,
         } => {
+            let gen = gen.map(|n| count_from_zero("complete", "--gen", n));
             let assignee = assignee_for("complete", assignee.as_deref(), false)?;
             stop_ticket_node(&node);
             ljos_cli::tell_raw!("{}", complete(&node, status.as_deref(), &assignee, gen)?)
@@ -7705,6 +8199,7 @@ fn run_command() -> Result<()> {
             why,
             about,
         } => {
+            unit_interval("trust", "weight", weight);
             let row = Trust {
                 from,
                 to,
@@ -7858,6 +8353,7 @@ fn run_command() -> Result<()> {
             since_size,
             scope,
         } => {
+            let since_size = since_size.map(|n| count_from_zero("handover", "--since-size", n));
             for id in &issue {
                 stop_ticket(id);
             }
@@ -7934,7 +8430,8 @@ fn run_command() -> Result<()> {
             source,
         } => match (name, value) {
             (Some(name), Some(value)) => {
-                let every_s = parse_every(&every)?;
+                finite_number("habit", "value", value);
+                let every_s = span_or_refuse(parse_every(&every));
                 let (body, prev) = habit(&name, value, &unit, every_s, &source)?;
                 ljos_cli::tell!("{}", write_ack(&body, false));
                 if let Some(p) = prev {
@@ -8096,6 +8593,8 @@ fn run_command() -> Result<()> {
             json,
             quiet,
         } => {
+            open_unit("finish", "--beta", beta);
+            let gen = gen.map(|n| count_from_zero("finish", "--gen", n));
             let (issue, inferred) = match issue {
                 Some(raw) => (raw, false),
                 None => {
@@ -8184,6 +8683,8 @@ fn run_command() -> Result<()> {
             share,
             rule,
         } => {
+            open_unit("learn", "--beta", beta);
+            share_gap("learn", "--share", share);
             stop_ticket(&id);
             let forecasts = forecasts_from_json(&ljos_cli::raw_ballot_json(&id)?)?;
             let (outcome, off) = ljos_cli::named_outcome(
@@ -8395,7 +8896,7 @@ mod help_list {
     }
 
     fn every_command_is_in_one_group_inner() {
-        let cmd = Cli::command();
+        let cmd = cli_command();
         help_groups::groups_match(&cmd).unwrap_or_else(|err| panic!("{err}"));
         let short = help_groups::render(&cmd, false);
         let all = help_groups::render(&cmd, true);
@@ -8537,5 +9038,138 @@ mod usage_hint {
         assert!(line.contains("`ljos search \"kiln\"`"), "{line}");
         assert!(line.contains("`ljos remember "), "{line}");
         assert!(line.contains("`ljos proposals`"), "{line}");
+    }
+}
+
+#[cfg(test)]
+mod flag_text {
+    use super::*;
+
+    fn on_stack<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(work)
+            .expect("spawn")
+            .join()
+            .expect("flag text check")
+    }
+
+    fn words(args: &[&str]) -> Vec<String> {
+        std::iter::once("ljos")
+            .chain(args.iter().copied())
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn an_equals_value_is_the_value_and_free_text_may_start_with_a_hyphen() {
+        on_stack(an_equals_value_is_the_value_and_free_text_may_start_with_a_hyphen_inner);
+    }
+
+    fn an_equals_value_is_the_value_and_free_text_may_start_with_a_hyphen_inner() {
+        let inline = words(&["finish", "demo-kiln", "--lesson=--json"]);
+        assert!(
+            missing_flag_value_inner(&inline).is_none(),
+            "an '=' value was treated as a missing flag: {:?}",
+            missing_flag_value_inner(&inline)
+        );
+        let separate = words(&["finish", "demo-kiln", "--lesson", "--json"]);
+        let missing = missing_flag_value_inner(&separate).expect("next flag is a missing value");
+        assert!(
+            missing.contains("finish: --lesson needs a value"),
+            "{missing}"
+        );
+
+        let lesson = Cli::try_parse_from(words(&["finish", "demo-kiln", "--lesson", "-x"]))
+            .expect("a lesson may start with a hyphen");
+        match lesson.cmd {
+            Cmd::Finish {
+                lesson: Some(text), ..
+            } => assert_eq!(text, "-x"),
+            _ => panic!("finish did not keep the lesson"),
+        }
+        let joined = Cli::try_parse_from(words(&["finish", "demo-kiln", "--lesson=--json"]))
+            .expect("an '=' lesson is the lesson");
+        match joined.cmd {
+            Cmd::Finish {
+                lesson: Some(text), ..
+            } => assert_eq!(text, "--json"),
+            _ => panic!("finish did not keep the joined lesson"),
+        }
+
+        let cases: &[(&[&str], &str)] = &[
+            (&["remember", "--", "-x"], "remember text"),
+            (&["search", "--", "-x"], "search query"),
+            (&["note", "--", "-x"], "note text"),
+            (&["file", "-p", "demo", "--", "-x"], "file title"),
+            (&["prefer", "--", "-x"], "prefer text"),
+            (&["ask", "editor", "--", "-x"], "ask text"),
+            (&["finish", "demo-kiln", "--", "-x"], "finish lesson text"),
+        ];
+        for (args, what) in cases {
+            Cli::try_parse_from(words(args)).unwrap_or_else(|err| {
+                panic!("{what} refused a leading hyphen:\n{err}");
+            });
+        }
+        let flagged = Cli::try_parse_from(words(&["search", "-x"]));
+        assert!(
+            flagged.is_err(),
+            "a bare -x on search is a flag, not the query"
+        );
+        for args in [
+            &["file", "--unknown-flag"][..],
+            &["finish", "demo-kiln", "--unknown-flag"][..],
+        ] {
+            assert!(
+                Cli::try_parse_from(words(args)).is_err(),
+                "{args:?} treated an unknown flag as text"
+            );
+        }
+    }
+
+    #[test]
+    fn every_numeric_flag_accepts_a_leading_minus() {
+        on_stack(every_numeric_flag_accepts_a_leading_minus_inner);
+    }
+
+    fn every_numeric_flag_accepts_a_leading_minus_inner() {
+        let mut cmd = cli_command();
+        cmd.build();
+        let mut left_out = Vec::new();
+        numeric_left_out(&cmd, &mut Vec::new(), &mut left_out);
+        assert!(
+            left_out.is_empty(),
+            "numeric flags left out of the hyphen value:\n{}",
+            left_out.join("\n")
+        );
+    }
+
+    fn numeric_left_out(cmd: &clap::Command, path: &mut Vec<String>, left_out: &mut Vec<String>) {
+        for arg in cmd.get_arguments() {
+            if !arg.get_action().takes_values() {
+                continue;
+            }
+            let id = arg.get_value_parser().type_id();
+            let numeric = id == std::any::TypeId::of::<i64>()
+                || id == std::any::TypeId::of::<i32>()
+                || id == std::any::TypeId::of::<u64>()
+                || id == std::any::TypeId::of::<u32>()
+                || id == std::any::TypeId::of::<usize>()
+                || id == std::any::TypeId::of::<f64>()
+                || id == std::any::TypeId::of::<f32>();
+            if numeric && !arg.is_allow_hyphen_values_set() {
+                let name = arg
+                    .get_long()
+                    .map(|long| format!("--{long}"))
+                    .or_else(|| arg.get_short().map(|short| format!("-{short}")))
+                    .unwrap_or_else(|| arg.get_id().to_string());
+                left_out.push(format!("{} {name}", path.join(" ")));
+            }
+        }
+        for sub in cmd.get_subcommands() {
+            path.push(sub.get_name().to_string());
+            numeric_left_out(sub, path, left_out);
+            path.pop();
+        }
     }
 }

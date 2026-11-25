@@ -426,15 +426,16 @@ fn clippy_refuses_the_raw_writers_and_passes_them_without_the_paths() {
     );
 }
 
-/// The output setup clippy cannot see. Command-line binaries select their
-/// output kind before installing the panic hook. The graphical binary
-/// installs the panic hook before its other work.
+/// The output setup clippy cannot see. Command-line entry points select their
+/// output kind before doing command work. The graphical binary installs the
+/// panic hook before its other work.
 #[test]
 fn every_binary_starts_with_its_output_setup() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    for (file, prefix) in [
+    for (file, entry, prefix) in [
         (
             "ljos-cli/src/main.rs",
+            "\nfn main() {\n",
             &[
                 "let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();",
                 "ljos_cli::output::set_output_kind(output_kind(&argv));",
@@ -443,6 +444,7 @@ fn every_binary_starts_with_its_output_setup() {
         ),
         (
             "ljos-cli/src/bin/ljos-mcp/main.rs",
+            "\nfn main() {\n",
             &[
                 "ljos_cli::output::set_output_kind(ljos_cli::output::Kind::Machine);",
                 "ljos_cli::output::install_panic_hook();",
@@ -450,15 +452,15 @@ fn every_binary_starts_with_its_output_setup() {
         ),
         (
             "ljos-hud/src/bin.rs",
+            "\nfn main() {\n",
             &["ljos_cli::output::install_panic_hook();"][..],
         ),
     ] {
         let text = std::fs::read_to_string(crates.join(file)).unwrap();
         let body = text
-            .split_once("\nfn main() {\n")
-            .and_then(|(_, rest)| rest.split_once("\n}\n"))
-            .map(|(body, _)| body)
-            .unwrap_or_else(|| panic!("{file}: no fn main"));
+            .split_once(entry)
+            .map(|(_, body)| body)
+            .unwrap_or_else(|| panic!("{file}: no {entry:?}"));
         let first: Vec<&str> = body
             .lines()
             .map(str::trim)
