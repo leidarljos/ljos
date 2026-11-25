@@ -1,0 +1,1 @@
+The crates.io stand-in in the first-run tests writes down every URL the seat asks curl for, and the README walk and the confused-order walk fail when the seat asked for anything but a crates.io version or skipped that lookup, so a step that reads the network again shows as a failure instead of passing while the network answers.

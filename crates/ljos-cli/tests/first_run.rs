@@ -86,6 +86,11 @@ struct Seat {
 }
 
 impl Seat {
+    /// The seat's `~/.local/bin`, first on its `PATH`.
+    fn bin(&self) -> PathBuf {
+        self.root.join("home/.local/bin")
+    }
+
     fn open() -> Self {
         let base = seat_base().unwrap_or_else(|line| panic!("{line}"));
         let root = tempfile::Builder::new()
@@ -1245,6 +1250,7 @@ fn a_new_seat_follows_the_readme_and_getting_started() {
         stood_in_for_install,
         "the docs no longer tell a new seat to run install.sh"
     );
+    registry::assert_only_registry(&seat.bin(), "the README and getting started");
 }
 
 /// Two votes typed in one shell are one voice. The settle this prints is
@@ -1472,4 +1478,5 @@ fn a_confused_order_stays_plain() {
             limit,
         );
     }
+    registry::assert_only_registry(&seat.bin(), "a confused order");
 }
