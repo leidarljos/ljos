@@ -134,6 +134,7 @@ mod exe_publish;
 pub mod extract;
 pub mod gates;
 pub mod git_hooks;
+mod git_identity;
 pub mod graphify;
 mod handover_scope;
 pub mod hookd;
@@ -2784,11 +2785,11 @@ fn stamp_env() -> Vec<(String, String)> {
     };
     above.unwrap_or_else(|| {
         if cfg!(test) {
-            std::env::vars().collect()
+            env_vars().collect()
         } else {
             proc_tree::environ(std::process::id())
                 .map(|e| clean_shell_environ(e, true))
-                .unwrap_or_else(|| std::env::vars().collect())
+                .unwrap_or_else(|| env_vars().collect())
         }
     })
 }
@@ -2960,7 +2961,7 @@ fn stamp_from_ancestors() -> Option<Vec<(String, String)>> {
             active
                 .iter()
                 .filter_map(|(pid, _)| proc_tree::environ(*pid))
-                .chain(std::iter::once_with(|| std::env::vars().collect()))
+                .chain(std::iter::once_with(|| env_vars().collect()))
                 .find_map(|env| {
                     env.into_iter()
                         .find(|(k, _)| k == key)
@@ -3357,10 +3358,18 @@ fn runner_stamp_env() -> Vec<(String, String)> {
     }
 }
 
+/// This process's environment, without the variables whose name or value
+/// is not UTF-8. [`std::env::vars`] panics on those, and a caller may
+/// export any bytes.
+pub(crate) fn env_vars() -> impl Iterator<Item = (String, String)> {
+    std::env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+}
+
 /// Every usable session variable in this process's own environment,
 /// sorted. A parent that did not pass the variable in does not count.
 pub(crate) fn own_stamped_sessions() -> Vec<(String, String)> {
-    let mut found: Vec<(String, String)> = std::env::vars()
+    let mut found: Vec<(String, String)> = env_vars()
         .filter(|(k, v)| runner_session_var(k, v) && usable_session_id(v).is_some())
         .map(|(k, v)| (k, v.trim().to_string()))
         .collect();
@@ -4224,7 +4233,7 @@ fn cause_of(
 /// The names of the runner variables set here, sorted. Never their values.
 #[must_use]
 pub fn runner_marks() -> Vec<String> {
-    let mut names: Vec<String> = std::env::vars()
+    let mut names: Vec<String> = env_vars()
         .filter(|(k, v)| runner_session_var(k, v) || RUNNER_MARKS.contains(&k.as_str()))
         .map(|(k, _)| k)
         .collect();
@@ -5444,7 +5453,7 @@ fn live_harness_session() -> Option<LiveSession> {
     }
     let id = call_cursor_conversation().filter(|id| !subagent_id(id))?;
     let family = if own_mark("CLAUDECODE")
-        || std::env::vars().any(|(key, value)| key.starts_with("CLAUDE_") && !value.is_empty())
+        || env_vars().any(|(key, value)| key.starts_with("CLAUDE_") && !value.is_empty())
     {
         "claude"
     } else if own_mark("CURSOR_AGENT") {
@@ -5969,12 +5978,21 @@ pub fn checked_seat() -> Option<String> {
         .or_else(|| call_seat_now().map(|s| s.seat))
 }
 
-/// Name [`checked_seat`] on a `git` child that may commit to the tracker,
-/// so the commit hook checks the seat this process writes as.
-pub(crate) fn seat_git_child(cmd: &mut std::process::Command) {
+/// Name [`checked_seat`] on a `git` child that may commit to the tracker.
+///
+/// Tracker commits take their author and committer from git config, not
+/// identity overrides inherited from the seat that called ljos.
+///
+/// # Errors
+///
+/// The environment names git config in a form git would refuse; see
+/// [`git_identity::strip_git_identity`].
+pub(crate) fn seat_git_child(cmd: &mut std::process::Command) -> std::io::Result<()> {
+    git_identity::strip_git_identity(cmd)?;
     if let Some(seat) = checked_seat() {
         cmd.env("LJOS_SEAT", seat);
     }
+    Ok(())
 }
 
 /// The name this conversation's claims are held under.
@@ -24278,7 +24296,7 @@ pub fn atom_source() -> Value {
     if let Some(node) = mesh::joined_node() {
         source["mesh"] = serde_json::json!({"node": node, "seat": seat.seat});
     }
-    let turn = std::env::vars()
+    let turn = env_vars()
         .filter(|(k, v)| k.ends_with("_TURN_ID") && !v.trim().is_empty())
         .map(|(_, v)| v.trim().to_string())
         .next();
@@ -35902,15 +35920,25 @@ pub fn doctor() -> Vec<Habitat> {
 /// Whether git can name the author and committer of a tracker commit.
 ///
 /// The question is asked in the tracker checkout, so a `user.name` set only
-/// there counts, and git answers it the way a commit would: config, the
-/// `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables, and the account name. With
-/// no identity a tracker write stays on disk and the commit is refused, so
-/// the row is a warning that names the two commands. A git that cannot be
-/// asked leaves the row out.
+/// there counts, and git answers it the way a tracker commit would: from
+/// config and the account name, with the identity the environment exports
+/// dropped as [`seat_git_child`] drops it. With no identity a tracker write
+/// stays on disk and the commit is refused, so the row is a warning that
+/// names the two commands. A git that cannot be asked leaves the row out.
 fn git_identity_row() -> Option<Habitat> {
     let dir = git_identity_dir();
     for var in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
-        let out = git_in(&dir, &["var", var])?;
+        let mut cmd = git_at(&dir);
+        cmd.args(["var", var]).stdin(std::process::Stdio::null());
+        git_hooks::hook_child_env(&mut cmd);
+        if let Err(why) = seat_git_child(&mut cmd) {
+            return Some(Habitat {
+                name: "git identity",
+                state: format!("{why}, so tracker writes stay uncommitted"),
+                ok: false,
+            });
+        }
+        let out = bounded_output(&mut cmd).ok()?;
         if out.status.success() {
             continue;
         }
@@ -51878,7 +51906,7 @@ fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         clear_git_repo_env(&mut cmd);
         apply_git_command_env(&mut cmd);
         git_hooks::hook_child_env(&mut cmd);
-        seat_git_child(&mut cmd);
+        seat_git_child(&mut cmd)?;
         bounded_output(&mut cmd)
     };
     // `Err` is a busy index, with what git said.

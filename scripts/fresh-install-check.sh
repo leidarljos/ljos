@@ -39,7 +39,9 @@
 #   --help              this text
 #
 # Environment: FRESH_INSTALL_ROOT is --root. The checks run with a clean
-# environment: PATH, HOME, the git identity and the seat names only.
+# environment: PATH, HOME, a git config file that names the identity, and
+# the seat names only. A tracker commit takes no identity from the
+# environment, so the identity is config, kept outside HOME.
 set -u
 
 SELF=$(CDPATH= cd -- "$(dirname "$0")" && pwd)/$(basename "$0")
@@ -62,8 +64,10 @@ if [ "${1:-}" = --child ]; then
   : > "$RESULTS"
   mkdir -p "$LOGS"
   export HOME PATH XDG_RUNTIME_DIR
-  export GIT_AUTHOR_NAME=fresh GIT_AUTHOR_EMAIL=fresh@example.invalid
-  export GIT_COMMITTER_NAME=fresh GIT_COMMITTER_EMAIL=fresh@example.invalid
+  GIT_CONFIG_GLOBAL=$RUN/gitconfig
+  export GIT_CONFIG_GLOBAL
+  git config --global user.name fresh
+  git config --global user.email fresh@example.invalid
   [ -z "$PORT" ] || export PACKSET_URL="http://127.0.0.1:$PORT"
 
   # A seat's commands come from its runner, through a shell of their own.
