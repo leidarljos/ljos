@@ -237,6 +237,22 @@ fn the_hook_server_says_so_when_its_runtime_directory_cannot_be_made() {
 }
 
 #[test]
+fn doctor_fix_says_why_it_left_the_session_seat() {
+    let seat = Seat::new();
+    let mut cmd = seat.ljos(false, &["doctor", "--fix"]);
+    cmd.env("CURSOR_CONVERSATION_ID", "nr-doctor-0199a1b2");
+    let (out, _) = seat.run(cmd, "");
+    let err = seat.stderr_of(&out);
+    assert!(
+        err.contains(&format!(
+            "ljos: left session seat: no runtime directory for the session seat, {} {REASON}",
+            seat.open.display()
+        )),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_hook_call_is_judged_at_once_with_no_queue_to_wait_in() {
     let seat = Seat::new();
     let payload = serde_json::json!({
