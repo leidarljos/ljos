@@ -1,0 +1,1 @@
+The first-run test answers the crates.io version lookup doctor makes from a `curl` stand-in on the seat's `PATH`, so it no longer reads the public network and no longer fails when crates.io does not answer.

@@ -8,6 +8,8 @@
 //! the tracker, the memory writer and the deed store, which is `ljos
 //! onboard` when no coding tool is installed. That command runs in the
 //! skipped line's place. Every other command is the one the page prints.
+//! The version check doctor makes asks a crates.io stand-in on the seat's
+//! `PATH`, so no step reads the public network.
 
 #![allow(
     clippy::disallowed_macros,
@@ -18,6 +20,8 @@ ljos_test_boot::harness!();
 
 #[path = "common/pty.rs"]
 mod pty;
+#[path = "common/registry.rs"]
+mod registry;
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -82,6 +86,11 @@ struct Seat {
 }
 
 impl Seat {
+    /// The seat's `~/.local/bin`, first on its `PATH`.
+    fn bin(&self) -> PathBuf {
+        self.root.join("home/.local/bin")
+    }
+
     fn open() -> Self {
         let base = seat_base().unwrap_or_else(|line| panic!("{line}"));
         let root = tempfile::Builder::new()
@@ -108,6 +117,7 @@ impl Seat {
         }
         ljos_cli::change_mode(root.join("run"), 0o700).unwrap();
         link_programs(&bin);
+        registry::stand_in(&bin, Duration::ZERO);
         let port = free_port();
         let mut env = BTreeMap::new();
         env.insert("HOME".into(), home.display().to_string());
@@ -1305,6 +1315,7 @@ fn a_new_seat_follows_the_readme_and_getting_started() {
         stood_in_for_install,
         "the docs no longer tell a new seat to run install.sh"
     );
+    registry::assert_only_registry(&seat.bin(), "the README and getting started");
 }
 
 /// Two votes typed in one shell are one voice. The settle this prints is
@@ -1574,4 +1585,5 @@ fn a_confused_order_stays_plain() {
             limit,
         );
     }
+    registry::assert_only_registry(&seat.bin(), "a confused order");
 }
