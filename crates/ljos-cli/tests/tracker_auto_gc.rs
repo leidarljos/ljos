@@ -210,19 +210,13 @@ fn tracker_loose_objects_stay_bounded_over_200_commits() {
         ("user.name", "probe"),
         ("user.email", "probe@example.invalid"),
         ("commit.gpgsign", "false"),
-        ("gc.auto", "200"),
+        // A count `git gc --auto` would never reach. ljos packs on bytes.
+        ("gc.auto", "100000"),
         ("gc.autoDetach", "false"),
     ] {
         git(&tracker, &["config", k, v]);
     }
 
-    // Blob "anchor-11\n" hashes to 17311b936343c60fc459bac3a04b6752a9894476
-    // so objects/17/ has a loose object for `git gc --auto`.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "writes a file that is not a git hook"
-    )]
-    std::fs::write(tracker.join("anchor.txt"), "anchor-11\n").unwrap();
     #[expect(
         clippy::disallowed_methods,
         reason = "writes a file that is not a git hook"
@@ -270,6 +264,7 @@ fn tracker_loose_objects_stay_bounded_over_200_commits() {
             .env("VISSUE_NO_ROUTE", "1")
             .env("LJOS_SEAT", "probe")
             .env("LJOS_TRACKER_GIT", "commit")
+            .env("LJOS_TRACKER_GC_BYTES", "4096")
             .env("LJOS_HOOKD", "off")
             .env("LJOS_USER_RULES_SYNC", "off")
             .env("PACKSET_URL", "off")
@@ -315,7 +310,7 @@ fn tracker_loose_objects_stay_bounded_over_200_commits() {
     run_ljos(&["claim", "probe-bound"]);
     run_ljos(&["finish", "probe-bound"]);
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
         if !tracker.join(".git/gc.pid").exists() && !pack_files(&tracker).is_empty() {
             break;

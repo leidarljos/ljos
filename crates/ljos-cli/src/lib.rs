@@ -51127,44 +51127,223 @@ pub(crate) fn git_at(dir: &Path) -> std::process::Command {
     cmd
 }
 
-/// Trigger a detached `git gc --auto` on `root`. Called at the end of
-/// `finish` and `sync` because per-commit tracker git commands pass
-/// `gc.auto=0`.
-pub(crate) fn maybe_gc_tracker(root: &Path) {
-    if refuse_ljos_checkout(root).is_err() {
-        return;
+/// Loose object bytes past which [`maybe_gc_tracker`] packs a tracker.
+/// `git gc --auto` counts loose objects, not their size: thousands of
+/// rewritten per-issue files stayed under its count of 6,700 while they
+/// held 123 MiB. `LJOS_TRACKER_GC_BYTES` sets it; `0` never packs.
+const TRACKER_GC_BYTES: u64 = 32 << 20;
+
+fn tracker_gc_bytes() -> u64 {
+    std::env::var("LJOS_TRACKER_GC_BYTES")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(TRACKER_GC_BYTES)
+}
+
+/// The file a tracker's `git gc` holds locked while it runs, in the
+/// repository's common directory. Not named `*.lock`, which a hand
+/// clearing git's stale locks would unlink under a live gc. The gc also
+/// holds [`TRACKER_LOCK`], the same file every tracker writer takes, so a
+/// write waits and a gc that cannot take it is skipped.
+const TRACKER_GC_LOCK: &str = "ljos-gc.flock";
+
+/// `gc.pruneExpire` passed on the gc command line. Two weeks is git's own
+/// default. A checkout value of `now` is not read: immediate pruning can
+/// delete an object a writer is still storing.
+const TRACKER_GC_PRUNE: &str = "gc.pruneExpire=2.weeks.ago";
+
+/// `gc.worktreePruneExpire` passed on the same command line. Three months
+/// is git's own default for `git worktree prune`.
+const TRACKER_GC_WORKTREE_PRUNE: &str = "gc.worktreePruneExpire=3.months.ago";
+
+/// What [`maybe_gc_tracker`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrackerGc {
+    /// Not a checkout ljos packs, or packing is off.
+    Skipped,
+    /// The loose objects are under the limit.
+    Below,
+    /// A writer holds [`TRACKER_LOCK`], or another gc holds [`TRACKER_GC_LOCK`].
+    Busy,
+    /// A `git gc` started in its own session.
+    Started,
+    /// The lock or the gc could not be started.
+    Failed,
+}
+
+/// Pack `root` in the background once its loose objects pass
+/// [`tracker_gc_bytes`]. Called at the end of `finish` and `sync`, because
+/// per-commit tracker git commands pass `gc.auto=0`.
+pub(crate) fn maybe_gc_tracker(root: &Path) -> TrackerGc {
+    gc_tracker_past(root, tracker_gc_bytes())
+}
+
+/// [`maybe_gc_tracker`] with the limit given. The `git gc` runs in a
+/// session of its own and holds [`TRACKER_LOCK`] and [`TRACKER_GC_LOCK`]
+/// until it and every git it starts have exited. A writer takes the same
+/// commit lock, so it waits, and a gc that finds either lock held is
+/// skipped. The command passes [`TRACKER_GC_PRUNE`] and
+/// [`TRACKER_GC_WORKTREE_PRUNE`], ahead of the checkout's own values.
+/// This returns once the gc has started: the caller's deadline neither
+/// waits for it nor stops it.
+pub(crate) fn gc_tracker_past(root: &Path, limit: u64) -> TrackerGc {
+    use std::os::unix::io::AsRawFd as _;
+    use std::os::unix::process::CommandExt as _;
+    if limit == 0 || refuse_ljos_checkout(root).is_err() {
+        return TrackerGc::Skipped;
     }
+    let Some(loose) = loose_object_bytes(root) else {
+        return TrackerGc::Skipped;
+    };
+    if loose < limit {
+        return TrackerGc::Below;
+    }
+    let Some(common) = git_common_dir(root) else {
+        return TrackerGc::Skipped;
+    };
+    // The commit lock first. A writer already in the checkout keeps its
+    // write, and this gc does not start beside it.
+    let Some(commit_path) = tracker_lock_path(root) else {
+        return TrackerGc::Skipped;
+    };
+    let commit_lock = match tracker_flock_nb(&commit_path) {
+        Ok(file) => file,
+        Err(state) => return state,
+    };
+    let gc_lock = match tracker_flock_nb(&common.join(TRACKER_GC_LOCK)) {
+        Ok(file) => file,
+        Err(state) => return state,
+    };
     let mut gc = git_cmd();
     apply_git_command_env(&mut gc);
     clear_git_repo_env(&mut gc);
     gc.arg("-C")
         .arg(root)
-        .args(["-c", "gc.autoDetach=true", "gc", "--auto", "-q"])
+        .args([
+            "-c",
+            TRACKER_GC_PRUNE,
+            "-c",
+            TRACKER_GC_WORKTREE_PRUNE,
+            "gc",
+            "--quiet",
+        ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let cap = call_deadline::timeout();
-    let left = wall_left()
-        .unwrap_or(cap)
-        .min(cap)
-        .max(std::time::Duration::from_millis(1));
-    let Ok(mut child) = gc.spawn() else {
-        return;
-    };
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if start.elapsed() < left => {
-                std::thread::sleep(std::time::Duration::from_millis(5));
+    let commit_fd = commit_lock.as_raw_fd();
+    let gc_fd = gc_lock.as_raw_fd();
+    // SAFETY: fork, _exit, setsid, sysconf, fcntl and close are
+    // async-signal-safe and run in the forked child before exec. The
+    // middle child exits at once, so the gc is no one's child to reap or
+    // kill. The gc keeps both lock descriptors and no other descriptor
+    // its caller left open: a caller reading a pipe to its end would wait
+    // for the gc too. Closing the caller's copies after spawn does not
+    // unlock, because the gc still holds the same open file description.
+    // When the gc exits, the kernel closes those descriptors and the
+    // locks lift, whether or not anyone has waited for the process.
+    unsafe {
+        gc.pre_exec(move || {
+            let pid = libc::fork();
+            if pid < 0 {
+                return Err(std::io::Error::last_os_error());
             }
-            Ok(None) | Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return;
+            if pid > 0 {
+                libc::_exit(0);
             }
-        }
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let top = libc::sysconf(libc::_SC_OPEN_MAX).clamp(256, 65_536) as libc::c_int;
+            for fd in 3..top {
+                if fd == commit_fd || fd == gc_fd {
+                    continue;
+                }
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                    libc::close(fd);
+                }
+            }
+            for fd in [commit_fd, gc_fd] {
+                if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
     }
+    match gc.spawn() {
+        Ok(mut middle) => {
+            #[cfg(test)]
+            GC_MIDDLE_PID.with(|pid| pid.set(middle.id()));
+            let _ = middle.wait();
+            TrackerGc::Started
+        }
+        Err(_) => TrackerGc::Failed,
+    }
+}
+
+// The middle process of the last `gc_tracker_past` on this thread.
+// The caller waits for that process, so a test can check it was reaped
+// without scanning every zombie in the suite.
+#[cfg(test)]
+thread_local! {
+    static GC_MIDDLE_PID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// A non-blocking exclusive flock on `path`, creating the file. `Ok` holds
+/// the lock until the file is closed. `Err` is [`TrackerGc::Busy`] when
+/// another holder has it, and [`TrackerGc::Failed`] when the file cannot
+/// be opened or `flock` fails for another reason. The file is closed on
+/// that path, which releases a lock this call took only when the open
+/// succeeded and the flock did not: a failed flock holds nothing.
+fn tracker_flock_nb(path: &Path) -> Result<std::fs::File, TrackerGc> {
+    use std::os::unix::io::AsRawFd as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|_| TrackerGc::Failed)?;
+    // SAFETY: flock on a descriptor this function owns. A non-blocking try
+    // does not wait.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        Ok(file)
+    } else {
+        Err(match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EWOULDBLOCK | libc::EINTR) => TrackerGc::Busy,
+            _ => TrackerGc::Failed,
+        })
+    }
+}
+
+/// The bytes `git count-objects -v` counts as loose objects in `root`.
+fn loose_object_bytes(root: &Path) -> Option<u64> {
+    let said = git_ok_stdout(root, &["count-objects", "-v"])?;
+    let kib = said
+        .lines()
+        .find_map(|line| line.strip_prefix("size: "))?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(kib.saturating_mul(1024))
+}
+
+/// The common git directory of the checkout at `root`.
+fn git_common_dir(root: &Path) -> Option<PathBuf> {
+    let said = git_ok_stdout(root, &["rev-parse", "--git-common-dir"])?;
+    let said = said.trim();
+    if said.is_empty() {
+        return None;
+    }
+    let path = Path::new(said);
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    })
 }
 
 /// Discovery should not walk up from a scratch path under `target/` into an
@@ -63822,6 +64001,519 @@ mod tests {
             "LJOS_TRACKER_GIT",
             "LJOS_SEAT",
             "LJOS_TRACKER_SPLIT_BYTES",
+        ] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// Whether no process holds the flock on `path`. A missing file is
+    /// not held.
+    fn gc_lock_free(path: &Path) -> bool {
+        use std::os::unix::io::AsRawFd as _;
+        let Ok(file) = std::fs::File::open(path) else {
+            return true;
+        };
+        // SAFETY: flock on a descriptor this function owns; closing it at
+        // the end of the call lets go of a lock taken here.
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+    }
+
+    /// ljos-yjho: a tracker is packed on the bytes its loose objects hold,
+    /// not on their count. Past the limit one `git gc` starts in its own
+    /// session and packs them after this call has returned. Under the
+    /// limit none starts, and while a gc holds the lock none starts beside
+    /// it.
+    #[test]
+    fn tracker_gc_packs_on_loose_bytes_one_at_a_time() {
+        use std::os::unix::io::AsRawFd as _;
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seeded_tracker(root);
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        for at in 0..64 {
+            let mut bytes = Vec::with_capacity(8192);
+            for _ in 0..1024 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                bytes.extend_from_slice(&seed.to_le_bytes());
+            }
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
+            std::fs::write(root.join(format!("blob-{at}.bin")), bytes).unwrap();
+        }
+        git_text(root, &["add", "."]);
+        git_text(root, &["commit", "-q", "-m", "incompressible blobs"]);
+        let loose = super::loose_object_bytes(root).unwrap();
+        assert!(loose >= 512 * 1024, "{loose}");
+
+        assert_eq!(super::gc_tracker_past(root, 0), super::TrackerGc::Skipped);
+        assert_eq!(
+            super::gc_tracker_past(root, loose + 1),
+            super::TrackerGc::Below
+        );
+
+        let lock = super::git_common_dir(root)
+            .unwrap()
+            .join(super::TRACKER_GC_LOCK);
+        {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "opens a path that is not a git hook"
+            )]
+            let held = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&lock)
+                .unwrap();
+            // SAFETY: flock on a descriptor this block owns until it ends.
+            let took = unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            assert_eq!(took, 0);
+            assert_eq!(super::gc_tracker_past(root, 1), super::TrackerGc::Busy);
+            assert_eq!(super::loose_object_bytes(root), Some(loose));
+        }
+
+        assert_eq!(super::gc_tracker_past(root, 1), super::TrackerGc::Started);
+        assert!(
+            wait_until(std::time::Duration::from_secs(60), || {
+                super::loose_object_bytes(root) == Some(0) && gc_lock_free(&lock)
+            }),
+            "the gc did not pack the loose objects: {:?} bytes left",
+            super::loose_object_bytes(root)
+        );
+        let packs = std::fs::read_dir(root.join(".git/objects/pack"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".pack"))
+            .count();
+        assert!(packs >= 1, "no pack after the gc");
+        assert_eq!(super::gc_tracker_past(root, 1), super::TrackerGc::Below);
+    }
+
+    /// `ps -o stat=` for `pid`, with the padding removed. The first character
+    /// is `Z` for an unreaped zombie on Linux and on macOS. Empty when `ps`
+    /// cannot name the process. `/proc/pid/stat` is not used: macOS has no
+    /// `/proc`, and a missing file there is an empty string.
+    fn process_stat(pid: libc::pid_t) -> String {
+        let Ok(mut cmd) = crate::exe_publish::program("ps") else {
+            return String::new();
+        };
+        let Ok(out) = cmd.args(["-o", "stat=", "-p", &pid.to_string()]).output() else {
+            return String::new();
+        };
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// The parent `ps -o ppid=` reports for `pid`. `None` when the process
+    /// is already gone.
+    fn process_ppid(pid: u32) -> Option<u32> {
+        let mut cmd = crate::exe_publish::program("ps").ok()?;
+        let out = cmd
+            .args(["-o", "ppid=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8(out.stdout).ok()?.trim().parse().ok()
+    }
+
+    /// `pid` is not a live process and not a zombie. Signal 0 does not
+    /// deliver; `ESRCH` is the kernel's name for a pid nobody still holds.
+    fn process_is_gone(pid: u32) -> bool {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        if pid <= 0 {
+            return false;
+        }
+        // SAFETY: signal 0 only checks that `pid` exists.
+        let rc = unsafe { libc::kill(pid, 0) };
+        rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
+    /// Whether `pid` has a vnode open whose path ends with `suffix`. Linux
+    /// reads `/proc/pid/fd`. macOS asks libproc: the same directory is not
+    /// on that system, and unwrapping it is `NotFound`.
+    fn process_holds_path_suffix(pid: u32, suffix: &str) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            for entry in std::fs::read_dir(format!("/proc/{pid}/fd")).unwrap() {
+                let Ok(entry) = entry else { continue };
+                let Ok(target) = std::fs::read_link(entry.path()) else {
+                    continue;
+                };
+                if target.to_string_lossy().ends_with(suffix) {
+                    return true;
+                }
+            }
+            false
+        }
+        #[cfg(target_os = "macos")]
+        {
+            macos_holds_path_suffix(pid, suffix)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (pid, suffix);
+            false
+        }
+    }
+
+    /// `PROC_PIDFDVNODEPATHINFO` from `<sys/proc_info.h>` is 2. The record
+    /// carries the vnode path, so the suffix is in the bytes the call writes.
+    #[cfg(target_os = "macos")]
+    fn macos_holds_path_suffix(pid: u32, suffix: &str) -> bool {
+        // PROC_PIDFDVNODEPATHINFO in <sys/proc_info.h>. The record holds the vnode path.
+        const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
+        let Some(pid) = libc::c_int::try_from(pid).ok() else {
+            return false;
+        };
+        let suffix = suffix.as_bytes();
+        if suffix.is_empty() {
+            return false;
+        }
+        // SAFETY: a null buffer asks for the fd-list size and writes nothing.
+        let need =
+            unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+        if need <= 0 {
+            return false;
+        }
+        let size = std::mem::size_of::<libc::proc_fdinfo>();
+        let count = usize::try_from(need).unwrap_or(0) / size;
+        if count == 0 {
+            return false;
+        }
+        let mut entries = vec![
+            libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0,
+            };
+            count
+        ];
+        let Some(bytes) = libc::c_int::try_from(count.saturating_mul(size)).ok() else {
+            return false;
+        };
+        // SAFETY: `entries` is `bytes` of writable `proc_fdinfo`, the size just
+        // reported. A short write is trimmed below.
+        let got = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                entries.as_mut_ptr().cast(),
+                bytes,
+            )
+        };
+        if got <= 0 {
+            return false;
+        }
+        let nent = usize::try_from(got).unwrap_or(0) / size;
+        for entry in entries.iter().take(nent) {
+            let mut raw = [0u8; 8192];
+            // SAFETY: `raw` is the buffer the call fills. 8192 holds the vnode
+            // path record, and a larger buffer is accepted.
+            let n = unsafe {
+                libc::proc_pidfdinfo(
+                    pid,
+                    entry.proc_fd,
+                    PROC_PIDFDVNODEPATHINFO,
+                    raw.as_mut_ptr().cast(),
+                    libc::c_int::try_from(raw.len()).unwrap_or(8192),
+                )
+            };
+            if n <= 0 {
+                continue;
+            }
+            let n = usize::try_from(n).unwrap_or(0).min(raw.len());
+            if raw[..n]
+                .windows(suffix.len())
+                .any(|window| window == suffix)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The detached gc is reparented, and nothing in ljos waits for it.
+    /// The flock it holds is on a descriptor. The kernel closes that
+    /// descriptor when the process exits, so the lock lifts while the
+    /// process is still a zombie that nobody has waited for.
+    #[test]
+    fn a_flock_lifts_when_its_holder_exits_unreaped() {
+        use std::os::unix::io::AsRawFd as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("held.flock");
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        struct Reap(libc::pid_t);
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                if self.0 > 0 {
+                    // SAFETY: waitpid on the child this test forked. A
+                    // second wait after a successful one returns an error
+                    // and is ignored.
+                    unsafe {
+                        libc::waitpid(self.0, std::ptr::null_mut(), 0);
+                    }
+                }
+            }
+        }
+        // SAFETY: open, fork, flock, close and _exit. The child calls only
+        // those and then _exit, so it does not run Rust destructors.
+        let (pid, parent_fd) = unsafe {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "opens a descriptor this test flocks and closes, not a git hook"
+            )]
+            let fd = libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o600);
+            assert!(fd >= 0, "open {}", std::io::Error::last_os_error());
+            let pid = libc::fork();
+            assert!(pid >= 0, "fork {}", std::io::Error::last_os_error());
+            if pid == 0 {
+                if libc::flock(fd, libc::LOCK_EX) != 0 {
+                    libc::_exit(2);
+                }
+                libc::_exit(0);
+            }
+            (pid, fd)
+        };
+        let _reap = Reap(pid);
+        // SAFETY: `parent_fd` is the descriptor opened above. Closing it
+        // does not unlock a child that still holds the same description,
+        // and after the child has exited it releases nothing further.
+        unsafe { libc::close(parent_fd) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut saw = String::new();
+        while std::time::Instant::now() < deadline {
+            saw = process_stat(pid);
+            if saw.starts_with('Z') {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            saw.starts_with('Z'),
+            "the child was not an unreaped zombie: {saw:?}"
+        );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
+        let again = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        // SAFETY: flock on a descriptor this test owns.
+        let took = unsafe { libc::flock(again.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(
+            took,
+            0,
+            "the unreaped exit left the flock held: {}",
+            std::io::Error::last_os_error()
+        );
+        let mut status: libc::c_int = 0;
+        // SAFETY: `pid` is the child forked above. This reaps it.
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert_eq!(waited, pid);
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
+    }
+
+    /// ljos-yjho: a checkout whose `gc.pruneExpire` is `now` still keeps a
+    /// fresh unreachable commit, because the gc passes a two-week grace on
+    /// its command line. A plain `git gc` that reads the same config
+    /// removes it.
+    #[test]
+    fn a_configured_prune_now_keeps_a_fresh_unreachable_commit() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seeded_tracker(root);
+        git_text(root, &["commit", "-q", "--allow-empty", "-m", "dangling"]);
+        let dangling = git_text(root, &["rev-parse", "HEAD"]);
+        let dangling = dangling.trim();
+        git_text(root, &["reset", "-q", "--hard", "HEAD~1"]);
+        git_text(root, &["reflog", "expire", "--expire=now", "--all"]);
+        git_text(root, &["config", "gc.pruneExpire", "now"]);
+        git_text(root, &["config", "gc.worktreePruneExpire", "now"]);
+        assert_eq!(
+            git_text(root, &["config", "--get", "gc.pruneExpire"]).trim(),
+            "now"
+        );
+        let loose = super::loose_object_bytes(root).unwrap();
+        assert!(loose >= 1024, "{loose}");
+
+        let gc_lock = super::git_common_dir(root)
+            .unwrap()
+            .join(super::TRACKER_GC_LOCK);
+        let commit_lock = root.join(super::TRACKER_LOCK);
+        {
+            let _held = super::tracker_commit_lock(root);
+            assert_eq!(super::gc_tracker_past(root, 1), super::TrackerGc::Busy);
+            assert_eq!(super::loose_object_bytes(root), Some(loose));
+        }
+        assert_eq!(super::gc_tracker_past(root, 1), super::TrackerGc::Started);
+        assert!(
+            wait_until(std::time::Duration::from_secs(60), || {
+                gc_lock_free(&gc_lock) && gc_lock_free(&commit_lock)
+            }),
+            "the gc did not release the locks"
+        );
+        assert_eq!(
+            git_text(root, &["cat-file", "-t", dangling]).trim(),
+            "commit",
+            "the gc pruned under gc.pruneExpire=now"
+        );
+        let plain = super::git_at(root)
+            .args(["gc", "--quiet"])
+            .output()
+            .unwrap();
+        assert!(
+            plain.status.success(),
+            "{}",
+            String::from_utf8_lossy(&plain.stderr)
+        );
+        let gone = super::git_at(root)
+            .args(["cat-file", "-t", dangling])
+            .output()
+            .unwrap();
+        assert!(
+            !gone.status.success(),
+            "a plain git gc left the unreachable commit in place, so the config was not now"
+        );
+    }
+
+    /// ljos-yjho: while a gc runs it holds the tracker commit lock, and the
+    /// lock descriptors stay open in that process. A note started then
+    /// waits and lands whole. The gc's command line carries the safe prune
+    /// window. The middle process was waited, so its pid is gone, and the
+    /// gc was reparented.
+    #[test]
+    fn a_note_during_gc_lands_while_the_writer_lock_is_held() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seeded_tracker(root);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(root.join("loose.bin"), vec![0x5a; 8192]).unwrap();
+        git_text(root, &["add", "."]);
+        git_text(root, &["commit", "-q", "-m", "loose bytes"]);
+        git_text(root, &["config", "gc.pruneExpire", "now"]);
+        git_text(root, &["config", "gc.worktreePruneExpire", "now"]);
+        let loose = super::loose_object_bytes(root).unwrap();
+        assert!(loose >= 1024, "{loose}");
+
+        let argv_path = dir.path().join("gc-argv");
+        let pid_path = dir.path().join("gc-pid");
+        let release_path = dir.path().join("gc-release");
+        let bin = dir.path().join("bin");
+        crate::exe_publish::install_executable(
+            &bin.join("git"),
+            format!(
+                "#!/bin/sh\nreal=/usr/bin/git\nrelease='{}'\nfor arg in \"$@\"; do\n  if [ \"$arg\" = gc ]; then\n    printf '%s\\n' \"$*\" >> '{}'\n    printf '%s\\n' \"$$\" > '{}'\n    i=0\n    while [ ! -f \"$release\" ]; do\n      i=$((i + 1))\n      if [ \"$i\" -gt 1200 ]; then\n        break\n      fi\n      sleep 0.05\n    done\n    break\n  fi\ndone\nexec \"$real\" \"$@\"\n",
+                release_path.display(),
+                argv_path.display(),
+                pid_path.display()
+            ),
+        )
+        .unwrap();
+        let _git = super::prepend_path(&bin);
+        std::env::set_var("VISSUE_ROOT", root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        std::env::set_var("LJOS_TRACKER_BATCH_SECS", "0");
+
+        let commit_lock = root.join(super::TRACKER_LOCK);
+        let gc_lock = super::git_common_dir(root)
+            .unwrap()
+            .join(super::TRACKER_GC_LOCK);
+        assert_eq!(super::gc_tracker_past(root, 1), super::TrackerGc::Started);
+        assert!(
+            wait_until(std::time::Duration::from_secs(10), || pid_path.is_file()),
+            "the gc did not record its pid"
+        );
+        let pid: u32 = std::fs::read_to_string(&pid_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            !gc_lock_free(&commit_lock),
+            "the writer lock was free while gc ran"
+        );
+        assert!(!gc_lock_free(&gc_lock), "the gc lock was free while gc ran");
+        assert!(
+            process_holds_path_suffix(pid, ".ljos-commit.lock"),
+            "the gc process does not hold the writer lock fd"
+        );
+        assert!(
+            process_holds_path_suffix(pid, "ljos-gc.flock"),
+            "the gc process does not hold ljos-gc.flock"
+        );
+        let ppid = process_ppid(pid);
+        assert!(
+            ppid.is_some_and(|parent| parent != std::process::id()),
+            "the gc was still this process's child: {ppid:?}"
+        );
+        let middle = super::GC_MIDDLE_PID.with(std::cell::Cell::get);
+        assert!(
+            middle > 0 && process_is_gone(middle),
+            "the middle gc process {middle} was left behind"
+        );
+        assert!(
+            super::tracker_commit_lock_by(
+                root,
+                std::time::Instant::now() + std::time::Duration::from_millis(200)
+            )
+            .is_none(),
+            "a writer did not have to wait on the gc"
+        );
+        let argv = std::fs::read_to_string(&argv_path).unwrap();
+        assert!(
+            argv.contains(super::TRACKER_GC_PRUNE),
+            "gc argv missed the prune grace: {argv}"
+        );
+        assert!(
+            argv.contains(super::TRACKER_GC_WORKTREE_PRUNE),
+            "gc argv missed the worktree prune grace: {argv}"
+        );
+        assert!(
+            !argv.contains("gc.pruneExpire=now"),
+            "gc argv took the checkout prune config: {argv}"
+        );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(&release_path, "go\n").unwrap();
+
+        let layout = vissue_core::Layout::new(root, "Software");
+        let note = format!("kept-{}", "abc".repeat(40));
+        vissue_core::ops::note(&layout, "probe-a1b2", &note).unwrap();
+        let said = persist_tracker("probe-a1b2", "noted");
+        assert!(said.contains("committed"), "{said}");
+        let issues = std::fs::read_to_string(root.join("Software/probe/issues.org")).unwrap();
+        assert!(issues.contains(&note), "{issues}");
+        let committed = git_text(
+            root,
+            &["show", "-1", "--format=", "--", "Software/probe/issues.org"],
+        );
+        assert!(committed.contains(&note), "{committed}");
+        assert!(gc_lock_free(&commit_lock) && gc_lock_free(&gc_lock));
+        for var in [
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_SEAT",
+            "LJOS_TRACKER_BATCH_SECS",
         ] {
             std::env::remove_var(var);
         }

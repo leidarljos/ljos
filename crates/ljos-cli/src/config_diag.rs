@@ -792,6 +792,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_TRACKER_GC_BYTES",
+        default: "33554432 bytes",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_TRACKER_GIT",
         default: "push",
         group: "ljos",
