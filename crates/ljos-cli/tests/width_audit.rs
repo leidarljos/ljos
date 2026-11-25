@@ -33,7 +33,7 @@ const FIXED_ITEMS: &[(&str, &str)] = &[
     // The digest the MCP tool returns.
     ("ljos-cli/src/digest.rs", "digest_for_tool"),
     // `--json` output.
-    ("ljos-cli/src/main_impl.rs", "page_width"),
+    ("ljos-cli/src/main.rs", "page_width"),
     // JSON-RPC replies.
     ("ljos-cli/src/bin/ljos-mcp/server.rs", "TOOL_WIDTH"),
     // The pane takes the banner lines from the island page; it is not a terminal.
@@ -434,7 +434,7 @@ fn every_binary_starts_with_its_output_setup() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (file, entry, prefix) in [
         (
-            "ljos-cli/src/main_impl.rs",
+            "ljos-cli/src/main.rs",
             "\nfn main() {\n",
             &[
                 "let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();",
@@ -461,7 +461,7 @@ fn every_binary_starts_with_its_output_setup() {
             &["ljos_cli::output::install_panic_hook();"][..],
         ),
         (
-            "ljos-cli/src/main_impl.rs",
+            "ljos-cli/src/main.rs",
             "\nfn run_hook_child(argv: Vec<std::ffi::OsString>) {\n",
             &[
                 "ljos_cli::output::set_output_kind(output_kind(&argv));",

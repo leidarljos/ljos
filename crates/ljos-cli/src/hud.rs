@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn launcher_lives_in_the_cli() {
-        let src = include_str!("main_impl.rs");
+        let src = include_str!("main.rs");
         assert!(src.contains("Cmd::Hud"));
         assert!(src.contains("ljos-hud"));
         assert!(src.contains("install_desktop"));

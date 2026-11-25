@@ -32,11 +32,6 @@ path = "src/main.rs"
 name = "ljos-mcp"
 path = "src/bin/ljos-mcp/main.rs"
 
-[[bin]]
-name = "ljos-hook-test-child"
-path = "src/bin/ljos-hook-test-child.rs"
-required-features = ["test-hooks"]
-
 [features]
 # For this package's own tests only, through the dev-dependency below. A
 # release build leaves it off, so no ljos binary can move the person key.
