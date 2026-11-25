@@ -173,6 +173,13 @@ jobs:
           set -euo pipefail
           git config --local --list > "${{ runner.temp }}/git-config-before"
           cargo test --workspace --no-fail-fast
+          # .gitignore hides seat state a test leaves in a crate, so git
+          # status would not show it.
+          stray=$(find crates -mindepth 2 -maxdepth 2 -name ljos)
+          if [ -n "$stray" ]; then
+            printf 'a test left seat state in a crate:\n%s\n' "$stray" >&2
+            exit 1
+          fi
           git config --local --list > "${{ runner.temp }}/git-config-after"
           diff -u "${{ runner.temp }}/git-config-before" "${{ runner.temp }}/git-config-after"
       - name: MCP tool list size

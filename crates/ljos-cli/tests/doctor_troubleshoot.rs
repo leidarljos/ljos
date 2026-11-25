@@ -390,7 +390,7 @@ fn the_troubleshooting_registry_section_names_the_release_install() {
     let _ = std::fs::remove_file(bin.join("packset"));
     let (_, text) = doctor(&home, &format!("{}:/usr/bin:/bin", bin.display()));
     assert!(
-        text.contains("warn\tcrates.io\tdid not answer, so the version check was skipped\n"),
+        text.contains("warn\tcrates.io\tdid not answer, so the version check was skipped; run `ljos doctor` again once it answers.\n"),
         "{text}"
     );
     let printed = text
@@ -460,7 +460,7 @@ fn doctor_warns_when_crates_io_does_not_answer() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        text.contains("warn\tcrates.io\tdid not answer, so the version check was skipped\n"),
+        text.contains("warn\tcrates.io\tdid not answer, so the version check was skipped; run `ljos doctor` again once it answers.\n"),
         "{text}"
     );
 }

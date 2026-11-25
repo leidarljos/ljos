@@ -168,7 +168,7 @@ The config rows show =set= for =LJOS_TRACKER_TOKEN=, =LJOS_WAKE_LAUNCHER_KEY= an
 With =curl= unable to reach crates.io, doctor printed:
 
 #+begin_src text
-warn	crates.io	did not answer, so the version check was skipped
+warn	crates.io	did not answer, so the version check was skipped; run `ljos doctor` again once it answers.
 #+end_src
 
 A missing binary then has no version in parentheses: not on PATH, so run =curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh=.

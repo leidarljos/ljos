@@ -263,7 +263,7 @@ With ``curl`` unable to reach crates.io, doctor printed:
 
 .. code:: text
 
-   warn    crates.io   did not answer, so the version check was skipped
+   warn    crates.io   did not answer, so the version check was skipped; run `ljos doctor` again once it answers.
 
 ..
    # proseguard:on
