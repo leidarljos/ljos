@@ -842,6 +842,35 @@ fn open_dir(path: &Path) -> Result<File, Error> {
     Ok(opened)
 }
 
+/// Open the directory `name` under `dir` without following a symlink at
+/// `name`. On Linux the descriptor is `O_PATH`: it can be looked through
+/// and stat'd, and the directory needs no read permission.
+#[cfg(unix)]
+pub(crate) fn open_dir_at_nofollow(
+    dir: impl std::os::fd::AsFd,
+    name: &std::ffi::OsStr,
+) -> Result<File, Error> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let access = rustix::fs::OFlags::PATH;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let access = rustix::fs::OFlags::RDONLY;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a directory on the way to a state root without following a symlink"
+    )]
+    rustix::fs::openat(
+        dir,
+        name,
+        access
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|err| Error::from_raw_os_error(err.raw_os_error()))
+}
+
 #[cfg(unix)]
 fn moded(err: Error, what: &str, path: &Path) -> Error {
     Error::new(

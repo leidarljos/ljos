@@ -19847,18 +19847,68 @@ fn random_state_name() -> String {
     format!("ljos-state-{token}")
 }
 
-/// Another user may rename entries in a directory anyone can write that
-/// lacks the sticky bit, and so swap the new state root for one they own
-/// after the post-create check. Such a parent is refused.
-fn temp_parent_is_safe(parent: &Path) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt as _;
-    let meta = std::fs::metadata(parent).map_err(|err| no_home_message(&err.to_string()))?;
-    if meta.mode() & 0o1002 == 0o002 {
-        return Err(no_home_message(
-            "refusing a temporary directory any user can write that has no sticky bit",
-        ));
+/// Whether a directory with `uid` and `mode` on the way to the state root
+/// is safe for `owner`.
+///
+/// Another user may rename entries in a directory they own, sticky or not,
+/// and in one they can write through its group or other bits that has no
+/// sticky bit. Either lets them swap the new state root for one of theirs.
+fn trusted_dir_mode(uid: u32, mode: u32, owner: u32) -> Result<(), &'static str> {
+    if uid != 0 && uid != owner {
+        return Err("refusing a temporary directory another user owns");
+    }
+    if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+        return Err("refusing a temporary directory another user can write that has no sticky bit");
     }
     Ok(())
+}
+
+/// `dir`'s owner and mode bits.
+fn dir_owner_mode(dir: &std::fs::File) -> std::io::Result<(u32, u32)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = dir.metadata()?;
+    Ok((meta.uid(), meta.mode() & 0o7777))
+}
+
+/// A descriptor for `parent`, reached from `/` one directory at a time.
+///
+/// A symlink in `parent` is resolved first, and the resolved path is then
+/// opened without following any symlink. Every directory on it, `/`
+/// included, must pass [`trusted_dir_mode`] for `owner`, so no other user
+/// can rename a directory on the way after this check.
+fn open_trusted_dir(parent: &Path, owner: u32) -> Result<(PathBuf, std::fs::File), String> {
+    let real = std::fs::canonicalize(parent).map_err(|err| {
+        no_home_message(&format!("could not resolve {}: {err}", parent.display()))
+    })?;
+    let mut reached = PathBuf::from("/");
+    let mut dir = exe_publish::open_dir_at_nofollow(rustix::fs::CWD, std::ffi::OsStr::new("/"))
+        .map_err(|err| no_home_message(&format!("could not open /: {err}")))?;
+    for part in real.components() {
+        match part {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(name) => {
+                reached.push(name);
+                dir = exe_publish::open_dir_at_nofollow(&dir, name).map_err(|err| {
+                    no_home_message(&format!(
+                        "could not open {} without following a symlink: {err}",
+                        reached.display()
+                    ))
+                })?;
+            }
+            _ => {
+                return Err(no_home_message(&format!(
+                    "{} did not resolve to a plain path",
+                    parent.display()
+                )))
+            }
+        }
+        let (uid, mode) = dir_owner_mode(&dir)
+            .map_err(|err| no_home_message(&format!("{}: {err}", reached.display())))?;
+        if let Err(why) = trusted_dir_mode(uid, mode, owner) {
+            return Err(no_home_message(&format!("{why}: {}", reached.display())));
+        }
+    }
+    Ok((real, dir))
 }
 
 /// A private state directory under `parent`, and the `ljos` directory inside it.
@@ -19871,12 +19921,17 @@ pub(crate) struct EphemeralState {
 
 impl EphemeralState {
     fn create(parent: &Path) -> Result<Self, String> {
+        Self::create_for(parent, euid())
+    }
+
+    fn create_for(parent: &Path, owner: u32) -> Result<Self, String> {
         if !parent.is_absolute() {
             return Err(no_home_message(
                 "the temporary directory is not an absolute path",
             ));
         }
-        temp_parent_is_safe(parent)?;
+        let (parent, _dir) = open_trusted_dir(parent, owner)?;
+        let parent = parent.as_path();
         for _ in 0..8 {
             let root = parent.join(random_state_name());
             match claim_new_private_dir(&root) {
@@ -19983,7 +20038,7 @@ fn isolated_state_dir() -> PathBuf {
 mod ephemeral_state_tests {
     use super::{
         claim_new_private_dir, created_dir_is_private, created_dir_is_private_for, log_recall_in,
-        EphemeralState, EPHEMERAL_STATE_WARNING, EPHEMERAL_WARNINGS,
+        trusted_dir_mode, EphemeralState, EPHEMERAL_STATE_WARNING, EPHEMERAL_WARNINGS,
     };
     use std::os::unix::fs::MetadataExt as _;
     use std::path::Path;
@@ -20119,6 +20174,133 @@ mod ephemeral_state_tests {
         let parent = tempfile::tempdir().unwrap();
         crate::change_mode(parent.path(), 0o1777).unwrap();
         let state = EphemeralState::create(parent.path()).unwrap();
+        assert_eq!(mode_of(state.path()), 0o700);
+    }
+
+    #[test]
+    fn a_temporary_directory_needs_a_trusted_owner_and_no_open_write() {
+        let me = 1000;
+        assert_eq!(trusted_dir_mode(0, 0o1777, me), Ok(()));
+        assert_eq!(trusted_dir_mode(me, 0o700, me), Ok(()));
+        assert_eq!(trusted_dir_mode(me, 0o1770, me), Ok(()));
+        assert_eq!(trusted_dir_mode(0, 0o755, me), Ok(()));
+        for (uid, mode) in [(1001, 0o1777), (1001, 0o700), (1001, 0o755)] {
+            let err = trusted_dir_mode(uid, mode, me).unwrap_err();
+            assert!(err.contains("another user owns"), "{uid} {mode:o}: {err}");
+        }
+        for mode in [0o770, 0o720, 0o777, 0o702] {
+            let err = trusted_dir_mode(me, mode, me).unwrap_err();
+            assert!(err.contains("sticky"), "{mode:o}: {err}");
+            let err = trusted_dir_mode(0, mode, me).unwrap_err();
+            assert!(err.contains("sticky"), "root {mode:o}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_group_writable_parent_without_the_sticky_bit_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        crate::change_mode(parent.path(), 0o770).unwrap();
+        let Err(err) = EphemeralState::create(parent.path()) else {
+            panic!("a group-writable parent with no sticky bit was used");
+        };
+        assert!(err.contains("sticky"), "{err}");
+        assert!(err.contains("HOME"), "{err}");
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_parent_under_a_world_writable_directory_is_refused() {
+        let top = tempfile::tempdir().unwrap();
+        let parent = top.path().join("private");
+        std::fs::create_dir(&parent).unwrap();
+        crate::change_mode(&parent, 0o700).unwrap();
+        crate::change_mode(top.path(), 0o777).unwrap();
+        let Err(err) = EphemeralState::create(&parent) else {
+            panic!("a parent under a world-writable directory was used");
+        };
+        assert!(err.contains("sticky"), "{err}");
+        assert!(err.contains(&top.path().display().to_string()), "{err}");
+        assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_sticky_parent_another_user_owns_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        crate::change_mode(parent.path(), 0o1777).unwrap();
+        let someone_else = super::euid().wrapping_add(1);
+        let Err(err) = EphemeralState::create_for(parent.path(), someone_else) else {
+            panic!("a sticky parent another user owns was used");
+        };
+        assert!(err.contains("another user owns"), "{err}");
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_symlinked_parent_is_resolved_before_it_is_checked() {
+        let top = tempfile::tempdir().unwrap();
+        let real = top.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        crate::change_mode(&real, 0o700).unwrap();
+        let link = top.path().join("link");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test plants a symlinked TMPDIR"
+        )]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let state = EphemeralState::create(&link).unwrap();
+        let real = std::fs::canonicalize(&real).unwrap();
+        assert!(
+            state.path().starts_with(&real),
+            "{}",
+            state.path().display()
+        );
+        assert!(
+            !state.path().starts_with(&link),
+            "{}",
+            state.path().display()
+        );
+    }
+
+    #[test]
+    fn a_symlinked_parent_into_an_open_directory_is_refused() {
+        let open = tempfile::tempdir().unwrap();
+        crate::change_mode(open.path(), 0o777).unwrap();
+        let top = tempfile::tempdir().unwrap();
+        let link = top.path().join("link");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test plants a symlinked TMPDIR"
+        )]
+        std::os::unix::fs::symlink(open.path(), &link).unwrap();
+        let Err(err) = EphemeralState::create(&link) else {
+            panic!("a symlink into a world-writable directory was used");
+        };
+        assert!(err.contains("sticky"), "{err}");
+        assert_eq!(std::fs::read_dir(open.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_private_parent_this_user_owns_is_used() {
+        let parent = tempfile::tempdir().unwrap();
+        crate::change_mode(parent.path(), 0o700).unwrap();
+        let state = EphemeralState::create(parent.path()).unwrap();
+        assert_eq!(mode_of(state.path()), 0o700);
+        assert_eq!(
+            std::fs::symlink_metadata(state.path()).unwrap().uid(),
+            super::euid()
+        );
+    }
+
+    #[test]
+    fn a_root_owned_sticky_tmp_is_used() {
+        let tmp = std::fs::canonicalize("/tmp").unwrap();
+        let meta = std::fs::symlink_metadata(&tmp).unwrap();
+        assert!(
+            meta.is_dir() && meta.uid() == 0 && meta.mode() & 0o7777 == 0o1777,
+            "this host's /tmp is not a root-owned 01777 directory"
+        );
+        let state = EphemeralState::create(Path::new("/tmp")).unwrap();
+        assert!(state.path().starts_with(&tmp), "{}", state.path().display());
         assert_eq!(mode_of(state.path()), 0o700);
     }
 
