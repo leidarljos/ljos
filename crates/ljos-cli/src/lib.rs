@@ -58624,6 +58624,7 @@ pub fn bind_connection_env(cmd: &mut std::process::Command) {
 /// ballot is the caster's persona ballot, not that seat's own row.
 pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Result<()> {
     use std::process::{Command, Stdio};
+    check_vissue_note(bin, args)?;
     if tool_bound::armed() {
         let left = wall_left()
             .unwrap_or_else(tool_bound::budget)
@@ -58766,6 +58767,57 @@ fn note_landed(issue: &str, text: &str) -> bool {
         })
         .max_by_key(|(ts, _)| ts.to_string());
     latest.is_some_and(|(_, note)| note.trim() == text.trim())
+}
+
+/// The most bytes one tracker note holds. Every note rewrites the issue's
+/// file and git keeps each version, so a pasted payload is paid again on
+/// every later write to that issue.
+pub const NOTE_MAX_BYTES: usize = 4096;
+
+/// The most bytes one line of a tracker note holds. Prose wraps well under
+/// it. An encoded snapshot is one long line.
+pub const NOTE_LINE_MAX_BYTES: usize = 2048;
+
+/// Whether `text` fits a tracker note. A note past either cap is a failed
+/// command, not a policy label: the process exits non-zero and the note is
+/// not written. The line names the size, the cap, and `ljos note ID --file`.
+pub(crate) fn check_note_size(issue: &str, text: &str) -> Result<()> {
+    let remedy = format!("so run `ljos note {issue} --file PATH`. Nothing was noted");
+    if text.len() > NOTE_MAX_BYTES {
+        return Err(policy_label::failed(
+            "oversize",
+            anyhow::anyhow!(
+                "note: the note is {} bytes, past the cap of {NOTE_MAX_BYTES}, {remedy}",
+                text.len()
+            ),
+        ));
+    }
+    if let Some((at, line)) = text
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.len() > NOTE_LINE_MAX_BYTES)
+    {
+        return Err(policy_label::failed(
+            "oversize",
+            anyhow::anyhow!(
+                "note: line {} of the note is {} bytes, past the cap of {NOTE_LINE_MAX_BYTES}, {remedy}",
+                at + 1,
+                line.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// [`check_note_size`] for a `vissue note ID TEXT...` about to start.
+/// Any other command passes.
+fn check_vissue_note(bin: &str, args: &[impl AsRef<str>]) -> Result<()> {
+    if bin != "vissue" || args.first().map(AsRef::as_ref) != Some("note") || args.len() < 3 {
+        return Ok(());
+    }
+    let issue = args[1].as_ref();
+    let text: Vec<&str> = args[2..].iter().map(AsRef::as_ref).collect();
+    check_note_size(issue, &text.join(" "))
 }
 
 fn tracker_note_already_written(args: &[impl AsRef<str>]) -> bool {
@@ -59043,6 +59095,7 @@ fn run_captured_within(
 ) -> Result<Said> {
     use std::io::Read as _;
     use std::process::{Command, Stdio};
+    check_vissue_note(bin, args)?;
     if tool_bound::armed() {
         tool_bound::note(bin);
         if let Some(line) = tool_bound::failure() {
@@ -64004,6 +64057,50 @@ mod tests {
         ] {
             std::env::remove_var(var);
         }
+    }
+
+    /// ljos-yjho: a note past [`NOTE_MAX_BYTES`], or with a line past
+    /// [`NOTE_LINE_MAX_BYTES`], is a failed command before any `vissue note`
+    /// starts. The line names the size, the cap, and `ljos note ID --file`.
+    /// Prose under both caps, and any other command, passes.
+    #[test]
+    fn a_note_past_its_caps_is_refused_before_vissue_starts() {
+        let prose = format!("{}\n", "word ".repeat(60)).repeat(13);
+        assert!(prose.len() <= super::NOTE_MAX_BYTES);
+        assert!(super::check_note_size("proj-1", &prose).is_ok());
+
+        let big = format!("{}\n", "word ".repeat(60)).repeat(14);
+        let err = super::check_note_size("proj-1", &big).unwrap_err();
+        assert!(crate::policy_label::as_policy(&err).is_none(), "{err:#}");
+        let detail = err.to_string();
+        assert!(detail.contains(&big.len().to_string()), "{detail}");
+        assert!(detail.contains("4096"), "{detail}");
+        assert!(detail.contains("ljos note proj-1 --file PATH"), "{detail}");
+        assert!(detail.contains("Nothing was noted"), "{detail}");
+        assert!(!detail.contains("soft cap"), "{detail}");
+
+        let long_line = format!("context\n{}", "QUJD".repeat(600));
+        assert!(long_line.len() <= super::NOTE_MAX_BYTES);
+        let err = super::check_note_size("proj-1", &long_line).unwrap_err();
+        let detail = err.to_string();
+        assert!(detail.contains("line 2 of the note"), "{detail}");
+        assert!(detail.contains("2048"), "{detail}");
+        assert!(detail.contains("ljos note proj-1 --file PATH"), "{detail}");
+        assert!(crate::policy_label::as_policy(&err).is_none(), "{err:#}");
+
+        let payload = format!("b64z:{}", "QUJD".repeat(6_000));
+        let err = super::run_for(
+            "vissue",
+            &["note", "proj-1", payload.as_str()],
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(crate::policy_label::as_policy(&err).is_none(), "{err:#}");
+        assert!(err.to_string().contains("Nothing was noted"), "{err:#}");
+        assert!(!err.to_string().contains("not on PATH"), "{err:#}");
+        assert!(super::check_vissue_note("vissue", &["show", "proj-1", &payload]).is_ok());
+        assert!(super::check_vissue_note("claimdag", &["note", "proj-1", &payload]).is_ok());
+        assert!(super::check_vissue_note("vissue", &["note", "proj-1", "plain"]).is_ok());
     }
 
     /// Whether no process holds the flock on `path`. A missing file is
