@@ -51838,16 +51838,34 @@ fn board_project(board: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// `BOARD_DIR/issues/ID.org` for `issue` on the split board `board`.
-/// `None` when that file is not there.
+/// The file that holds `issue` on the split board `board`: the name vissue
+/// wrote it under ([`vissue_ledger_file_name`]), else its name in the
+/// layout ([`ledger_file_name`]). `None` when neither is there.
 fn ledger_issue_file(board: &Path, issue: &str) -> Option<PathBuf> {
-    let file = board.parent()?.join("issues").join(ledger_file_name(issue));
-    file.is_file().then_some(file)
+    let dir = board.parent()?.join("issues");
+    let written = dir.join(vissue_ledger_file_name(issue));
+    if written.is_file() {
+        return Some(written);
+    }
+    let file = dir.join(ledger_file_name(issue));
+    (file.is_file() && (!issue.contains('/') || ledger_file_holds(&file, issue))).then_some(file)
 }
 
-/// The per-issue file name of `issue`, as vissue names it: bytes outside
-/// `[A-Za-z0-9._-]` are `%XX`.
+/// The per-issue file name of `issue` in its board's `issues/` directory:
+/// the id after its last `/`, with bytes outside `[A-Za-z0-9._-]` as
+/// `%XX`. A project `A/B` sits in `A/B/`, so its id `A/B-x7k2` is
+/// `B-x7k2.org` there, as `B-x7k2` is in the project `B`.
 fn ledger_file_name(issue: &str) -> String {
+    match issue.rsplit('/').next() {
+        Some(leaf) if !leaf.is_empty() => vissue_ledger_file_name(leaf),
+        _ => vissue_ledger_file_name(issue),
+    }
+}
+
+/// The name vissue gives `issue`'s per-issue file when it writes one: the
+/// whole id with bytes outside `[A-Za-z0-9._-]` as `%XX`, so a `/` is
+/// `%2F`.
+fn vissue_ledger_file_name(issue: &str) -> String {
     let mut name = String::new();
     for byte in issue.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
@@ -51858,6 +51876,106 @@ fn ledger_file_name(issue: &str) -> String {
     }
     name.push_str(".org");
     name
+}
+
+/// The id a [`vissue_ledger_file_name`] encodes. `None` for a name that
+/// is not one.
+fn vissue_ledger_file_id(name: &str) -> Option<String> {
+    let stem = name.strip_suffix(".org")?;
+    let mut bytes = Vec::with_capacity(stem.len());
+    let mut rest = stem.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte == b'%' {
+            let hex = std::str::from_utf8(tail.get(..2)?).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            rest = &tail[2..];
+        } else {
+            bytes.push(byte);
+            rest = tail;
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Whether the per-issue file at `file` is the heading of `issue`: its
+/// first `:ID:` property names it.
+fn ledger_file_holds(file: &Path, issue: &str) -> bool {
+    use std::io::BufRead as _;
+    let Ok(open) = std::fs::File::open(file) else {
+        return false;
+    };
+    std::io::BufReader::new(open)
+        .lines()
+        .take(400)
+        .map_while(std::result::Result::ok)
+        .find_map(|line| {
+            line.trim_start()
+                .strip_prefix(":ID:")
+                .map(|id| id.trim() == issue)
+        })
+        .unwrap_or(false)
+}
+
+/// Move the per-issue file at `file` from the name vissue gave it to its
+/// name in the layout, and return where it is. Only an id with a `/` has
+/// two names. A file git tracks, or one the pending list names, keeps its
+/// name: another checkout or a held write knows it by that path, and
+/// [`ledger_issue_file`] still finds it. So does one whose layout name is
+/// taken. The move runs under the board's issues lock; the caller holds
+/// the checkout lock.
+fn settle_ledger_file(file: &Path) -> PathBuf {
+    let kept = file.to_path_buf();
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name().and_then(|n| n.to_str())) else {
+        return kept;
+    };
+    let Some(issue) = vissue_ledger_file_id(name).filter(|id| id.contains('/')) else {
+        return kept;
+    };
+    let Some(board) = ledger_board(file).filter(|board| board != file) else {
+        return kept;
+    };
+    let target = dir.join(ledger_file_name(&issue));
+    if target == file || target.exists() || !file.is_file() {
+        return kept;
+    }
+    if git_ok_stdout(dir, &["ls-files", "--", name]).is_none_or(|out| !out.trim().is_empty()) {
+        return kept;
+    }
+    if let Some(root) = worktree_root(dir) {
+        if rel_to_top(&root, file).is_some_and(|rel| read_pending(&root).contains(&rel)) {
+            return kept;
+        }
+    }
+    let moved = with_wall_bounded_issues_lock(&board, || {
+        if target.exists() || !file.is_file() {
+            return Ok(false);
+        }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a tracker file that is not a git hook"
+        )]
+        std::fs::rename(file, &target).map_err(|e| anyhow::anyhow!("rename: {e}"))?;
+        Ok(true)
+    });
+    if matches!(moved, Ok(true)) {
+        target
+    } else {
+        kept
+    }
+}
+
+/// [`settle_ledger_file`] for every per-issue file of the split board
+/// `board`.
+fn settle_ledger_files(board: &Path) {
+    let Ok(entries) = std::fs::read_dir(board_issues_dir(board)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_str().is_some_and(|name| name.contains("%2F")) {
+            settle_ledger_file(&entry.path());
+        }
+    }
 }
 
 /// Remove the stale whole-file temporaries beside the tracker file at
@@ -53364,10 +53482,17 @@ fn split_as_migrated(board: &Path) -> Option<Vec<PathBuf>> {
     }
     let doc =
         vissue_core::IssueDoc::parse(&board_project(board), board.to_path_buf(), &content).ok()?;
-    let mut want: std::collections::BTreeSet<String> = doc
+    // A heading's file is under the name migrate wrote, or the one
+    // [`settle_ledger_files`] moved it to.
+    let mut named: std::collections::BTreeMap<String, &str> = std::collections::BTreeMap::new();
+    for heading in &doc.headings {
+        named.insert(vissue_ledger_file_name(&heading.id), &heading.id);
+        named.insert(ledger_file_name(&heading.id), &heading.id);
+    }
+    let mut want: std::collections::BTreeSet<&str> = doc
         .headings
         .iter()
-        .map(|heading| ledger_file_name(&heading.id))
+        .map(|heading| heading.id.as_str())
         .collect();
     let mut files = Vec::new();
     for entry in std::fs::read_dir(&dir).ok()? {
@@ -53376,7 +53501,8 @@ fn split_as_migrated(board: &Path) -> Option<Vec<PathBuf>> {
         if name == ".ledger" || tracker_tmp::is_temp_name(&name) {
             continue;
         }
-        if !want.remove(&name) || !entry.file_type().ok()?.is_file() {
+        let id = named.get(name.as_str())?;
+        if !want.remove(id) || !entry.file_type().ok()?.is_file() {
             return None;
         }
         let text = std::fs::read_to_string(entry.path()).ok()?;
@@ -53500,6 +53626,7 @@ fn prepare_split(path: &Path, writes: &[(String, String)], also: &[String]) -> S
         let Some(issues_rel) = rel(&board_issues_dir(&board)) else {
             return SplitStep::WriteOn;
         };
+        settle_ledger_files(&board);
         let mut rels = split_owned_rels(&top, &board);
         if rels.is_empty() {
             rels.push(board_rel.clone());
@@ -53656,6 +53783,7 @@ fn split_board(
     }
     let mut rels = Vec::new();
     for (candidate, board_rel, _) in &split {
+        settle_ledger_files(candidate);
         let owned = split_owned_rels(top, candidate);
         if owned.is_empty() {
             rels.push(board_rel.clone());
@@ -54141,6 +54269,28 @@ fn persist_one_tracker_file(
     let Some(parent) = path.parent() else {
         return format!("tracker git: {} has no directory\n", path.display());
     };
+    // Only a file vissue named with a `/` in its id can move, and the move
+    // happens under the checkout lock this commit then keeps.
+    let unsettled = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains("%2F"));
+    let lock = if unsettled {
+        lock.or_else(|| {
+            tracker_commit_lock_by(
+                parent,
+                std::time::Instant::now() + tracker_lock_budget().wait,
+            )
+        })
+    } else {
+        lock
+    };
+    let settled = if unsettled && lock.is_some() {
+        settle_ledger_file(path)
+    } else {
+        path.to_path_buf()
+    };
+    let path: &Path = &settled;
     // Relative to the directory git runs in: an absolute path that reaches
     // the checkout through a symlink is outside it to git.
     let file = path.file_name().map_or_else(
@@ -63973,6 +64123,278 @@ mod tests {
             "LJOS_TRACKER_GIT",
             "LJOS_SEAT",
             "LJOS_TRACKER_SPLIT_BYTES",
+        ] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// ljos-yjho: an id with a `/` names its per-issue file by the part
+    /// after the last `/`, as any other id does, and the name vissue gives
+    /// it reads back to the id.
+    #[test]
+    fn a_ticket_id_with_a_slash_names_its_file_like_any_other() {
+        assert_eq!(super::ledger_file_name("ljos-3n59"), "ljos-3n59.org");
+        assert_eq!(
+            super::ledger_file_name("Software/ljos-3n59"),
+            "ljos-3n59.org"
+        );
+        assert_eq!(super::ledger_file_name("a b"), "a%20b.org");
+        assert_eq!(
+            super::vissue_ledger_file_name("Software/ljos-3n59"),
+            "Software%2Fljos-3n59.org"
+        );
+        for id in ["Software/ljos-3n59", "ljos-3n59", "a b"] {
+            let name = super::vissue_ledger_file_name(id);
+            assert_eq!(super::vissue_ledger_file_id(&name).as_deref(), Some(id));
+        }
+        assert_eq!(super::vissue_ledger_file_id("bad%2.org"), None);
+        assert_eq!(super::vissue_ledger_file_id("ljos-3n59.txt"), None);
+    }
+
+    /// ljos-yjho: a layout name that already holds a ticket is left alone.
+    /// The `%2F` file keeps its bytes, and a leaf whose `:ID:` is a
+    /// different ticket is not that id's file.
+    #[test]
+    fn an_existing_layout_name_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let board_dir = dir.path().join("Software/ljos");
+        let issues = board_dir.join("issues");
+        std::fs::create_dir_all(&issues).unwrap();
+        let board = board_dir.join("issues.org");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(&board, "#+TITLE: ljos\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(issues.join(".ledger"), "ledger\n").unwrap();
+        let leaf = issues.join("ljos-new1.org");
+        let slash = issues.join("Software%2Fljos-new1.org");
+        let leaf_bytes = ":PROPERTIES:\n:ID:         other-id\n:END:\nleaf stays\n";
+        let slash_bytes = ":PROPERTIES:\n:ID:         Software/ljos-new1\n:END:\nslash stays\n";
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(&leaf, leaf_bytes).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(&slash, slash_bytes).unwrap();
+        assert_eq!(super::settle_ledger_file(&slash), slash);
+        assert_eq!(std::fs::read_to_string(&leaf).unwrap(), leaf_bytes);
+        assert_eq!(std::fs::read_to_string(&slash).unwrap(), slash_bytes);
+        assert_eq!(
+            super::ledger_issue_file(&board, "Software/ljos-new1").unwrap(),
+            slash
+        );
+        std::fs::remove_file(&slash).unwrap();
+        assert!(super::ledger_issue_file(&board, "Software/ljos-new1").is_none());
+        let kept = issues.join("ljos-kept.org");
+        let kept_bytes = ":PROPERTIES:\n:ID:         Software/ljos-kept\n:END:\nkept\n";
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(&kept, kept_bytes).unwrap();
+        assert_eq!(
+            super::ledger_issue_file(&board, "Software/ljos-kept").unwrap(),
+            kept
+        );
+    }
+
+    /// ljos-yjho: two seats settle the same board at once. Each slash-id
+    /// file lands under its layout name with the bytes it had, and neither
+    /// seat's file is lost.
+    #[test]
+    fn two_seats_settle_slash_files_and_keep_the_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let board_dir = root.join("Software/ljos");
+        let issues = board_dir.join("issues");
+        std::fs::create_dir_all(&issues).unwrap();
+        let board = board_dir.join("issues.org");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(&board, "#+TITLE: ljos\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(issues.join(".ledger"), "ledger\n").unwrap();
+        let init = super::git_at(root).args(["init", "-q"]).output().unwrap();
+        assert!(
+            init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let seats = [
+            ("Software/ljos-seat-a", "seat-a-bytes-aaa"),
+            ("Software/ljos-seat-b", "seat-b-bytes-bbb"),
+        ];
+        for (id, body) in seats {
+            let name = super::vissue_ledger_file_name(id);
+            let text = format!(":PROPERTIES:\n:ID:         {id}\n:END:\n{body}\n");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
+            std::fs::write(issues.join(name), text).unwrap();
+        }
+        let left = {
+            let board = board.clone();
+            std::thread::spawn(move || super::settle_ledger_files(&board))
+        };
+        let right = {
+            let board = board.clone();
+            std::thread::spawn(move || super::settle_ledger_files(&board))
+        };
+        left.join().unwrap();
+        right.join().unwrap();
+        for (id, body) in seats {
+            let slash = issues.join(super::vissue_ledger_file_name(id));
+            let leaf = issues.join(super::ledger_file_name(id));
+            assert!(!slash.exists(), "{}", slash.display());
+            let text = std::fs::read_to_string(&leaf).unwrap();
+            assert!(text.contains(body), "{text}");
+            assert!(text.contains(id), "{text}");
+            assert_eq!(super::ledger_issue_file(&board, id).unwrap(), leaf);
+        }
+    }
+
+    /// A tracker checkout whose nested project `Software/ljos`, the board
+    /// `Software/Software/ljos/issues.org`, holds `count` padded issues
+    /// with ids `Software/ljos-bNNN`, committed. Returns the board.
+    fn big_nested_board(root: &Path, count: usize) -> PathBuf {
+        seeded_tracker(root);
+        let dir = root.join("Software/Software/ljos");
+        std::fs::create_dir_all(&dir).unwrap();
+        let issues = dir.join("issues.org");
+        let mut text = String::from("#+TITLE: ljos\n#+VISSUE: 1\n#+TODO: TODO | DONE\n\n");
+        for at in 0..count {
+            text.push_str(&format!(
+                "* TODO [#C] Nested {at}\n:PROPERTIES:\n:ID:         Software/ljos-b{at:03}\n:END:\n\
+                 A body line that pads the board the way real notes do.\n"
+            ));
+        }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(&issues, text).unwrap();
+        let run = |args: &[&str]| {
+            let o = super::git_at(root).args(args).output().unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        };
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "big nested board"]);
+        issues
+    }
+
+    /// ljos-yjho: a nested project's board splits into per-issue files
+    /// named the way every other board's are, `issues/ljos-b007.org` and
+    /// not `issues/Software%2Fljos-b007.org`. A ticket vissue files on the
+    /// split board later moves to that name before its first commit. A
+    /// file already committed under the old name keeps it and is still
+    /// found, and vissue reads every one of them.
+    #[test]
+    fn a_nested_board_splits_into_files_named_like_any_other() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let issues = big_nested_board(root, 300);
+        std::env::set_var("VISSUE_ROOT", root);
+        std::env::set_var("VISSUE_NO_ROUTE", "1");
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        std::env::set_var("LJOS_TRACKER_SPLIT_BYTES", "20000");
+        std::env::set_var("LJOS_TRACKER_BATCH_SECS", "0");
+        let layout = vissue_core::Layout::new(root, "Software");
+        let board_dir = "Software/Software/ljos";
+        let untracked = || {
+            git_text(
+                root,
+                &[
+                    "status",
+                    "--porcelain",
+                    "--",
+                    "Software/Software/ljos/issues.org",
+                    "Software/Software/ljos/issues",
+                ],
+            )
+        };
+
+        vissue_core::ops::note(&layout, "Software/ljos-b007", "first look").unwrap();
+        let said = persist_tracker_file(&issues, "Software/ljos-b007", "noted");
+        assert!(
+            said.contains("split Software/Software/ljos/issues.org"),
+            "{said}"
+        );
+        assert!(vissue_core::ledger::is_ledger(&issues));
+        let tracked = git_text(root, &["ls-files", &format!("{board_dir}/issues")]);
+        let files: Vec<&str> = tracked.lines().filter(|l| l.ends_with(".org")).collect();
+        assert_eq!(files.len(), 300, "{tracked}");
+        assert!(!tracked.contains('%'), "{tracked}");
+        assert!(
+            tracked.contains("Software/Software/ljos/issues/ljos-b007.org"),
+            "{tracked}"
+        );
+        assert!(untracked().is_empty(), "{said}\n{}", untracked());
+
+        vissue_core::ops::note(&layout, "Software/ljos-b123", "event one").unwrap();
+        let said = persist_tracker("Software/ljos-b123", "noted");
+        assert!(said.contains("committed"), "{said}");
+        let (_, paths) = head_change(root);
+        assert_eq!(paths, vec![format!("{board_dir}/issues/ljos-b123.org")]);
+        assert_eq!(
+            tracker_issue_path("Software/ljos-b299").unwrap(),
+            root.join("Software/Software/ljos/issues/ljos-b299.org")
+        );
+        let card = vissue_core::agent::show_json(&layout, "Software/ljos-b123").unwrap();
+        assert!(card.to_string().contains("event one"), "{card}");
+
+        let opts = vissue_core::ops::CreateOpts {
+            id: Some("Software/ljos-new1"),
+            ..Default::default()
+        };
+        vissue_core::ops::create(&layout, "Software/ljos", "Fresh", opts).unwrap();
+        let written = root.join("Software/Software/ljos/issues/Software%2Fljos-new1.org");
+        assert!(written.is_file(), "vissue wrote no file under its own name");
+        let said = persist_tracker("Software/ljos-new1", "filed");
+        assert!(said.contains("committed"), "{said}");
+        assert!(!written.exists(), "{said}");
+        let (_, paths) = head_change(root);
+        assert_eq!(paths, vec![format!("{board_dir}/issues/ljos-new1.org")]);
+        assert!(untracked().is_empty(), "{said}\n{}", untracked());
+        let card = vissue_core::agent::show_json(&layout, "Software/ljos-new1").unwrap();
+        assert_eq!(card["title"], "Fresh");
+
+        let old = format!("{board_dir}/issues/Software%2Fljos-b001.org");
+        git_text(
+            root,
+            &["mv", &format!("{board_dir}/issues/ljos-b001.org"), &old],
+        );
+        git_text(root, &["commit", "-q", "-m", "a file under the old name"]);
+        vissue_core::ops::note(&layout, "Software/ljos-b001", "kept name").unwrap();
+        let said = persist_tracker("Software/ljos-b001", "noted");
+        assert!(said.contains("committed"), "{said}");
+        let (_, paths) = head_change(root);
+        assert_eq!(paths, vec![old]);
+        let card = vissue_core::agent::show_json(&layout, "Software/ljos-b001").unwrap();
+        assert!(card.to_string().contains("kept name"), "{card}");
+        for var in [
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_SEAT",
+            "LJOS_TRACKER_SPLIT_BYTES",
+            "LJOS_TRACKER_BATCH_SECS",
         ] {
             std::env::remove_var(var);
         }
