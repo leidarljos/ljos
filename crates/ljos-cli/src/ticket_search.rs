@@ -376,24 +376,22 @@ fn tickets() -> (Vec<IssueRec>, LoadedClaims) {
     let mut claims = BTreeMap::new();
     let mut seen = BTreeSet::new();
     for layout in &layouts {
-        let snapshot = match vissue_core::catalog::CatalogSnapshot::load(layout) {
-            Ok(snapshot) => snapshot,
+        let records = match vissue_core::catalog::load_recs(layout) {
+            Ok(records) => records,
             Err(_) => {
                 complete = false;
                 continue;
             }
         };
-        let loaded_claims: BTreeMap<String, String> = snapshot
-            .claims()
-            .map(|(id, holder)| (id.to_string(), crate::canonical_seat_name(holder)))
-            .collect();
-        for rec in snapshot.into_records() {
+        for rec in records {
             if rec.heading.id.is_empty() {
                 continue;
             }
+            // A repeated id keeps its first heading, and the claim is that
+            // heading's, not another heading's with the same id.
             if seen.insert(rec.heading.id.clone()) {
-                if let Some(holder) = loaded_claims.get(&rec.heading.id) {
-                    claims.insert(rec.heading.id.clone(), holder.clone());
+                if let Some(holder) = rec.heading.claimed_by() {
+                    claims.insert(rec.heading.id.clone(), crate::canonical_seat_name(holder));
                 }
                 out.push(rec);
             }
