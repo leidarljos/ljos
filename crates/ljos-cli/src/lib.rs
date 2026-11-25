@@ -61816,6 +61816,20 @@ mod tests {
         assert_eq!(left, 0);
     }
 
+    /// Root may own a directory on the way to the temporary directory, but
+    /// not `ljos-UID` or the home's directory of another user.
+    #[test]
+    fn a_root_owned_directory_is_not_this_user_s_runtime_directory() {
+        let uid = euid();
+        if uid == 0 {
+            return;
+        }
+        let root =
+            exe_publish::open_dir_at_nofollow(rustix::fs::CWD, std::ffi::OsStr::new("/")).unwrap();
+        let err = runtime_dir_at(&root, std::ffi::OsStr::new("tmp"), uid, false).unwrap_err();
+        assert!(err.contains("another user owns"), "{err}");
+    }
+
     #[test]
     fn a_pre_created_runtime_directory_this_user_owns_is_used() {
         let tmp = tempfile::tempdir().unwrap();
