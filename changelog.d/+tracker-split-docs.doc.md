@@ -1,1 +1,0 @@
-The cloud VM page and the environment reference now cover two split cases. A board split also migrates every unsplit sibling board under the same prefix. A failed split commit is kept when another write reaches `issues/` first.

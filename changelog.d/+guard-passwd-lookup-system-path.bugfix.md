@@ -1,1 +1,0 @@
-The guard shim and `scripts/install.sh` run `id`, `getent` and `dscl` from their system paths instead of looking them up on `PATH`, so a stand-in `getent` on `PATH` cannot name another passwd home and make a `TMPDIR` that contains the real home pass for a sandbox.

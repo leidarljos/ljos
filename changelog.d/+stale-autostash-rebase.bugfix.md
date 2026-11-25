@@ -1,1 +1,0 @@
-A tracker checkout no longer stays "rebasing" after a sync is killed between replaying and restoring its autostash. The next tracker write clears that finished rebase with `git rebase --quit`, which keeps `HEAD` and the work tree and saves the autostash to `git stash list`. A rebase that still names a branch or a todo list, or was touched in the last two minutes, is left alone.
