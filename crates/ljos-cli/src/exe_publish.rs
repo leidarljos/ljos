@@ -871,6 +871,33 @@ pub(crate) fn open_dir_at_nofollow(
     .map_err(|err| Error::from_raw_os_error(err.raw_os_error()))
 }
 
+/// The names in the directory `dir` holds, read through a new descriptor
+/// for it and not through its path. `dir` may be an `O_PATH` descriptor.
+pub(crate) fn list_dir_at(dir: impl std::os::fd::AsFd) -> Result<Vec<std::ffi::OsString>, Error> {
+    use std::os::unix::ffi::OsStrExt as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "reopens a directory already held to read its names"
+    )]
+    let reading = rustix::fs::openat(
+        dir,
+        ".",
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .and_then(rustix::fs::Dir::new)
+    .map_err(|err| Error::from_raw_os_error(err.raw_os_error()))?;
+    let mut names = Vec::new();
+    for entry in reading {
+        let entry = entry.map_err(|err| Error::from_raw_os_error(err.raw_os_error()))?;
+        let name = std::ffi::OsStr::from_bytes(entry.file_name().to_bytes());
+        if name != "." && name != ".." {
+            names.push(name.to_os_string());
+        }
+    }
+    Ok(names)
+}
+
 /// Make `name` under `dir` as a new directory mode `0700`, open it without
 /// following a symlink, and set `0700` again through that descriptor so the
 /// umask does not decide it.
