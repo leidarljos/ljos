@@ -4,8 +4,9 @@
 CHANGELOG.md says a minor bump is a feature and a patch is a fix. Nothing
 tied the two together: towncrier puts every `feature` fragment in a
 "Features" section whatever version `towncrier build --version` is given,
-so v0.45.4, a patch, shipped five features. This reads the workspace
-version, the changelog and the pending fragments and checks:
+so v0.45.4, a patch, shipped a Features section of eight entries. This
+reads the workspace version, the changelog and the pending fragments and
+checks:
 
 1. A release whose patch number is not 0 has no "Features" or "Removals"
    section. A feature or a removal needs a minor bump.
