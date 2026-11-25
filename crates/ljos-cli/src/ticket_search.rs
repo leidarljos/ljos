@@ -26,9 +26,11 @@
 //! this seat's. The one local case is a tracker whose `seats` roster names
 //! only this seat. An empty roster is not that case: any seat may write.
 
+use crate::word_rank::{QueryTerms, TermBag};
 use packset_client::Hit;
 use std::collections::{BTreeMap, BTreeSet};
 use vissue_core::views::IssueRec;
+
 
 /// How close a ticket is to the query. Earlier bands are printed first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -52,7 +54,39 @@ struct Found {
 /// has no match, or when it cannot be read.
 pub fn merge(hits: &mut Vec<Hit>, query: &str) {
     let records = tickets();
-    let mut found = collect_records(&records, query);
+    merge_records(hits, query, &records, Here::current);
+}
+
+/// This seat and the tracker it sits in, read only when a page is placed.
+struct Here {
+    mine: String,
+    cwd: Option<std::path::PathBuf>,
+    roster: Vec<String>,
+}
+
+impl Here {
+    fn current() -> Self {
+        Self {
+            mine: crate::seat_name(),
+            cwd: vissue_core::Layout::resolve(None, None)
+                .ok()
+                .map(|layout| layout.root().to_path_buf()),
+            roster: crate::tracker_roster_names(),
+        }
+    }
+}
+
+fn merge_records(
+    hits: &mut Vec<Hit>,
+    query: &str,
+    records: &[IssueRec],
+    here: impl FnOnce() -> Here,
+) {
+    if query.trim().is_empty() {
+        return;
+    }
+    let tickets = read_tickets(records, query);
+    let mut found = collect_records(&tickets);
     if !found.is_empty() {
         let have: BTreeSet<String> = hits.iter().filter_map(|hit| hit.id.clone()).collect();
         found.retain(|row| row.hit.id.as_ref().is_none_or(|id| !have.contains(id)));
@@ -79,7 +113,7 @@ pub fn merge(hits: &mut Vec<Hit>, query: &str) {
     // The pack may already have returned these tickets, ranked by the
     // title embedding. Who filed, claimed, or noted them still has to
     // move them, including a match the title embedding never returned.
-    place_rows(hits, query, &records);
+    place_rows(hits, &tickets, here);
 }
 
 fn score_intrinsic(rows: &mut [Found]) {
@@ -113,25 +147,120 @@ fn intrinsic(band: Band) -> f64 {
     }
 }
 
-fn collect_records(rows: &[IssueRec], query: &str) -> Vec<Found> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Vec::new();
+/// One query, read once for every ticket on the page.
+struct Asked {
+    text: String,
+    norm: String,
+    /// Content words, each with its own terms and whether it is a word
+    /// that labels titles rather than naming one.
+    words: Vec<String>,
+    word_terms: Vec<QueryTerms>,
+    common: Vec<bool>,
+    terms: QueryTerms,
+    /// Per entry of `terms`, whether it is a generic word.
+    generic: Vec<bool>,
+}
+
+impl Asked {
+    /// `corpus` is every non-empty title, which is what makes a word
+    /// common to all of them.
+    fn new(query: &str, corpus: &[&TermBag]) -> Self {
+        let text = query.trim().to_string();
+        let words = content_words(&text);
+        let word_terms: Vec<QueryTerms> = words.iter().map(|word| QueryTerms::of(word)).collect();
+        let common = words
+            .iter()
+            .zip(&word_terms)
+            .map(|(word, terms)| {
+                listed_common(word)
+                    || (corpus.len() >= 2 && corpus.iter().all(|title| terms.any_in(title)))
+            })
+            .collect();
+        let terms = QueryTerms::of(&text);
+        let generic = terms
+            .written()
+            .map(crate::word_rank::generic_term)
+            .collect();
+        Self {
+            norm: norm(&text),
+            text,
+            words,
+            word_terms,
+            common,
+            terms,
+            generic,
+        }
     }
-    let titles: Vec<&str> = rows
+}
+
+/// What the page reads about one ticket, worked out once.
+struct Ticket<'r> {
+    rec: &'r IssueRec,
+    facts: Facts,
+    band: Option<Band>,
+    /// Query terms the title, body and notes cover.
+    cover: usize,
+    /// Every covered query term is a generic word, and there is one.
+    generic: bool,
+}
+
+impl Ticket<'_> {
+    /// Two query terms, or a title band. One shared generic word is not a match.
+    fn query_match(&self) -> bool {
+        self.cover >= 2 || self.band.is_some()
+    }
+
+    fn lead_title(&self) -> bool {
+        matches!(self.band, Some(Band::Exact | Band::Near))
+    }
+}
+
+fn read_tickets<'r>(records: &'r [IssueRec], query: &str) -> Vec<Ticket<'r>> {
+    let titles: Vec<Option<TermBag>> = records
         .iter()
-        .map(|rec| rec.heading.title.trim())
-        .filter(|title| !title.is_empty())
+        .map(|rec| {
+            let title = rec.heading.title.trim();
+            (!title.is_empty()).then(|| TermBag::of(title))
+        })
         .collect();
+    let corpus: Vec<&TermBag> = titles.iter().flatten().collect();
+    let asked = Asked::new(query, &corpus);
+    records
+        .iter()
+        .zip(&titles)
+        .map(|(rec, title_bag)| {
+            let blob = TermBag::of(&search_blob(rec));
+            let band = title_bag
+                .as_ref()
+                .and_then(|bag| band_with(&asked, rec.heading.title.trim(), bag, &blob));
+            let mut cover = 0;
+            let mut generic = true;
+            for (hit, generic_term) in asked.terms.hits(&blob).zip(&asked.generic) {
+                if hit {
+                    cover += 1;
+                    generic &= *generic_term;
+                }
+            }
+            Ticket {
+                rec,
+                facts: facts_of(rec),
+                band,
+                cover,
+                generic: cover > 0 && generic,
+            }
+        })
+        .collect()
+}
+
+fn collect_records(tickets: &[Ticket<'_>]) -> Vec<Found> {
     let mut found = Vec::new();
-    for rec in rows {
-        let title = rec.heading.title.trim();
-        let id = rec.heading.id.trim();
+    for ticket in tickets {
+        let title = ticket.rec.heading.title.trim();
+        let id = ticket.rec.heading.id.trim();
         if title.is_empty() || id.is_empty() {
             continue;
         }
-        let notes = notes_text(&rec.heading);
-        let Some(band) = band(query, title, &notes, &titles) else {
+        let Some(band) = ticket.band else {
             continue;
         };
         found.push(Found {
@@ -373,27 +502,24 @@ struct Scope {
     solo: bool,
 }
 
-fn scope_of(records: &[IssueRec], mine: &str) -> Scope {
-    let cwd = vissue_core::Layout::resolve(None, None)
-        .ok()
-        .map(|layout| layout.root().to_path_buf());
+fn scope_of(tickets: &[Ticket<'_>], here: &Here) -> Scope {
     let mut projects = BTreeSet::new();
-    for rec in records {
-        if facts_of(rec).owns(mine) {
-            let name = rec.project.trim().to_lowercase();
+    for ticket in tickets {
+        if ticket.facts.owns(&here.mine) {
+            let name = ticket.rec.project.trim().to_lowercase();
             if !name.is_empty() {
                 projects.insert(name);
             }
         }
     }
-    let roster = crate::tracker_roster_names();
-    let mine = crate::canonical_seat_name(mine);
-    let solo = roster.len() == 1
-        && roster
+    let mine = crate::canonical_seat_name(&here.mine);
+    let solo = here.roster.len() == 1
+        && here
+            .roster
             .iter()
             .any(|seat| crate::canonical_seat_name(seat) == mine);
     Scope {
-        cwd,
+        cwd: here.cwd.clone(),
         projects,
         solo,
     }
@@ -438,57 +564,35 @@ fn is_ticket_hit(hit: &Hit) -> bool {
     hit.kind == "ticket"
 }
 
-fn by_id(records: &[IssueRec]) -> BTreeMap<&str, &IssueRec> {
+/// The first ticket with each id.
+fn by_id<'t, 'r>(tickets: &'t [Ticket<'r>]) -> BTreeMap<&'r str, &'t Ticket<'r>> {
     let mut map = BTreeMap::new();
-    for rec in records {
-        map.entry(rec.heading.id.as_str()).or_insert(rec);
+    for ticket in tickets {
+        map.entry(ticket.rec.heading.id.as_str()).or_insert(ticket);
     }
     map
 }
 
-/// How many query terms the ticket's title, body and notes cover.
-fn ticket_coverage(query: &str, rec: &IssueRec) -> usize {
-    crate::word_rank::term_coverage(query, &search_blob(rec))
-}
-
-fn any_band(query: &str, rec: &IssueRec, titles: &[&str]) -> bool {
-    let notes = notes_text(&rec.heading);
-    band(query, rec.heading.title.trim(), &notes, titles).is_some()
-}
-
-/// Two query terms, or a title band. One shared generic word is not a match.
-fn query_match(query: &str, rec: &IssueRec, titles: &[&str]) -> bool {
-    ticket_coverage(query, rec) >= 2 || any_band(query, rec, titles)
-}
-
-fn lead_title(query: &str, rec: &IssueRec, titles: &[&str]) -> bool {
-    let notes = notes_text(&rec.heading);
-    matches!(
-        band(query, rec.heading.title.trim(), &notes, titles),
-        Some(Band::Exact | Band::Near)
-    )
-}
-
-fn generic_only(query: &str, rec: &IssueRec) -> bool {
-    let covered = crate::word_rank::covered_query_terms(query, &search_blob(rec));
-    !covered.is_empty()
-        && covered
-            .iter()
-            .all(|term| crate::word_rank::generic_term(term))
+/// The facts of the last ticket with each id.
+fn facts_by_id<'t>(tickets: &'t [Ticket<'_>]) -> BTreeMap<&'t str, &'t Facts> {
+    tickets
+        .iter()
+        .map(|ticket| (ticket.rec.heading.id.as_str(), &ticket.facts))
+        .collect()
 }
 
 /// Another project's ticket that only shares words such as docs, release, or video.
-fn unrelated_generic(rec: &IssueRec, scope: &Scope, query: &str) -> bool {
-    if in_working_project(rec, scope) {
+fn unrelated_generic(ticket: &Ticket<'_>, scope: &Scope) -> bool {
+    if in_working_project(ticket.rec, scope) {
         return false;
     }
     // No project from this seat's own facts: the tracker under the working
     // directory is the repo it is searching, and a ticket there is not an
     // unrelated project.
-    if scope.projects.is_empty() && in_cwd(scope, &rec.path) {
+    if scope.projects.is_empty() && in_cwd(scope, &ticket.rec.path) {
         return false;
     }
-    generic_only(query, rec)
+    ticket.generic
 }
 
 fn hit_for(rec: &IssueRec) -> Hit {
@@ -509,27 +613,19 @@ fn hit_for(rec: &IssueRec) -> Hit {
 
 /// Pull in a match the encoder did not return: a ticket this seat filed,
 /// claimed, or noted, or one in a project those facts name.
-fn ensure_matches(
-    hits: &mut Vec<Hit>,
-    query: &str,
-    records: &[IssueRec],
-    mine: &str,
-    scope: &Scope,
-    titles: &[&str],
-) {
+fn ensure_matches(hits: &mut Vec<Hit>, tickets: &[Ticket<'_>], mine: &str, scope: &Scope) {
     let have: BTreeSet<String> = hits
         .iter()
         .filter_map(|hit| hit.id.as_deref().map(str::to_string))
         .collect();
     let mut extra = Vec::new();
-    for rec in records {
-        let id = rec.heading.id.trim();
-        if id.is_empty() || have.contains(id) || !query_match(query, rec, titles) {
+    for ticket in tickets {
+        let id = ticket.rec.heading.id.trim();
+        if id.is_empty() || have.contains(id) || !ticket.query_match() {
             continue;
         }
-        let facts = facts_of(rec);
-        if facts.owns(mine) || in_working_project(rec, scope) {
-            extra.push(hit_for(rec));
+        if ticket.facts.owns(mine) || in_working_project(ticket.rec, scope) {
+            extra.push(hit_for(ticket.rec));
         }
     }
     hits.extend(extra);
@@ -551,18 +647,13 @@ fn stamp_ticket(hit: &mut Hit, rec: &IssueRec, facts: &Facts, scope: &Scope, min
     }
 }
 
-fn demote_unrelated(
-    rows: &mut Vec<Hit>,
-    index: &BTreeMap<&str, &IssueRec>,
-    scope: &Scope,
-    query: &str,
-) {
+fn demote_unrelated(rows: &mut Vec<Hit>, index: &BTreeMap<&str, &Ticket<'_>>, scope: &Scope) {
     let mut keep = Vec::new();
     let mut sink = Vec::new();
     for hit in rows.drain(..) {
-        let rec = hit.id.as_deref().and_then(|id| index.get(id).copied());
+        let ticket = hit.id.as_deref().and_then(|id| index.get(id).copied());
         let generic =
-            rec.is_some_and(|rec| is_ticket_hit(&hit) && unrelated_generic(rec, scope, query));
+            ticket.is_some_and(|ticket| is_ticket_hit(&hit) && unrelated_generic(ticket, scope));
         if generic {
             sink.push(hit);
         } else {
@@ -582,37 +673,30 @@ fn demote_unrelated(
 /// that names another seat, so the header stays true, and a project this
 /// seat works in still outranks an unrelated ticket that only shares a
 /// generic word.
-fn place_rows(hits: &mut Vec<Hit>, query: &str, records: &[IssueRec]) {
-    if records.is_empty() || query.trim().is_empty() {
+fn place_rows(hits: &mut Vec<Hit>, tickets: &[Ticket<'_>], here: impl FnOnce() -> Here) {
+    if tickets.is_empty() {
         return;
     }
-    let mine = crate::seat_name();
-    let scope = scope_of(records, &mine);
-    let titles: Vec<&str> = records
-        .iter()
-        .map(|rec| rec.heading.title.trim())
-        .filter(|title| !title.is_empty())
-        .collect();
-    ensure_matches(hits, query, records, &mine, &scope, &titles);
+    let here = here();
+    let mine = here.mine.as_str();
+    let scope = scope_of(tickets, &here);
+    ensure_matches(hits, tickets, mine, &scope);
     if hits.is_empty() {
         return;
     }
-    let index = by_id(records);
-    let mut known: BTreeMap<String, Facts> = BTreeMap::new();
-    for rec in records {
-        known.insert(rec.heading.id.clone(), facts_of(rec));
-    }
+    let index = by_id(tickets);
+    let known = facts_by_id(tickets);
     for hit in hits.iter_mut() {
         let Some(id) = hit.id.as_deref() else {
             continue;
         };
-        let Some(rec) = index.get(id).copied() else {
+        let Some(ticket) = index.get(id).copied() else {
             continue;
         };
-        let Some(facts) = known.get(id) else {
+        let Some(facts) = known.get(id).copied() else {
             continue;
         };
-        stamp_ticket(hit, rec, facts, &scope, &mine);
+        stamp_ticket(hit, ticket.rec, facts, &scope, mine);
     }
     let mut lead = Vec::new();
     let mut owned = Vec::new();
@@ -620,25 +704,25 @@ fn place_rows(hits: &mut Vec<Hit>, query: &str, records: &[IssueRec]) {
     let mut open = Vec::new();
     let mut away = Vec::new();
     for hit in hits.drain(..) {
-        let rec = hit.id.as_deref().and_then(|id| index.get(id).copied());
-        let facts = hit.id.as_deref().and_then(|id| known.get(id));
-        if rec.is_some_and(|rec| lead_title(query, rec, &titles)) {
+        let ticket = hit.id.as_deref().and_then(|id| index.get(id).copied());
+        let facts = hit.id.as_deref().and_then(|id| known.get(id).copied());
+        if ticket.is_some_and(Ticket::lead_title) {
             lead.push(hit);
-        } else if rec.is_some_and(|rec| {
-            facts.is_some_and(|facts| facts.owns(&mine)) && query_match(query, rec, &titles)
+        } else if ticket.is_some_and(|ticket| {
+            facts.is_some_and(|facts| facts.owns(mine)) && ticket.query_match()
         }) {
             owned.push(hit);
         } else if is_ticket_hit(&hit) {
-            if crate::other_seat(&hit.entities, &mine).is_some() {
+            if crate::other_seat(&hit.entities, mine).is_some() {
                 away.push(hit);
-            } else if rec
-                .is_some_and(|rec| facts.is_some_and(|facts| solo_local(rec, &scope, facts, &mine)))
-            {
+            } else if ticket.is_some_and(|ticket| {
+                facts.is_some_and(|facts| solo_local(ticket.rec, &scope, facts, mine))
+            }) {
                 home.push(hit);
             } else {
                 open.push(hit);
             }
-        } else if crate::other_seat(&hit.entities, &mine).is_some() {
+        } else if crate::other_seat(&hit.entities, mine).is_some() {
             away.push(hit);
         } else {
             home.push(hit);
@@ -649,23 +733,22 @@ fn place_rows(hits: &mut Vec<Hit>, query: &str, records: &[IssueRec]) {
             hit.id
                 .as_deref()
                 .and_then(|id| known.get(id))
-                .map(|facts| facts.recency(&mine))
+                .map(|facts| facts.recency(mine))
                 .unwrap_or(0)
         };
         let cover = |hit: &Hit| {
             hit.id
                 .as_deref()
-                .and_then(|id| index.get(id).copied())
-                .map(|rec| ticket_coverage(query, rec))
-                .unwrap_or(0)
+                .and_then(|id| index.get(id))
+                .map_or(0, |ticket| ticket.cover)
         };
         recency(right)
             .cmp(&recency(left))
             .then_with(|| cover(right).cmp(&cover(left)))
             .then_with(|| left.id.cmp(&right.id))
     });
-    demote_unrelated(&mut open, &index, &scope, query);
-    demote_unrelated(&mut away, &index, &scope, query);
+    demote_unrelated(&mut open, &index, &scope);
+    demote_unrelated(&mut away, &index, &scope);
     let mut ordered =
         Vec::with_capacity(lead.len() + owned.len() + home.len() + open.len() + away.len());
     ordered.extend(lead);
@@ -676,40 +759,55 @@ fn place_rows(hits: &mut Vec<Hit>, query: &str, records: &[IssueRec]) {
     *hits = ordered;
 }
 
+#[cfg(test)]
 fn band(query: &str, title: &str, notes: &str, corpus: &[&str]) -> Option<Band> {
-    let query = query.trim();
+    let bags: Vec<TermBag> = corpus.iter().map(|title| TermBag::of(title)).collect();
+    let corpus: Vec<&TermBag> = bags.iter().collect();
+    let asked = Asked::new(query, &corpus);
     let title = title.trim();
-    if query.is_empty() || title.is_empty() {
+    let blob = TermBag::of(&format!("{title}\n{notes}"));
+    band_with(&asked, title, &TermBag::of(title), &blob)
+}
+
+/// `title` is trimmed. `title_bag` is its terms, and `blob` is the terms
+/// of the title, body and notes.
+fn band_with(asked: &Asked, title: &str, title_bag: &TermBag, blob: &TermBag) -> Option<Band> {
+    if asked.text.is_empty() || title.is_empty() {
         return None;
     }
-    if norm(query) == norm(title) {
+    let title_norm = norm(title);
+    if asked.norm == title_norm {
         return Some(Band::Exact);
     }
-    if near(query, title) {
+    if near(&asked.words, &asked.norm, title, &title_norm) {
         return Some(Band::Near);
     }
-    let words = content_words(query);
-    if words.is_empty() {
+    if asked.words.is_empty() {
         return None;
     }
     // One query word is the subject. Two shared words name the ticket.
     // A longer query that shares only one common word does not: `update`
     // is in many titles, and `kiln` is not.
-    let shared: Vec<&String> = words.iter().filter(|word| covers(word, title)).collect();
-    let title_hit = if words.len() == 1 {
+    let shared: Vec<usize> = (0..asked.words.len())
+        .filter(|&index| asked.word_terms[index].any_in(title_bag))
+        .collect();
+    let title_hit = if asked.words.len() == 1 {
         !shared.is_empty()
     } else if shared.len() >= 2 {
         true
-    } else if let Some(word) = shared.first() {
-        !common_title_word(word, corpus)
+    } else if let Some(&index) = shared.first() {
+        !asked.common[index]
     } else {
         false
     };
     if title_hit {
         return Some(Band::Title);
     }
-    let blob = format!("{title}\n{notes}");
-    covers_all(&words, &blob).then_some(Band::Notes)
+    asked
+        .word_terms
+        .iter()
+        .all(|terms| terms.any_in(blob))
+        .then_some(Band::Notes)
 }
 
 /// Words that label a ticket without naming its subject. One of them,
@@ -721,28 +819,25 @@ const COMMON_TITLE: &[&str] = &[
     "info", "please", "also", "just", "more",
 ];
 
-fn common_title_word(word: &str, corpus: &[&str]) -> bool {
-    if COMMON_TITLE
+/// A word on [`COMMON_TITLE`], or a form of one. A word in every title is
+/// common too: [`Asked::new`] checks that against the corpus once.
+fn listed_common(word: &str) -> bool {
+    COMMON_TITLE
         .iter()
         .any(|item| word.eq_ignore_ascii_case(item) || crate::word_rank::shares_term(word, item))
-    {
-        return true;
-    }
-    let n = corpus.len();
-    n >= 2 && corpus.iter().filter(|title| covers(word, title)).count() == n
 }
 
 /// Same content words, one content word apart, or a short typo.
-fn near(query: &str, title: &str) -> bool {
-    let query_words = content_words(query);
+/// The two norms are [`norm`] of the query and the title.
+fn near(query_words: &[String], query_norm: &str, title: &str, title_norm: &str) -> bool {
     let title_words = content_words(title);
     if query_words.is_empty() || title_words.is_empty() {
         return false;
     }
-    if same_words(&query_words, &title_words) || one_word_apart(&query_words, &title_words) {
+    if same_words(query_words, &title_words) || one_word_apart(query_words, &title_words) {
         return true;
     }
-    typo_near(query, title)
+    typo_near(query_norm, title_norm)
 }
 
 fn same_words(left: &[String], right: &[String]) -> bool {
@@ -765,12 +860,11 @@ fn one_word_apart(left: &[String], right: &[String]) -> bool {
     short.iter().all(|word| covers(word, &blob))
 }
 
+/// Both texts are already [`norm`]ed.
 fn typo_near(query: &str, title: &str) -> bool {
-    let query = norm(query);
-    let title = norm(title);
     let (n, m) = (query.chars().count(), title.chars().count());
     let short = n.min(m);
-    short >= 12 && n.abs_diff(m) <= 2 && edit_within(&query, &title, 2)
+    short >= 12 && n.abs_diff(m) <= 2 && edit_within(query, title, 2)
 }
 
 fn norm(text: &str) -> String {
@@ -791,10 +885,6 @@ fn content_words(text: &str) -> Vec<String> {
         .filter(|word| crate::word_rank::shares_term(word, word))
         .map(str::to_string)
         .collect()
-}
-
-fn covers_all(words: &[String], text: &str) -> bool {
-    !words.is_empty() && words.iter().all(|word| covers(word, text))
 }
 
 fn covers(word: &str, text: &str) -> bool {
