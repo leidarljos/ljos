@@ -268,6 +268,7 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
   On failure, cleanup removes the staged file and removes the stage directory when its original name still refers to it.
   Mode changes no longer retry through a pathname after an open is denied.
 - ljos takes a lock on the git hooks directory while it reads and rewrites hooks there, so two ljos commands that edit hooks at once take turns and neither loses the other's edit.
+- The published `ljos` crate carries the installer release pins it embeds, so Cargo can verify the package outside the repository.
 
 ### Documentation
 
