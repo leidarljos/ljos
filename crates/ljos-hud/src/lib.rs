@@ -11,8 +11,8 @@ pub mod install_desktop;
 pub mod log;
 pub mod place;
 pub mod summon;
-#[doc(hidden)]
-pub mod test_env_guards;
+#[cfg(test)]
+mod test_env_guards;
 pub mod theme;
 pub mod tray;
 pub mod view;

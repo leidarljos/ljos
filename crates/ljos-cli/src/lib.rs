@@ -198,6 +198,7 @@ pub mod swap_log;
 pub mod sync;
 pub mod table;
 pub mod takeover;
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub mod test_env_guards;
 pub mod ticket_search;
