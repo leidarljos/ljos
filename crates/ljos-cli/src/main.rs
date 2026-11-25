@@ -6052,9 +6052,8 @@ fn run_command() -> Result<()> {
             // `capped` is the pack's page, counted before tickets are added.
             // A full pack page can still have more memories past `fetch`.
             let capped = fetch > 0 && hits.len() == usize::try_from(fetch).unwrap_or(usize::MAX);
-            if !dated && !filter.active() {
-                ljos_cli::ticket_search::merge(&mut hits, &asked);
-            }
+            let ticket_claims = (!dated && !filter.active())
+                .then(|| ljos_cli::ticket_search::merge(&mut hits, &asked));
             let receipt_rows = ljos_cli::search_receipt_rows(&hits);
             // After the pack, the slot merge and the ticket merge. A
             // receipt, a mail row and the other bookkeeping kinds are not
@@ -6156,7 +6155,7 @@ fn run_command() -> Result<()> {
                     ljos_cli::tell_raw!("{}", ljos_cli::NOTHING_RELEVANT);
                 } else {
                     let page = ljos_cli::without_raw_rows(&ljos_cli::scan::for_reader(
-                        &ljos_cli::format_search_stored_with_flags(
+                        &ljos_cli::format_search_stored_with_flags_and_claims(
                             &hits,
                             matched,
                             capped,
@@ -6165,6 +6164,7 @@ fn run_command() -> Result<()> {
                             ranking.mode != "lexical",
                             &id_space,
                             &rerun_flags,
+                            ticket_claims.as_ref(),
                             Width::stdout(),
                         ),
                         human_color(),

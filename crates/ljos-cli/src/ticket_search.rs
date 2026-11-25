@@ -58,15 +58,38 @@ struct Found {
     hit: Hit,
 }
 
+/// Claim facts read with one ticket-search corpus.
+///
+/// A complete load can answer that a missing claim is not held without
+/// spawning `vissue claims`. An incomplete load leaves that answer to the
+/// existing command fallback.
+#[derive(Debug, Default)]
+pub struct LoadedClaims {
+    by_id: BTreeMap<String, String>,
+    complete: bool,
+}
+
+impl LoadedClaims {
+    pub(crate) fn claimed_by_seat(&self, id: &str, seat: &str) -> Option<bool> {
+        let seat = crate::canonical_seat_name(seat);
+        match self.by_id.get(id) {
+            Some(holder) => Some(holder == &seat),
+            None if self.complete => Some(false),
+            None => None,
+        }
+    }
+}
+
 /// Insert tracker tickets that match `query`.
 ///
 /// Exact and near titles go in front of the memories already ranked, so
 /// they stay first after the limit cut. Other title matches, then notes
 /// matches, follow those memories. `hits` is unchanged when the tracker
 /// has no match, or when it cannot be read.
-pub fn merge(hits: &mut Vec<Hit>, query: &str) {
-    let records = tickets();
+pub fn merge(hits: &mut Vec<Hit>, query: &str) -> LoadedClaims {
+    let (records, claims) = tickets();
     merge_records(hits, query, &records, Here::current);
+    claims
 }
 
 /// This seat and the tracker it sits in, read only when a page is placed.
@@ -331,38 +354,58 @@ fn collect_records(tickets: &[Ticket<'_>]) -> Vec<Found> {
     found
 }
 
-fn tickets() -> Vec<IssueRec> {
+fn tickets() -> (Vec<IssueRec>, LoadedClaims) {
     let Ok(layout) = vissue_core::Layout::resolve(None, None) else {
-        return Vec::new();
+        return (Vec::new(), LoadedClaims::default());
     };
     if layout.require_tracker().is_err() {
-        return Vec::new();
+        return (Vec::new(), LoadedClaims::default());
     }
-    let layouts = vissue_core::Router::load(layout.clone())
-        .map(|router| {
+    let (layouts, mut complete) = match vissue_core::Router::load(layout.clone()) {
+        Ok(router) => (
             router
                 .unique_layouts()
                 .into_iter()
                 .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|_| vec![layout]);
+                .collect::<Vec<_>>(),
+            true,
+        ),
+        Err(_) => (vec![layout], false),
+    };
     let mut out = Vec::new();
+    let mut claims = BTreeMap::new();
     let mut seen = BTreeSet::new();
     for layout in &layouts {
-        let Ok(rows) = vissue_core::catalog::load_recs(layout) else {
-            continue;
+        let snapshot = match vissue_core::catalog::CatalogSnapshot::load(layout) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                complete = false;
+                continue;
+            }
         };
-        for rec in rows {
+        let loaded_claims: BTreeMap<String, String> = snapshot
+            .claims()
+            .map(|(id, holder)| (id.to_string(), crate::canonical_seat_name(holder)))
+            .collect();
+        for rec in snapshot.into_records() {
             if rec.heading.id.is_empty() {
                 continue;
             }
             if seen.insert(rec.heading.id.clone()) {
+                if let Some(holder) = loaded_claims.get(&rec.heading.id) {
+                    claims.insert(rec.heading.id.clone(), holder.clone());
+                }
                 out.push(rec);
             }
         }
     }
-    out
+    (
+        out,
+        LoadedClaims {
+            by_id: claims,
+            complete,
+        },
+    )
 }
 
 fn notes_text(heading: &vissue_core::IssueHeading) -> String {
