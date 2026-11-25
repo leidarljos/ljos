@@ -35920,15 +35920,25 @@ pub fn doctor() -> Vec<Habitat> {
 /// Whether git can name the author and committer of a tracker commit.
 ///
 /// The question is asked in the tracker checkout, so a `user.name` set only
-/// there counts, and git answers it the way a commit would: config, the
-/// `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables, and the account name. With
-/// no identity a tracker write stays on disk and the commit is refused, so
-/// the row is a warning that names the two commands. A git that cannot be
-/// asked leaves the row out.
+/// there counts, and git answers it the way a tracker commit would: from
+/// config and the account name, with the identity the environment exports
+/// dropped as [`seat_git_child`] drops it. With no identity a tracker write
+/// stays on disk and the commit is refused, so the row is a warning that
+/// names the two commands. A git that cannot be asked leaves the row out.
 fn git_identity_row() -> Option<Habitat> {
     let dir = git_identity_dir();
     for var in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
-        let out = git_in(&dir, &["var", var])?;
+        let mut cmd = git_at(&dir);
+        cmd.args(["var", var]).stdin(std::process::Stdio::null());
+        git_hooks::hook_child_env(&mut cmd);
+        if let Err(why) = seat_git_child(&mut cmd) {
+            return Some(Habitat {
+                name: "git identity",
+                state: format!("{why}, so tracker writes stay uncommitted"),
+                ok: false,
+            });
+        }
+        let out = bounded_output(&mut cmd).ok()?;
         if out.status.success() {
             continue;
         }
