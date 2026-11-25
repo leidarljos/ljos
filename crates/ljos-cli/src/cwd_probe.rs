@@ -117,7 +117,8 @@ fn remember_skip(dir: &Path) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dir.to_path_buf());
 }
 
-/// Leave `here` for an empty directory on the local temp filesystem.
+/// Leave `here` for an empty directory on the local temp filesystem, or
+/// for `/` when the temporary directory is open to other users.
 ///
 /// A tracker the environment already names is kept. A tracker the seat's
 /// configuration names, when it is not inside a product checkout, is
@@ -142,10 +143,27 @@ fn park(here: &Path, move_process_cwd: bool) {
         }
     }
     remember_skip(here);
-    let park = std::env::temp_dir().join(format!("ljos-cwd-{}", std::process::id()));
-    if std::fs::create_dir_all(&park).is_ok() {
-        let _ = std::env::set_current_dir(&park);
+    match park_dir(&std::env::temp_dir(), crate::euid()) {
+        Some(park) => {
+            use std::os::fd::AsRawFd as _;
+            // SAFETY: fchdir on a descriptor `park` owns for this call.
+            let _ = unsafe { libc::fchdir(park.as_raw_fd()) };
+        }
+        None => {
+            let _ = std::env::set_current_dir("/");
+        }
     }
+}
+
+/// `ljos-cwd-PID` under `tmp`, held: made mode `0700` when missing, and
+/// only when `tmp` passes [`crate::walk_trusted_dir`] for `uid` and the
+/// directory is `uid`'s and closed to other writers. `None` otherwise, so
+/// a directory another user made at that predictable name is never entered.
+fn park_dir(tmp: &Path, uid: u32) -> Option<std::fs::File> {
+    let (_, held) = crate::walk_trusted_dir(tmp, uid).ok()?;
+    let name = std::ffi::OsString::from(format!("ljos-cwd-{}", std::process::id()));
+    let (park, _) = crate::runtime_dir_at(&held, &name, uid, true).ok()??;
+    Some(park)
 }
 
 /// Whether `args`, after the program name, are `ljos git-hook`.
@@ -434,6 +452,37 @@ mod tests {
     }
 
     static CWD_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn the_park_is_a_private_directory_under_a_trusted_temporary_directory() {
+        use std::os::unix::fs::MetadataExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let uid = crate::euid();
+        let name = format!("ljos-cwd-{}", std::process::id());
+        let park = park_dir(tmp.path(), uid).expect("a park in a private directory");
+        let made = std::fs::symlink_metadata(tmp.path().join(&name)).unwrap();
+        let held = park.metadata().unwrap();
+        assert_eq!((made.dev(), made.ino()), (held.dev(), held.ino()));
+        assert_eq!(made.mode() & 0o7777, 0o700);
+        std::fs::remove_dir(tmp.path().join(&name)).unwrap();
+
+        crate::change_mode(tmp.path(), 0o777).unwrap();
+        assert!(park_dir(tmp.path(), uid).is_none());
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+
+        crate::change_mode(tmp.path(), 0o1777).unwrap();
+        let planted = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test plants a symlink at the park's name"
+        )]
+        std::os::unix::fs::symlink(planted.path(), tmp.path().join(&name)).unwrap();
+        assert!(park_dir(tmp.path(), uid).is_none());
+        std::fs::remove_file(tmp.path().join(&name)).unwrap();
+        std::fs::create_dir(tmp.path().join(&name)).unwrap();
+        crate::change_mode(tmp.path().join(&name), 0o777).unwrap();
+        assert!(park_dir(tmp.path(), uid).is_none());
+    }
 
     #[test]
     fn a_project_flag_or_a_ticket_id_names_the_project() {
