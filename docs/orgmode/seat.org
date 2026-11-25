@@ -19,4 +19,5 @@ stays open until vissue closes it.
 
 =ljos sitting= opens: doctor, sync when the repository names a scope, cards, due, island, blockers, playbook, workflow when the issue carries one, panel when the issue is a decision, recall, timeline, reclaim, claim. The reclaim step, printed before claim, hands back claims quiet longer than =LJOS_LEASE_SECS= (900 by default, 0 turns it off) whose conversation is gone.
 A decision on a pack with no personas gets one panel line that says so and names =ljos persona NAME --anchor A --view ...=, not an error and not a set of briefs.
+The panel reads the pack within the interactive pack budget (=LJOS_PACK_TIMEOUT_MS=, else =PACKSET_TIMEOUT_MS=, else four seconds, and at most five), not what is left of the sitting's one-second memory read, so the time doctor and the earlier sections take does not leave it without an answer.
 =ljos finish= hands the session node back and leaves the ticket open. With =--close= and a status of =done= or =cancelled= it completes the node and closes the ticket. Walk: [[https://leidarljos.github.io/docs/sit/][Sit]] · [[https://leidarljos.github.io/docs/start/][First write]].

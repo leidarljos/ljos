@@ -48165,6 +48165,10 @@ pub fn sitting_stream_started(
     }
     let decision = tracker_show_json(issue).is_ok_and(|v| is_decision(&v));
     if decision {
+        // The memory clock started with the listing, and doctor, sync and
+        // the tracker reads since then spend it as wall time. The panel is
+        // what a decision's sitting is for, so its reads get a call's budget.
+        let _panel_clock = pack_link::PackSection::enter(pack_call_budget());
         let mut piece = String::new();
         sections.heading(&mut piece, "panel");
         let dir = runtime_dir().join(format!("panel-{issue}"));

@@ -266,6 +266,45 @@ impl Drop for PackClock {
     }
 }
 
+/// A pack clock and command deadline of their own for one later section
+/// of a command, from now. The clock and the deadline in force come back
+/// when this guard drops. A pack that an earlier read found silent is
+/// still silent here, and a tool or wall bound still caps every call.
+pub struct PackSection {
+    clock: Option<Clock>,
+    command: Option<SystemTime>,
+    /// Drop has to run on the thread that entered, where the clock lives.
+    _thread: std::marker::PhantomData<*const ()>,
+}
+
+impl PackSection {
+    #[must_use]
+    pub fn enter(total: Duration) -> Self {
+        let clock = CLOCK.with(|slot| {
+            slot.borrow_mut().replace(Clock {
+                deadline: Instant::now() + total,
+                depth: 1,
+            })
+        });
+        let command =
+            COMMAND_DEADLINE.with(|cell| cell.borrow_mut().replace(SystemTime::now() + total));
+        Self {
+            clock,
+            command,
+            _thread: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for PackSection {
+    fn drop(&mut self) {
+        let clock = self.clock.take();
+        CLOCK.with(|slot| *slot.borrow_mut() = clock);
+        let command = self.command.take();
+        COMMAND_DEADLINE.with(|cell| *cell.borrow_mut() = command);
+    }
+}
+
 fn clock_deadline() -> Option<Instant> {
     CLOCK.with(|slot| slot.borrow().as_ref().map(|clock| clock.deadline))
 }
@@ -2778,6 +2817,33 @@ mod tests {
             (200..1_500).contains(&ahead),
             "clocked read deadline is {ahead} ms ahead"
         );
+    }
+
+    #[test]
+    fn a_section_reads_inside_its_own_clock_and_drop_puts_the_spent_one_back() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        let _clock = super::PackClock::enter(std::time::Duration::from_millis(1));
+        let _deadline = super::CommandDeadline::enter(std::time::Duration::from_millis(1));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let (client, seen) = serve(|_, _| (200, "ok".into(), None));
+        assert!(client.health().is_err(), "a spent clock still read");
+        {
+            let _section = super::PackSection::enter(std::time::Duration::from_secs(1));
+            assert_eq!(client.health().unwrap(), "ok");
+            let ahead = ahead_ms(&seen.lock().unwrap()[0]);
+            assert!(
+                (200..1_500).contains(&ahead),
+                "section read deadline is {ahead} ms ahead"
+            );
+        }
+        assert_eq!(
+            super::clock_left(),
+            Some(std::time::Duration::ZERO),
+            "drop did not put the spent clock back"
+        );
+        assert_eq!(super::command_remaining(), Some(std::time::Duration::ZERO));
+        assert!(client.health().is_err(), "a spent clock still read");
     }
 
     #[test]
