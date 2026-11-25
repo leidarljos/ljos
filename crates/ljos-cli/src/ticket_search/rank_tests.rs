@@ -530,6 +530,14 @@ const WORDS: &[&str] = &[
     "temperature",
     "storage",
     "stores",
+    "anneal",
+    "annealed",
+    "168",
+    "restack3",
+    "default-on",
+    "default",
+    "gate",
+    "gated",
 ];
 const STAMPS: &[&str] = &[
     "[2026-11-01 Sun 09:00]",
@@ -568,6 +576,7 @@ fn tracker(seed: u64, n: usize) -> Vec<IssueRec> {
             1 => "Store mount".to_string(),
             2 => "Fix the store mount timeout".to_string(),
             3 => "GPRidge narrated video set".to_string(),
+            4 => "Anneal 168 restack3 default-on gate".to_string(),
             _ => phrase(&mut rng, 1, 6),
         };
         let body = if rng.chance(60) {
@@ -652,6 +661,12 @@ fn queries(rng: &mut Lcg, records: &[IssueRec]) -> Vec<String> {
         "webdav drain delete safety",
         "release",
         "a of the",
+        "anneal 168 restack3 default-on gate",
+        "default-on gate",
+        "restack3 anneal",
+        "kiln glaze overnight backup drive",
+        "store mount backup drive overnight 24",
+        "GPRidge narrated video set ridge walk",
     ]
     .iter()
     .map(|ask| (*ask).to_string())
@@ -739,15 +754,16 @@ fn band_reads_the_same_as_the_per_call_band() {
     }
 }
 
-/// `count` tickets, of which `sharing` titles share `mount` with the query
-/// `store mount` and nothing else. Each of those asks whether `mount` is
-/// in every title.
-fn shared_word_tracker(count: usize, sharing: usize) -> Vec<IssueRec> {
+/// `count` tickets, of which `sharing` titles share one word with the
+/// query and nothing else. The shared word cycles through `leads`. Each of
+/// those titles asks whether its word is in every title.
+fn shared_word_tracker(count: usize, sharing: usize, leads: &[&str]) -> Vec<IssueRec> {
     let step = count / sharing;
     (0..count)
         .map(|index| {
             let title = if index % step == 0 && index / step < sharing {
-                format!("Mount the backup drive {index}")
+                let lead = leads[(index / step) % leads.len()];
+                format!("{lead} the backup drive {index}")
             } else {
                 format!("Kiln glaze batch {index}")
             };
@@ -764,17 +780,16 @@ fn shared_word_tracker(count: usize, sharing: usize) -> Vec<IssueRec> {
         .collect()
 }
 
-fn analyses_for(count: usize, sharing: usize) -> (usize, usize) {
-    let records = shared_word_tracker(count, sharing);
+/// Texts analyzed for `query`, and how many shared-word titles it printed.
+fn analyses_for(query: &str, count: usize, sharing: usize, leads: &[&str]) -> (usize, usize) {
+    let records = shared_word_tracker(count, sharing, leads);
     let mut hits = Vec::new();
     let before = crate::word_rank::analyzed();
-    merge_records(&mut hits, "store mount", &records, || {
-        here("ada", false, true)
-    });
+    merge_records(&mut hits, query, &records, || here("ada", false, true));
     let spent = crate::word_rank::analyzed() - before;
     let titled = hits
         .iter()
-        .filter(|hit| hit.text.starts_with("Mount the backup drive"))
+        .filter(|hit| hit.text.contains(" the backup drive "))
         .count();
     (spent, titled)
 }
@@ -783,14 +798,46 @@ fn analyses_for(count: usize, sharing: usize) -> (usize, usize) {
 /// 24,000 tickets. Ten times the tickets is about ten times the work.
 #[test]
 fn shared_title_words_cost_linear_work() {
-    let (small, small_titled) = analyses_for(2_000, 30);
-    let (large, large_titled) = analyses_for(20_000, 300);
+    let (small, small_titled) = analyses_for("store mount", 2_000, 30, &["Mount"]);
+    let (large, large_titled) = analyses_for("store mount", 20_000, 300, &["Mount"]);
     assert_eq!(small_titled, 30);
     assert_eq!(large_titled, 300);
     say!("ticket analyses: 2,000 tickets {small}, 20,000 tickets {large}");
     assert!(
         large <= 12 * small,
         "20,000 tickets took {large} analyses against {small} for 2,000"
+    );
+    assert!(large <= 10 * 20_000, "{large} analyses for 20,000 tickets");
+}
+
+/// The query a seat saw hang on 0.45.4: six words, one of them digits and
+/// one hyphenated. Each of its four content words is the only word some
+/// titles share with it. Ten times the tickets is about ten times the
+/// work, and twelve words cost about what two do, per ticket.
+#[test]
+fn long_mixed_queries_cost_work_linear_in_words_and_tickets() {
+    const SIX: &str = "anneal 168 restack3 default-on gate";
+    const TWELVE: &str =
+        "anneal 168 restack3 default-on gate quench 2048 relink9 opt-in latch ramp soak";
+    let leads = ["Anneal", "restack3", "default-on", "gate"];
+    let (two, two_titled) = analyses_for("anneal gate", 20_000, 300, &leads);
+    let (small, small_titled) = analyses_for(SIX, 2_000, 30, &leads);
+    let (large, large_titled) = analyses_for(SIX, 20_000, 300, &leads);
+    let (twelve, twelve_titled) = analyses_for(TWELVE, 20_000, 300, &leads);
+    assert_eq!(two_titled, 150);
+    assert_eq!(small_titled, 30);
+    assert_eq!(large_titled, 300);
+    assert_eq!(twelve_titled, 300);
+    say!(
+        "ticket analyses: two words 20,000 tickets {two}; six words 2,000 tickets {small}, 20,000 tickets {large}; twelve words 20,000 tickets {twelve}"
+    );
+    assert!(
+        large <= 12 * small,
+        "20,000 tickets took {large} analyses against {small} for 2,000"
+    );
+    assert!(
+        twelve <= two + two / 10,
+        "twelve words took {twelve} analyses against {two} for two"
     );
     assert!(large <= 10 * 20_000, "{large} analyses for 20,000 tickets");
 }
