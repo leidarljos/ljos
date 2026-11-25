@@ -1445,6 +1445,115 @@ fn a_start_cut_before_the_create_does_not_adopt_a_stranger_with_the_same_tags() 
 }
 
 #[test]
+fn a_second_child_with_the_filing_tag_is_refused_with_the_recovery_step() {
+    let board = Board::new();
+    let path = board.write_skel("release.org", SKEL);
+    board.ok(&["workflow", "define", path.to_str().unwrap()]);
+    let parent = first_id(&board.ok(&["file", "Release 1.2.0", "--top", "-p", "demo"]));
+    let real = sibling::require("vissue").unwrap_or_else(|line| panic!("{line}"));
+    let shim = board.dir.path().join("shim");
+    std::fs::create_dir_all(&shim).unwrap();
+    let mark = board.dir.path().join("cut-once");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(&mark, "").unwrap();
+    let script = shim.join("vissue");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = note ] && [ \"$3\" = 'step: version' ] && [ -e '{mark}' ]; then\n  rm -f '{mark}'\n  echo 'cut short' >&2\n  exit 1\nfi\nexec '{real}' \"$@\"\n",
+            mark = mark.display(),
+            real = real.display(),
+        ),
+    )
+    .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let start = |board: &Board| {
+        board
+            .cmd_as(
+                "saddle",
+                &[
+                    "workflow",
+                    "--start",
+                    "release",
+                    &parent,
+                    "--var",
+                    "version=1.2.0",
+                ],
+            )
+            .env("PATH", format!("{}:{}", shim.display(), board.path))
+            .output()
+            .unwrap()
+    };
+    let cut = start(&board);
+    assert!(!cut.status.success(), "{}", text(&cut));
+    assert!(text(&cut).contains("cut short"), "{}", text(&cut));
+
+    let index_path = board.home.join(".state/ljos/workflows/release.json");
+    let index: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&index_path).unwrap()).unwrap();
+    let token = index["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|run| run["parent"] == parent.as_str())
+        .and_then(|run| run["filing"]["token"].as_str())
+        .unwrap_or_else(|| panic!("no filing token in {index}"))
+        .to_string();
+    let tag = format!("filing-{token}");
+    let layout = vissue_core::Layout::new(&board.root, "Software");
+    let doc =
+        vissue_core::IssueDoc::parse_file("demo", &layout.project_issues_path("demo")).unwrap();
+    let bump = doc
+        .headings
+        .iter()
+        .find(|h| h.title == "Bump the version")
+        .map(|h| h.id.clone())
+        .expect("the cut start filed the version step");
+    let copy = first_id(&board.ok(&["file", "Bump the version again", "--parent", &parent]));
+    vissue_core::ops::retag(&layout, &copy, std::slice::from_ref(&tag), &[]).unwrap();
+
+    let refused = start(&board);
+    assert!(!refused.status.success(), "{}", text(&refused));
+    let refused = text(&refused);
+    assert!(
+        refused.contains(&format!("{parent} has 2 children filed for step version")),
+        "{refused}"
+    );
+    assert!(refused.contains(&bump), "{refused}");
+    assert!(refused.contains(&copy), "{refused}");
+    assert!(
+        refused.contains(&format!(
+            "remove the {tag} tag from every one of them except the child to keep, then start again"
+        )),
+        "{refused}"
+    );
+
+    vissue_core::ops::retag(&layout, &copy, &[], std::slice::from_ref(&tag)).unwrap();
+    let resumed = start(&board);
+    assert!(resumed.status.success(), "{}", text(&resumed));
+    let resumed = String::from_utf8_lossy(&resumed.stdout).into_owned();
+    assert!(resumed.contains("adopted version"), "{resumed}");
+    let stored = std::fs::read_to_string(&index_path).unwrap();
+    assert!(
+        stored.contains(&format!("\"version\": \"{bump}\"")),
+        "{stored}"
+    );
+    assert!(!stored.contains(copy.as_str()), "{stored}");
+}
+
+#[test]
 fn an_index_body_edited_without_its_sha_is_refused() {
     let board = Board::new();
     let (_, changelog, version, signoff) = start_release(&board);

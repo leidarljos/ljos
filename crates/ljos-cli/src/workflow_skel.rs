@@ -2674,10 +2674,8 @@ fn interrupted_step(
         }
     }
     if found.len() > 1 {
-        bail!(
-            "workflow: {parent} has {} children filed for step {key}; close all but one and start again",
-            found.len()
-        );
+        let ids: Vec<&str> = found.iter().map(|(id, _)| id.as_str()).collect();
+        bail!(duplicate_filing_refusal(parent, key, &tag, &ids));
     }
     let Some((id, unnoted)) = found.pop() else {
         return Ok(None);
@@ -2686,6 +2684,17 @@ fn interrupted_step(
         write_note(&id, &format!("{STEP_NOTE}{key}"))?;
     }
     Ok(Some(id))
+}
+
+/// The refusal for more than one child of `parent` that carries `tag` for
+/// step `key`. Closing a child does not drop it from the search, so the
+/// recovery is to take `tag` off every child but the one to keep.
+fn duplicate_filing_refusal(parent: &str, key: &str, tag: &str, ids: &[&str]) -> String {
+    format!(
+        "workflow: {parent} has {} children filed for step {key} with the {tag} tag: {}; remove the {tag} tag from every one of them except the child to keep, then start again",
+        ids.len(),
+        ids.join(", ")
+    )
 }
 
 /// File the ticket of `step` under `parent` with the `step:` note that binds
@@ -3520,5 +3529,38 @@ Options: ship, hold
         });
         assert_eq!(step_kind_of(&note_only), None);
         assert_eq!(step_key_of(&note_only).as_deref(), Some("signoff"));
+    }
+
+    #[test]
+    fn a_duplicate_filing_refusal_names_the_tag_every_child_and_the_recovery() {
+        let tag = format!("{FILING_TAG}0123456789abcdef");
+        let err = duplicate_filing_refusal(
+            "demo-p1",
+            "version",
+            &tag,
+            &["demo-c1", "demo-c2", "demo-c3"],
+        );
+        assert!(err.starts_with("workflow: demo-p1 has 3 children"), "{err}");
+        assert!(err.contains("step version"), "{err}");
+        assert!(err.contains("demo-c1, demo-c2, demo-c3"), "{err}");
+        assert!(
+            err.contains(
+                "remove the filing-0123456789abcdef tag from every one of them except the child to keep, then start again"
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("close all but one"), "{err}");
+    }
+
+    #[test]
+    fn a_duplicate_filing_refusal_names_two_children() {
+        let err =
+            duplicate_filing_refusal("demo-p1", "changelog", "filing-feed", &["demo-a", "demo-b"]);
+        assert!(err.contains("2 children filed for step changelog"), "{err}");
+        assert!(
+            err.contains("the filing-feed tag: demo-a, demo-b;"),
+            "{err}"
+        );
+        assert!(err.contains("remove the filing-feed tag"), "{err}");
     }
 }
