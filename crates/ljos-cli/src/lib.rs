@@ -134,6 +134,7 @@ mod exe_publish;
 pub mod extract;
 pub mod gates;
 pub mod git_hooks;
+mod git_identity;
 pub mod graphify;
 mod handover_scope;
 pub mod hookd;
@@ -5977,107 +5978,21 @@ pub fn checked_seat() -> Option<String> {
         .or_else(|| call_seat_now().map(|s| s.seat))
 }
 
-/// Whether a `git -c` parameter overrides the commit identity.
-fn git_identity_parameter(parameter: &str) -> bool {
-    let key = parameter.split_once('=').map_or(parameter, |(key, _)| key);
-    key.eq_ignore_ascii_case("user.name") || key.eq_ignore_ascii_case("user.email")
-}
-
-/// The value `cmd` will give `key`, including an explicit removal.
-fn git_child_env(cmd: &std::process::Command, key: &str) -> Option<std::ffi::OsString> {
-    match cmd
-        .get_envs()
-        .find(|(name, _)| *name == std::ffi::OsStr::new(key))
-    {
-        Some((_, value)) => value.map(std::ffi::OsStr::to_os_string),
-        None => std::env::var_os(key),
-    }
-}
-
-/// Drop identity entries from git's shell-quoted `-c` environment.
-fn strip_git_identity_parameters(cmd: &mut std::process::Command) {
-    let Some(raw) = git_child_env(cmd, "GIT_CONFIG_PARAMETERS") else {
-        return;
-    };
-    let Some(raw) = raw.to_str() else {
-        return;
-    };
-    let mut parameters = shell_words(raw);
-    let before = parameters.len();
-    parameters.retain(|parameter| !git_identity_parameter(parameter));
-    if parameters.len() == before {
-        return;
-    }
-    if parameters.is_empty() {
-        cmd.env_remove("GIT_CONFIG_PARAMETERS");
-        return;
-    }
-    let quoted = parameters
-        .iter()
-        .map(|parameter| format!("'{}'", parameter.replace('\'', "'\\''")))
-        .collect::<Vec<_>>()
-        .join(" ");
-    cmd.env("GIT_CONFIG_PARAMETERS", quoted);
-}
-
-/// Drop identity entries from git's counted `-c` environment.
-fn strip_counted_git_identity(cmd: &mut std::process::Command) {
-    let Some(count) = git_child_env(cmd, "GIT_CONFIG_COUNT")
-        .and_then(|count| count.to_str().and_then(|count| count.parse::<usize>().ok()))
-    else {
-        return;
-    };
-    let mut kept = Vec::with_capacity(count);
-    let mut removed = false;
-    for index in 0..count {
-        let key = git_child_env(cmd, &format!("GIT_CONFIG_KEY_{index}"));
-        let value = git_child_env(cmd, &format!("GIT_CONFIG_VALUE_{index}"));
-        if key
-            .as_deref()
-            .and_then(std::ffi::OsStr::to_str)
-            .is_some_and(git_identity_parameter)
-        {
-            removed = true;
-        } else {
-            kept.push((key, value));
-        }
-    }
-    if !removed {
-        return;
-    }
-    for index in 0..count {
-        cmd.env_remove(format!("GIT_CONFIG_KEY_{index}"));
-        cmd.env_remove(format!("GIT_CONFIG_VALUE_{index}"));
-    }
-    cmd.env("GIT_CONFIG_COUNT", kept.len().to_string());
-    for (index, (key, value)) in kept.into_iter().enumerate() {
-        if let Some(key) = key {
-            cmd.env(format!("GIT_CONFIG_KEY_{index}"), key);
-        }
-        if let Some(value) = value {
-            cmd.env(format!("GIT_CONFIG_VALUE_{index}"), value);
-        }
-    }
-}
-
 /// Name [`checked_seat`] on a `git` child that may commit to the tracker.
 ///
 /// Tracker commits take their author and committer from git config, not
 /// identity overrides inherited from the seat that called ljos.
-pub(crate) fn seat_git_child(cmd: &mut std::process::Command) {
-    for key in [
-        "GIT_AUTHOR_NAME",
-        "GIT_AUTHOR_EMAIL",
-        "GIT_COMMITTER_NAME",
-        "GIT_COMMITTER_EMAIL",
-    ] {
-        cmd.env_remove(key);
-    }
-    strip_git_identity_parameters(cmd);
-    strip_counted_git_identity(cmd);
+///
+/// # Errors
+///
+/// The environment names git config in a form git would refuse; see
+/// [`git_identity::strip_git_identity`].
+pub(crate) fn seat_git_child(cmd: &mut std::process::Command) -> std::io::Result<()> {
+    git_identity::strip_git_identity(cmd)?;
     if let Some(seat) = checked_seat() {
         cmd.env("LJOS_SEAT", seat);
     }
+    Ok(())
 }
 
 /// The name this conversation's claims are held under.
@@ -51981,7 +51896,7 @@ fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         clear_git_repo_env(&mut cmd);
         apply_git_command_env(&mut cmd);
         git_hooks::hook_child_env(&mut cmd);
-        seat_git_child(&mut cmd);
+        seat_git_child(&mut cmd)?;
         bounded_output(&mut cmd)
     };
     // `Err` is a busy index, with what git said.
@@ -62136,42 +62051,6 @@ mod tests {
         ] {
             std::env::remove_var(var);
         }
-    }
-
-    /// A seat's identity overrides do not become the tracker commit identity.
-    #[test]
-    fn a_tracker_commit_takes_its_identity_from_repo_config() {
-        let _env = env_guard();
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        seeded_tracker(root);
-        std::env::set_var("VISSUE_ROOT", root);
-        std::env::set_var("VISSUE_NO_ROUTE", "1");
-        std::env::set_var("LJOS_TRACKER_GIT", "commit");
-        std::env::set_var("LJOS_TRACKER_BATCH_SECS", "0");
-        std::env::set_var("LJOS_SEAT", "saddle");
-        std::env::set_var("GIT_AUTHOR_NAME", "author override");
-        std::env::set_var("GIT_AUTHOR_EMAIL", "author@box");
-        std::env::set_var("GIT_COMMITTER_NAME", "committer override");
-        std::env::set_var("GIT_COMMITTER_EMAIL", "committer@box");
-        std::env::set_var(
-            "GIT_CONFIG_PARAMETERS",
-            "'core.abbrev=9' 'user.name=bad' 'user.email=bad@box'",
-        );
-        std::env::set_var("GIT_CONFIG_COUNT", "3");
-        std::env::set_var("GIT_CONFIG_KEY_0", "core.abbrev");
-        std::env::set_var("GIT_CONFIG_VALUE_0", "9");
-        std::env::set_var("GIT_CONFIG_KEY_1", "user.name");
-        std::env::set_var("GIT_CONFIG_VALUE_1", "counted bad");
-        std::env::set_var("GIT_CONFIG_KEY_2", "user.email");
-        std::env::set_var("GIT_CONFIG_VALUE_2", "counted-bad@box");
-
-        let said = super::attach_to_issue("probe-a1b2", "config owns this identity").unwrap();
-        assert!(said.contains("committed"), "{said}");
-        assert_eq!(
-            git_text(root, &["log", "-1", "--format=%an <%ae>%n%cn <%ce>"]),
-            "seat <seat@example.invalid>\nseat <seat@example.invalid>\n"
-        );
     }
 
     /// Another writer committed the note body before this seat's line
