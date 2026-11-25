@@ -227,10 +227,21 @@ fn feed(mut cmd: Command, payload: &str) -> std::process::Child {
     child
 }
 
+/// One `/proc/PID/status` field in KB.
+fn status_kb(status: &str, field: &str) -> Option<u64> {
+    status.lines().find_map(|line| {
+        line.strip_prefix(field)
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+    })
+}
+
+/// The child, and a thread that answers its highest sampled `RssAnon`
+/// and `VmHWM`, in KB, once it exits.
 fn feed_measured(
     mut cmd: Command,
     payload: &str,
-) -> (std::process::Child, std::thread::JoinHandle<u64>) {
+) -> (std::process::Child, std::thread::JoinHandle<(u64, u64)>) {
     let mut child = cmd.spawn().unwrap();
     let pid = child.id();
     child
@@ -241,18 +252,13 @@ fn feed_measured(
         .unwrap();
     let peak = std::thread::spawn(move || {
         let path = format!("/proc/{pid}/status");
-        let mut peak = 0;
+        let (mut anon, mut hwm) = (0, 0);
         while let Ok(status) = std::fs::read_to_string(&path) {
-            if let Some(kb) = status.lines().find_map(|line| {
-                line.strip_prefix("RssAnon:")
-                    .and_then(|value| value.split_whitespace().next())
-                    .and_then(|value| value.parse::<u64>().ok())
-            }) {
-                peak = peak.max(kb);
-            }
+            anon = anon.max(status_kb(&status, "RssAnon:").unwrap_or(0));
+            hwm = hwm.max(status_kb(&status, "VmHWM:").unwrap_or(0));
             std::thread::sleep(Duration::from_millis(1));
         }
-        peak
+        (anon, hwm)
     });
     (child, peak)
 }
@@ -354,14 +360,22 @@ fn wait_for(path: &Path) {
     }
 }
 
+/// Highest anonymous RSS of one burst call, in KB. A call peaks near
+/// 2 MB in a debug build and near 1.2 MB in a release build.
+const ANON_CAP_KB: u64 = 8 * 1024;
+
+/// Highest `VmHWM` of one burst call in a release build, in KB. A call
+/// peaks near 13.5 MB.
+const RELEASE_HWM_CAP_KB: u64 = 20 * 1024;
+
 /// Twenty tool calls at once, half of them the first write of a session.
 /// Each write used to file its claim inside the call, under the book lock,
 /// and the calls queued behind each other for seconds. Each call answers
 /// within 200 ms once it holds a slot, and within the admission budget
 /// end to end; how many run at once is the server's slot count, which
-/// follows the box's cores.
+/// follows the box's cores. Each call stays under the memory caps above.
 #[test]
-fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
+fn twenty_calls_at_once_each_answer_inside_200_ms_and_the_rss_caps() {
     if !Path::new("/proc/self/status").is_file() {
         eprintln!("skipped: /proc/self/status is not available");
         return;
@@ -405,20 +419,34 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
     }
     let report: Vec<String> = rows
         .iter()
-        .map(|(i, took, kb)| format!("call {i}: {} ms, {kb} KB", took.as_millis()))
+        .map(|(i, took, (anon, hwm))| {
+            format!(
+                "call {i}: {} ms, {anon} KB anonymous, {hwm} KB VmHWM",
+                took.as_millis()
+            )
+        })
         .collect();
     eprintln!("{}", report.join("\n"));
-    for (i, took, kb) in &rows {
+    for (i, took, (anon, hwm)) in &rows {
         assert!(
             *took < Duration::from_millis(ljos_cli::hookd::ADMIT_MS),
             "call {i} took {took:?}, past the admission budget:\n{}",
             report.join("\n")
         );
-        // Bound memory owned by the hook rather than file-backed debug
-        // code. Release builds peak far below this total-RSS cap, while
-        // debug builds can map more than 30 MB of code alone.
-        let room = 30 * 1024 + (30 * 1024) / 20;
-        assert!(*kb < room, "call {i} peaked at {kb} KB anonymous RSS");
+        assert!(
+            *anon < ANON_CAP_KB,
+            "call {i} peaked at {anon} KB anonymous RSS:\n{}",
+            report.join("\n")
+        );
+        // A debug build maps more than 30 MB of code, so only a release
+        // build bounds file-backed pages.
+        if cfg!(not(debug_assertions)) {
+            assert!(
+                *hwm < RELEASE_HWM_CAP_KB,
+                "call {i} peaked at {hwm} KB VmHWM:\n{}",
+                report.join("\n")
+            );
+        }
     }
     let times = std::fs::read_to_string(hab.run.join("ljos/hook-times.log")).unwrap();
     let mut answered = 0;
