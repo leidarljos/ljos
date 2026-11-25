@@ -2022,7 +2022,39 @@ impl Seat {
 }
 
 /// What the MCP client said at initialize, kept for every tool call after.
+#[cfg(not(test))]
 static ANNOUNCED: std::sync::OnceLock<Seat> = std::sync::OnceLock::new();
+
+// It is set once and never cleared, so a process-wide one would carry a
+// test's seat into every test after it. Each test runs on its own thread.
+#[cfg(test)]
+thread_local! {
+    static ANNOUNCED: std::cell::OnceCell<Seat> = const { std::cell::OnceCell::new() };
+}
+
+fn announced() -> Option<Seat> {
+    #[cfg(not(test))]
+    {
+        ANNOUNCED.get().cloned()
+    }
+    #[cfg(test)]
+    {
+        ANNOUNCED.with(|slot| slot.get().cloned())
+    }
+}
+
+fn keep_announced(seat: &Seat) {
+    #[cfg(not(test))]
+    {
+        let _ = ANNOUNCED.set(seat.clone());
+    }
+    #[cfg(test)]
+    {
+        ANNOUNCED.with(|slot| {
+            let _ = slot.set(seat.clone());
+        });
+    }
+}
 
 /// A name as a seat: lower case, runs of letters and digits joined by one
 /// hyphen. `Acme CLI`, `acme-cli` and `acme_cli/1.2` are one seat.
@@ -3585,7 +3617,7 @@ pub fn seat_for_thread(thread: &str) -> Seat {
     let thread = thread.trim();
     let mut seat = named_var("LJOS_SEAT")
         .and_then(|raw| seated_name(&raw))
-        .or_else(|| ANNOUNCED.get().map(|s| s.seat.clone()))
+        .or_else(|| announced().map(|s| s.seat))
         .or_else(mapped_box_seat)
         .unwrap_or_else(login_user);
     if named_var("LJOS_SEAT").is_none() {
@@ -3665,12 +3697,12 @@ pub fn announce_seat(client: &str, runner_pid: u32) -> Seat {
             format!("LJOS_SEAT, process {runner_pid}"),
         );
         write_record(&seat_record_path(runner_pid), &seat);
-        let _ = ANNOUNCED.set(seat.clone());
+        keep_announced(&seat);
         return seat;
     };
     let seat = Seat::tagged(name, &session_tag(&id), format!("conversation {id}"));
     write_record_ids(&session_record_path(&id), &seat, &[id]);
-    let _ = ANNOUNCED.set(seat.clone());
+    keep_announced(&seat);
     seat
 }
 
@@ -4779,16 +4811,13 @@ fn named_var(key: &str) -> Option<String> {
 /// name the conversation id that did not resolve.
 fn conversation_derived_seat() -> Option<String> {
     let recorded = seat_from_session_records();
-    if let Some(seat) = ANNOUNCED
-        .get()
-        .filter(|seat| !omitted_actor_name(&seat.seat))
-    {
+    if let Some(seat) = announced().filter(|seat| !omitted_actor_name(&seat.seat)) {
         // The record under this conversation id is that conversation. The
         // client name belongs to this process, and a record that names
         // another seat is not that client.
         let same = recorded.as_ref().is_none_or(|row| row.seat == seat.seat);
         if same {
-            return Some(seat.seat.clone());
+            return Some(seat.seat);
         }
     }
     if let Some(seat) = mapped_box_seat() {
@@ -4918,9 +4947,7 @@ fn whoami_resolved() -> Seat {
     // A record filed under a conversation id this shell carries. The
     // process tree is not consulted for a seat.
     let record = seat_from_session_records().filter(|seat| !omitted_actor_name(&seat.seat));
-    let program = ANNOUNCED
-        .get()
-        .cloned()
+    let program = announced()
         .or_else(|| record.clone())
         .or_else(seat_from_runner_env);
     let agent = named_var("VISSUE_AGENT");
@@ -5237,7 +5264,7 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
         seat
     } else if known.contains(&named_slug) {
         named_slug
-    } else if ANNOUNCED.get().is_some_and(|seat| seat.seat == named_slug) {
+    } else if announced().is_some_and(|seat| seat.seat == named_slug) {
         bookkeep::log_line(&format!(
             "note: the tracker lists no seat {named_slug}; sitting it as the seat this server was given"
         ));
@@ -5655,7 +5682,7 @@ impl std::fmt::Display for Derived {
 #[must_use]
 pub fn derived_seat(who: &Seat) -> Option<Derived> {
     let named = call_seat_now().is_some()
-        || ANNOUNCED.get().is_some()
+        || announced().is_some()
         || named_var("LJOS_SEAT").is_some()
         || named_var("VISSUE_AGENT").is_some()
         || seat_from_runner_env().is_some();
