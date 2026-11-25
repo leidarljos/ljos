@@ -16,10 +16,10 @@ use vissue_core::{IssueHeading, LogEntry};
 
 mod develop {
     use super::super::{
-        content_words, edit_within, facts_of, hit_for, in_cwd, in_working_project, intrinsic,
-        is_ticket_hit, lift, norm, notes_text, preferred_project, score_intrinsic, search_blob,
-        sink, solo_local, stamp_ticket, weigh_projects, Band, Facts, Found, Here, Scope,
-        COMMON_TITLE,
+        content_words, edit_within, facts_of, hit_for, in_cwd, in_home, in_working_project,
+        intrinsic, is_ticket_hit, lift, norm, notes_text, project_rank, score_intrinsic,
+        search_blob, sink, solo_local, stamp_ticket, weigh_projects, Band, Facts, Found, Here,
+        Scope, Weighed, COMMON_TITLE,
     };
     use packset_client::Hit;
     use std::collections::{BTreeMap, BTreeSet};
@@ -300,29 +300,34 @@ mod develop {
         demote_unrelated(&mut open, &index, &scope, query);
         demote_unrelated(&mut away, &index, &scope, query);
         let named = |rec: &IssueRec| crate::word_rank::shares_term(&rec.project, query);
-        let far = if scope.placed() || records.iter().any(named) {
+        let anchored = records.iter().any(|rec| named(rec) || in_home(rec, &scope));
+        let weighed = if anchored || !scope.projects.is_empty() {
             let total = crate::word_rank::QueryTerms::of(query).written().count();
-            weigh_projects(&mut lead, &mut open, &mut away, |hit| {
+            weigh_projects(&mut lead, &mut owned, &mut open, &mut away, |hit| {
                 let rec = hit.id.as_deref().and_then(|id| index.get(id).copied())?;
                 is_ticket_hit(hit).then(|| {
                     let covered =
                         crate::word_rank::covered_query_terms(query, &search_blob(rec)).len();
                     (
-                        preferred_project(rec, &scope, named(rec)),
+                        project_rank(rec, &scope, named(rec), anchored),
                         total > 0 && covered == total,
                     )
                 })
             })
         } else {
-            Vec::new()
+            Weighed {
+                owned: Vec::new(),
+                far: Vec::new(),
+            }
         };
         let mut ordered = Vec::new();
         ordered.extend(lead);
         ordered.extend(owned);
         ordered.extend(home);
+        ordered.extend(weighed.owned);
         ordered.extend(open);
         ordered.extend(away);
-        ordered.extend(far);
+        ordered.extend(weighed.far);
         *hits = ordered;
     }
 
@@ -877,7 +882,6 @@ fn long_mixed_queries_cost_work_linear_in_words_and_tickets() {
 #[test]
 fn the_seats_project_comes_before_one_word_matches_from_other_repos() {
     const QUERY: &str = "LTO metatensor link";
-    let filed = || vec![note("[2026-11-16 Mon 18:30]", "filed by bao")];
     let rows = [
         ("amsel-paper", "amsel-paper-lto", "Link metatensor with LTO"),
         (
@@ -904,13 +908,21 @@ fn the_seats_project_comes_before_one_word_matches_from_other_repos() {
         ("media", "media-0009", "Link previews in the gallery"),
         ("vissue", "vissue-0010", "Link checker timeout"),
     ];
-    let records: Vec<IssueRec> = rows
-        .iter()
-        .map(|(project, id, title)| {
-            let path = PathBuf::from(format!("{ROOT}/{project}/issues.org"));
-            ticket(project, id, title, "", filed(), None, path)
-        })
-        .collect();
+    let records_filed = |by_seat: &[&str]| -> Vec<IssueRec> {
+        rows.iter()
+            .map(|(project, id, title)| {
+                let seat = if by_seat.contains(id) {
+                    "amsel-paper"
+                } else {
+                    "bao"
+                };
+                let filed = vec![note("[2026-11-16 Mon 18:30]", &format!("filed by {seat}"))];
+                let path = PathBuf::from(format!("{ROOT}/{project}/issues.org"));
+                ticket(project, id, title, "", filed, None, path)
+            })
+            .collect()
+    };
+    let records = records_filed(&[]);
     let memory = |id: &str, seat: Option<&str>| Hit {
         id: Some(id.to_string()),
         text: "LTO notes".to_string(),
@@ -927,15 +939,16 @@ fn the_seats_project_comes_before_one_word_matches_from_other_repos() {
         labels: Vec::new(),
     };
     let start = vec![memory("mem-mine", None), memory("mem-cam", Some("cam"))];
-    let page = |home: &[&str]| {
+    let page_of = |records: &[IssueRec], home: &[&str]| {
         let mut hits = start.clone();
-        merge_records(&mut hits, QUERY, &records, || {
+        merge_records(&mut hits, QUERY, records, || {
             at_home("amsel-paper", false, true, home)
         });
         hits.into_iter()
             .filter_map(|hit| hit.id)
             .collect::<Vec<_>>()
     };
+    let page = |home: &[&str]| page_of(&records, home);
     let placed = page(&["amsel-paper"]);
     say!("page for {QUERY:?} on amsel-paper: {placed:?}");
     assert_eq!(
@@ -974,5 +987,31 @@ fn the_seats_project_comes_before_one_word_matches_from_other_repos() {
     assert!(
         at("metatensor-0001") < at("Kiln-0003") && at("chem-0002") < at("Kiln-0003"),
         "a project the query names still comes first: {unplaced:?}"
+    );
+
+    // The seat filed two of the other repos' one-word matches. They are its
+    // own rows, so they follow its memories and stay ahead of another
+    // seat's rows. The rest of those projects still weigh less.
+    let filed = records_filed(&["Kiln-0003", "ljos-0007"]);
+    let own_filed = page_of(&filed, &["amsel-paper"]);
+    say!("page with two filed by amsel-paper: {own_filed:?}");
+    assert_eq!(
+        own_filed,
+        [
+            "amsel-paper-lto",
+            "mem-mine",
+            "Kiln-0003",
+            "ljos-0007",
+            "mem-cam",
+            "amsel-paper-figs",
+            "metatensor-0001",
+            "chem-0002",
+            "Kiln-0004",
+            "docs-site-0005",
+            "ljos-0006",
+            "media-0008",
+            "media-0009",
+            "vissue-0010",
+        ]
     );
 }

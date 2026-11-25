@@ -18,11 +18,13 @@
 //! generic word such as docs, release, or video.
 //!
 //! The seat's own project is the one `LJOS_PROJECT`, the checkout or
-//! `vissue identity` names, and the repo it runs in. With that, a project
-//! its facts name, or a project the query names, another project's ticket
-//! weighs less: it comes after the seat's project in its group, and when
-//! it misses a query word it goes to the end of the page. That is the
-//! word match from another repo that shares one word.
+//! `vissue identity` names, and the repo it runs in. That project and a
+//! project the query names are nearest, then a project the seat's facts
+//! name, then any other. A ticket in a farther project comes after nearer
+//! ones in its group. When it also misses a query word it leaves the
+//! group: the seat's own ticket goes after the seat's memories, and any
+//! other goes to the end of the page. That is the word match from another
+//! repo that shares one word.
 //!
 //! Another seat's ticket stays after this seat's rows. That is the line
 //! the page prints, that this seat's rows come before another seat's.
@@ -550,13 +552,6 @@ struct Scope {
     home: Vec<String>,
 }
 
-impl Scope {
-    /// The seat has a project of its own to prefer.
-    fn placed(&self) -> bool {
-        !self.home.is_empty() || !self.projects.is_empty()
-    }
-}
-
 fn in_home(rec: &IssueRec, scope: &Scope) -> bool {
     let name = rec.project.trim();
     !name.is_empty()
@@ -566,37 +561,56 @@ fn in_home(rec: &IssueRec, scope: &Scope) -> bool {
             .any(|project| project.trim().eq_ignore_ascii_case(name))
 }
 
-/// A ticket in this seat's own project or repo, in a project its facts
-/// name, or in a project the query names.
-fn preferred_project(rec: &IssueRec, scope: &Scope, named: bool) -> bool {
-    named || in_home(rec, scope) || in_working_project(rec, scope)
+/// How far a ticket's project is from this seat. 0 is the seat's own
+/// project or repo, or a project the query names. 1 is a project the
+/// seat's facts name, and 2 is any other project. `anchored` says some
+/// ticket on the tracker is 0; without one, a project the facts name is 0.
+fn project_rank(rec: &IssueRec, scope: &Scope, named: bool, anchored: bool) -> u8 {
+    if named || in_home(rec, scope) {
+        0
+    } else if in_working_project(rec, scope) {
+        u8::from(anchored)
+    } else {
+        2
+    }
 }
 
-/// Another project weighs less than this seat's own. Within the title
-/// rows and the open and away rows, a ticket in a preferred project comes
-/// first. Another project's ticket that misses a query word leaves its
-/// group and goes to the end of the page, which is returned.
+/// The ticket rows [`weigh_projects`] moved out of their groups.
+struct Weighed {
+    /// This seat's own tickets that miss a query word, outside its nearest
+    /// project. They stay ahead of another seat's rows.
+    owned: Vec<Hit>,
+    /// Other tickets that miss a query word, outside the nearest project.
+    far: Vec<Hit>,
+}
+
+/// Another project weighs less than this seat's own. Within each group a
+/// ticket in a nearer project comes first. A ticket outside the nearest
+/// project that misses a query word leaves its group: this seat's own goes
+/// after this seat's memories, and any other goes to the end of the page.
 ///
-/// `judge` says, for a ticket row, whether its project is preferred and
-/// whether it covers every query word. Other rows are left in place.
+/// `judge` gives a ticket row its [`project_rank`] and whether it covers
+/// every query word. Other rows are left in place.
 fn weigh_projects(
     lead: &mut [Hit],
+    owned: &mut Vec<Hit>,
     open: &mut Vec<Hit>,
     away: &mut Vec<Hit>,
-    judge: impl Fn(&Hit) -> Option<(bool, bool)>,
-) -> Vec<Hit> {
-    let other = |hit: &Hit| judge(hit).is_some_and(|(preferred, _)| !preferred);
-    lead.sort_by_key(&other);
-    let mut far = Vec::new();
-    for rows in [open, away] {
-        let (keep, weak): (Vec<Hit>, Vec<Hit>) = rows
-            .drain(..)
-            .partition(|hit| judge(hit).is_none_or(|(preferred, full)| preferred || full));
+    judge: impl Fn(&Hit) -> Option<(u8, bool)>,
+) -> Weighed {
+    let rank = |hit: &Hit| judge(hit).map_or(0, |(rank, _)| rank);
+    let strong = |hit: &Hit| judge(hit).is_none_or(|(rank, full)| rank == 0 || full);
+    lead.sort_by_key(&rank);
+    let split = |rows: &mut Vec<Hit>| {
+        let (mut keep, weak): (Vec<Hit>, Vec<Hit>) = rows.drain(..).partition(&strong);
+        keep.sort_by_key(&rank);
         *rows = keep;
-        rows.sort_by_key(&other);
-        far.extend(weak);
-    }
-    far
+        weak
+    };
+    let owned = split(owned);
+    let mut far = split(open);
+    far.extend(split(away));
+    Weighed { owned, far }
 }
 
 fn scope_of(tickets: &[Ticket<'_>], here: &Here) -> Scope {
@@ -770,8 +784,8 @@ fn demote_unrelated(rows: &mut Vec<Hit>, index: &BTreeMap<&str, &Ticket<'_>>, sc
 /// An untagged ticket is not put in this seat's group. It sits before a row
 /// that names another seat, so the header stays true, and a project this
 /// seat works in still outranks an unrelated ticket that only shares a
-/// generic word. Another project's ticket comes after this seat's project,
-/// and one that misses a query word is last; see [`weigh_projects`].
+/// generic word. A farther project's ticket comes after a nearer one, and
+/// one that misses a query word moves down; see [`weigh_projects`].
 fn place_rows(hits: &mut Vec<Hit>, tickets: &[Ticket<'_>], here: impl FnOnce() -> Here) {
     if tickets.is_empty() {
         return;
@@ -848,28 +862,41 @@ fn place_rows(hits: &mut Vec<Hit>, tickets: &[Ticket<'_>], here: impl FnOnce() -
     });
     demote_unrelated(&mut open, &index, &scope);
     demote_unrelated(&mut away, &index, &scope);
-    let far = if scope.placed() || tickets.iter().any(|ticket| ticket.named) {
-        weigh_projects(&mut lead, &mut open, &mut away, |hit| {
+    let anchored = tickets
+        .iter()
+        .any(|ticket| ticket.named || in_home(ticket.rec, &scope));
+    let weighed = if anchored || !scope.projects.is_empty() {
+        weigh_projects(&mut lead, &mut owned, &mut open, &mut away, |hit| {
             let ticket = hit.id.as_deref().and_then(|id| index.get(id).copied())?;
             is_ticket_hit(hit).then(|| {
                 (
-                    preferred_project(ticket.rec, &scope, ticket.named),
+                    project_rank(ticket.rec, &scope, ticket.named, anchored),
                     ticket.full,
                 )
             })
         })
     } else {
-        Vec::new()
+        Weighed {
+            owned: Vec::new(),
+            far: Vec::new(),
+        }
     };
     let mut ordered = Vec::with_capacity(
-        lead.len() + owned.len() + home.len() + open.len() + away.len() + far.len(),
+        lead.len()
+            + owned.len()
+            + home.len()
+            + weighed.owned.len()
+            + open.len()
+            + away.len()
+            + weighed.far.len(),
     );
     ordered.extend(lead);
     ordered.extend(owned);
     ordered.extend(home);
+    ordered.extend(weighed.owned);
     ordered.extend(open);
     ordered.extend(away);
-    ordered.extend(far);
+    ordered.extend(weighed.far);
     *hits = ordered;
 }
 
