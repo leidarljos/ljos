@@ -3699,6 +3699,13 @@ fn holder_naming(text: &str, id: &str) -> Option<String> {
 /// session id does not either. The process record is the same seat, for
 /// this process alone.
 pub fn announce_seat(client: &str, runner_pid: u32) -> Seat {
+    // Only the process-state write guard clears the announcement, so a
+    // test without it would leave its seat to the tests after it.
+    #[cfg(test)]
+    debug_assert!(
+        ENV_LOCK_HELD.with(std::cell::Cell::get),
+        "a test announced a seat without test_env_lock"
+    );
     load_seat_env();
     // The harness name is how the client introduced itself. It is not
     // who is sitting.
