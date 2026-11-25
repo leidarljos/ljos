@@ -52,7 +52,7 @@ impl Seat {
         script(
             &bin,
             "claimdag",
-            "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\n",
         );
         script(&bin, "deedar", "#!/bin/sh\necho head\n");
         script(&bin, "curl", "#!/bin/sh\nexit 1\n");

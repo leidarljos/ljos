@@ -48,7 +48,7 @@ fn sit(shape: &str) -> std::process::Output {
     .unwrap();
     script(
         &bin.join("claimdag"),
-        "#!/bin/sh\ncase \"$1\" in\n  claim|upsert) echo gen=2 ;;\n  list) echo '[]' ;;\n  get) exit 1 ;;\nesac\nexit 0\n",
+        "#!/bin/sh\ncase \"$1\" in\n  claim|upsert) echo gen=2 ;;\n  list) echo '[]' ;;\n  get) echo 'not found' >&2; exit 1 ;;\nesac\nexit 0\n",
     );
     script(&bin.join("deedar"), "#!/bin/sh\necho head\nexit 0\n");
     script(

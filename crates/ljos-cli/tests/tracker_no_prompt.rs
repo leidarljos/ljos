@@ -106,7 +106,7 @@ impl Board {
         .unwrap();
         script(
             &stubs.join("claimdag"),
-            "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
+            "#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\nesac\necho '[]'\nexit 0\n",
         );
         script(&stubs.join("deedar"), "#!/bin/sh\necho head\nexit 0\n");
         let path = format!(

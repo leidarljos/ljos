@@ -4211,7 +4211,7 @@ fn ljos_claim_commits_the_issue() {
     fs::create_dir_all(&bin).unwrap();
     executable(
         &bin.join("claimdag"),
-        "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\n  *) exit 0 ;;\nesac\n",
+        "#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\n  *) exit 0 ;;\nesac\n",
     );
     executable(&bin.join("vissue"), "#!/bin/sh\nexit 0\n");
     let home = root.path().join("home");

@@ -89,7 +89,7 @@ fn tracker() -> Tracker {
     script(
         root,
         "claimdag",
-        "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\n",
+        "#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\nesac\necho '[]'\n",
     );
     script(root, "deedar", "#!/bin/sh\necho head\n");
     let layout = vissue_core::Layout::new(&tracker, "Software");

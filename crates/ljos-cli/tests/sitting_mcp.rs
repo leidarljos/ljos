@@ -93,7 +93,7 @@ impl Host {
             root.path(),
             "claimdag",
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
+                "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\nesac\necho '[]'\nexit 0\n",
                 log.display()
             ),
         );

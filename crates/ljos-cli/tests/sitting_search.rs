@@ -105,7 +105,7 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
         root.path(),
         "claimdag",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\nesac\necho '[]'\nexit 0\n",
             log.display()
         ),
     );
@@ -305,7 +305,7 @@ fn a_sitting_reads_related_memories_with_one_bounded_search() {
         root.path(),
         "claimdag",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\nesac\necho '[]'\nexit 0\n",
             log.display()
         ),
     );
@@ -525,7 +525,7 @@ fn sitting_fixture(root: &Path) -> (String, std::path::PathBuf, std::path::PathB
         root,
         "claimdag",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\nesac\necho '[]'\nexit 0\n",
             log.display()
         ),
     );

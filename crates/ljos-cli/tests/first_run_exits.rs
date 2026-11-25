@@ -104,7 +104,7 @@ impl Seat {
             root.path(),
             "claimdag",
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{log_s}'\ncase \"$1\" in\n  {list}\n  get) exit 1 ;;\n  upsert|claim)\n    mkdir -p \"$CLAIMDAG_DIR\"\n    : > \"$CLAIMDAG_DIR/work.bin\"\n    echo gen=2\n    ;;\nesac\nexit 0\n"
+                "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{log_s}'\ncase \"$1\" in\n  {list}\n  get) echo 'not found' >&2; exit 1 ;;\n  upsert|claim)\n    mkdir -p \"$CLAIMDAG_DIR\"\n    : > \"$CLAIMDAG_DIR/work.bin\"\n    echo gen=2\n    ;;\nesac\nexit 0\n"
             ),
         );
         script(

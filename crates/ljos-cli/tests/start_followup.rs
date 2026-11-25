@@ -59,7 +59,7 @@ fn the_write_after_start_stays_on_the_issue_start_opened() {
     script(
         &bin,
         "claimdag",
-        "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\nexit 0\n",
+        "#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\nexit 0\n",
     );
     script(&bin, "deedar", "#!/bin/sh\necho head\nexit 0\n");
     script(

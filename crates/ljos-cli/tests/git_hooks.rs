@@ -347,6 +347,7 @@ elif cmd == "get":
     elif i in s["known"]:
         print(f"id={i} status=ready gen=1")
     else:
+        sys.stderr.write("not found\n")
         sys.exit(1)
 elif cmd == "claim":
     i, who = a[1], opt("--assignee")

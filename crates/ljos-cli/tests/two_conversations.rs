@@ -110,6 +110,7 @@ if cmd == "claim":
 if cmd == "get":
     row = data.get(args[1])
     if not row:
+        sys.stderr.write("not found\n")
         sys.exit(1)
     print(f"{{args[1]}} {{row.get('status','todo')}} gen={{row.get('gen',1)}} assignee={{row.get('assignee','')}}")
     sys.exit(0)

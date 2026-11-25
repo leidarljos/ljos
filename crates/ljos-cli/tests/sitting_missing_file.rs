@@ -125,7 +125,7 @@ impl Place {
         script(
             &bin,
             "claimdag",
-            "#!/bin/sh\nprintf 'seats = [\"intruder\"]\\n' >> vissue.toml\ncase \"$1\" in\n  get) exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\nexit 0\n",
+            "#!/bin/sh\nprintf 'seats = [\"intruder\"]\\n' >> vissue.toml\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\nexit 0\n",
         );
         script(&bin, "deedar", "#!/bin/sh\necho head\nexit 0\n");
         #[expect(
