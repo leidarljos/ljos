@@ -325,9 +325,13 @@ fn read_job(path: &Path) -> Option<Job> {
 
 /// `ljos hook --drain`: apply every queued job. With `wait`, wait for a
 /// drainer that runs and return once the spool is empty; without, leave
-/// the work to that drainer.
+/// the work to that drainer. With no runtime directory nothing was
+/// queued, and there is nothing to drain.
 #[must_use]
 pub fn drain(wait: bool) -> i32 {
+    if crate::runtime_records().is_none() {
+        return 0;
+    }
     if mkdir_private(&spool()).is_err() {
         return 1;
     }

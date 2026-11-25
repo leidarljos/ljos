@@ -62,16 +62,22 @@ pub(crate) fn enclose(
     result
 }
 
+/// The runtime directory the plaintext export is made in, asked for before
+/// a scoped handover writes anything.
+///
+/// # Errors
+///
+/// No runtime directory is safe from other users, or it cannot be made.
+pub(crate) fn export_parent() -> Result<PathBuf> {
+    crate::runtime_dir_for("the scoped handover's plaintext export")
+        .context("handover: nothing was handed over")
+}
+
 /// A new directory only this user can read, in the runtime directory and
 /// so outside the bag a later copy sends, for the plaintext export.
 fn private_dir() -> Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
-    let parent = crate::runtime_dir();
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&parent)
-        .with_context(|| format!("create {}", parent.display()))?;
+    let parent = export_parent()?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());

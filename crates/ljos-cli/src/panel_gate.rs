@@ -717,12 +717,15 @@ struct TreeHold {
 /// Record this process's row. A shared shell or harness does not refuse
 /// the cast. It binds the ballot to the earlier row's session, which is
 /// the voice both ballots count as. The row stores that voice.
+///
+/// The rows live in the runtime directory. With none, the ballot is cast
+/// as its own session's, as it is for a process with no tree.
 fn hold_tree(
     issue: &str,
     claimed: &ballot_sig::SessionIdentity,
     tree: &CastTree,
 ) -> Result<Option<TreeHold>> {
-    if tree.shell.is_none() && tree.harness.is_none() {
+    if tree.shell.is_none() && tree.harness.is_none() || crate::runtime_records().is_none() {
         ballot_sig::clear_voice_bind();
         return Ok(None);
     }
