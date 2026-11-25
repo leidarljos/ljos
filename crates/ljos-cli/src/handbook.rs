@@ -1903,7 +1903,6 @@ fn org_state(state: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn options() -> Options {
         Options {
@@ -2748,22 +2747,17 @@ mod tests {
     }
 
     fn lint_summary(text: &str) -> Option<String> {
-        let emacs = ["/usr/bin/emacs", "/usr/local/bin/emacs"]
-            .into_iter()
-            .map(PathBuf::from)
-            .find(|path| path.is_file())
-            .or_else(|| {
-                let path = std::env::var_os("PATH")?;
-                std::env::split_paths(&path)
-                    .map(|dir| dir.join("emacs"))
-                    .find(|candidate| candidate.is_file())
-            });
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let emacs = std::env::split_paths(&path)
+            .map(|dir| dir.join("emacs"))
+            .find(|candidate| candidate.is_file());
         let Some(emacs) = emacs else {
+            let line = "emacs 29.3 is not on PATH, so run `apt-get install emacs-nox`.";
             assert!(
                 std::env::var("LJOS_TEST_REQUIRE_TOOLS").ok().as_deref() != Some("1"),
-                "emacs is not on PATH"
+                "{line}"
             );
-            crate::say!("emacs is not on PATH, so the org-lint check was skipped");
+            crate::say!("{line}");
             return None;
         };
         let dir = tempfile::tempdir().unwrap();

@@ -123,10 +123,14 @@ jobs:
       # The identity gate tests start a one-shot runner under zsh -c.
       # The hook queue test reads each call's peak RSS from GNU time.
       # Installer tests run the printed fish lines, including quotes and backslashes.
+      # The handbook and workflow render tests run org-lint in emacs-nox, which ships Org.
       - name: Use a reachable Ubuntu mirror
         run: sudo timeout -k 5 90 bash .github/scripts/apt-mirror.sh
-      - name: Install age, tmux, notmuch and time
-        run: sudo apt-get install -y --no-install-recommends age tmux notmuch time zsh shellcheck fish
+      - name: Install age, tmux, notmuch, time and Emacs
+        run: |
+          set -eu
+          sudo apt-get install -y --no-install-recommends age tmux notmuch time zsh shellcheck fish emacs-nox
+          emacs --batch -Q --eval "(progn (require 'org) (message \"org %s\" org-version))"
       # vissue, claimdag and deedar are named in .github/sibling-pin.
       # packset, phronesis and ljos-policyd are named in
       # scripts/sibling-tools.sh. The script builds each pin, checks the
@@ -157,7 +161,7 @@ jobs:
       # the next commit here runs hooks from a temp home that is gone.
       # Without --no-fail-fast one failing lib test stopped cargo before
       # any tests/*.rs ran (run 41565021207).
-      # A missing age-keygen, packsetd or vissue skips unless this is set,
+      # A missing age-keygen, emacs, packsetd or vissue skips unless this is set,
       # so this job cannot pass a test that did not run.
       - name: Workspace tests
         env:
@@ -243,12 +247,14 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # The sync, rules and push tests seal with age, as on the Linux job.
       # Installer tests run the printed fish lines, including quotes and backslashes.
-      - name: age
+      # The handbook unit test runs org-lint in Emacs, which ships Org.
+      - name: age, fish and Emacs
         run: |
           set -eu
-          brew install age fish
+          brew install age fish emacs
           command -v age-keygen
           command -v fish
+          emacs --batch -Q --eval "(progn (require 'org) (message \"org %s\" org-version))"
       - name: Unit tests
         run: cargo test --locked --workspace --lib --no-fail-fast
 

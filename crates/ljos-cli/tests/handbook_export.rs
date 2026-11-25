@@ -15,7 +15,7 @@ mod hand_world;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use hand_world::{dump, on_path, ready, World};
+use hand_world::{dump, ready, World};
 
 fn stderr(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
@@ -837,15 +837,7 @@ fn a_real_blocker_cycle_is_reported() {
 }
 
 fn emacs() -> Option<PathBuf> {
-    let found = on_path("emacs");
-    if found.is_none() {
-        assert!(
-            std::env::var(tools::REQUIRE_TOOLS).ok().as_deref() != Some("1"),
-            "emacs is not on PATH"
-        );
-        ljos_cli::say!("emacs is not on PATH, so the org check was skipped");
-    }
-    found
+    tools::find(tools::Tool::Emacs)
 }
 
 fn lint_findings(world: &World, emacs: &Path, file: &Path) -> Vec<String> {

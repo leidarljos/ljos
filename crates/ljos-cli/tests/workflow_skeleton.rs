@@ -5,6 +5,9 @@ ljos_test_boot::harness!();
 #[path = "common/sibling.rs"]
 mod sibling;
 
+#[path = "common/tools.rs"]
+mod tools;
+
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -2814,21 +2817,23 @@ fn normalized_org_injection_is_refused_and_safe_output_lints() {
         "--out",
         out.to_str().unwrap(),
     ]);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "starts a program outside git hook code"
-    )]
-    let lint = Command::new("/usr/bin/emacs")
-        .args([
-            "--batch",
-            "-Q",
-            "--eval",
-            "(progn (require (quote org)) (require (quote org-lint)) (find-file (car command-line-args-left)) (let ((issues (org-lint))) (when issues (dolist (i issues) (message \"%S\" i)) (kill-emacs 1))))",
-            out.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(lint.status.success(), "org-lint failed:\n{}", text(&lint));
+    if let Some(emacs) = tools::find(tools::Tool::Emacs) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        let lint = Command::new(&emacs)
+            .args([
+                "--batch",
+                "-Q",
+                "--eval",
+                "(progn (require (quote org)) (require (quote org-lint)) (find-file (car command-line-args-left)) (let ((issues (org-lint))) (when issues (dolist (i issues) (message \"%S\" i)) (kill-emacs 1))))",
+                out.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(lint.status.success(), "org-lint failed:\n{}", text(&lint));
+    }
 
     for injection in [
         "\u{200b}* Hidden heading",
