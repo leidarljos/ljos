@@ -2106,12 +2106,37 @@ pub(crate) fn runtime_records() -> Option<PathBuf> {
 
 static NO_RUNTIME_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Why there is no runtime directory, and what gives this user one.
-fn no_runtime_reason() -> String {
-    format!(
-        "{} is not safe from other users; set XDG_RUNTIME_DIR or HOME to an absolute path",
-        std::env::temp_dir().display()
-    )
+/// Why there is no runtime directory, and what gives this user one: an
+/// `XDG_RUNTIME_DIR` under [`NO_RUNTIME_DIR`], a temporary directory open
+/// to other users, or `ljos-UID` and `ljos-UID-own` in it that another user
+/// holds or can write.
+pub(crate) fn no_runtime_reason() -> String {
+    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
+        return format!(
+            "XDG_RUNTIME_DIR is {}, where nothing can be made; set it to a directory this user owns",
+            Path::new(&run).display()
+        );
+    }
+    let fix = "set XDG_RUNTIME_DIR or HOME to an absolute path";
+    let tmp = std::env::temp_dir();
+    let uid = euid();
+    let Ok((real, dir)) = walk_trusted_dir(&tmp, uid) else {
+        return format!("{} is not safe from other users; {fix}", tmp.display());
+    };
+    let taken: Vec<String> = [format!("ljos-{uid}"), format!("ljos-{uid}-own")]
+        .into_iter()
+        .filter_map(|name| {
+            let why = runtime_dir_at(&dir, std::ffi::OsStr::new(&name), uid, false).err()?;
+            Some(format!("{} ({why})", real.join(&name).display()))
+        })
+        .collect();
+    if taken.is_empty() {
+        return format!(
+            "no private directory could be made in {}; {fix}",
+            real.display()
+        );
+    }
+    format!("{} cannot be used; {fix}", taken.join(" and "))
 }
 
 fn warn_no_runtime_records() {
@@ -62182,6 +62207,48 @@ mod tests {
         crate::change_mode(open.path(), 0o777).unwrap();
         run_in_runtime_env(TEST, open.path(), None, None);
         assert_eq!(runtime_left(open.path()), Vec::<std::ffi::OsString>::new());
+    }
+
+    #[test]
+    fn an_xdg_runtime_dir_under_dev_null_is_named_as_the_cause() {
+        const TEST: &str = "tests::an_xdg_runtime_dir_under_dev_null_is_named_as_the_cause";
+        if runtime_env_child(TEST).is_some() {
+            let err = format!("{:#}", runtime_dir_for("the test's records").unwrap_err());
+            assert_eq!(
+                err,
+                "no runtime directory for the test's records, XDG_RUNTIME_DIR is /dev/null, where nothing can be made; set it to a directory this user owns"
+            );
+            assert_eq!(runtime_records(), None);
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        run_in_runtime_env(TEST, tmp.path(), None, Some(Path::new("/dev/null")));
+        assert_eq!(runtime_left(tmp.path()), Vec::<std::ffi::OsString>::new());
+    }
+
+    #[test]
+    fn taken_fallback_directories_are_named_as_the_cause() {
+        const TEST: &str = "tests::taken_fallback_directories_are_named_as_the_cause";
+        if let Some(tmp) = runtime_env_child(TEST) {
+            let uid = euid();
+            let real = tmp.canonicalize().unwrap();
+            let err = format!("{:#}", runtime_dir_for("the test's records").unwrap_err());
+            let want = format!(
+                "no runtime directory for the test's records, {0}/ljos-{uid} (refusing a runtime directory other users can write) and {0}/ljos-{uid}-own (refusing a runtime directory other users can write) cannot be used; set XDG_RUNTIME_DIR or HOME to an absolute path",
+                real.display()
+            );
+            assert_eq!(err, want);
+            assert!(!err.contains("/dev/null"), "{err}");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let uid = euid();
+        for name in [format!("ljos-{uid}"), format!("ljos-{uid}-own")] {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir(&dir).unwrap();
+            crate::change_mode(&dir, 0o777).unwrap();
+        }
+        run_in_runtime_env(TEST, tmp.path(), None, None);
     }
 
     #[test]

@@ -1,0 +1,1 @@
+With no runtime directory, the line that says so names the cause: an `XDG_RUNTIME_DIR` under `/dev/null`, a temporary directory open to other users, or an `ljos-UID` and `ljos-UID-own` that cannot be used, instead of always blaming the temporary directory.
