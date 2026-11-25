@@ -59746,6 +59746,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_guard_shim_steps_aside_for_a_temp_home_and_ljos_off_only() {
+        // Another test points TMPDIR at a directory it deletes. Under the
+        // lock, these directories are made under the TMPDIR the suite has.
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let guard = dir.path().join("guard-bin");
         let fake = dir.path().join("fake");

@@ -1,0 +1,1 @@
+The guard shim test holds the environment lock, so its directories are no longer made under a `TMPDIR` another test points at a directory it deletes, and it no longer fails with `No such file or directory`.
