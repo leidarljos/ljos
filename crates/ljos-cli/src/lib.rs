@@ -2064,7 +2064,21 @@ pub fn conversation_tag(pid: u32) -> String {
 
 /// The login's runtime directory, where what belongs to a session and never
 /// to the pack is kept.
+///
+/// With no directory safe from other users this is a path under
+/// `/dev/null`, where nothing can be made, and the first call says so once
+/// on stderr. A reader then finds nothing and a writer's record is lost; a
+/// caller that cannot go on without the directory asks [`runtime_dir_for`].
 pub(crate) fn runtime_dir() -> PathBuf {
+    let dir = runtime_dir_made();
+    if !keeps_runtime_records(&dir) {
+        warn_no_runtime_records();
+    }
+    dir
+}
+
+/// [`runtime_dir`] without the warning.
+fn runtime_dir_made() -> PathBuf {
     if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
         return PathBuf::from(run).join("ljos");
     }
@@ -2074,6 +2088,72 @@ pub(crate) fn runtime_dir() -> PathBuf {
         euid(),
         true,
     )
+}
+
+/// Where the runtime directory points when no directory is safe to keep
+/// records in. It is a character device, so nothing can be made under it.
+const NO_RUNTIME_DIR: &str = "/dev/null";
+
+/// Whether `dir`, a [`runtime_dir`], can hold records.
+pub(crate) fn keeps_runtime_records(dir: &Path) -> bool {
+    !dir.starts_with(NO_RUNTIME_DIR)
+}
+
+/// [`runtime_dir`] when it can hold records, else `None`.
+pub(crate) fn runtime_records() -> Option<PathBuf> {
+    Some(runtime_dir()).filter(|dir| keeps_runtime_records(dir))
+}
+
+static NO_RUNTIME_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Why there is no runtime directory, and what gives this user one.
+fn no_runtime_reason() -> String {
+    format!(
+        "{} is not safe from other users; set XDG_RUNTIME_DIR or HOME to an absolute path",
+        std::env::temp_dir().display()
+    )
+}
+
+fn warn_no_runtime_records() {
+    if !NO_RUNTIME_SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        say!("ljos: keeping no runtime records, {}", no_runtime_reason());
+    }
+}
+
+/// [`runtime_dir`], made mode `0700` when missing, for `what`, which
+/// cannot go on without it.
+///
+/// # Errors
+///
+/// No directory is safe from other users: the message names `what` and how
+/// to give this user one, and the warning [`runtime_dir`] gives is not
+/// repeated after it. Or the directory could not be made.
+pub(crate) fn runtime_dir_for(what: &str) -> Result<PathBuf> {
+    let dir = runtime_dir_made();
+    if let Some(err) = no_runtime_dir_for(what, &dir) {
+        return Err(err);
+    }
+    use std::os::unix::fs::DirBuilderExt as _;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .with_context(|| format!("could not make the runtime directory {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// The error [`runtime_dir_for`] gives `what` when `dir`, a
+/// [`runtime_dir`], can hold no records, and `None` when it can. The
+/// warning [`runtime_dir`] gives is not repeated after it.
+pub(crate) fn no_runtime_dir_for(what: &str, dir: &Path) -> Option<anyhow::Error> {
+    if keeps_runtime_records(dir) {
+        return None;
+    }
+    NO_RUNTIME_SAID.store(true, std::sync::atomic::Ordering::Relaxed);
+    Some(anyhow::anyhow!(
+        "no runtime directory for {what}, {}",
+        no_runtime_reason()
+    ))
 }
 
 /// [`runtime_dir`] without creating it.
@@ -2126,7 +2206,7 @@ fn runtime_fallback_in(tmp: &Path, home: Option<&Path>, uid: u32, make: bool) ->
         .filter(|h| !h.as_os_str().is_empty() && h.is_absolute())
         .map(|h| h.join(".cache/ljos/run"));
     let Ok((real, dir)) = walk_trusted_dir(tmp, uid) else {
-        return runtime_elsewhere(cache, tmp, uid, make);
+        return runtime_elsewhere(cache, uid, make);
     };
     let mut names = vec![std::ffi::OsString::from(format!("ljos-{uid}"))];
     names.extend(runtime_home_key(home));
@@ -2134,11 +2214,11 @@ fn runtime_fallback_in(tmp: &Path, home: Option<&Path>, uid: u32, make: bool) ->
         return path;
     }
     if cache.is_some() {
-        return runtime_elsewhere(cache, tmp, uid, make);
+        return runtime_elsewhere(cache, uid, make);
     }
     let own = [std::ffi::OsString::from(format!("ljos-{uid}-own"))];
     runtime_dirs_at(&dir, &real, &own, uid, make)
-        .unwrap_or_else(|_| runtime_elsewhere(None, tmp, uid, make))
+        .unwrap_or_else(|_| runtime_elsewhere(None, uid, make))
 }
 
 /// The directory name for `home` under `ljos-UID`.
@@ -2150,8 +2230,8 @@ fn runtime_home_key(home: Option<&Path>) -> Option<std::ffi::OsString> {
 }
 
 /// The runtime directory when the temporary directory has none to give:
-/// `cache` made as before, or a path under `/dev/null`.
-fn runtime_elsewhere(cache: Option<PathBuf>, tmp: &Path, uid: u32, make: bool) -> PathBuf {
+/// `cache` made as before, or a path under [`NO_RUNTIME_DIR`].
+fn runtime_elsewhere(cache: Option<PathBuf>, uid: u32, make: bool) -> PathBuf {
     match cache {
         Some(dir) => {
             if make && !dir.exists() {
@@ -2163,18 +2243,7 @@ fn runtime_elsewhere(cache: Option<PathBuf>, tmp: &Path, uid: u32, make: bool) -
             }
             dir
         }
-        None => {
-            if make {
-                static ONCE: std::sync::Once = std::sync::Once::new();
-                ONCE.call_once(|| {
-                    say!(
-                        "ljos: keeping no runtime records, {} is not safe from other users; set XDG_RUNTIME_DIR or HOME to an absolute path",
-                        tmp.display()
-                    );
-                });
-            }
-            PathBuf::from(format!("/dev/null/ljos-{uid}"))
-        }
+        None => Path::new(NO_RUNTIME_DIR).join(format!("ljos-{uid}")),
     }
 }
 
@@ -13686,8 +13755,7 @@ pub fn start_decision_panel(
                 .into(),
         );
     }
-    let dir = runtime_dir();
-    std::fs::create_dir_all(&dir)?;
+    let dir = runtime_dir_for("the panel's prompt")?;
     let stamp = std::process::id();
     let prompt_file = dir.join(format!("panel-prompt-{stamp}.txt"));
     let log = dir.join(format!("panel-open-{stamp}.log"));
@@ -14002,10 +14070,11 @@ mod panel_open_tests {
 ///
 /// # Errors
 ///
-/// No project can be named, the tracker refuses the issue, or a member
-/// cannot be started.
+/// There is no runtime directory for the briefs, no project can be named,
+/// the tracker refuses the issue, or a member cannot be started.
 pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Result<String> {
     let _ = std::fs::create_dir_all(log.parent().unwrap_or(log));
+    let run = runtime_dir_for("the panel's briefs")?;
     let issue = decision_issue_for(prompt)?;
     append_log(log, &format!("issue {issue}\n"));
     if let Err(err) = panel_runner::resolve_panel_run_harness_with(None, false, &on_path) {
@@ -14021,7 +14090,7 @@ pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Resul
         Some("company-panel"),
     )?;
     append_log(log, &sat);
-    let briefs = runtime_dir().join(format!("panel-{issue}"));
+    let briefs = run.join(format!("panel-{issue}"));
     let wrote = panel(&issue, &briefs)?;
     append_log(log, &wrote);
     let (_, seated) = panel_roster(&issue)?;
@@ -40377,8 +40446,9 @@ pub fn handover(
 ///
 /// # Errors
 ///
-/// As [`handover`]. With `scope`, also a scope no tracker lists recipients
-/// for, or an age that refused to seal.
+/// As [`handover`]. With `scope`, also no private runtime directory for
+/// the plaintext export, a scope no tracker lists recipients for, or an
+/// age that refused to seal.
 pub fn handover_scoped(
     out: &Path,
     projects: &[String],
@@ -40388,6 +40458,9 @@ pub fn handover_scoped(
 ) -> Result<Vec<String>> {
     if projects.is_empty() && issues.is_empty() {
         bail!("handover: name a project or an issue");
+    }
+    if scope.is_some() {
+        handover_scope::export_parent()?;
     }
     let mut lines = Vec::new();
     let mut args = vec![
@@ -48652,7 +48725,6 @@ pub fn sitting_stream_started(
         let _panel_clock = pack_link::PackSection::enter(pack_call_budget());
         let mut piece = String::new();
         sections.heading(&mut piece, "panel");
-        let dir = runtime_dir().join(format!("panel-{issue}"));
         // A pack with no personas has not failed to write a panel: nobody
         // has written one yet. Asking `panel` would also store an attempt.
         if personas_from_pack().is_ok_and(|all| all.is_empty()) {
@@ -48660,7 +48732,9 @@ pub fn sitting_stream_started(
                 "{issue} is a decision. The pack has no personas yet, so no panel is seated.\nAdd one with `ljos persona reviewer --anchor 0.5 --view \"checks codec choices\" --about codec`.\n"
             ));
         } else {
-            match panel(issue, &dir) {
+            match runtime_dir_for("the panel's briefs")
+                .and_then(|run| panel(issue, &run.join(format!("panel-{issue}"))))
+            {
                 Ok(said) => piece.push_str(&format!(
                     "{issue} is a decision. Run the panel before the work: one subagent per brief, each casts its ballot, then `ljos consensus {issue}`. A close of a decision is refused with fewer than two ballots.\n{said}"
                 )),
@@ -54028,7 +54102,9 @@ fn persist_one_tracker_file(
             "tracker git: committed {message}; push destination is not origin's default, kept local\n"
         ));
     };
-    if mode == "push" {
+    // A background push writes its log in the runtime directory. With none,
+    // the push runs here, as `LJOS_TRACKER_GIT=push` asks.
+    if mode == "push" || runtime_records().is_none() {
         return say(
             match tracker_push::publish_explicit(dir, &destination.remote, &destination.branch) {
                 Ok(()) => {
@@ -61703,6 +61779,22 @@ mod tests {
         std::fs::read_dir(dir).unwrap().count()
     }
 
+    /// The runtime directories and deed exports in `dir` while it was
+    /// `TMPDIR`. Tests on other threads make their own files there meanwhile,
+    /// so the directory is not expected to stay empty.
+    pub(crate) fn runtime_left(dir: &Path) -> Vec<std::ffi::OsString> {
+        let own = format!("ljos-{}", euid());
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with(&own) || name.starts_with("deed-export-")
+            })
+            .collect()
+    }
+
     #[test]
     fn a_trusted_temporary_directory_gets_a_private_runtime_directory() {
         let tmp = tempfile::tempdir().unwrap();
@@ -62021,6 +62113,151 @@ mod tests {
             runtime_homes_at(&held, &base, uid),
             vec![base.join("home-checked")]
         );
+    }
+
+    const RUNTIME_CHILD: &str = "LJOS_TEST_RUNTIME_CHILD";
+
+    /// In the child [`run_in_runtime_env`] starts for `test`, the `TMPDIR`
+    /// it was given; `None` in the parent.
+    pub(crate) fn runtime_env_child(test: &str) -> Option<PathBuf> {
+        (std::env::var_os(RUNTIME_CHILD).is_some_and(|child| child == test))
+            .then(std::env::temp_dir)
+    }
+
+    /// Runs `test` alone in a child of this test binary with `TMPDIR`,
+    /// `HOME` and `XDG_RUNTIME_DIR` as given, and fails with its output when
+    /// it fails. Setting them here would move the temporary directory of
+    /// every test running beside this one.
+    pub(crate) fn run_in_runtime_env(
+        test: &str,
+        tmp: &Path,
+        home: Option<&Path>,
+        run: Option<&Path>,
+    ) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", test, "--test-threads=1"])
+            .env(RUNTIME_CHILD, test)
+            .env("TMPDIR", tmp);
+        for (key, value) in [("HOME", home), ("XDG_RUNTIME_DIR", run)] {
+            match value {
+                Some(value) => cmd.env(key, value),
+                None => cmd.env_remove(key),
+            };
+        }
+        let out = cmd.output().unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains("1 passed"), "{test} did not run: {said}");
+    }
+
+    #[test]
+    fn with_no_safe_runtime_directory_a_caller_that_needs_one_is_told_why() {
+        const TEST: &str =
+            "tests::with_no_safe_runtime_directory_a_caller_that_needs_one_is_told_why";
+        if runtime_env_child(TEST).is_some() {
+            let err = format!("{:#}", runtime_dir_for("the test's records").unwrap_err());
+            assert!(
+                err.starts_with("no runtime directory for the test's records, "),
+                "{err}"
+            );
+            assert!(
+                err.ends_with(
+                    "is not safe from other users; set XDG_RUNTIME_DIR or HOME to an absolute path"
+                ),
+                "{err}"
+            );
+            assert!(
+                !err.contains("/dev/null") && !err.contains("os error"),
+                "{err}"
+            );
+            assert_eq!(runtime_records(), None);
+            return;
+        }
+        let open = tempfile::tempdir().unwrap();
+        crate::change_mode(open.path(), 0o777).unwrap();
+        run_in_runtime_env(TEST, open.path(), None, None);
+        assert_eq!(runtime_left(open.path()), Vec::<std::ffi::OsString>::new());
+    }
+
+    #[test]
+    fn a_caller_that_needs_the_runtime_directory_gets_it_made_private() {
+        const TEST: &str = "tests::a_caller_that_needs_the_runtime_directory_gets_it_made_private";
+        if runtime_env_child(TEST).is_some() {
+            let made = runtime_dir_for("the test's records").unwrap();
+            let run = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
+            assert_eq!(made, run.join("ljos"));
+            assert_eq!(runtime_mode(&made), 0o700);
+            assert_eq!(runtime_records(), Some(made));
+            return;
+        }
+        let open = tempfile::tempdir().unwrap();
+        crate::change_mode(open.path(), 0o777).unwrap();
+        let run = tempfile::tempdir().unwrap();
+        run_in_runtime_env(TEST, open.path(), None, Some(run.path()));
+        assert_eq!(runtime_mode(&run.path().join("ljos")), 0o700);
+    }
+
+    /// A background push keeps its log in the runtime directory, so with
+    /// none the push runs in the foreground instead of not at all.
+    #[test]
+    fn with_no_runtime_directory_a_tracker_push_runs_in_the_foreground() {
+        const TEST: &str = "tests::with_no_runtime_directory_a_tracker_push_runs_in_the_foreground";
+        if runtime_env_child(TEST).is_none() {
+            let open = tempfile::tempdir().unwrap();
+            crate::change_mode(open.path(), 0o777).unwrap();
+            run_in_runtime_env(TEST, open.path(), None, None);
+            assert_eq!(runtime_left(open.path()), Vec::<std::ffi::OsString>::new());
+            return;
+        }
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, remote) = (dir.path().join("work"), dir.path().join("remote.git"));
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let o = git_cmd().arg("-C").arg(cwd).args(args).output().unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        };
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        git(
+            dir.path(),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        git(&root, &["init", "-q"]);
+        for (k, v) in [
+            ("user.email", "seat@example.invalid"),
+            ("user.name", "seat"),
+        ] {
+            git(&root, &["config", k, v]);
+        }
+        let issues = root.join("Software/probe/issues.org");
+        let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-e5f6\n:END:\n";
+        crate::write_file(&issues, heading).unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+        // SAFETY: this child runs this one test and holds the environment lock.
+        unsafe {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+            std::env::set_var("VISSUE_ROOT", &root);
+            std::env::set_var("VISSUE_NO_ROUTE", "1");
+            std::env::remove_var("ISSUE_ROOT");
+            std::env::remove_var("LJOS_TRACKER_GIT");
+        }
+        crate::write_file(&issues, heading.replace("TODO", "STARTED")).unwrap();
+        let said = super::persist_tracker("probe-e5f6", "claimed");
+        assert!(said.contains("committed and pushed"), "{said}");
     }
 
     #[test]

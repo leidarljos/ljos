@@ -385,7 +385,7 @@ fn resolved_map() -> Option<(String, &'static str)> {
 
 fn parent_record() -> Option<String> {
     for (pid, _) in crate::ancestry() {
-        let path = crate::runtime_dir().join(format!("seat-{pid}"));
+        let path = crate::runtime_dir_path().join(format!("seat-{pid}"));
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };

@@ -2805,24 +2805,29 @@ mod tests {
     /// runtime that has recorded no tool call.
     #[test]
     fn a_tool_call_record_is_seen_when_xdg_runtime_dir_differs() {
-        let home = tempfile::tempdir().unwrap();
-        let writer = tempfile::tempdir().unwrap();
-        let reader = tempfile::tempdir().unwrap();
-        let tmpdir = writer.path().join("tmp");
-        std::fs::create_dir_all(&tmpdir).unwrap();
-        // Hold the env lock after all tempdirs so drop order restores env
-        // before those directories are deleted.
+        const TEST: &str =
+            "proc_tree::tests::a_tool_call_record_is_seen_when_xdg_runtime_dir_differs";
+        let Some(tmpdir) = crate::tests::runtime_env_child(TEST) else {
+            let home = tempfile::tempdir().unwrap();
+            let writer = tempfile::tempdir().unwrap();
+            let tmpdir = writer.path().join("tmp");
+            std::fs::create_dir_all(&tmpdir).unwrap();
+            crate::tests::run_in_runtime_env(TEST, &tmpdir, Some(home.path()), None);
+            return;
+        };
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let writer = tmpdir.parent().unwrap().to_path_buf();
+        let reader = tempfile::tempdir_in(&writer).unwrap();
         let _guard = crate::test_env_lock();
-        // SAFETY: geteuid has no arguments and only reads process identity.
-        let uid = unsafe { libc::geteuid() };
-        let fallback = crate::runtime_fallback(&tmpdir, Some(home.path()), uid);
-        // SAFETY: this test holds `test_env_lock`, which puts the variables
-        // back when it drops. Nothing else on this thread reads them.
+        // SAFETY: this child runs this one test and holds `test_env_lock`.
         unsafe {
-            std::env::set_var("HOME", home.path());
+            std::env::set_var("HOME", &home);
             std::env::set_var("TMPDIR", &tmpdir);
             std::env::remove_var("XDG_RUNTIME_DIR");
         }
+        // SAFETY: geteuid has no arguments and only reads process identity.
+        let uid = unsafe { libc::geteuid() };
+        let fallback = crate::runtime_fallback(&tmpdir, Some(&home), uid);
         let opener = Proc {
             pid: 1,
             start: 1,
@@ -2839,12 +2844,13 @@ mod tests {
             "the hook did not write the record under its default runtime directory"
         );
         assert!(
-            home.path().join(".cache/ljos/run/tool-calls").is_file(),
+            home.join(".cache/ljos/run/tool-calls").is_file(),
             "the hook did not keep a copy outside XDG_RUNTIME_DIR"
         );
+        // SAFETY: this child runs this one test and holds `test_env_lock`.
         unsafe {
             std::env::set_var("XDG_RUNTIME_DIR", reader.path());
-            std::env::set_var("HOME", writer.path().join("other-home"));
+            std::env::set_var("HOME", writer.join("other-home"));
         }
         assert!(
             !reader.path().join("ljos/tool-calls").exists(),
