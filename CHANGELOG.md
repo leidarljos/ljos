@@ -5,6 +5,184 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.46.0 (2026-11-25)
+
+### Features
+
+- A project can keep a versioned workflow skeleton and run it as a ticket graph.
+  `ljos workflow define` stores the Org file as a deed.
+  `ljos workflow` with `--start` files one ticket per step, with block edges for dependencies.
+  A signoff step waits for the other steps, open blockers, a consensus on `ship` and any required deed.
+  `ljos workflow revise` folds notes from a run back into the next skeleton version.
+  `ljos workflow render` writes a public Org page and checks it.
+  A parent that already runs a skeleton cannot start the feature workflow.
+  A dependency listed twice is refused when the skeleton is defined.
+  Step kind is read from the ticket tags, so a later note cannot change it.
+  A `--var` argument that is not key=value is refused without repeating the argument.
+- Add `--public` to `ljos remember`, `ljos prefer` and `ljos rule`, and `ljos memories review --public ID`, to mark a lesson, preference or rule as one the person chose to publish.
+  Nothing is marked unless it is asked for.
+  Repeating a private lesson with `ljos remember --public` marks that row public.
+  `ljos memories review --public` records a project from `-p` or the checkout when the row names none.
+- Add `-p` and `--tag` to `ljos prefer` and `ljos rule` to record a project and tags on the row.
+  With neither flag nothing is recorded.
+- Add `ljos handbook` to write the lessons, preferences, rules, tickets and workflows marked public as one Org document. Nothing unmarked is exported. A marked item that reads as private stops the export. `ljos handbook` then names the item and the kind of match, and writes nothing.
+  Refuse banned product terms and credential phrasing such as `the password is hunter`, `the pin is 4921`, `curl -u user:pass` and `sshpass -p`, in the public-text screen.
+  The screen reads an address that follows a letter and a dot, as in `e.g.10.0.0.1`. A private quad inside a longer dotted run is refused, as in `1.10.0.0.5`, and only a public quad written in decimal is spared as a version, as in `v1.10.0.0`.
+  A `_` beside a number or an IPv6 address does not hide it, as in `_10.0.0.5_` or `_2001:db8::1_`.
+  The screen reads a numeric internet address as the C library's `inet_aton` does.
+  Each part may be hex, octal or decimal, of any length, so `00012.0.0.1` and `0x0000000a.0.0.1` are refused.
+  A private number of one to three parts, or a bare integer, is refused only beside an address word, a port, `//` or `@`, as in `ip 10.1` and `ping 167772161`.
+  `//` and `@` count on either side of that number, and a letter directly before a private dotted quad does not hide it.
+  A handbook line is bookkeeping only when it is a state change of the form `State "DONE" from "TODO"`, a `CLOCK:` line with an org time, or a noted, claimed or finished line that names one seat.
+
+### Fixes
+
+- A public lesson the pack did not take is not queued for a later replay.
+- A seat with no absolute `HOME` checks every directory on the resolved `TMPDIR` path, not only the last one.
+  Each must be owned by root or this user, and must not be group or world writable without the sticky bit.
+- A seat with no absolute `HOME` is told its temporary state directory is removed when the command exits normally.
+  A signal, `exec` or abort skips that removal, so the warning no longer says the state will be discarded.
+- A seat with no absolute `HOME` makes its temporary state directories relative to the checked `TMPDIR` descriptor, and refuses them when their paths no longer name what it made.
+- A seat with no absolute `HOME` refuses a `TMPDIR` that any user can write and that has no sticky bit, because another user could swap the state directory there.
+  The refusal names `HOME` and `XDG_STATE_HOME`.
+- A sitting on a decision now gives the panel its own pack budget, the interactive one, so the panel is written when doctor, sync and the earlier sections used up the sitting's one-second memory read.
+  Before, a slow crates.io answer to doctor, or a loaded machine, left the panel with no time and it printed `the panel could not be written: persona: GET /v1/atoms?kind=persona failed: io: the pack did not answer`.
+- A skeleton start that was cut short no longer leaves the parent unusable: the index records the run before the first tracker write and each step as it is filed, and the next start files the rest. A ticket filed just before the cut is taken up, not filed twice.
+  A start cut short after the create takes up only the ticket that carries the token the index held before that create, and writes its step note. A ticket with the same step tags and no token is left alone.
+- A workflow error about a skeleton that is not stored writes `<value>` for the name you typed.
+- Applying a settled skeleton revision moves only the run the skeleton index recorded for the proposal, and only while that run still pins the version the proposal was filed against.
+  Moving the proposal ticket under another parent, or applying it again, no longer moves any other run.
+- Keep a workflow run bound to its first skeleton metadata and note-identified steps unless a settled revision replaces the skeleton.
+- Keep workflow run state only in the skeleton index, validate every pinned step ticket, bound address scans, and preserve public fingerprints and trailing Rust paths.
+- Make a hook stop after the first pack read that times out, so a hung pack costs one 400 ms wait instead of two.
+- Mark a handbook workflow only with the exact header line `#+public: yes`, outside any block, and read its title from the same header. Another case, value, spacing, tab or trailing space does not mark it, and neither does a line that ends in `\r\n`.
+  Replace the id of a ticket the page leaves out with `external dependency` in every string the handbook prints, with or without `--tree`. That covers lessons, preferences, rules, workflow names and titles, `--title`, and a ticket's title, body and notes. The match reads one canonical escape layer and ordinary line wraps. It also reads Org emphasis marks and `_` in place of the hyphen. The handbook replaces a known project name followed by a hyphen and the tracker's `id_length` characters of `0-9a-z`, letters alone included, and nothing else: `iso-8601`, `CVE-2024-3094` and `Nov-2026` stay.
+  Write the `--out` file through a temporary file and a rename, so a failed write leaves the earlier file whole. Refuse a symbolic link, a file that is not regular and a read-only file as `--out`, name the path in a write error, and treat `--out /dev/stdout` as stdout. Resolve a directory `--out` to `faq.org` first, and check only that file for the export and for `--check`. The rename targets the path itself. It replaces a link swapped in after the check and does not write through it.
+- Public render refuses Org export constructs, model names, credential shapes, mailboxes and private addresses.
+  `workflow define` and `workflow revise --apply` take a skeleton lock and replace the index through a new file.
+  A retried apply of the same body does not store another version, and an applied proposal is closed.
+- Public render refuses a secret or an email split across two lines, including `(at)` and `[at]`.
+  The public page lists workflow edges in an example block and is refused when that page contains a babel source block.
+- Public render refuses secrets, private paths, characters outside the public set, unsafe `--var` values, and a `:ROLE:` that names a seat.
+  A second `workflow revise --apply` on the same proposal is a no-op, and `--start` waits 30 seconds for the run lock.
+- Refuse `--public` under a runner on `ljos remember`, `ljos prefer` and `ljos rule`, as `ljos memories review --public` already did.
+- Refuse unsafe workflow starts before writing, serialize every start on one parent, validate workflow variables and sign-off steps, preserve fields when marking memories public, and keep public handbook prose and multi-project rows.
+- Stop a usage error from repeating a value you typed. The line names the flag or the command word and writes `<value>` for the rest.
+  The hint for `ljos completions` with no shell writes `<value>` for the value of a global flag.
+- The doctor and sitting row for a crates.io that does not answer names `ljos doctor` as the next command.
+  The first-run tests stub crates.io as unreachable, so their rows no longer depend on the network.
+- The handbook and workflow screens now classify the same canonical text.
+  They decode one layer of percent, HTML, `\u`, `\x` and quoted-printable escapes.
+  They normalize line breaks and spaces and fold allowed symbols to plain keyboard characters for detection.
+  They find a path, an email address or a secret cut by an ordinary line wrap.
+  Addresses are found within one line.
+  An address broken across lines on purpose is not caught.
+  The screens refuse addresses in `10.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16` and `100.64.0.0/10`.
+  Every private dotted quad is refused.
+  A public dotted quad is refused unless it is a resolver, a netmask or a version-context quad written in decimal.
+  A netmask is ones then zeros, as in `255.255.240.0`, so `255.0.255.0` is refused.
+  Version context is a version word before or after the quad, or a `v` glued to it, as in `v1.10.0.0`.
+  A private number of one to three parts, or a bare integer, is refused only beside an address word before or after it, a port, `//` or `@`, as in `127.1 host`.
+  A backtick or verbatim span does not hide an IPv6 address such as `::a`, and an IPv6 address after a dot, as in `x.::a`, is refused.
+- The handbook export and `workflow render` refuse a character outside the public set, written or decoded from an escape, as `character`, with no placeholder.
+  The public set is the printable keyboard characters, the line break and every other character the documentation uses.
+- The identity check takes the GitHub <noreply@github.com> committer only on a merge whose one signature `gpg` reports with a `VALIDSIG` primary key fingerprint the gate pins, so a pull request merged on github.com passes and a GitHub-committed commit that is not such a merge fails.
+  A merge signed by a key the gate does not pin, or by an expired or revoked key, fails with a message that names the commit, the key and the files to update when GitHub changes its web-flow key.
+- The public-text screen reads every IPv4 and IPv6 literal with the standard parsers, at any start and end inside a run of hex digits, colons and dots.
+  A non-public address is refused next to any letter, digit or separator.
+  A run of any length is read in linear time, so a long OID, dot leader, hex dump or fingerprint is refused only when a piece of it is an address.
+  A bare `::` after a separator, at a line start, or as a Rust path still passes.
+- The public-text screen refuses non-public addresses after every separator and at word edges, while keeping numeric Rust paths.
+- The public-text screen uses one range test for a non-public address. Loopback, unspecified, private IPv4, link-local IPv4 and IPv6, unique local, site-local, multicast, documentation, benchmarking, carrier-grade NAT, and the IPv4-mapped or IPv4-compatible form of any of those are refused. A zone suffix is stripped before the address is read. A Rust path, a version string or Title Case words spare a candidate only when that test is false, so `v10.0.0.1` and `V127.0.0.1` are refused and `Face::Fade` and `Dead::Beef` stay.
+  A candidate starts at the beginning of a run and after every separator in it, a dot, a single colon, a slash, an equals sign, an at sign, a parenthesis, a bracket or a backtick, so `a.fe80::1` and `cafe.fd00::1` are refused.
+  A lone `::` with no hex digit on either side inside the same token is not an address, so `term :: description` and the `` `::` `` token stay. `addr=::`, `ip=::` and `addr=::1` are refused.
+- The shell guard now labels a write to every default curl config curl 7.x through 8.23 reads, including `$XDG_CONFIG_HOME/curlrc`, which curl 8.10.0 and later opens.
+  The files are `$CURL_HOME` (`.curlrc`, `_curlrc`, and `.config/curlrc`), `$XDG_CONFIG_HOME` with and without the leading dot, `$HOME`, the passwd home, and `.curlrc` and `_curlrc` under `%USERPROFILE%`, `%APPDATA%` and `%USERPROFILE%\Application Data`.
+- The sign-off gate reads its steps from the pinned skeleton and the step ids `--start` recorded in the skeleton index.
+  Retagging a step, its kind, its quorum or its deed flag no longer skips or lowers the gate.
+- The skeleton index refuses a stored skeleton body whose sha256 does not match, so an edited body cannot lower the sign-off gate.
+- Ticket search loads the vissue corpus and shared Org setup files once, reuses that load for finish hints, and never retains claim facts after the search call.
+- Tracker commits and merges take their author and committer from git config, not from identity the calling seat exports.
+  A ticket commit, a tracker push's merge or rebase, the merge `ljos sync` and `ljos inbox --sync` make, and the user-rules merge and commit all drop `GIT_AUTHOR_*`, `GIT_COMMITTER_*` and `EMAIL`, and the `user`, `author` and `committer` names and emails and any include in `GIT_CONFIG_PARAMETERS` or `GIT_CONFIG_COUNT`.
+  A non-UTF-8 `GIT_CONFIG_PARAMETERS` is read as bytes, as git reads it.
+  A `GIT_CONFIG_COUNT` git would refuse is refused with one line that names it; `ljos sync` used to abort on `GIT_CONFIG_COUNT=99999999999999`.
+  The doctor's `git identity` row asks git the way a tracker commit does, so an identity exported only in the environment is a warning.
+- Use one credential matcher for the public-text export and for the prompt excerpt `ljos remember` keeps. An export now refuses what the excerpt already redacted: a key-prefixed word (also in quotes, brackets or Org marks), an assignment with a value (`password==x`, `secret::x`), and `pw:` like `pass:`.
+  It also refuses a 24-character run of letters and digits, also when cut by `-`, `.` or `_` with an 8-character mixed piece, or cut over lines with neither half 24 long. The export still reads as prose a marker with no value, a capitalised `Token::Eof`, a slug with no mixed piece of 8 or more characters, and a hex run of 32 or more; the excerpt redacts those.
+- Whether a pack answer carried the token is now kept for the thread that read it, so a person's preference stays on the prompt when another thread of the same process reads that pack by id at the same moment.
+  Before, that other thread's refused bare read marked the shared socket as unproven, and the hook dropped the preference it had just found and printed no note.
+- While `workflow revise --from` reads the stored skeleton, files the proposal and writes the index back, it keeps the skeleton lock.
+  A `define` or `--apply` that ran in between is no longer overwritten by the older copy.
+- Workflow rendering now refuses sensitive author text with line-specific diagnostics and keeps accepted prose unchanged.
+- `ljos claim` with no id reads a claim refusal from the top error again, and reads the whole error chain only for the node-creation collision, so a deeper cause that mentions a claimed status stops the claim instead of passing the ticket over.
+- `ljos remember --public` refuses to mark a row that names another project, and leaves the row as it was.
+  A public repeat that matches a private row in other words or through an alias publishes the words of the repeat, not those of the private row.
+- `ljos search` prefers tickets in the seat's own project or repo over other projects' tickets.
+  `LJOS_PROJECT`, the checkout's project, `vissue identity`, and the name of the git checkout name the seat's project; a project the query names counts the same, and a project the seat's facts name comes next.
+  A ticket in a farther project comes after nearer ones, and one that misses a query word moves down: below the seat's memories when the seat filed, claimed or noted it, and to the end of the page otherwise.
+  A word-ranked `ljos search "LTO metatensor link"` on seat amsel-paper had printed nine other repos' tickets that each shared one word with the query.
+- `ljos search` reads each tracker ticket once per query, and works out once per query word whether that word is in every title.
+  A query of two or more words that shares one word with many titles had re-read every title for each of them, so `ljos search "store mount"` took 36 s on 0.45.4 against 6.5 s on 0.44.0 over a tracker of about 24,000 tickets.
+  A long query with digits and hyphenated words, such as `ljos search "anneal 168 restack3 default-on gate"`, could run for minutes the same way; each title word is now read once however long the query is.
+  Reading each ticket once does not by itself change which tickets a search prints or their order.
+- `ljos workflow --start` refuses a step when more than one child carries the attempt's `filing-` tag, and the refusal now names that tag and every such child.
+  It says to remove the tag from every one of them except the child to keep, then start again.
+  Closing a child did not clear the refusal, because a closed child still matches.
+- `workflow --start` finds the per-run lock directory of a tracker whose `.git` is a file without following a `GIT_DIR` exported to it.
+  Two starts under different exported repositories now share one lock.
+- `workflow --start` returns an error when the per-run lock file cannot be opened or locked.
+  A mode `000` lock no longer lets concurrent starts file the same steps.
+- `workflow define` writes the deed temp file with `O_EXCL` in the temp directory.
+  A symlink planted at that path is not followed, so the link target stays unchanged.
+- `workflow render --var` fills a placeholder in the skeleton title as well as in the steps.
+- `workflow render` names the `--out` file it cannot read or write, instead of saying the store is not writable.
+  It refuses an `--out` that is a symlink or not a regular file, and puts the page in place through a new temporary file instead of writing into the old one.
+- ljos no longer panics when a variable in its environment is not UTF-8; the scans for runner sessions, turn ids and `LJOS_` settings skip that variable.
+
+### Documentation
+
+- The command reference says every `workflow-warning` exits 1, and the handbook and workflow how-tos describe the pinned sign-off gate.
+- The handbook and workflow how-tos define the accidental-leak threat model, one-layer decoding and the public character set.
+- The workflow how-to and `workflow render --help` describe a refusal, and the doc export check fails when `docs/source/howto-workflow.rst` drifts from the pandoc export.
+  The check also finds Org pages that changed without their reStructuredText page.
+  The base exporter exports both revisions of each such page, and the check fails if they differ.
+
+### Miscellaneous
+
+- A guard test seat directory reads its root under the env lock and takes a random name, so it no longer lands inside, and is removed with, the directory another test set as `HOME`.
+- A test pins that the row written back after a refused public mark is not public.
+- A workflow render test checks title, step title, role and body fields, then scans the rendered page, using a fixed seat roster.
+- In the library tests the seat an MCP client announced is kept per test thread, so a test that announces a seat no longer makes `a_shared_name_does_not_occupy_the_whole_host` resolve that seat instead of `seat`.
+- The bare-claim race test fails with the seat's output when a seat does not reach the upsert gate or does not exit within a deadline, instead of blocking until CI stops the job.
+- The bare-claim race test has one deadline from its start, reaps a killed seat within a short grace, and stops reading a pipe an escaped process still holds, so nothing in it can wait without bound.
+- The crates.io stand-in in the first-run tests writes down every URL the seat asks curl for, and the README walk and the confused-order walk fail when the seat asked for anything but a crates.io version or skipped that lookup, so a step that reads the network again shows as a failure instead of passing while the network answers.
+- The docs screen test counts an email at `example.com` as a quoted example, so the sitting how-to that quotes `sha-2@example.com` passes it.
+- The first-run check that crates.io did not answer installs the failing `curl` after the registry stand-in.
+  Before, that stand-in replaced the stub, `ljos doctor` got an answer, and the check found no `crates.io` row.
+- The first-run seat's `curl` stub runs the `curl` on the test's `PATH` for anything but crates.io, instead of `/usr/bin/curl`.
+- The first-run test answers the crates.io version lookup doctor makes from a `curl` stand-in on the seat's `PATH`, so it no longer reads the public network and no longer fails when crates.io does not answer.
+- The guard shim temp-home test takes the environment lock before it makes its directories.
+  A test that points `TMPDIR` at a directory it deletes could otherwise remove them while the test ran.
+- The guard shim test holds the environment lock, so its directories are no longer made under a `TMPDIR` another test points at a directory it deletes, and it no longer fails with `No such file or directory`.
+- The org-lint harnesses load `ob-dot`, so Org 9.8, which maps `dot` to `graphviz-dot-mode`, does not call the dependency graph block an unknown language.
+  The handbook unit test runs Org 9.8's misplaced-heading check itself on every Org version, with only the backslash that escapes a line starting with stars exempt.
+  The macOS unit tests set `LJOS_TEST_REQUIRE_TOOLS=1`, and both CI jobs load `ob-dot` when they check the installed Org.
+- The org-lint tests find `emacs` on `PATH` instead of `/usr/bin/emacs`, skip with one line naming `apt-get install emacs-nox` when it is missing, and fail with that line under `LJOS_TEST_REQUIRE_TOOLS=1`.
+  The Linux cargo test job installs `emacs-nox` and the macOS job installs `emacs`, so all three org-lint tests run in CI.
+- The tool-call record test points `TMPDIR` at a directory it does not remove recursively, so a test that made its temp directory there while it was set, such as the guard shim test, no longer loses its shim and working directory with `No such file or directory`.
+- The twenty-call hook test limits each call's anonymous memory to 9 MB instead of its whole resident set to 30 MB.
+- `.gitignore` hides a `ljos` state directory inside a crate again, and the cargo test job fails when the suite leaves one in any crate.
+- `CommitLock::acquire_by` keeps its `Option` return and its callers keep their behaviour.
+  `CommitLock::try_acquire_by` returns the open or `flock` error for a caller that must not go on without the lock, and `workflow --start` uses it.
+- `scripts/changelog-check.py` runs in the changelog CI job.
+  It fails a patch version that has a `feature` or `removal` fragment waiting, and a release after 0.45.4 with a Features or Removals section under a patch number.
+  It also fails a release, or a set of waiting fragments, that states one change twice, as 0.45.4 did for the `url` 2.5.9 bump.
+  `CHANGELOG.md` 0.45.4 now says that bump once.
+- `scripts/release-install-check.sh` now fails when `crates/ljos-cli/release-pin`, the copy the published crate embeds, differs from `.github/release-pin`.
+  It also fails when the fallback list in `scripts/install.sh` names a different set of tools or versions.
+  `CONTRIBUTING.md` and the pin file now name all three places the installer release pin is written.
+
+
 ## 0.45.4 (2026-11-24)
 
 ### Features

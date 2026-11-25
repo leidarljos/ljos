@@ -1,1 +1,0 @@
-Refuse unsafe workflow starts before writing, serialize every start on one parent, validate workflow variables and sign-off steps, preserve fields when marking memories public, and keep public handbook prose and multi-project rows.
