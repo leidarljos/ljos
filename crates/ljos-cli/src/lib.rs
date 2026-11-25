@@ -92291,6 +92291,7 @@ lesson, due yesterday, seat ada
 
     #[test]
     fn the_packaged_release_pins_match_the_installer() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             super::RELEASE_PIN,
             include_str!("../../../.github/release-pin")
