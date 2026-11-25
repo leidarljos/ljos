@@ -255,7 +255,10 @@ With no runtime records, the hook server, the decision panel, a scoped
 handover and a deed export stop with one line that says why, and leave
 nothing behind. A vote is cast as its own session's voice, a hook call is
 judged at once with no queue, a tracker push runs in the foreground, and
-=ljos hook --drain= has nothing to drain.
+=ljos hook --drain= has nothing to drain. No tool-call record can be kept,
+so no hook's prompt is taken as the person's. The line names the cause:
+an =XDG_RUNTIME_DIR= under =/dev/null=, an open temporary directory, or
+an =ljos-UID= and =ljos-UID-own= that cannot be used.
 
 This flag list is copied from command help.
 A test fails when this list and the binary differ.
