@@ -235,7 +235,6 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 - The installer now treats a writer port like a writer address under a temporary home.
   It keeps memory on when the selected writer port is nonblank, as `ljos` does.
   The selected port is `PACKSET_PORT` when it is set, and `LJOS_MEM_PORT` otherwise.
-- The locked url crate is 2.5.9, the first release that fixes RUSTSEC-2026-0592 in 2.5.8.
 - The opening screen now names the README installer command, including the encoder, when run from a Cargo build.
 - The tracker push leaves the per-issue files of a split board out of its duplicate heading fold.
   A replace record repeats its issue's `:ID:`, so the fold read it as a duplicate heading and broke the record framing and the issue file.

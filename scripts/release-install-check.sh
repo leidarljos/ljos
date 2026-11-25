@@ -55,20 +55,47 @@ grep -F -q 'ljos-${TAG}-${{ matrix.target }}' "$REL" ||
   die "release.yml no longer names the archive ljos-TAG-target"
 
 # The versions install.sh uses when nobody passes --pin or --latest.
-# .github/release-pin is the source. The fallback in the script is for a
-# download that does not sit next to this tree, and it has to name the
-# same ones. release-pin-check.sh asks GitHub whether they are released.
-while IFS= read -r line || [ -n "$line" ]; do
-  trim=${line#"${line%%[![:space:]]*}"}
-  case "$trim" in
-    '' | \#*) continue ;;
-  esac
-  read -r name ver _extra <<EOF
+# .github/release-pin is the source. Two other places hold the same list
+# and have to agree with it exactly, in names, versions and no extras:
+#   crates/ljos-cli/release-pin   the copy the published crate embeds. A
+#                                 crate cannot reach ../../.github, so it
+#                                 carries the file, comments included.
+#   scripts/install.sh            the fallback list for a download that does
+#                                 not sit next to this tree.
+# release-pin-check.sh asks GitHub whether the pinned releases exist.
+CRATE_PIN=$ROOT/crates/ljos-cli/release-pin
+[ -f "$CRATE_PIN" ] || die "no $CRATE_PIN"
+cmp -s "$ROOT/.github/release-pin" "$CRATE_PIN" ||
+  die "crates/ljos-cli/release-pin differs from .github/release-pin. cp .github/release-pin crates/ljos-cli/release-pin"
+
+# The `name version` rows of a pin file, one per line, sorted.
+pin_rows() {
+  while IFS= read -r line || [ -n "$line" ]; do
+    trim=${line#"${line%%[![:space:]]*}"}
+    case "$trim" in
+      '' | \#*) continue ;;
+    esac
+    read -r name ver _extra <<EOF
 $trim
 EOF
-  grep -F -q "$name=$ver" "$INSTALL" ||
-    die "install.sh fallback does not pin $name=$ver from .github/release-pin"
-done < "$ROOT/.github/release-pin"
+    printf '%s %s\n' "$name" "${ver:-}"
+  done < "$1" | sort
+}
+
+# The `name version` rows of the fallback loop in install.sh.
+fallback_rows() {
+  sed -n 's/^[[:space:]]*for item in \(.*\); do$/\1/p' "$INSTALL" | tr ' ' '\n' |
+    sed -n 's/^\([^=][^=]*\)=\(.*\)$/\1 \2/p' | sort
+}
+
+pin_have=$(pin_rows "$ROOT/.github/release-pin")
+fallback_have=$(fallback_rows)
+[ -n "$fallback_have" ] || die "install.sh has no fallback list of name=version items"
+[ "$fallback_have" = "$pin_have" ] || die "install.sh fallback list differs from .github/release-pin.
+install.sh:
+$fallback_have
+.github/release-pin:
+$pin_have"
 
 # The tests build the commits in .github/sibling-pin. The install has to
 # run the same version of each tool, so the two files agree.

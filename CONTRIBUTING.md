@@ -11,6 +11,13 @@ Write the entry as one Markdown bullet body, one sentence per line, with no lead
 CI runs `towncrier build --draft --version` with the version from `[workspace.package]` in `Cargo.toml`.
 A malformed name, an unknown type, or two files for the same number and type fails that draft.
 At release time `towncrier build --version X.Y.Z` collects the fragments into `CHANGELOG.md` and removes them.
+A patch release (`Z` is not 0) carries fixes, documentation and miscellaneous entries only.
+A `feature` or `removal` fragment needs a minor bump, because towncrier files every `feature` fragment under Features whatever version it is given.
+`scripts/changelog-check.py` fails when `Cargo.toml` names a patch version that has no section in `CHANGELOG.md` yet and a `feature` or `removal` fragment is waiting, and when a release after 0.45.4 has a Features or Removals section under a patch number.
+Move the fragment to the next minor release or give it another type.
+The same script fails when one release, or the waiting fragments, state a change twice: the same entry, or one RUSTSEC, GHSA or CVE advisory in two entries.
+One change is one fragment, also when it lands on two branches.
+The CI `changelog fragments` job runs it, and `--selftest` runs its own cases.
 
 ## Tests
 
@@ -19,6 +26,11 @@ At release time `towncrier build --version X.Y.Z` collects the fragments into `C
 It reads `.github/sibling-pin` for `vissue`, `claimdag` and `deedar`, and the commits in the script for `packset`, `packsetd`, [phronesis](https://github.com/leidarljos/phronesis) and `ljos-policyd`.
 It installs the binaries into DEST and checks each `--version` against its pin.
 `scripts/install.sh` installs a different list: `.github/release-pin` names released versions of `vissue`, `claimdag` and `deedar`, and `scripts/release-pin-check.sh` asks GitHub that each archive is there.
+The release pin is written in three places, and a change to one is a change to all three:
+`.github/release-pin` is the source, `crates/ljos-cli/release-pin` is a byte-for-byte copy that the published `ljos` crate embeds (a crate cannot read `.github/`), and the `for item in` line in `apply_release_pins` in `scripts/install.sh` is the fallback list for an installer downloaded without this tree.
+`scripts/release-install-check.sh` fails when the crate copy is not identical to the source, or when the fallback list names a tool or version the source does not, or lacks one it does, and each tool's version in `.github/sibling-pin` has to match its row in `.github/release-pin`.
+The `release installer` job and the release workflow run it, and `cp .github/release-pin crates/ljos-cli/release-pin` refreshes the copy.
+`scripts/release-pin-check.sh` then asks GitHub that each pinned archive exists.
 `ljos-policyd version` must contain `(phronesis)`, because the guard tests ask that build how a shell line reads.
 The script needs `git`, the Rust toolchain in `rust-toolchain.toml`, and the packages `g++`, `meson`, `ninja-build`, `capnproto` and `pkg-config`.
 `g++` is the C++ compiler phronesis's c-capnproto wrap needs; without it `meson setup` stops with `Compiler c++ cannot compile programs.`

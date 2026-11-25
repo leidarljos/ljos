@@ -62,6 +62,13 @@ jobs:
           python -m pip install --disable-pip-version-check -q 'towncrier==26.9.0'
           version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           towncrier build --draft --version "$version"
+      # A patch cannot carry a feature or a removal, and one change is
+      # one entry. See CONTRIBUTING.md, Changelog entries.
+      - name: Changelog matches the version bump
+        run: |
+          set -euo pipefail
+          python3 scripts/changelog-check.py --selftest
+          python3 scripts/changelog-check.py
   # install.sh's archive names against the names the release workflow
   # publishes, then an install from a local directory of those archives,
   # for every target the release builds.
