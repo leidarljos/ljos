@@ -506,19 +506,30 @@ fn the_remember_sample_uses_a_neutral_host() {
 
 /// The crates.io stand-in passes doctor's own lookup, and fails a call
 /// that names another URL beside it, a path under the crate, or a URL
-/// given with `--url`.
+/// given with `--url`. Each call starts with `-q`, which is what doctor
+/// passes so curl reads no config file.
 #[test]
 fn the_curl_stand_in_reads_every_url_a_call_names() {
     let lookup = "https://crates.io/api/v1/crates/ljos";
-    let cases: &[(&[&str], bool)] = &[
+    let doctor: Vec<&str> = ljos_cli::CRATE_CURL_FLAGS
+        .iter()
+        .copied()
+        .chain([lookup])
+        .collect();
+    assert!(
+        matches!(doctor.first().copied(), Some("-q" | "--disable")),
+        "doctor's curl must skip config files"
+    );
+    let cases: Vec<(Vec<&str>, bool)> = vec![
+        (doctor, true),
+        (vec!["-q", "-sSm", "3", "-Aljos-doctor", lookup], true),
         (
-            &["-sS", "-A", "ljos-doctor", "--max-time", "3", lookup],
+            vec!["-q", "-sSm3", "--user-agent", "ljos-doctor", lookup],
             true,
         ),
-        (&["-sSm", "3", "-Aljos-doctor", lookup], true),
-        (&["-sSm3", "--user-agent", "ljos-doctor", lookup], true),
         (
-            &[
+            vec![
+                "-q",
                 "-sS",
                 "https://github.com/leidarljos/ljos/releases/latest",
                 lookup,
@@ -526,23 +537,23 @@ fn the_curl_stand_in_reads_every_url_a_call_names() {
             false,
         ),
         (
-            &["-sS", "https://crates.io/api/v1/crates/ljos/owners"],
+            vec!["-q", "-sS", "https://crates.io/api/v1/crates/ljos/owners"],
             false,
         ),
         (
-            &["-sS", "https://crates.io/api/v1/crates/ljos?page=2"],
+            vec!["-q", "-sS", "https://crates.io/api/v1/crates/ljos?page=2"],
             false,
         ),
         (
-            &["--url", "https://github.com/leidarljos/ljos", lookup],
+            vec!["-q", "--url", "https://github.com/leidarljos/ljos", lookup],
             false,
         ),
-        (&["-sS", "-A", "ljos-doctor"], false),
+        (vec!["-q", "-sS", "-A", "ljos-doctor"], false),
     ];
     for (args, passes) in cases {
-        let (answered, held) = stand_in_call(args, false, CurlSeat::Clean);
-        assert_eq!(answered, *passes, "{args:?}");
-        assert_eq!(held, *passes, "{args:?}");
+        let (answered, held) = stand_in_call(&args, false, CurlSeat::Clean);
+        assert_eq!(answered, passes, "{args:?}");
+        assert_eq!(held, passes, "{args:?}");
     }
 }
 
@@ -552,7 +563,7 @@ const HIDDEN: &str = "https://github.com/leidarljos/ljos/releases/latest";
 /// Where a call to the stand-in finds a default `.curlrc`.
 #[derive(Debug, Clone, Copy)]
 enum CurlSeat {
-    /// An empty home, with no `.curlrc` anywhere curl looks.
+    /// An empty home, with no `.curlrc` planted in it.
     Clean,
     Home,
     CurlHome,
@@ -612,22 +623,28 @@ fn stand_in_call(args: &[&str], stdin_conf: bool, seat: CurlSeat) -> (bool, bool
     (said.status.success(), held)
 }
 
-/// A config file can name a URL the arguments do not, so the stand-in
-/// refuses every way to give curl one, every option it does not know, and
-/// a default `.curlrc` unless `-q` comes first.
+/// A config file can name a URL the arguments do not. curl reads one
+/// unless `-q` or `--disable` is the first argument, so the stand-in
+/// refuses a call that does not start that way. It also refuses every
+/// way to pass `-K` or `--config`, and every option it does not know.
 #[test]
 fn the_curl_stand_in_refuses_what_could_hide_a_url() {
     use CurlSeat::{Clean, CurlHome, Home, NoHome, Xdg, XdgNoDot};
     let lookup = "https://crates.io/api/v1/crates/ljos";
     let doctor = ["-sS", "-A", "ljos-doctor", "--max-time", "3", lookup];
-    let quiet = ["-q", "-sS", "-A", "ljos-doctor", "--max-time", "3", lookup];
+    let quiet: Vec<&str> = ljos_cli::CRATE_CURL_FLAGS
+        .iter()
+        .copied()
+        .chain([lookup])
+        .collect();
     let cases: &[(&[&str], bool, CurlSeat, bool)] = &[
-        (&doctor, false, Clean, true),
-        (&quiet, false, Home, true),
-        (&quiet, false, CurlHome, true),
-        (&quiet, false, NoHome, true),
+        (&doctor, false, Clean, false),
+        (quiet.as_slice(), false, Home, true),
+        (quiet.as_slice(), false, CurlHome, true),
+        (quiet.as_slice(), false, NoHome, true),
         (
             &[
+                "-q",
                 "--silent",
                 "--show-error",
                 "--fail",
@@ -639,15 +656,20 @@ fn the_curl_stand_in_refuses_what_could_hide_a_url() {
             Clean,
             true,
         ),
-        (&["-K", "curl.conf", lookup], false, Clean, false),
-        (&["-sK", "curl.conf", lookup], false, Clean, false),
-        (&["-sSKcurl.conf", lookup], false, Clean, false),
-        (&["--config", "curl.conf", lookup], false, Clean, false),
-        (&["--config=curl.conf", lookup], false, Clean, false),
-        (&["--conf", "curl.conf", lookup], false, Clean, false),
-        (&["-K", "-", lookup], true, Clean, false),
-        (&["-sK-", lookup], true, Clean, false),
-        (&["--config", "-", lookup], true, Clean, false),
+        (&["-q", "-K", "curl.conf", lookup], false, Clean, false),
+        (&["-q", "-sK", "curl.conf", lookup], false, Clean, false),
+        (&["-q", "-sSKcurl.conf", lookup], false, Clean, false),
+        (
+            &["-q", "--config", "curl.conf", lookup],
+            false,
+            Clean,
+            false,
+        ),
+        (&["-q", "--config=curl.conf", lookup], false, Clean, false),
+        (&["-q", "--conf", "curl.conf", lookup], false, Clean, false),
+        (&["-q", "-K", "-", lookup], true, Clean, false),
+        (&["-q", "-sK-", lookup], true, Clean, false),
+        (&["-q", "--config", "-", lookup], true, Clean, false),
         (&doctor, false, Home, false),
         (&doctor, false, CurlHome, false),
         (&doctor, false, Xdg, false),
@@ -655,41 +677,305 @@ fn the_curl_stand_in_refuses_what_could_hide_a_url() {
         (&doctor, false, NoHome, false),
         (&["-sS", "-q", lookup], false, Home, false),
         (&["-qs", lookup], false, Home, false),
-        (&[lookup, "--next", HIDDEN], false, Clean, false),
-        (&[lookup, "-:", HIDDEN], false, Clean, false),
-        (&["--next", lookup], false, Clean, false),
-        (&["@curl.conf"], false, Clean, false),
-        (&[lookup, "@curl.conf"], false, Clean, false),
+        (&["-q", lookup, "--next", HIDDEN], false, Clean, false),
+        (&["-q", lookup, "-:", HIDDEN], false, Clean, false),
+        (&["-q", "--next", lookup], false, Clean, false),
+        (&["-q", "@curl.conf"], false, Clean, false),
+        (&["-q", lookup, "@curl.conf"], false, Clean, false),
         (
-            &["https://crates.io/api/v1/crates/{ljos,serde}"],
+            &["-q", "https://crates.io/api/v1/crates/{ljos,serde}"],
             false,
             Clean,
             false,
         ),
         (
-            &["https://crates.io/api/v1/crates/ljo[r-s]"],
+            &["-q", "https://crates.io/api/v1/crates/ljo[r-s]"],
             false,
             Clean,
             false,
         ),
-        (&["--user-agent=ljos-doctor", lookup], false, Clean, false),
-        (&["--url=https://example.org/", lookup], false, Clean, false),
-        (&["-x", "http://127.0.0.1:9", lookup], false, Clean, false),
         (
-            &["--resolve", "crates.io:443:127.0.0.1", lookup],
+            &["-q", "--user-agent=ljos-doctor", lookup],
             false,
             Clean,
             false,
         ),
-        (&["-sSv", lookup], false, Clean, false),
-        (&["", lookup], false, Clean, false),
-        (&[lookup, "--max-time"], false, Clean, false),
+        (
+            &["-q", "--url=https://example.org/", lookup],
+            false,
+            Clean,
+            false,
+        ),
+        (
+            &["-q", "-x", "http://127.0.0.1:9", lookup],
+            false,
+            Clean,
+            false,
+        ),
+        (
+            &["-q", "--resolve", "crates.io:443:127.0.0.1", lookup],
+            false,
+            Clean,
+            false,
+        ),
+        (&["-q", "-sSv", lookup], false, Clean, false),
+        (&["-q", "", lookup], false, Clean, false),
+        (&["-q", lookup, "--max-time"], false, Clean, false),
     ];
     for (args, stdin_conf, seat, passes) in cases {
         let (answered, held) = stand_in_call(args, *stdin_conf, *seat);
         assert_eq!(answered, *passes, "{args:?} with {seat:?}");
         assert_eq!(held, *passes, "{args:?} with {seat:?}");
     }
+}
+
+/// Body a curlrc names with `url=`, and the body the arguments name.
+const CURLRC_BODY: &str = "HIDDEN-CURLRC-BODY\n";
+const ASKED_BODY: &str = "ASKED-BODY\n";
+
+/// One file curl reads when `-q` is not the first argument.
+struct CurlrcFile {
+    label: &'static str,
+    file: PathBuf,
+    env: Vec<(&'static str, PathBuf)>,
+    /// Run curl with this directory as uid 0's passwd home. The host
+    /// account's `~/.curlrc` is left alone.
+    passwd_home: Option<PathBuf>,
+}
+
+fn make_dir(root: &Path, name: &str) -> PathBuf {
+    let path = root.join(name);
+    std::fs::create_dir_all(&path).unwrap_or_else(|err| panic!("create {}: {err}", path.display()));
+    path
+}
+
+fn curlrc_files(root: &Path) -> Vec<CurlrcFile> {
+    let blank = make_dir(root, "blank");
+    let mut files = Vec::new();
+    let curl_home = make_dir(root, "curl-home");
+    files.push(CurlrcFile {
+        label: "CURL_HOME/.curlrc",
+        file: curl_home.join(".curlrc"),
+        env: vec![("CURL_HOME", curl_home), ("HOME", blank.clone())],
+        passwd_home: None,
+    });
+    let xdg = make_dir(root, "xdg");
+    files.push(CurlrcFile {
+        label: "XDG_CONFIG_HOME/.curlrc",
+        file: xdg.join(".curlrc"),
+        env: vec![("XDG_CONFIG_HOME", xdg), ("HOME", blank.clone())],
+        passwd_home: None,
+    });
+    let home = make_dir(root, "home");
+    files.push(CurlrcFile {
+        label: "HOME/.curlrc",
+        file: home.join(".curlrc"),
+        env: vec![("HOME", home)],
+        passwd_home: None,
+    });
+    let curl_home_config = make_dir(root, "curl-home-config");
+    files.push(CurlrcFile {
+        label: "CURL_HOME/.config/curlrc",
+        file: curl_home_config.join(".config/curlrc"),
+        env: vec![("CURL_HOME", curl_home_config), ("HOME", blank.clone())],
+        passwd_home: None,
+    });
+    let home_config = make_dir(root, "home-config");
+    files.push(CurlrcFile {
+        label: "HOME/.config/curlrc",
+        file: home_config.join(".config/curlrc"),
+        env: vec![("HOME", home_config)],
+        passwd_home: None,
+    });
+    let home_config_empty = make_dir(root, "home-config-empty-xdg");
+    files.push(CurlrcFile {
+        label: "HOME/.config/curlrc with XDG_CONFIG_HOME empty",
+        file: home_config_empty.join(".config/curlrc"),
+        env: vec![
+            ("HOME", home_config_empty),
+            ("XDG_CONFIG_HOME", PathBuf::new()),
+        ],
+        passwd_home: None,
+    });
+    let curl_home_config_empty = make_dir(root, "curl-home-config-empty-xdg");
+    files.push(CurlrcFile {
+        label: "CURL_HOME/.config/curlrc with XDG_CONFIG_HOME empty",
+        file: curl_home_config_empty.join(".config/curlrc"),
+        env: vec![
+            ("CURL_HOME", curl_home_config_empty),
+            ("HOME", blank.clone()),
+            ("XDG_CONFIG_HOME", PathBuf::new()),
+        ],
+        passwd_home: None,
+    });
+    let passwd_home = make_dir(root, "passwd-home");
+    files.push(CurlrcFile {
+        label: "passwd home .curlrc",
+        file: passwd_home.join(".curlrc"),
+        env: vec![("HOME", blank)],
+        passwd_home: Some(passwd_home),
+    });
+    files
+}
+
+fn passwd_naming_root(home: &Path) -> String {
+    let text =
+        std::fs::read_to_string("/etc/passwd").unwrap_or_else(|err| panic!("read passwd: {err}"));
+    let home = home.display().to_string();
+    let mut out = String::new();
+    let mut found = false;
+    for line in text.lines() {
+        let mut parts: Vec<String> = line.split(':').map(str::to_string).collect();
+        if parts.len() >= 6 && parts[2] == "0" {
+            parts[5] = home.clone();
+            found = true;
+        }
+        out.push_str(&parts.join(":"));
+        out.push('\n');
+    }
+    assert!(found, "passwd has no uid 0");
+    out
+}
+
+fn curl_env(cmd: &mut Command, place: &CurlrcFile) {
+    cmd.env_clear();
+    cmd.env("PATH", "/usr/bin:/bin");
+    for (key, value) in &place.env {
+        cmd.env(key, value);
+    }
+}
+
+fn flags_for(url: &str, quiet: bool) -> Vec<String> {
+    let mut flags: Vec<String> = ljos_cli::CRATE_CURL_FLAGS
+        .iter()
+        .map(|flag| (*flag).to_string())
+        .collect();
+    if !quiet && matches!(flags.first().map(String::as_str), Some("-q" | "--disable")) {
+        flags.remove(0);
+    }
+    flags.push(url.to_string());
+    flags
+}
+
+fn run_curl(args: &[String], place: &CurlrcFile) -> std::process::Output {
+    let curl = "/usr/bin/curl";
+    if let Some(home) = &place.passwd_home {
+        let dir = tempfile::tempdir().unwrap_or_else(|err| panic!("passwd dir: {err}"));
+        let passwd = dir.path().join("passwd");
+        ljos_cli::write_file(&passwd, passwd_naming_root(home))
+            .unwrap_or_else(|err| panic!("write {}: {err}", passwd.display()));
+        let mut cmd = ljos_cli::program("unshare").unwrap_or_else(|err| panic!("unshare: {err}"));
+        cmd.args([
+            "--user",
+            "--mount",
+            "--map-root-user",
+            "--",
+            "bash",
+            "-c",
+            "mount --bind \"$1\" /etc/passwd && shift && exec \"$@\"",
+            "bash",
+        ])
+        .arg(&passwd)
+        .arg(curl)
+        .args(args);
+        curl_env(&mut cmd, place);
+        // The passwd file has to outlive the child.
+        let said = cmd
+            .output()
+            .unwrap_or_else(|err| panic!("{}: {err}", place.label));
+        drop(dir);
+        said
+    } else {
+        let mut cmd = ljos_cli::program(curl).unwrap_or_else(|err| panic!("curl: {err}"));
+        cmd.args(args);
+        curl_env(&mut cmd, place);
+        cmd.output()
+            .unwrap_or_else(|err| panic!("{}: {err}", place.label))
+    }
+}
+
+fn curl_body(said: &std::process::Output) -> Result<String, String> {
+    if !said.status.success() {
+        return Err(format!(
+            "curl exited {}\n{}",
+            said.status,
+            String::from_utf8_lossy(&said.stderr)
+        ));
+    }
+    String::from_utf8(said.stdout.clone()).map_err(|err| err.to_string())
+}
+
+/// Doctor's crates.io curl starts with the flags in [`ljos_cli::CRATE_CURL_FLAGS`].
+/// A curlrc `url=` in every file curl reads is absent from that run, and
+/// the same arguments without a leading `-q` or `--disable` do fetch it.
+#[test]
+fn a_curlrc_url_in_every_file_curl_reads_is_not_fetched() {
+    let root = tempfile::tempdir().unwrap_or_else(|err| panic!("root: {err}"));
+    let asked = root.path().join("asked");
+    let hidden = root.path().join("hidden");
+    ljos_cli::write_file(&asked, ASKED_BODY)
+        .unwrap_or_else(|err| panic!("write {}: {err}", asked.display()));
+    ljos_cli::write_file(&hidden, CURLRC_BODY)
+        .unwrap_or_else(|err| panic!("write {}: {err}", hidden.display()));
+    let asked_url = format!("file://{}", asked.display());
+    let conf = format!("url = \"file://{}\"\n", hidden.display());
+    let lookup = "https://crates.io/api/v1/crates/ljos";
+    let mut failures = Vec::new();
+    for place in curlrc_files(root.path()) {
+        if let Some(parent) = place.file.parent() {
+            std::fs::create_dir_all(parent)
+                .unwrap_or_else(|err| panic!("create {}: {err}", parent.display()));
+        }
+        ljos_cli::write_file(&place.file, &conf)
+            .unwrap_or_else(|err| panic!("write {}: {err}", place.file.display()));
+        let loud = match curl_body(&run_curl(&flags_for(&asked_url, false), &place)) {
+            Ok(text) if text.contains(CURLRC_BODY) && text.contains(ASKED_BODY) => None,
+            Ok(text) => Some(format!(
+                "{}: without -q, curl did not read {}\n{text}",
+                place.label,
+                place.file.display()
+            )),
+            Err(err) => Some(format!("{}: control curl failed: {err}", place.label)),
+        };
+        if let Some(err) = loud {
+            failures.push(err);
+            continue;
+        }
+        match curl_body(&run_curl(&flags_for(&asked_url, true), &place)) {
+            Ok(text) if text.contains(ASKED_BODY) && !text.contains("HIDDEN-CURLRC-BODY") => {}
+            Ok(text) => failures.push(format!(
+                "{}: doctor's curl fetched the curlrc url\n{text}",
+                place.label
+            )),
+            Err(err) => failures.push(format!("{}: doctor's curl failed: {err}", place.label)),
+        }
+        let dir = tempfile::tempdir().unwrap_or_else(|err| panic!("stand-in dir: {err}"));
+        let bin = dir.path().join("bin");
+        registry::stand_in(&bin, Duration::ZERO);
+        let mut call =
+            ljos_cli::program(bin.join("curl")).unwrap_or_else(|err| panic!("stand-in: {err}"));
+        call.args(flags_for(lookup, true));
+        curl_env(&mut call, &place);
+        let said = call
+            .output()
+            .unwrap_or_else(|err| panic!("{} stand-in: {err}", place.label));
+        let held =
+            std::panic::catch_unwind(|| registry::assert_only_registry(&bin, place.label)).is_ok();
+        if !said.status.success() || !held {
+            failures.push(format!(
+                "{}: stand-in did not answer with only the crates URL\n{}",
+                place.label,
+                String::from_utf8_lossy(&said.stderr)
+            ));
+        } else if String::from_utf8_lossy(&said.stdout).contains("HIDDEN-CURLRC-BODY") {
+            failures.push(format!("{}: stand-in printed the curlrc body", place.label));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "a curlrc url was fetched:\n{}",
+        failures.join("\n")
+    );
 }
 
 fn repo_file(rel: &str) -> String {

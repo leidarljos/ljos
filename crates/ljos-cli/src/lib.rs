@@ -35645,6 +35645,13 @@ fn encoder_not_runnable(line: Option<&str>) -> String {
 /// A day, in seconds: how long a crates.io answer is kept on disk.
 const CRATE_VERSION_TTL_S: u64 = 86_400;
 
+/// Flags of the crates.io lookup doctor runs, before the URL.
+///
+/// `-q` is first. That is the only place curl skips its config file.
+/// A config file can name a URL the arguments do not, and which file
+/// curl opens is not a list this program keeps.
+pub const CRATE_CURL_FLAGS: &[&str] = &["-q", "-sS", "-A", "ljos-doctor", "--max-time", "3"];
+
 /// Where a crates.io answer is kept between processes, so a herd of seats
 /// opening sittings asks the registry once a day for each binary rather
 /// than once a sitting each.
@@ -35735,7 +35742,8 @@ fn crate_max_version(name: &str, refresh: bool) -> Option<CrateVersion> {
         reason = "starts a program outside git hook code"
     )]
     let mut curl = std::process::Command::new("curl");
-    curl.args(["-sS", "-A", "ljos-doctor", "--max-time", "3", &url]);
+    curl.args(CRATE_CURL_FLAGS);
+    curl.arg(&url);
     let said = output_within(curl, None, std::time::Duration::from_secs(4)).ok();
     let got = said.and_then(|said| {
         if !said.status.success() {

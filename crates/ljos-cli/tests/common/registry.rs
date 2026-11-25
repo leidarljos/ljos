@@ -8,11 +8,12 @@
 //! every URL a call names, positional or after `--url`, is written to
 //! `bin/.curl-asked`, one line a call with its URLs in order.
 //!
-//! A config file can name URLs the arguments do not, so the stand-in
-//! fails closed. It refuses `-K` and `--config` in any form, any option
-//! it does not know, and a call that would read a default `.curlrc`
-//! unless `-q` comes first. What it refused is written on the call's line
-//! after `refused:`.
+//! A config file can name URLs the arguments do not. curl reads one
+//! unless `-q` or `--disable` is the first argument, and the file it
+//! reads is not a fixed list. The stand-in refuses a call that does not
+//! start that way. It also refuses `-K` and `--config` in any form and
+//! any option it does not know. What it refused is written on the call's
+//! line after `refused:`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -134,15 +135,10 @@ for arg; do
   first=
 done
 [ -z "$next" ] || refused="$refused refused:no-value"
+# curl reads a config file unless -q or --disable is the first argument.
+# Which file that is depends on the curl version, so this does not keep a list.
 if [ -z "$quiet" ]; then
-  [ -n "$HOME" ] || refused="$refused refused:no-HOME"
-  for rc in \
-    "${{CURL_HOME:+$CURL_HOME/.curlrc}}" \
-    "${{XDG_CONFIG_HOME:-$HOME/.config}}/.curlrc" \
-    "${{XDG_CONFIG_HOME:-$HOME/.config}}/curlrc" \
-    "$HOME/.curlrc"; do
-    [ -n "$rc" ] && [ -e "$rc" ] && refused="$refused refused:$rc"
-  done
+  refused="$refused refused:config"
 fi
 line="$urls$refused"
 printf '%s\n' "${{line# }}" >> '{log}'
