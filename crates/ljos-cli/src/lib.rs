@@ -2267,6 +2267,11 @@ fn record_dir_mode(uid: u32, mode: u32, owner: u32) -> Result<(), &'static str> 
 /// tracker, is read from all of them: a reader whose `HOME` differs from the
 /// writer's still finds it. Empty when `tmp` or `ljos-UID` fails the checks
 /// [`runtime_fallback`] makes; a home's directory that fails them is left out.
+///
+/// `ljos-UID` is listed through the descriptor that was checked, and each
+/// home's directory is checked through it too. The paths returned can only
+/// be renamed by this user or root: every directory on the way is owned by
+/// one of them and either closed to other writers or sticky.
 pub(crate) fn runtime_fallback_homes(tmp: &Path, uid: u32) -> Vec<PathBuf> {
     let Ok((real, dir)) = walk_trusted_dir(tmp, uid) else {
         return Vec::new();
@@ -2275,16 +2280,21 @@ pub(crate) fn runtime_fallback_homes(tmp: &Path, uid: u32) -> Vec<PathBuf> {
     let Ok(Some((held, _))) = runtime_dir_at(&dir, &name, uid, false) else {
         return Vec::new();
     };
-    let base = real.join(&name);
-    let mut homes: Vec<PathBuf> = std::fs::read_dir(&base)
+    runtime_homes_at(&held, &real.join(&name), uid)
+}
+
+/// The home's directories in `held`, which `base` named when it was
+/// checked, each passing [`runtime_dir_at`], as paths under `base`.
+fn runtime_homes_at(held: &std::fs::File, base: &Path, uid: u32) -> Vec<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(listing) = exe_publish::list_dir_at(held) else {
+        return Vec::new();
+    };
+    let mut homes: Vec<PathBuf> = listing
         .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("home-"))
-        .filter(|entry| {
-            runtime_dir_at(&held, &entry.file_name(), uid, false).is_ok_and(|d| d.is_some())
-        })
-        .map(|entry| entry.path())
+        .filter(|entry| entry.as_bytes().starts_with(b"home-"))
+        .filter(|entry| runtime_dir_at(held, entry, uid, false).is_ok_and(|d| d.is_some()))
+        .map(|entry| base.join(entry))
         .collect();
     homes.sort();
     homes
@@ -61985,6 +61995,32 @@ mod tests {
         );
         assert_eq!(entries(&want), 0);
         assert!(runtime_fallback_homes(tmp.path(), uid).is_empty());
+    }
+
+    /// A `ljos-UID` renamed after it was checked is still the one listed.
+    #[test]
+    fn the_fallback_homes_are_listed_through_the_directory_checked() {
+        let top = tempfile::tempdir().unwrap();
+        let uid = euid();
+        let base = top.path().join(format!("ljos-{uid}"));
+        for dir in [&base, &base.join("home-checked")] {
+            std::fs::create_dir(dir).unwrap();
+            crate::change_mode(dir, 0o700).unwrap();
+        }
+        let held = exe_publish::open_dir_at_nofollow(rustix::fs::CWD, base.as_os_str()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test swaps ljos-UID after it was checked"
+        )]
+        std::fs::rename(&base, top.path().join("moved")).unwrap();
+        for dir in [&base, &base.join("home-planted")] {
+            std::fs::create_dir(dir).unwrap();
+            crate::change_mode(dir, 0o700).unwrap();
+        }
+        assert_eq!(
+            runtime_homes_at(&held, &base, uid),
+            vec![base.join("home-checked")]
+        );
     }
 
     #[test]
