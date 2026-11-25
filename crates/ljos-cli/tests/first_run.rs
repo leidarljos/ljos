@@ -9,7 +9,8 @@
 //! onboard` when no coding tool is installed. That command runs in the
 //! skipped line's place. Every other command is the one the page prints.
 //! The version check doctor makes asks a crates.io stand-in on the seat's
-//! `PATH`, so no step reads the public network.
+//! `PATH`, so no step reads the public network. The check that the registry
+//! did not answer replaces that stand-in with a curl that fails for crates.io.
 
 #![allow(
     clippy::disallowed_macros,
@@ -304,12 +305,11 @@ fn link_programs(bin: &Path) {
             let _ = symlink(&path, bin.join(name));
         }
     }
-    stub_unreachable_crates_io(bin);
 }
 
 /// A `curl` that fails for crates.io and runs the real one for anything
-/// else, so the doctor and first-run rows are the same whether or not this
-/// host can reach the registry.
+/// else. The unreachable-crates.io check installs it over the stand-in, so
+/// that row does not depend on whether this host can reach the registry.
 ///
 /// The real `curl` is the one on this test's `PATH`, found before the stub
 /// is installed. With none, the stub fails other calls as a missing `curl`.
@@ -1385,6 +1385,9 @@ fn an_unreachable_crates_io_row_names_the_next_command() {
         return;
     }
     let mut seat = Seat::open();
+    // The open seat answers crates.io. This row is the lookup that does
+    // not, so the failing curl replaces that stand-in.
+    stub_unreachable_crates_io(&seat.bin());
     let cwd = seat.work.clone();
     let limit = budget("ljos onboard");
     let (code, output, elapsed) = seat.run("ljos onboard", &cwd, limit);
