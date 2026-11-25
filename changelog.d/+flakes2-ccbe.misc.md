@@ -1,0 +1,1 @@
+In the library tests the seat an MCP client announced is kept per test thread, so a test that announces a seat no longer makes `a_shared_name_does_not_occupy_the_whole_host` resolve that seat instead of `seat`.
