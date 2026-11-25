@@ -107,8 +107,22 @@ struct Slot {
     /// The proof held on `stream` and the stream is still the one it held on.
     proven: bool,
     token_tag: u64,
-    /// The last answer on this socket carried the token.
-    carried: bool,
+}
+
+thread_local! {
+    /// Whether the last answer this thread read from each address carried
+    /// the token. The socket is shared by every thread of the process; who
+    /// a thread's answer came from is not. Another thread's refused probe
+    /// on the same writer, between this thread's search and its reading of
+    /// the origins, would otherwise make that search read as unproven.
+    static CARRIED: std::cell::RefCell<HashMap<SocketAddr, bool>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn note_carried(addr: SocketAddr, carried: bool) {
+    CARRIED.with(|by_addr| {
+        by_addr.borrow_mut().insert(addr, carried);
+    });
 }
 
 fn slots() -> &'static Mutex<HashMap<SocketAddr, Arc<Mutex<Slot>>>> {
@@ -124,7 +138,6 @@ fn slot_for(addr: SocketAddr) -> Arc<Mutex<Slot>> {
                 stream: None,
                 proven: false,
                 token_tag: 0,
-                carried: false,
             }))
         })
         .clone()
@@ -1503,16 +1516,15 @@ impl PacksetClient {
         load_token().is_some() && !foreign(&self.base)
     }
 
-    /// Whether the last answer on this socket carried the token. A closed
-    /// socket does not keep this for the next call: that call proves again.
+    /// Whether the last answer this thread read from this writer carried
+    /// the token. A closed socket does not keep this for the next call:
+    /// that call proves again.
     #[must_use]
     pub(crate) fn carried(&self) -> bool {
         let Some(addr) = self.addr else {
             return false;
         };
-        let map = slots().lock().unwrap_or_else(|p| p.into_inner());
-        map.get(&addr)
-            .is_some_and(|slot| slot.lock().unwrap_or_else(|p| p.into_inner()).carried)
+        CARRIED.with(|by_addr| by_addr.borrow().get(&addr).copied().unwrap_or(false))
     }
 
     pub fn workspace(&self) -> String {
@@ -1743,7 +1755,7 @@ impl PacksetClient {
                     Gate::Bare => None,
                     Gate::Send => call.token,
                     Gate::Busy(raw) => {
-                        live.carried = false;
+                        note_carried(addr, false);
                         live.proven = false;
                         return Ok(Answer {
                             status: raw.status,
@@ -1761,7 +1773,7 @@ impl PacksetClient {
                     Ok(stream) => live.stream = Some(stream),
                     Err(err) => {
                         live.proven = false;
-                        live.carried = false;
+                        note_carried(addr, false);
                         return Err(Error::Io(err));
                     }
                 }
@@ -1785,7 +1797,7 @@ impl PacksetClient {
                     let stale = had && !revived && !io_is_quiet(&err);
                     live.stream = None;
                     live.proven = false;
-                    live.carried = false;
+                    note_carried(addr, false);
                     if stale {
                         revived = true;
                         continue;
@@ -1794,7 +1806,7 @@ impl PacksetClient {
                 }
             };
             let trusted = carried.is_some();
-            live.carried = trusted;
+            note_carried(addr, trusted);
             if trusted && live.stream.is_some() {
                 live.proven = true;
             } else if live.stream.is_none() {
@@ -2816,6 +2828,49 @@ mod tests {
         assert!(
             (200..1_500).contains(&ahead),
             "clocked read deadline is {ahead} ms ahead"
+        );
+    }
+
+    /// Two threads of one process read the same writer. One reads by id
+    /// bare and is refused, as `atom_now` does first. The other's answer,
+    /// read with the token just before, still carried it.
+    #[test]
+    fn a_bare_read_on_another_thread_leaves_this_threads_answer_proven() {
+        let _g = crate::tests::env_guard();
+        let _home = quiet_pack();
+        unsafe { std::env::set_var("PACKSET_TOKEN", "pin-token") };
+        let (client, _) = serve(|_, req| {
+            let shown = req.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization") && value.trim() == "Bearer pin-token"
+                })
+            });
+            if shown {
+                (200, r#"{"hits":[]}"#.into(), None)
+            } else {
+                (401, r#"{"error":"token"}"#.into(), None)
+            }
+        });
+        let timeout = std::time::Duration::from_secs(2);
+        let mine = client
+            .roundtrip("GET", "/v1/search", &[], None, true, timeout)
+            .unwrap();
+        assert!(mine.trusted, "the proof did not hold: {}", mine.status);
+        assert!(client.carried());
+        let base = client.base().to_string();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let other = super::PacksetClient::new(base);
+                let bare = other
+                    .roundtrip("GET", "/v1/atoms/row", &[], None, false, timeout)
+                    .unwrap();
+                assert_eq!(bare.status, 401);
+                assert!(!other.carried());
+            });
+        });
+        assert!(
+            client.carried(),
+            "a refused read on another thread made this thread's answer unproven"
         );
     }
 
