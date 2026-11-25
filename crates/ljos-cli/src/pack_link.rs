@@ -43,7 +43,20 @@ impl Clone for PacksetClient {
 }
 
 /// One answer. `trusted` means the token was on this answer, after the
-/// proof held.
+/// proof held. Trust is read from the answer a caller holds, never from
+/// the socket or the thread: another thread's refused probe on the same
+/// writer says nothing about this answer, and a kept answer read on
+/// another thread keeps the trust it was read with.
+///
+/// The proof is not kept for a later connection: the next call proves
+/// again before the token is written. It reads an atom id no pack holds,
+/// under a fresh nonce, on the socket the call will use: with no token
+/// and with a bogus one of the same shape, which both have to come back
+/// 401, then the call carries this seat's. A listener that does not check
+/// the bearer cannot pass that, and one that refuses only some URLs is
+/// asked a URL it did not choose. A listener that already learnt the
+/// token, or a process of this user that reads the token file, passes;
+/// only a pack that signs its answers would tell either apart.
 #[derive(Debug, Clone)]
 pub(crate) struct Answer {
     pub status: u16,
@@ -107,22 +120,6 @@ struct Slot {
     /// The proof held on `stream` and the stream is still the one it held on.
     proven: bool,
     token_tag: u64,
-}
-
-thread_local! {
-    /// Whether the last answer this thread read from each address carried
-    /// the token. The socket is shared by every thread of the process; who
-    /// a thread's answer came from is not. Another thread's refused probe
-    /// on the same writer, between this thread's search and its reading of
-    /// the origins, would otherwise make that search read as unproven.
-    static CARRIED: std::cell::RefCell<HashMap<SocketAddr, bool>> =
-        std::cell::RefCell::new(HashMap::new());
-}
-
-fn note_carried(addr: SocketAddr, carried: bool) {
-    CARRIED.with(|by_addr| {
-        by_addr.borrow_mut().insert(addr, carried);
-    });
 }
 
 fn slots() -> &'static Mutex<HashMap<SocketAddr, Arc<Mutex<Slot>>>> {
@@ -1516,17 +1513,6 @@ impl PacksetClient {
         load_token().is_some() && !foreign(&self.base)
     }
 
-    /// Whether the last answer this thread read from this writer carried
-    /// the token. A closed socket does not keep this for the next call:
-    /// that call proves again.
-    #[must_use]
-    pub(crate) fn carried(&self) -> bool {
-        let Some(addr) = self.addr else {
-            return false;
-        };
-        CARRIED.with(|by_addr| by_addr.borrow().get(&addr).copied().unwrap_or(false))
-    }
-
     pub fn workspace(&self) -> String {
         if let Some(workspace) = &self.workspace {
             return workspace.clone();
@@ -1755,7 +1741,6 @@ impl PacksetClient {
                     Gate::Bare => None,
                     Gate::Send => call.token,
                     Gate::Busy(raw) => {
-                        note_carried(addr, false);
                         live.proven = false;
                         return Ok(Answer {
                             status: raw.status,
@@ -1773,7 +1758,6 @@ impl PacksetClient {
                     Ok(stream) => live.stream = Some(stream),
                     Err(err) => {
                         live.proven = false;
-                        note_carried(addr, false);
                         return Err(Error::Io(err));
                     }
                 }
@@ -1797,7 +1781,6 @@ impl PacksetClient {
                     let stale = had && !revived && !io_is_quiet(&err);
                     live.stream = None;
                     live.proven = false;
-                    note_carried(addr, false);
                     if stale {
                         revived = true;
                         continue;
@@ -1806,7 +1789,6 @@ impl PacksetClient {
                 }
             };
             let trusted = carried.is_some();
-            note_carried(addr, trusted);
             if trusted && live.stream.is_some() {
                 live.proven = true;
             } else if live.stream.is_none() {
@@ -2132,6 +2114,18 @@ impl PacksetClient {
         fire: bool,
         lens: Option<&str>,
     ) -> Result<Value, Error> {
+        Ok(self.activate_fetched(workspace, q, limit, fire, lens)?.0)
+    }
+
+    /// [`Self::activate_as`], and whether the token was on the answer.
+    pub(crate) fn activate_fetched(
+        &self,
+        workspace: &str,
+        q: &str,
+        limit: u32,
+        fire: bool,
+        lens: Option<&str>,
+    ) -> Result<(Value, bool), Error> {
         let limit = limit.to_string();
         let fire = if fire { "1" } else { "0" };
         let mut query = vec![
@@ -2150,7 +2144,8 @@ impl PacksetClient {
             None,
             super::SEARCH_PACK_BUDGET,
         )?;
-        self.json_ok("/v1/activate", answer)
+        let trusted = answer.trusted;
+        Ok((self.json_ok("/v1/activate", answer)?, trusted))
     }
 
     pub fn hubs(&self, workspace: &str, limit: usize) -> Result<Value, Error> {
@@ -2828,49 +2823,6 @@ mod tests {
         assert!(
             (200..1_500).contains(&ahead),
             "clocked read deadline is {ahead} ms ahead"
-        );
-    }
-
-    /// Two threads of one process read the same writer. One reads by id
-    /// bare and is refused, as `atom_now` does first. The other's answer,
-    /// read with the token just before, still carried it.
-    #[test]
-    fn a_bare_read_on_another_thread_leaves_this_threads_answer_proven() {
-        let _g = crate::tests::env_guard();
-        let _home = quiet_pack();
-        unsafe { std::env::set_var("PACKSET_TOKEN", "pin-token") };
-        let (client, _) = serve(|_, req| {
-            let shown = req.lines().any(|line| {
-                line.split_once(':').is_some_and(|(name, value)| {
-                    name.eq_ignore_ascii_case("authorization") && value.trim() == "Bearer pin-token"
-                })
-            });
-            if shown {
-                (200, r#"{"hits":[]}"#.into(), None)
-            } else {
-                (401, r#"{"error":"token"}"#.into(), None)
-            }
-        });
-        let timeout = std::time::Duration::from_secs(2);
-        let mine = client
-            .roundtrip("GET", "/v1/search", &[], None, true, timeout)
-            .unwrap();
-        assert!(mine.trusted, "the proof did not hold: {}", mine.status);
-        assert!(client.carried());
-        let base = client.base().to_string();
-        std::thread::scope(|s| {
-            s.spawn(|| {
-                let other = super::PacksetClient::new(base);
-                let bare = other
-                    .roundtrip("GET", "/v1/atoms/row", &[], None, false, timeout)
-                    .unwrap();
-                assert_eq!(bare.status, 401);
-                assert!(!other.carried());
-            });
-        });
-        assert!(
-            client.carried(),
-            "a refused read on another thread made this thread's answer unproven"
         );
     }
 
