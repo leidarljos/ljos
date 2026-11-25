@@ -2,8 +2,10 @@
 //! the per-call ranking built.
 //!
 //! [`develop`] is that per-call ranking, kept as it was except that the
-//! seat and the tracker come from a [`Here`] instead of the process. The
-//! tracker here is generated: ids, titles, notes and seats are made up.
+//! seat and the tracker come from a [`Here`] instead of the process, and
+//! that it ends with the same [`weigh_projects`](super::weigh_projects)
+//! step, judged per call. The tracker here is generated: ids, titles,
+//! notes and seats are made up.
 
 use super::{merge_records, Here};
 use packset_client::Hit;
@@ -15,8 +17,9 @@ use vissue_core::{IssueHeading, LogEntry};
 mod develop {
     use super::super::{
         content_words, edit_within, facts_of, hit_for, in_cwd, in_working_project, intrinsic,
-        is_ticket_hit, lift, norm, notes_text, score_intrinsic, search_blob, sink, solo_local,
-        stamp_ticket, Band, Facts, Found, Here, Scope, COMMON_TITLE,
+        is_ticket_hit, lift, norm, notes_text, preferred_project, score_intrinsic, search_blob,
+        sink, solo_local, stamp_ticket, weigh_projects, Band, Facts, Found, Here, Scope,
+        COMMON_TITLE,
     };
     use packset_client::Hit;
     use std::collections::{BTreeMap, BTreeSet};
@@ -113,6 +116,7 @@ mod develop {
             cwd,
             projects,
             solo,
+            home: here.home.clone(),
         }
     }
 
@@ -295,13 +299,30 @@ mod develop {
         });
         demote_unrelated(&mut open, &index, &scope, query);
         demote_unrelated(&mut away, &index, &scope, query);
-        let mut ordered =
-            Vec::with_capacity(lead.len() + owned.len() + home.len() + open.len() + away.len());
+        let named = |rec: &IssueRec| crate::word_rank::shares_term(&rec.project, query);
+        let far = if scope.placed() || records.iter().any(named) {
+            let total = crate::word_rank::QueryTerms::of(query).written().count();
+            weigh_projects(&mut lead, &mut open, &mut away, |hit| {
+                let rec = hit.id.as_deref().and_then(|id| index.get(id).copied())?;
+                is_ticket_hit(hit).then(|| {
+                    let covered =
+                        crate::word_rank::covered_query_terms(query, &search_blob(rec)).len();
+                    (
+                        preferred_project(rec, &scope, named(rec)),
+                        total > 0 && covered == total,
+                    )
+                })
+            })
+        } else {
+            Vec::new()
+        };
+        let mut ordered = Vec::new();
         ordered.extend(lead);
         ordered.extend(owned);
         ordered.extend(home);
         ordered.extend(open);
         ordered.extend(away);
+        ordered.extend(far);
         *hits = ordered;
     }
 
@@ -682,6 +703,10 @@ fn queries(rng: &mut Lcg, records: &[IssueRec]) -> Vec<String> {
 }
 
 fn here(mine: &str, solo: bool, cwd: bool) -> Here {
+    at_home(mine, solo, cwd, &[])
+}
+
+fn at_home(mine: &str, solo: bool, cwd: bool, home: &[&str]) -> Here {
     Here {
         mine: mine.to_string(),
         cwd: cwd.then(|| PathBuf::from(ROOT)),
@@ -690,6 +715,7 @@ fn here(mine: &str, solo: bool, cwd: bool) -> Here {
         } else {
             vec!["ada".to_string(), "bao".to_string()]
         },
+        home: home.iter().map(|name| (*name).to_string()).collect(),
     }
 }
 
@@ -703,10 +729,11 @@ fn the_page_is_the_page_the_per_call_ranking_built() {
         let asks = queries(&mut rng, &records);
         for (index, query) in asks.iter().enumerate() {
             let place = || {
-                here(
+                at_home(
                     ["ada", "bao", "zed"][index % 3],
                     index % 4 == 0,
                     index % 5 != 0,
+                    [&[][..], &["Kiln"], &["media", "LJOS"]][index % 7 % 3],
                 )
             };
             let start = pack_hits(&mut rng, &records);
@@ -840,4 +867,112 @@ fn long_mixed_queries_cost_work_linear_in_words_and_tickets() {
         "twelve words took {twelve} analyses against {two} for two"
     );
     assert!(large <= 10 * 20_000, "{large} analyses for 20,000 tickets");
+}
+
+/// `ljos search "LTO metatensor link"` on seat amsel-paper, word ranked
+/// because memory was busy: nine of ten rows were other repos' tickets
+/// that share one word. The seat's project comes first, a project the
+/// query names and another repo's ticket with every word follow, and the
+/// matches from other repos that miss a word are last.
+#[test]
+fn the_seats_project_comes_before_one_word_matches_from_other_repos() {
+    const QUERY: &str = "LTO metatensor link";
+    let filed = || vec![note("[2026-11-16 Mon 18:30]", "filed by bao")];
+    let rows = [
+        ("amsel-paper", "amsel-paper-lto", "Link metatensor with LTO"),
+        (
+            "amsel-paper",
+            "amsel-paper-figs",
+            "Metatensor figures need the link step",
+        ),
+        ("metatensor", "metatensor-0001", "Wheel link flags"),
+        (
+            "chem",
+            "chem-0002",
+            "Metatensor LTO link error in the chem build",
+        ),
+        ("Kiln", "Kiln-0003", "Kiln link schedule"),
+        ("Kiln", "Kiln-0004", "Link kiln logs"),
+        (
+            "docs-site",
+            "docs-site-0005",
+            "Dead link on the landing page",
+        ),
+        ("ljos", "ljos-0006", "Fix the broken link in the docs"),
+        ("ljos", "ljos-0007", "LTO for release builds"),
+        ("media", "media-0008", "LTO tape backup"),
+        ("media", "media-0009", "Link previews in the gallery"),
+        ("vissue", "vissue-0010", "Link checker timeout"),
+    ];
+    let records: Vec<IssueRec> = rows
+        .iter()
+        .map(|(project, id, title)| {
+            let path = PathBuf::from(format!("{ROOT}/{project}/issues.org"));
+            ticket(project, id, title, "", filed(), None, path)
+        })
+        .collect();
+    let memory = |id: &str, seat: Option<&str>| Hit {
+        id: Some(id.to_string()),
+        text: "LTO notes".to_string(),
+        score: 0.5,
+        kind: "lesson".to_string(),
+        ts: None,
+        entities: seat
+            .map(|seat| format!("seat:{seat}"))
+            .into_iter()
+            .collect(),
+        ballots: None,
+        of: None,
+        rerank_score: None,
+        labels: Vec::new(),
+    };
+    let start = vec![memory("mem-mine", None), memory("mem-cam", Some("cam"))];
+    let page = |home: &[&str]| {
+        let mut hits = start.clone();
+        merge_records(&mut hits, QUERY, &records, || {
+            at_home("amsel-paper", false, true, home)
+        });
+        hits.into_iter()
+            .filter_map(|hit| hit.id)
+            .collect::<Vec<_>>()
+    };
+    let placed = page(&["amsel-paper"]);
+    say!("page for {QUERY:?} on amsel-paper: {placed:?}");
+    assert_eq!(
+        placed,
+        [
+            "amsel-paper-lto",
+            "mem-mine",
+            "mem-cam",
+            "amsel-paper-figs",
+            "metatensor-0001",
+            "chem-0002",
+            "Kiln-0003",
+            "Kiln-0004",
+            "docs-site-0005",
+            "ljos-0006",
+            "ljos-0007",
+            "media-0008",
+            "media-0009",
+            "vissue-0010",
+        ]
+    );
+    let first_ten = &placed[..10];
+    let noise = first_ten
+        .iter()
+        .filter(|id| {
+            !id.starts_with("amsel-paper")
+                && !id.starts_with("metatensor")
+                && !id.starts_with("mem-")
+                && *id != "chem-0002"
+        })
+        .count();
+    assert_eq!(noise, 4, "{first_ten:?}");
+
+    let unplaced = page(&[]);
+    let at = |id: &str| unplaced.iter().position(|row| row == id).expect(id);
+    assert!(
+        at("metatensor-0001") < at("Kiln-0003") && at("chem-0002") < at("Kiln-0003"),
+        "a project the query names still comes first: {unplaced:?}"
+    );
 }

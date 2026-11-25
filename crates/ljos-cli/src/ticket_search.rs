@@ -15,9 +15,17 @@
 //! placed with this seat's rows when its title, body or notes match. The
 //! newest note weighs more than an older one. A ticket in a project this
 //! seat works in comes before another project's ticket that only shares a
-//! generic word such as docs, release, or video. Another seat's ticket
-//! stays after this seat's rows. That is the line the page prints, that
-//! this seat's rows come before another seat's.
+//! generic word such as docs, release, or video.
+//!
+//! The seat's own project is the one `LJOS_PROJECT`, the checkout or
+//! `vissue identity` names, and the repo it runs in. With that, a project
+//! its facts name, or a project the query names, another project's ticket
+//! weighs less: it comes after the seat's project in its group, and when
+//! it misses a query word it goes to the end of the page. That is the
+//! word match from another repo that shares one word.
+//!
+//! Another seat's ticket stays after this seat's rows. That is the line
+//! the page prints, that this seat's rows come before another seat's.
 //!
 //! A pack row with no `seat:` tag is this seat's memory: the pack stamps
 //! another seat when the row is theirs. A ticket is not that store. Who
@@ -64,6 +72,8 @@ struct Here {
     mine: String,
     cwd: Option<std::path::PathBuf>,
     roster: Vec<String>,
+    /// The project this seat names and the repo it sits in.
+    home: Vec<String>,
 }
 
 impl Here {
@@ -74,8 +84,24 @@ impl Here {
                 .ok()
                 .map(|layout| layout.root().to_path_buf()),
             roster: crate::tracker_roster_names(),
+            home: home_projects(),
         }
     }
+}
+
+/// `LJOS_PROJECT`, the checkout's project, or `vissue identity`, then the
+/// name of the git checkout the seat runs in.
+fn home_projects() -> Vec<String> {
+    let mut home: Vec<String> = crate::seat_tracker_project().into_iter().collect();
+    let repo = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::checkout_root(&cwd))
+        .and_then(|top| {
+            top.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        });
+    home.extend(repo);
+    home
 }
 
 fn merge_records(
@@ -209,6 +235,10 @@ struct Ticket<'r> {
     cover: usize,
     /// Every covered query term is a generic word, and there is one.
     generic: bool,
+    /// The title, body and notes cover every query term.
+    full: bool,
+    /// The query names the ticket's project.
+    named: bool,
 }
 
 impl Ticket<'_> {
@@ -232,10 +262,17 @@ fn read_tickets<'r>(records: &'r [IssueRec], query: &str) -> Vec<Ticket<'r>> {
         .collect();
     let corpus: Vec<&TermBag> = titles.iter().flatten().collect();
     let asked = Asked::new(query, &corpus);
+    let total = asked.terms.written().count();
+    let query_bag = TermBag::of(&asked.text);
+    let mut named: BTreeMap<&str, bool> = BTreeMap::new();
     records
         .iter()
         .zip(&titles)
         .map(|(rec, title_bag)| {
+            let project = rec.project.as_str();
+            let named = *named
+                .entry(project)
+                .or_insert_with(|| QueryTerms::of(project).any_in(&query_bag));
             let blob = TermBag::of(&search_blob(rec));
             let band = title_bag
                 .as_ref()
@@ -254,6 +291,8 @@ fn read_tickets<'r>(records: &'r [IssueRec], query: &str) -> Vec<Ticket<'r>> {
                 band,
                 cover,
                 generic: cover > 0 && generic,
+                full: total > 0 && cover == total,
+                named,
             }
         })
         .collect()
@@ -507,6 +546,57 @@ struct Scope {
     projects: BTreeSet<String>,
     /// The roster names this seat and nobody else.
     solo: bool,
+    /// The project this seat names and the repo it sits in.
+    home: Vec<String>,
+}
+
+impl Scope {
+    /// The seat has a project of its own to prefer.
+    fn placed(&self) -> bool {
+        !self.home.is_empty() || !self.projects.is_empty()
+    }
+}
+
+fn in_home(rec: &IssueRec, scope: &Scope) -> bool {
+    let name = rec.project.trim();
+    !name.is_empty()
+        && scope
+            .home
+            .iter()
+            .any(|project| project.trim().eq_ignore_ascii_case(name))
+}
+
+/// A ticket in this seat's own project or repo, in a project its facts
+/// name, or in a project the query names.
+fn preferred_project(rec: &IssueRec, scope: &Scope, named: bool) -> bool {
+    named || in_home(rec, scope) || in_working_project(rec, scope)
+}
+
+/// Another project weighs less than this seat's own. Within the title
+/// rows and the open and away rows, a ticket in a preferred project comes
+/// first. Another project's ticket that misses a query word leaves its
+/// group and goes to the end of the page, which is returned.
+///
+/// `judge` says, for a ticket row, whether its project is preferred and
+/// whether it covers every query word. Other rows are left in place.
+fn weigh_projects(
+    lead: &mut [Hit],
+    open: &mut Vec<Hit>,
+    away: &mut Vec<Hit>,
+    judge: impl Fn(&Hit) -> Option<(bool, bool)>,
+) -> Vec<Hit> {
+    let other = |hit: &Hit| judge(hit).is_some_and(|(preferred, _)| !preferred);
+    lead.sort_by_key(&other);
+    let mut far = Vec::new();
+    for rows in [open, away] {
+        let (keep, weak): (Vec<Hit>, Vec<Hit>) = rows
+            .drain(..)
+            .partition(|hit| judge(hit).is_none_or(|(preferred, full)| preferred || full));
+        *rows = keep;
+        rows.sort_by_key(&other);
+        far.extend(weak);
+    }
+    far
 }
 
 fn scope_of(tickets: &[Ticket<'_>], here: &Here) -> Scope {
@@ -529,6 +619,7 @@ fn scope_of(tickets: &[Ticket<'_>], here: &Here) -> Scope {
         cwd: here.cwd.clone(),
         projects,
         solo,
+        home: here.home.clone(),
     }
 }
 
@@ -679,7 +770,8 @@ fn demote_unrelated(rows: &mut Vec<Hit>, index: &BTreeMap<&str, &Ticket<'_>>, sc
 /// An untagged ticket is not put in this seat's group. It sits before a row
 /// that names another seat, so the header stays true, and a project this
 /// seat works in still outranks an unrelated ticket that only shares a
-/// generic word.
+/// generic word. Another project's ticket comes after this seat's project,
+/// and one that misses a query word is last; see [`weigh_projects`].
 fn place_rows(hits: &mut Vec<Hit>, tickets: &[Ticket<'_>], here: impl FnOnce() -> Here) {
     if tickets.is_empty() {
         return;
@@ -756,13 +848,28 @@ fn place_rows(hits: &mut Vec<Hit>, tickets: &[Ticket<'_>], here: impl FnOnce() -
     });
     demote_unrelated(&mut open, &index, &scope);
     demote_unrelated(&mut away, &index, &scope);
-    let mut ordered =
-        Vec::with_capacity(lead.len() + owned.len() + home.len() + open.len() + away.len());
+    let far = if scope.placed() || tickets.iter().any(|ticket| ticket.named) {
+        weigh_projects(&mut lead, &mut open, &mut away, |hit| {
+            let ticket = hit.id.as_deref().and_then(|id| index.get(id).copied())?;
+            is_ticket_hit(hit).then(|| {
+                (
+                    preferred_project(ticket.rec, &scope, ticket.named),
+                    ticket.full,
+                )
+            })
+        })
+    } else {
+        Vec::new()
+    };
+    let mut ordered = Vec::with_capacity(
+        lead.len() + owned.len() + home.len() + open.len() + away.len() + far.len(),
+    );
     ordered.extend(lead);
     ordered.extend(owned);
     ordered.extend(home);
     ordered.extend(open);
     ordered.extend(away);
+    ordered.extend(far);
     *hits = ordered;
 }
 
