@@ -2772,17 +2772,32 @@ mod tests {
             reason = "writes a file that is not a git hook"
         )]
         std::fs::write(dir.path().join("notes.org"), "#+title: Notes\n").unwrap();
+        // Org 9.8 maps dot to graphviz-dot-mode, which Emacs does not ship, so
+        // org-lint calls the dependency graph block an unknown language.
+        // ob-dot ships with Org and makes dot a Babel language.
+        // Org 9.8's misplaced-heading checker flags any character but a comma
+        // or a blank in front of `** `, so it flags the backslash written in
+        // front of a line that starts with stars. The harness runs that check
+        // itself with that one escape exempt, on every Org version.
         let lisp = format!(
-            "(progn (require 'org) (find-file {file:?}) (setq org-confirm-babel-evaluate nil) \
-             (let* ((tree (org-element-parse-buffer)) (lint (org-lint))) \
+            "(progn (require 'org) (require 'org-lint) (require 'ob-dot) (find-file {file:?}) (setq org-confirm-babel-evaluate nil) \
+             (let* ((tree (org-element-parse-buffer)) \
+             (lint (org-lint (delq 'misplaced-heading (mapcar #'org-lint-checker-name org-lint--checkers)))) \
+             (misplaced (let (bad) (goto-char (point-min)) \
+             (while (re-search-forward \"[^*\n\r ,]\\\\*\\\\*+ \" nil t) \
+             (unless (and (eq (char-after (match-beginning 0)) ?\\\\) \
+             (save-excursion (goto-char (match-beginning 0)) (skip-chars-backward \" \\t\") (bolp))) \
+             (when (memq (org-element-type (org-element-at-point)) '(paragraph headline)) \
+             (push (line-number-at-pos) bad)))) bad))) \
              (dolist (r lint) (message \"LINT %s\" r)) \
+             (dolist (line misplaced) (message \"LINT misplaced heading at line %d\" line)) \
              (message \"KEYWORDS %s\" (mapconcat #'identity (org-element-map tree 'keyword (lambda (k) (org-element-property :key k))) \",\")) \
              (message \"DRAWERS %d\" (length (org-element-map tree '(drawer property-drawer) #'identity))) \
              (message \"BLOCKS %d\" (length (org-element-map tree '(src-block example-block export-block quote-block special-block verse-block center-block comment-block dynamic-block) #'identity))) \
              (message \"HEADLINES %d\" (length (org-element-map tree 'headline #'identity))) \
              (message \"COMMENTS %d\" (length (org-element-map tree '(comment comment-block) #'identity))) \
              (message \"TABLES %d\" (length (org-element-map tree 'table #'identity))) \
-             (kill-emacs (if lint 1 0))))"
+             (kill-emacs (if (or lint misplaced) 1 0))))"
         );
         #[expect(
             clippy::disallowed_methods,

@@ -130,7 +130,7 @@ jobs:
         run: |
           set -eu
           sudo apt-get install -y --no-install-recommends age tmux notmuch time zsh shellcheck fish emacs-nox
-          emacs --batch -Q --eval "(progn (require 'org) (message \"org %s\" org-version))"
+          emacs --batch -Q --eval "(progn (require 'org) (require 'ob-dot) (message \"org %s\" org-version))"
       # vissue, claimdag and deedar are named in .github/sibling-pin.
       # packset, phronesis and ljos-policyd are named in
       # scripts/sibling-tools.sh. The script builds each pin, checks the
@@ -248,14 +248,18 @@ jobs:
       # The sync, rules and push tests seal with age, as on the Linux job.
       # Installer tests run the printed fish lines, including quotes and backslashes.
       # The handbook unit test runs org-lint in Emacs, which ships Org.
+      # Homebrew's Emacs carries a newer Org than emacs-nox on the Linux job.
       - name: age, fish and Emacs
         run: |
           set -eu
           brew install age fish emacs
           command -v age-keygen
           command -v fish
-          emacs --batch -Q --eval "(progn (require 'org) (message \"org %s\" org-version))"
+          emacs --batch -Q --eval "(progn (require 'org) (require 'ob-dot) (message \"org %s\" org-version))"
+      # A missing emacs fails the handbook unit test instead of skipping it.
       - name: Unit tests
+        env:
+          LJOS_TEST_REQUIRE_TOOLS: "1"
         run: cargo test --locked --workspace --lib --no-fail-fast
 
   # release.yml already builds on macos-latest. This job runs the

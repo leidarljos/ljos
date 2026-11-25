@@ -843,8 +843,11 @@ fn emacs() -> Option<PathBuf> {
 fn lint_findings(world: &World, emacs: &Path, file: &Path) -> Vec<String> {
     let home = world.home.path().join("emacs-home");
     std::fs::create_dir_all(home.join(".emacs.d")).unwrap();
+    // Org 9.8 maps dot to graphviz-dot-mode, which Emacs does not ship, so
+    // org-lint calls the dependency graph block an unknown language.
+    // ob-dot ships with Org and makes dot a Babel language.
     let lisp = format!(
-        "(progn (require 'org) (find-file {file:?}) (setq org-confirm-babel-evaluate nil) (dolist (r (org-lint)) (message \"LINT %s\" r)) (kill-emacs 0))"
+        "(progn (require 'org) (require 'ob-dot) (find-file {file:?}) (setq org-confirm-babel-evaluate nil) (dolist (r (org-lint)) (message \"LINT %s\" r)) (kill-emacs 0))"
     );
     #[expect(
         clippy::disallowed_methods,
