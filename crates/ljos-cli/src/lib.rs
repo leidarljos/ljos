@@ -60304,7 +60304,7 @@ mod tests {
             let _env = crate::test_env_lock();
             crate::with_env_mutation(|| {
                 // SAFETY: test_env_lock is held and puts HOME back.
-                unsafe { std::env::set_var("HOME", &home) };
+                unsafe { crate::test_env_guards::set_var_unchecked("HOME", &home) };
             });
             ready_tx.send(()).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(300));

@@ -2925,7 +2925,7 @@ mod tests {
     fn a_bare_read_on_another_thread_leaves_this_threads_answer_proven() {
         let _g = crate::tests::env_guard();
         let _home = quiet_pack();
-        unsafe { std::env::set_var("PACKSET_TOKEN", "pin-token") };
+        unsafe { crate::test_env_guards::set_var_unchecked("PACKSET_TOKEN", "pin-token") };
         let (client, _) = serve(|_, req| {
             let shown = req.lines().any(|line| {
                 line.split_once(':').is_some_and(|(name, value)| {
