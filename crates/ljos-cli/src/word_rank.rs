@@ -382,29 +382,104 @@ pub fn shares_term(query: &str, text: &str) -> bool {
 /// `SHA-1` covers `sha1`. A stop word is not a term.
 #[must_use]
 pub fn term_coverage(query: &str, text: &str) -> usize {
-    let concepts = concepts(query);
-    if concepts.is_empty() {
+    let terms = QueryTerms::of(query);
+    if terms.is_empty() {
         return 0;
     }
-    let have: std::collections::BTreeSet<String> = analyze(text).bag.into_iter().collect();
-    concepts
-        .iter()
-        .filter(|concept| concept_covered(concept, &have))
-        .count()
+    terms.coverage(&TermBag::of(text))
 }
 
 /// Query terms that occur in `text`, in the order they were typed.
 #[must_use]
 pub fn covered_query_terms(query: &str, text: &str) -> Vec<String> {
-    let concepts = concepts(query);
-    if concepts.is_empty() {
+    let terms = QueryTerms::of(query);
+    if terms.is_empty() {
         return Vec::new();
     }
-    let have: std::collections::BTreeSet<String> = analyze(text).bag.into_iter().collect();
-    concepts
-        .into_iter()
-        .filter(|concept| concept_covered(concept, &have))
-        .collect()
+    terms.covered(&TermBag::of(text))
+}
+
+/// The terms of one text, analyzed once so many queries can read them.
+pub struct TermBag(std::collections::BTreeSet<String>);
+
+impl TermBag {
+    #[must_use]
+    pub fn of(text: &str) -> Self {
+        Self(analyze(text).bag.into_iter().collect())
+    }
+}
+
+/// A query's terms, analyzed once and checked against any number of
+/// [`TermBag`]s. [`term_coverage`] and [`covered_query_terms`] read the
+/// same terms.
+pub struct QueryTerms {
+    terms: Vec<(String, Concept)>,
+}
+
+impl QueryTerms {
+    #[must_use]
+    pub fn of(query: &str) -> Self {
+        Self {
+            terms: concepts(query)
+                .into_iter()
+                .map(|written| {
+                    let concept = concept_of(&written);
+                    (written, concept)
+                })
+                .collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.terms.is_empty()
+    }
+
+    /// The terms in the order they were typed.
+    pub fn written(&self) -> impl Iterator<Item = &str> {
+        self.terms.iter().map(|(written, _)| written.as_str())
+    }
+
+    /// Whether each term occurs in `bag`, in the order they were typed.
+    pub fn hits<'a>(&'a self, bag: &'a TermBag) -> impl Iterator<Item = bool> + 'a {
+        self.terms
+            .iter()
+            .map(move |(_, concept)| covered_by(concept, &bag.0))
+    }
+
+    /// Whether any term occurs in `bag`.
+    #[must_use]
+    pub fn any_in(&self, bag: &TermBag) -> bool {
+        self.hits(bag).any(|hit| hit)
+    }
+
+    /// How many terms occur in `bag`.
+    #[must_use]
+    pub fn coverage(&self, bag: &TermBag) -> usize {
+        self.hits(bag).filter(|hit| *hit).count()
+    }
+
+    /// The terms that occur in `bag`, in the order they were typed.
+    #[must_use]
+    pub fn covered(&self, bag: &TermBag) -> Vec<String> {
+        self.written()
+            .zip(self.hits(bag))
+            .filter(|(_, hit)| *hit)
+            .map(|(written, _)| written.to_string())
+            .collect()
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static ANALYZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many texts this thread has analyzed. A test reads the difference
+/// across a call to see how the work grows.
+#[cfg(test)]
+pub(crate) fn analyzed() -> usize {
+    ANALYZED.with(std::cell::Cell::get)
 }
 
 /// Whether `term` is a common word that does not name a project or a subject.
@@ -801,7 +876,10 @@ fn concept_of(written: &str) -> Concept {
 }
 
 fn concept_covered(written: &str, have: &std::collections::BTreeSet<String>) -> bool {
-    let concept = concept_of(written);
+    covered_by(&concept_of(written), have)
+}
+
+fn covered_by(concept: &Concept, have: &std::collections::BTreeSet<String>) -> bool {
     if !concept.joined.is_empty() && have.contains(&concept.joined) {
         return true;
     }
@@ -814,7 +892,7 @@ fn concept_covered(written: &str, have: &std::collections::BTreeSet<String>) -> 
     if !concept.parts.is_empty() && concept.parts.iter().all(|part| have.contains(part)) {
         return true;
     }
-    form_covered(&concept, have)
+    form_covered(concept, have)
 }
 
 /// A shared prefix plus an inflection, so `narration` covers `narrated`.
@@ -878,6 +956,8 @@ fn prepare(doc: &Doc<'_>) -> Prepared {
 }
 
 fn analyze(text: &str) -> Field {
+    #[cfg(test)]
+    ANALYZED.with(|count| count.set(count.get() + 1));
     let mut seq = Vec::new();
     let mut bag = Vec::new();
     let mut slot = 0u32;
