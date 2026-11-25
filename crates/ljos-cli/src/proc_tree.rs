@@ -2808,13 +2808,30 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let writer = tempfile::tempdir().unwrap();
         let reader = tempfile::tempdir().unwrap();
-        let tmpdir = writer.path().join("tmp");
-        std::fs::create_dir_all(&tmpdir).unwrap();
+        // SAFETY: geteuid has no arguments and only reads process identity.
+        let uid = unsafe { libc::geteuid() };
+        // A test that takes no lock makes its tempdir under whatever TMPDIR
+        // is set, and may still be using it after this test ends. Only what
+        // this test wrote is removed, and the directory itself only if empty.
+        struct OwnTmp(std::path::PathBuf, u32);
+        impl Drop for OwnTmp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(self.0.join(format!("ljos-{}", self.1)));
+                let _ = std::fs::remove_dir(&self.0);
+            }
+        }
+        let tmp = OwnTmp(
+            tempfile::Builder::new()
+                .prefix("ljos-tmpdir-")
+                .tempdir()
+                .unwrap()
+                .keep(),
+            uid,
+        );
+        let tmpdir = tmp.0.clone();
         // Hold the env lock after all tempdirs so drop order restores env
         // before those directories are deleted.
         let _guard = crate::test_env_lock();
-        // SAFETY: geteuid has no arguments and only reads process identity.
-        let uid = unsafe { libc::geteuid() };
         let fallback = crate::runtime_fallback(&tmpdir, Some(home.path()), uid);
         // SAFETY: this test holds `test_env_lock`, which puts the variables
         // back when it drops. Nothing else on this thread reads them.

@@ -1,0 +1,1 @@
+The tool-call record test points `TMPDIR` at a directory it does not remove recursively, so a test that made its temp directory there while it was set, such as the guard shim test, no longer loses its shim and working directory with `No such file or directory`.
