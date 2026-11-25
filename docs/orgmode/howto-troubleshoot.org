@@ -175,6 +175,11 @@ A missing binary then has no version in parentheses: not on PATH, so run =curl -
 The warning does not by itself exit 1.
 A copy already in the day cache is still used, and the row says =crates.io (cached)=.
 
+Doctor runs that lookup as =curl -q=, so curl reads no curlrc.
+A proxy, CA bundle or other option kept only in =~/.curlrc=, =~/.config/curlrc= or another curlrc does not reach it, and on a network that needs that proxy the row says crates.io did not answer.
+The environment still applies: =https_proxy=, =HTTPS_PROXY=, =ALL_PROXY= and =NO_PROXY= name the proxy, and =CURL_CA_BUNDLE=, =SSL_CERT_FILE= and =SSL_CERT_DIR= name the CA certificates.
+Set the proxy or the CA bundle in one of those variables in the shell that runs =ljos doctor=.
+
 * Mistyped ticket id
 
 When a ticket id is close to one in the tracker, =show=, =note= and

@@ -1,0 +1,1 @@
+The crates.io stand-in in the first-run tests refuses a call that could read a URL its arguments do not name: `-K` or `--config` in any form, including `-K -` and `--config=FILE`, and any option it does not know.

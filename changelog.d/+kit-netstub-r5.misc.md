@@ -1,0 +1,2 @@
+The first-run curlrc test checks that curl without `-q` reads a place only on the curl releases that read it, from one table that cites curl's source, so it passes on curl before 7.82.0 and from 8.10.0 as well as on 8.5.0.
+It also plants `XDG_CONFIG_HOME/curlrc` without the dot, which curl reads from 8.10.0 in place of `XDG_CONFIG_HOME/.curlrc`, and the passwd home's `.curlrc` with `HOME` unset, which every release reads.

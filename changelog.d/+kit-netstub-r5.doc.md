@@ -1,0 +1,1 @@
+The registry section of the troubleshooting page says doctor's crates.io lookup reads no curlrc, so a proxy or CA bundle kept only there does not reach it, while `https_proxy`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `CURL_CA_BUNDLE`, `SSL_CERT_FILE` and `SSL_CERT_DIR` still do.

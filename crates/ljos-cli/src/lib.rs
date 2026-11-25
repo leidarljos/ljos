@@ -626,7 +626,7 @@ pub fn session_start_for(session: Option<&str>) -> String {
 }
 
 /// `atom` as an agent's: origin `agent-derived` and no basis, for a
-/// listing from a listener [`pack_proven`] did not prove.
+/// listing whose answer did not carry the token after the proof.
 fn as_agents(mut atom: Value) -> Value {
     if let Some(obj) = atom.as_object_mut() {
         obj.insert(
@@ -11814,10 +11814,10 @@ fn with_issue_recall(call: &HookCall, text: String) -> String {
 fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, Vec<String>)> {
     let atoms = with_pack_timeout(1_500, || {
         let client = pack()?;
-        rows_read(&client, &client.workspace())
+        rows_with_trust(&client, &client.workspace())
     });
     let atoms = match atoms {
-        Ok(atoms) => Some(atoms),
+        Ok(listed) => Some(listed),
         Err(err) => {
             if pack_unreachable(&err) || writer_unreachable(&err) {
                 mark_writer_down();
@@ -11827,8 +11827,8 @@ fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, V
     };
     let mut hits = Vec::new();
     let mut matched_lexical = 0;
-    if let Some(atoms) = atoms {
-        record_listed_origins(&atoms);
+    if let Some((atoms, trusted)) = atoms {
+        record_listed_origins(&atoms, trusted);
         let seen = seen_ids(call.session.as_deref());
         let rows: Vec<(Hit, String)> = atoms
             .iter()
@@ -13179,8 +13179,8 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
         // A 401 or 403 is the writer's answer. Falling through to another
         // search hides it behind an empty page, and the model never sees
         // the command that fixes the token.
-        let (body, _) = match search_relevant(&client, cue, limit, false, timeout) {
-            Ok(pair) => pair,
+        let (body, _, trusted) = match search_relevant(&client, cue, limit, false, timeout) {
+            Ok(found) => found,
             Err(err)
                 if writer_refusal(&err) || is_memory_starting(&err) || is_reported_busy(&err) =>
             {
@@ -13203,7 +13203,7 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
         let Some(found) = found else {
             return Ok(None);
         };
-        keep_search_origins(&client, found.iter().map(|(h, _)| h));
+        keep_search_origins(&client, trusted, found.iter().map(|(h, _)| h));
         Ok(Some(found))
     })();
     match raw {
@@ -16766,7 +16766,7 @@ fn search_direct(query: &str, limit: u32) -> Result<Vec<Hit>> {
         note_cosine(&mut hit, cosine);
         hits.push(hit);
     }
-    keep_search_origins(&client, &hits);
+    keep_search_origins(&client, answer.trusted, &hits);
     let mut hits = fold_verbatim(query, hits);
     conceal_bookkeeping(&mut hits);
     Ok(hits)
@@ -17455,13 +17455,15 @@ fn redact_hit_provenance(body: &mut Value) {
 /// cannot be read, or a port another user holds, is not that listener:
 /// the search is the stored atoms alone, and the miss is said. Taking
 /// the listener's answer then would let it choose the recall.
+///
+/// The bool is whether the token was on the search's answer.
 fn search_relevant(
     client: &PacksetClient,
     cue: &str,
     limit: u32,
     rerank: bool,
     timeout: std::time::Duration,
-) -> Result<(Value, usize)> {
+) -> Result<(Value, usize, bool)> {
     if seat_has_no_token(client) {
         // Nothing is listening. The missing token is not the failure,
         // and saying it hides the command that starts the writer.
@@ -17472,7 +17474,8 @@ fn search_relevant(
             }
         }
         say_search_miss();
-        return Ok(stored_only(client, cue, limit));
+        let (body, chosen) = stored_only(client, cue, limit);
+        return Ok((body, chosen, false));
     }
     // A listener that already failed the proof is read bare. Asking for
     // the token's cache would miss, re-read status, and wipe a refusal.
@@ -17599,7 +17602,7 @@ fn search_relevant(
     if open {
         redact_hit_provenance(&mut body);
     }
-    Ok((body, chosen))
+    Ok((body, chosen, fetched.1))
 }
 
 /// The stored atoms that best match `cue`, and none the writer chose.
@@ -18136,16 +18139,17 @@ fn ranked_hits(rows: SharedRows, query: &str, limit: usize) -> Vec<Hit> {
 /// read, under whatever pack stamp, so a lesson written since is missing
 /// and one retired since can still show. Empty when no hook has kept one.
 fn local_store_hits(query: &str, limit: usize) -> Vec<Hit> {
-    ranked_hits(std::sync::Arc::new(local_store_rows()), query, limit)
+    ranked_hits(std::sync::Arc::new(local_store_rows().0), query, limit)
 }
 
-/// The live rows of the listing a hook last kept, see [`local_store_hits`].
-fn local_store_rows() -> Vec<Row> {
+/// The live rows of the listing a hook last kept, see [`local_store_hits`],
+/// and whether that listing carried the token this reader would show.
+fn local_store_rows() -> (Vec<Row>, bool) {
     let Some((text, carried)) = newest_listing(&pack_workspace()) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     let Some((rows, trusted)) = last_listing::<Row>(&text) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     // A writer that is not answering cannot prove the token, so a listing
     // read under it is trusted only by a reader that carries it now.
@@ -18162,7 +18166,7 @@ fn local_store_rows() -> Vec<Row> {
         .map(|row| if trusted { row } else { row.into_agents() })
         .collect();
     read_claims(rows.len());
-    rows
+    (rows, trusted)
 }
 
 /// Atoms the lexical scan did not keep, when [`word_rank`] can still match
@@ -18323,9 +18327,9 @@ fn packset_search_relevant(query: &str, limit: u32) -> Result<Vec<Hit>> {
     }
     let hits = with_writer(|| {
         let client = pack()?;
-        let (body, _) = search_relevant(&client, q, limit, false, pack_timeout())?;
+        let (body, _, trusted) = search_relevant(&client, q, limit, false, pack_timeout())?;
         let hits: Vec<Hit> = serde_json::from_value(body["hits"].clone()).unwrap_or_default();
-        keep_search_origins(&client, &hits);
+        keep_search_origins(&client, trusted, &hits);
         Ok(hits)
     })?;
     let mut hits = fold_verbatim(q, hits);
@@ -18378,7 +18382,7 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
     }
     let (hits, ran) = with_writer(|| {
         let client = pack()?;
-        let (body, chosen) = search_relevant(&client, q, limit, true, pack_timeout())?;
+        let (body, chosen, trusted) = search_relevant(&client, q, limit, true, pack_timeout())?;
         let mut scored: Vec<(Hit, f64)> = Vec::new();
         let mut unscored: Vec<Hit> = Vec::new();
         let mut extra: Vec<Hit> = Vec::new();
@@ -18404,7 +18408,7 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
             unscored.extend(extra);
             merge_by_lexical(scored.into_iter().map(|(h, _)| h).collect(), unscored, q)
         };
-        keep_search_origins(&client, &hits);
+        keep_search_origins(&client, trusted, &hits);
         Ok((hits, ran))
     })?;
     Ok((hits, ran))
@@ -22991,14 +22995,20 @@ fn rows_listed(client: &PacksetClient, workspace: &str) -> Result<(SharedRows, b
 /// [`rows_listed`] for a reader that names the person: an unproven
 /// listener's rows are an agent's, as [`atoms_read`] marks atoms.
 fn rows_read(client: &PacksetClient, workspace: &str) -> Result<SharedRows> {
+    Ok(rows_with_trust(client, workspace)?.0)
+}
+
+/// [`rows_read`], and whether the token was on the listing.
+fn rows_with_trust(client: &PacksetClient, workspace: &str) -> Result<(SharedRows, bool)> {
     let (rows, trusted) = rows_listed(client, workspace)?;
     if trusted {
-        return Ok(rows);
+        return Ok((rows, true));
     }
     read_claims(rows.len());
     let rows = std::sync::Arc::unwrap_or_clone(rows);
-    Ok(std::sync::Arc::new(
-        rows.into_iter().map(Row::into_agents).collect(),
+    Ok((
+        std::sync::Arc::new(rows.into_iter().map(Row::into_agents).collect()),
+        false,
     ))
 }
 
@@ -35863,6 +35873,13 @@ fn encoder_not_runnable(line: Option<&str>) -> String {
 /// A day, in seconds: how long a crates.io answer is kept on disk.
 const CRATE_VERSION_TTL_S: u64 = 86_400;
 
+/// Flags of the crates.io lookup doctor runs, before the URL.
+///
+/// `-q` is first. That is the only place curl skips its config file.
+/// A config file can name a URL the arguments do not, and which file
+/// curl opens is not a list this program keeps.
+pub const CRATE_CURL_FLAGS: &[&str] = &["-q", "-sS", "-A", "ljos-doctor", "--max-time", "3"];
+
 /// Where a crates.io answer is kept between processes, so a herd of seats
 /// opening sittings asks the registry once a day for each binary rather
 /// than once a sitting each.
@@ -35953,7 +35970,8 @@ fn crate_max_version(name: &str, refresh: bool) -> Option<CrateVersion> {
         reason = "starts a program outside git hook code"
     )]
     let mut curl = std::process::Command::new("curl");
-    curl.args(["-sS", "-A", "ljos-doctor", "--max-time", "3", &url]);
+    curl.args(CRATE_CURL_FLAGS);
+    curl.arg(&url);
     let said = output_within(curl, None, std::time::Duration::from_secs(4)).ok();
     let got = said.and_then(|said| {
         if !said.status.success() {
@@ -41804,6 +41822,11 @@ pub fn packset_island(cue: &str, fire: bool) -> Result<Value> {
 /// weights that persona fired, and a fire writes its weights and not the
 /// seat's. The seat's own island is the one with no lens.
 pub fn packset_island_as(cue: &str, fire: bool, lens: Option<&str>) -> Result<Value> {
+    Ok(island_with_trust(cue, fire, lens)?.0)
+}
+
+/// [`packset_island_as`], and whether the token was on the pack's answer.
+fn island_with_trust(cue: &str, fire: bool, lens: Option<&str>) -> Result<(Value, bool)> {
     let cue = cue.trim();
     if cue.is_empty() {
         bail!("island: pass the task or question at hand");
@@ -41814,8 +41837,8 @@ pub fn packset_island_as(cue: &str, fire: bool, lens: Option<&str>) -> Result<Va
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(str::to_lowercase);
-    let mut body = client
-        .activate_as(&workspace, cue, 24, fire, lens.as_deref())
+    let (mut body, trusted) = client
+        .activate_fetched(&workspace, cue, 24, fire, lens.as_deref())
         .context("island: GET /v1/activate failed")?;
     if body["fired"].as_u64().unwrap_or(0) > 0 {
         match record_fire(cue, lens.as_deref(), &body) {
@@ -41823,7 +41846,7 @@ pub fn packset_island_as(cue: &str, fire: bool, lens: Option<&str>) -> Result<Va
             Err(err) => body["trace_error"] = Value::String(err.to_string()),
         }
     }
-    Ok(body)
+    Ok((body, trusted))
 }
 
 /// Record a fire as why-provenance: which links were strengthened, under
@@ -42297,8 +42320,8 @@ pub fn packset_search_as_of(
     let found = with_writer(|| {
         let client = pack()?;
         let workspace = client.workspace();
-        let hits = client
-            .search_opts(
+        let (hits, trusted) = client
+            .search_fetched(
                 &workspace,
                 &recall_query(q),
                 limit,
@@ -42307,7 +42330,7 @@ pub fn packset_search_as_of(
             )
             .map_err(anyhow::Error::from)
             .context("search: GET /v1/search failed")?;
-        keep_origins_of(&client, &hits);
+        keep_origins_of(&client, trusted, &hits);
         Ok(hits)
     })?;
     // The cross-encoder replaces the head. When the fused leader is also
@@ -44960,24 +44983,27 @@ fn recall_cues(issue: &str) -> Vec<String> {
 /// Related hits from a sitting's one listing. The search is not asked
 /// again. The cues are the ones [`recall_cues`] would have sent, and the
 /// rank is the lexical match the pack uses when it answers by words.
-fn related_from_listing(atoms: &[Value], cues: &[String], own: &[Hit]) -> Vec<Hit> {
+/// `proven` is whether the token was on the listing.
+fn related_from_listing(atoms: &[Value], cues: &[String], own: &[Hit], proven: bool) -> Vec<Hit> {
     let skip: std::collections::BTreeSet<&str> =
         own.iter().filter_map(|hit| hit.id.as_deref()).collect();
     let pool = RELATED_MEMORY_CAP * POOL_PER_SHOWN;
     let mut related = Vec::new();
     for cue in cues {
-        related.extend(listed_word_hits(atoms, cue, pool, &skip));
+        related.extend(listed_word_hits(atoms, cue, pool, &skip, proven));
     }
     related
 }
 
 /// At most `limit` live lessons in `atoms` that share a word with `cue`,
 /// best lexical match first. Ids in `skip` are the issue's own memories.
+/// `proven` is whether the token was on the listing `atoms` came from.
 fn listed_word_hits(
     atoms: &[Value],
     cue: &str,
     limit: usize,
     skip: &std::collections::BTreeSet<&str>,
+    proven: bool,
 ) -> Vec<Hit> {
     let now = now_utc();
     let live: Vec<&Value> = atoms
@@ -45012,7 +45038,6 @@ fn listed_word_hits(
         .collect();
     order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
     order.truncate(limit);
-    let proven = pack().ok().is_some_and(|client| pack_proven(&client));
     let mut hits: Vec<Hit> = order
         .into_iter()
         .filter_map(|i| {
@@ -45036,7 +45061,8 @@ fn recall_memories_with(issue: &str, include_notes: bool, width: Width) -> Resul
             // from this seat's memory slot do not open another socket.
             // They still go through sitting_subject_rows.
             let cues = recall_cues(issue);
-            let own = tagged_with_issue(&local_store_rows(), issue);
+            let (kept, trusted) = local_store_rows();
+            let own = tagged_with_issue(&kept, issue, trusted);
             let mut hits = Vec::new();
             for cue in &cues {
                 hits.extend(local_store_hits(cue, RELATED_MEMORY_CAP));
@@ -45062,7 +45088,7 @@ fn recall_memories_with(issue: &str, include_notes: bool, width: Width) -> Resul
                 width,
             ));
         }
-        let own = tagged_with_issue(listing.atoms.as_ref(), issue);
+        let own = tagged_with_issue(listing.atoms.as_ref(), issue, listing.trusted);
         let cues = recall_cues(issue);
         let title = issue_title(issue).unwrap_or_default();
         let ticket = sitting_ticket_text(issue, &title);
@@ -45073,6 +45099,7 @@ fn recall_memories_with(issue: &str, include_notes: bool, width: Width) -> Resul
             &ticket,
             listing.atoms.as_ref(),
             listing.searched,
+            listing.trusted,
             &listing.query,
             &now,
             &seat,
@@ -45136,7 +45163,8 @@ fn recall_memories_with(issue: &str, include_notes: bool, width: Width) -> Resul
                 ) =>
         {
             degraded_state = degraded::of_error(&err);
-            tagged_with_issue(&local_store_rows(), issue)
+            let (kept, trusted) = local_store_rows();
+            tagged_with_issue(&kept, issue, trusted)
         }
         // A pack that has not opened sheds the listing. Word search below
         // is the page. A busy pack that stayed busy does the same, and the
@@ -45276,9 +45304,9 @@ fn most_relevant<'a>(rows: &[&'a Hit], cue: &str, cap: usize) -> Vec<&'a Hit> {
 fn issue_memories(issue: &str) -> Result<Vec<Hit>> {
     let atoms = with_writer(|| {
         let client = pack()?;
-        rows_read(&client, &client.workspace()).context("recall: GET /v1/atoms failed")
+        rows_with_trust(&client, &client.workspace()).context("recall: GET /v1/atoms failed")
     })?;
-    Ok(tagged_with_issue(&atoms, issue))
+    Ok(tagged_with_issue(&atoms.0, issue, atoms.1))
 }
 
 /// When an atom was written: `valid_from`, else `source.at`, else `ts`.
@@ -45293,9 +45321,9 @@ fn written_at(atom: &Value) -> Option<String> {
 }
 
 /// [`issue_memories`] on a listing already read, ordered by when each
-/// memory was written, newest first.
-fn tagged_with_issue(atoms: &[impl Listed], issue: &str) -> Vec<Hit> {
-    let proven = pack().ok().is_some_and(|client| pack_proven(&client));
+/// memory was written, newest first. `proven` is whether the token was on
+/// that listing.
+fn tagged_with_issue(atoms: &[impl Listed], issue: &str, proven: bool) -> Vec<Hit> {
     let mut own: Vec<Hit> = atoms
         .iter()
         .filter(|atom| atom.field("tombstone") != Some(&Value::Bool(true)))
@@ -45836,8 +45864,8 @@ fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>, usize)>
     // from that listing, under the same subject rule as the due cards.
     if let Some(listing) = sitting_listing() {
         events.extend(related_memory_events(issue, &title, &listing.atoms));
-    } else if let Ok(island) = packset_island(&title, false) {
-        if !pack().is_ok_and(|client| client.carried()) {
+    } else if let Ok((island, trusted)) = island_with_trust(&title, false, None) {
+        if !trusted {
             events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
             let matched = events.len();
             let skip = matched.saturating_sub(limit);
@@ -47822,21 +47850,26 @@ fn sitting_subject_rows(
 /// Search hits and word matches for a sitting's recall list, after
 /// [`sitting_names_issue`]. The search order is unchanged for the rows
 /// that clear it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the sitting's one read is passed as its atoms, how it answered and whether the token was on it"
+)]
 fn sitting_recall_hits(
     issue: &str,
     ticket: &str,
     atoms: &[Value],
     searched: bool,
+    trusted: bool,
     query: &str,
     now: &str,
     seat: &str,
 ) -> Vec<Hit> {
-    let own = tagged_with_issue(atoms, issue);
+    let own = tagged_with_issue(atoms, issue, trusted);
     let kept = sitting_subject_rows(issue, ticket, atoms, now, seat);
     if searched {
         searched_hits(&kept, &own, query, issue)
     } else {
-        related_from_listing(&kept, &recall_cues(issue), &own)
+        related_from_listing(&kept, &recall_cues(issue), &own, trusted)
     }
 }
 
@@ -48196,6 +48229,8 @@ struct SittingListing {
     atoms: std::sync::Arc<Vec<Value>>,
     ok: bool,
     searched: bool,
+    /// The token was on the answer `atoms` came from.
+    trusted: bool,
     query: String,
     /// Why the read did not answer, when it did not.
     state: Option<degraded::State>,
@@ -48207,6 +48242,7 @@ impl Clone for SittingListing {
             atoms: std::sync::Arc::clone(&self.atoms),
             ok: self.ok,
             searched: self.searched,
+            trusted: self.trusted,
             query: self.query.clone(),
             state: self.state,
         }
@@ -48229,6 +48265,7 @@ fn fail_sitting_listing() {
             atoms: std::sync::Arc::new(Vec::new()),
             ok: false,
             searched: false,
+            trusted: false,
             query: String::new(),
             state: Some(degraded::State::Busy),
         });
@@ -48257,10 +48294,11 @@ impl SittingListingGuard {
         let clock = pack_link::PackClock::enter(budget);
         let listing = match pack() {
             Ok(client) => match sitting_pack_read(&client, ticket) {
-                Ok((atoms, searched)) => SittingListing {
+                Ok((atoms, searched, trusted)) => SittingListing {
                     atoms: std::sync::Arc::new(atoms),
                     ok: true,
                     searched,
+                    trusted,
                     query: ticket.to_string(),
                     state: None,
                 },
@@ -48268,6 +48306,7 @@ impl SittingListingGuard {
                     atoms: std::sync::Arc::new(Vec::new()),
                     ok: false,
                     searched: false,
+                    trusted: false,
                     query: ticket.to_string(),
                     state: Some(degraded::of_error(&err).unwrap_or(degraded::State::Busy)),
                 },
@@ -48276,6 +48315,7 @@ impl SittingListingGuard {
                 atoms: std::sync::Arc::new(Vec::new()),
                 ok: false,
                 searched: false,
+                trusted: false,
                 query: ticket.to_string(),
                 state: degraded::of_error(&err),
             },
@@ -48320,8 +48360,9 @@ fn search_endpoint_missing(status: u16, body: &str) -> bool {
 
 /// The sitting's one pack read: search hits for `ticket`, or a short
 /// listing when the writer cannot search. An error is a read that did
-/// not answer. The caller does not ask again.
-fn sitting_pack_read(client: &PacksetClient, ticket: &str) -> Result<(Vec<Value>, bool)> {
+/// not answer. The caller does not ask again. The bools are whether the
+/// search answered, and whether the token was on the answer read.
+fn sitting_pack_read(client: &PacksetClient, ticket: &str) -> Result<(Vec<Value>, bool, bool)> {
     let query = sitting_search_cue(ticket);
     if query.is_empty() {
         bail!("sitting: the ticket has no words to search");
@@ -48343,13 +48384,13 @@ fn sitting_pack_read(client: &PacksetClient, ticket: &str) -> Result<(Vec<Value>
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            Ok((hits, true))
+            Ok((hits, true, answer.trusted))
         }
         // A writer with no search, or one that sheds the search while a
         // write is in progress, still has a bounded listing. That listing
         // is the read that answers. A body over the cap is not ranked.
         Ok(answer) if search_endpoint_missing(answer.status, &answer.body) => {
-            sitting_limited_listing(client).map(|atoms| (atoms, false))
+            sitting_limited_listing(client).map(|(atoms, trusted)| (atoms, false, trusted))
         }
         Ok(answer) => bail!("sitting: GET /v1/search: status code {}", answer.status),
         // A search that never answers, or whose deadline passed, is not
@@ -48363,15 +48404,16 @@ fn sitting_pack_read(client: &PacksetClient, ticket: &str) -> Result<(Vec<Value>
             if spent || is_pack_busy(&err) || is_deadline_miss(&err) {
                 return Err(err);
             }
-            sitting_limited_listing(client).map(|atoms| (atoms, false))
+            sitting_limited_listing(client).map(|(atoms, trusted)| (atoms, false, trusted))
         }
     }
 }
 
 /// A lesson listing with a limit, used when `/v1/search` is not there.
 /// A body over [`SITTING_LIST_CAP`] is refused: the writer ignored the
-/// limit and the sitting will not rank the whole pack.
-fn sitting_limited_listing(client: &PacksetClient) -> Result<Vec<Value>> {
+/// limit and the sitting will not rank the whole pack. The bool is whether
+/// the token was on the listing.
+fn sitting_limited_listing(client: &PacksetClient) -> Result<(Vec<Value>, bool)> {
     let workspace = client.workspace();
     let limit = SITTING_SEARCH_LIMIT.to_string();
     let pairs = [
@@ -48399,7 +48441,7 @@ fn sitting_limited_listing(client: &PacksetClient) -> Result<Vec<Value>> {
         .cloned()
         .unwrap_or_default();
     atoms.truncate(SITTING_SEARCH_LIMIT);
-    Ok(atoms)
+    Ok((atoms, answer.trusted))
 }
 
 impl Drop for SittingListingGuard {
@@ -55211,10 +55253,9 @@ fn substituted(h: &Hit) -> bool {
     }) && !same_record(h)
 }
 
-/// Record each listing atom's origin when the listener asks for the
-/// token, and clear the person otherwise. One proof for the whole list.
-fn record_listed_origins(atoms: &[impl Claim]) {
-    let proven = pack().ok().is_some_and(|client| pack_proven(&client));
+/// Record each listing atom's origin when the token was on the listing
+/// (`proven`), and clear the person otherwise. One proof for the whole list.
+fn record_listed_origins(atoms: &[impl Claim], proven: bool) {
     for atom in atoms {
         record_listed(atom, proven);
     }
@@ -55253,14 +55294,19 @@ fn keep_origin_at(atom: &impl Claim, now: &str) {
 /// long-lived process must not name a hit by the origin it read before.
 /// A hit the listing does not hold is recorded as not held, and a listing
 /// that does not answer clears the person recorded for every hit.
-fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'a Hit>) {
+/// `trusted` is whether the token was on the answer that found the hits.
+fn keep_origins_of<'a>(
+    client: &PacksetClient,
+    trusted: bool,
+    hits: impl IntoIterator<Item = &'a Hit>,
+) {
     let ids: Vec<&str> = hits.into_iter().filter_map(|h| h.id.as_deref()).collect();
     if ids.is_empty() {
         return;
     }
-    // The last answer on this socket did not carry the token. A listing
-    // now would be another request, and its rows would not name the person.
-    if !pack_proven(client) {
+    // The search's answer did not carry the token. A listing now would be
+    // another request, and its rows would not name the person.
+    if !trusted {
         ids.into_iter().for_each(unrecord_person);
         return;
     }
@@ -55303,8 +55349,12 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
 /// stored. A hit it does not hold, or a listing that does not answer,
 /// is not the person's: [`keep_origins_of`] records the first as not
 /// held and clears the person for the second.
-fn keep_search_origins<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'a Hit>) {
-    keep_origins_of(client, hits);
+fn keep_search_origins<'a>(
+    client: &PacksetClient,
+    trusted: bool,
+    hits: impl IntoIterator<Item = &'a Hit>,
+) {
+    keep_origins_of(client, trusted, hits);
 }
 
 /// Whether the pack stored `h` as the person's. A hit whose origin no
@@ -55407,23 +55457,6 @@ fn atom_now_budget() -> std::time::Duration {
         })
         .unwrap_or(ATOM_NOW_MS);
     std::time::Duration::from_millis(ms)
-}
-
-/// Whether the last answer from `client`'s socket carried this seat's
-/// token. The proof is not kept for a later connection: the next call
-/// proves again before the token is written. A failed proof is asked
-/// again on that call.
-///
-/// The proof reads an atom id no pack holds, under a fresh nonce, on the
-/// socket the call will use: with no token and with a bogus one of the
-/// same shape, which both have to come back 401, then the call carries
-/// this seat's. A listener that does not check the bearer cannot pass
-/// that, and one that refuses only some URLs is asked a URL it did not
-/// choose. A listener that already learnt the token, or a process of
-/// this user that reads the token file, passes; only a pack that signs
-/// its answers would tell either apart.
-pub(crate) fn pack_proven(client: &PacksetClient) -> bool {
-    client.carried()
 }
 
 /// Atom `id` as this seat's pack answers for it now, both requests inside
@@ -60969,7 +61002,7 @@ mod tests {
             serde_json::json!({"id": "mail", "kind": "message", "text": "a letter",
             "issue": "probe-0lm4"}),
         );
-        let own = super::tagged_with_issue(&atoms, "probe-0lm4");
+        let own = super::tagged_with_issue(&atoms, "probe-0lm4", false);
         let ids: Vec<&str> = own.iter().filter_map(|h| h.id.as_deref()).collect();
         assert_eq!(ids.len(), 23, "{ids:?}");
         assert_eq!(ids[0], "own21");
@@ -79094,7 +79127,16 @@ playbook: sit
         );
         let recall = super::recall_lines(
             &[],
-            super::sitting_recall_hits("demo-lk1e", ticket, &atoms, true, ticket, now, "ada"),
+            super::sitting_recall_hits(
+                "demo-lk1e",
+                ticket,
+                &atoms,
+                true,
+                false,
+                ticket,
+                now,
+                "ada",
+            ),
             ticket,
             now,
             true,
@@ -79480,7 +79522,7 @@ lesson, due yesterday, seat ada
                 .map(|event| event.text)
                 .collect::<Vec<_>>()
                 .join("\n");
-            let own = super::tagged_with_issue(std::slice::from_ref(&atom), issue);
+            let own = super::tagged_with_issue(std::slice::from_ref(&atom), issue, false);
             let recall = super::recall_lines(
                 &own,
                 super::sitting_recall_hits(
@@ -79488,6 +79530,7 @@ lesson, due yesterday, seat ada
                     &ticket,
                     std::slice::from_ref(&atom),
                     true,
+                    false,
                     &ticket,
                     now,
                     "ada",
@@ -80551,7 +80594,7 @@ lesson, due yesterday, seat ada
                 .map(|event| event.text)
                 .collect::<Vec<_>>()
                 .join("\n");
-        let own = super::tagged_with_issue(std::slice::from_ref(&atom), issue);
+        let own = super::tagged_with_issue(std::slice::from_ref(&atom), issue, false);
         let recall = super::recall_lines(
             &own,
             super::sitting_recall_hits(
@@ -80559,6 +80602,7 @@ lesson, due yesterday, seat ada
                 &ticket,
                 std::slice::from_ref(&atom),
                 true,
+                false,
                 &ticket,
                 now,
                 "ada",
@@ -91290,6 +91334,63 @@ lesson, due yesterday, seat ada
         assert!(
             took < std::time::Duration::from_millis(HOOK_DEADLINE_MS - 2000),
             "the prompt waited {took:?} on a rerank"
+        );
+    }
+
+    /// A hook keeps its search answer and listing for the whole process.
+    /// Another thread that reads them sends nothing, and the preference
+    /// they hold stays the person's: the trust was read with the answer.
+    #[test]
+    fn a_kept_search_read_on_another_thread_keeps_its_trust() {
+        let _env = env_guard();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("LJOS_IN_HOOK", "1"),
+            ("PACKSET_WORKSPACE", "ws"),
+        ]);
+        let held = r#"{"id":"p1","text":"Tag a release with git push origin TAG; --follow-tags leaves v-tags behind.","score":2.0,"kind":"preference","ts":"2026-10-10T18:00:00.000Z","entities":[],"origin":"user-declared","source":{"basis":"person"},"ballots":3,"of":3}"#;
+        let (url, asked) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if !stub_showed_token(req) {
+                (401, r#"{"error":"token"}"#.into())
+            } else if first.contains("/v1/search") {
+                (200, format!(r#"{{"hits":[{held}]}}"#))
+            } else if first.starts_with("GET /v1/atoms") {
+                (200, format!(r#"{{"atoms":[{held}]}}"#))
+            } else if first.starts_with("GET /v1/status") {
+                (200, r#"{"search":{"ranks":[]}}"#.into())
+            } else {
+                (404, r#"{"error":"not here"}"#.into())
+            }
+        });
+        let _held = PackUrl::set(&url);
+        pack_link::forget_kept_answers();
+        forget_atom_listings();
+        let cue = "how should I tag the release?";
+        let person = || {
+            packset_search_relevant(cue, 5)
+                .unwrap()
+                .iter()
+                .find(|hit| hit.id.as_deref() == Some("p1"))
+                .map(person_origin)
+        };
+        let filled = std::thread::spawn(person).join().unwrap();
+        assert_eq!(filled, Some(true), "the filling thread lost the person");
+        unrecord_person("p1");
+        let sent = asked.lock().unwrap().len();
+        let read = std::thread::spawn(person).join().unwrap();
+        let after = asked.lock().unwrap().clone();
+        assert_eq!(
+            after.len(),
+            sent,
+            "the reading thread asked the pack again: {:?}",
+            &after[sent..]
+        );
+        assert_eq!(
+            read,
+            Some(true),
+            "a kept answer read on another thread lost the person's preference"
         );
     }
 
