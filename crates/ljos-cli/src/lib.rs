@@ -20263,6 +20263,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_new_state_dir_is_0700_whatever_the_umask() {
+        let _g = env_guard();
         let parent = tempfile::tempdir().unwrap();
         let made = claim_new_private_dir_at(&held(parent.path()), "fresh".as_ref(), super::euid())
             .unwrap();
@@ -20272,6 +20273,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_parent_swapped_after_the_check_gets_nothing() {
+        let _g = env_guard();
         let top = tempfile::tempdir().unwrap();
         let parent = top.path().join("parent");
         let moved = top.path().join("moved");
@@ -20329,6 +20331,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_world_writable_parent_without_the_sticky_bit_is_refused() {
+        let _g = env_guard();
         let parent = tempfile::tempdir().unwrap();
         crate::change_mode(parent.path(), 0o777).unwrap();
         let Err(err) = EphemeralState::create(parent.path()) else {
@@ -20341,6 +20344,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_sticky_world_writable_parent_is_used() {
+        let _g = env_guard();
         let parent = tempfile::tempdir().unwrap();
         crate::change_mode(parent.path(), 0o1777).unwrap();
         let state = EphemeralState::create(parent.path()).unwrap();
@@ -20349,6 +20353,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_temporary_directory_needs_a_trusted_owner_and_no_open_write() {
+        let _g = env_guard();
         let me = 1000;
         assert_eq!(trusted_dir_mode(0, 0o1777, me), Ok(()));
         assert_eq!(trusted_dir_mode(me, 0o700, me), Ok(()));
@@ -20368,6 +20373,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_group_writable_parent_without_the_sticky_bit_is_refused() {
+        let _g = env_guard();
         let parent = tempfile::tempdir().unwrap();
         crate::change_mode(parent.path(), 0o770).unwrap();
         let Err(err) = EphemeralState::create(parent.path()) else {
@@ -20380,6 +20386,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_parent_under_a_world_writable_directory_is_refused() {
+        let _g = env_guard();
         let top = tempfile::tempdir().unwrap();
         let parent = top.path().join("private");
         std::fs::create_dir(&parent).unwrap();
@@ -20395,6 +20402,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_sticky_parent_another_user_owns_is_refused() {
+        let _g = env_guard();
         let parent = tempfile::tempdir().unwrap();
         crate::change_mode(parent.path(), 0o1777).unwrap();
         let someone_else = super::euid().wrapping_add(1);
@@ -20407,6 +20415,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_symlinked_parent_is_resolved_before_it_is_checked() {
+        let _g = env_guard();
         let top = tempfile::tempdir().unwrap();
         let real = top.path().join("real");
         std::fs::create_dir(&real).unwrap();
@@ -20433,6 +20442,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_symlinked_parent_into_an_open_directory_is_refused() {
+        let _g = env_guard();
         let open = tempfile::tempdir().unwrap();
         crate::change_mode(open.path(), 0o777).unwrap();
         let top = tempfile::tempdir().unwrap();
@@ -20451,6 +20461,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_private_parent_this_user_owns_is_used() {
+        let _g = env_guard();
         let parent = tempfile::tempdir().unwrap();
         crate::change_mode(parent.path(), 0o700).unwrap();
         let state = EphemeralState::create(parent.path()).unwrap();
@@ -20463,6 +20474,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_root_owned_sticky_tmp_is_used() {
+        let _g = env_guard();
         let tmp = std::fs::canonicalize("/tmp").unwrap();
         let meta = std::fs::symlink_metadata(&tmp).unwrap();
         assert!(
@@ -43343,6 +43355,7 @@ mod taken_first_tests {
 
     #[test]
     fn a_top_refusal_and_a_mint_collision_are_passed_over() {
+        let _env_read = crate::test_env_read_lock();
         assert!(taken_first(&anyhow::anyhow!(
             "claim: demo-aa01 is held by another seat"
         )));
@@ -43357,6 +43370,7 @@ mod taken_first_tests {
 
     #[test]
     fn a_refusal_word_in_a_deeper_cause_is_not_passed_over() {
+        let _env_read = crate::test_env_read_lock();
         let deep: anyhow::Result<()> = Err(anyhow::anyhow!("tracker: status claimed"));
         let deep = deep
             .context("claim: could not write the tracker")
@@ -60960,6 +60974,7 @@ mod tests {
 
     #[test]
     fn two_seat_dirs_of_one_name_are_apart() {
+        let _env_read = crate::test_env_read_lock();
         let first = SeatDir::new("same-name");
         let marker = first.path().join("marker");
         crate::write_file(&marker, b"first").unwrap();
@@ -60974,8 +60989,11 @@ mod tests {
 
     #[test]
     fn a_seat_dir_waits_out_a_home_another_test_set() {
+        let env_read = crate::test_env_read_lock();
         let other = SeatDir::new("other-home");
         let home = other.path().to_path_buf();
+        // The holder takes the writer, which waits for every reader.
+        drop(env_read);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
             let _env = crate::test_env_lock();
@@ -64338,6 +64356,7 @@ mod tests {
     /// it reads back to the id.
     #[test]
     fn a_ticket_id_with_a_slash_names_its_file_like_any_other() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(super::ledger_file_name("ljos-3n59"), "ljos-3n59.org");
         assert_eq!(
             super::ledger_file_name("Software/ljos-3n59"),
@@ -64361,6 +64380,7 @@ mod tests {
     /// different ticket is not that id's file.
     #[test]
     fn an_existing_layout_name_is_not_overwritten() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let board_dir = dir.path().join("Software/ljos");
         let issues = board_dir.join("issues");
@@ -64417,6 +64437,7 @@ mod tests {
     /// seat's file is lost.
     #[test]
     fn two_seats_settle_slash_files_and_keep_the_bytes() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let board_dir = root.join("Software/ljos");
@@ -64611,6 +64632,7 @@ mod tests {
     /// Prose under both caps, and any other command, passes.
     #[test]
     fn a_note_past_its_caps_is_refused_before_vissue_starts() {
+        let _env_read = crate::test_env_read_lock();
         let prose = format!("{}\n", "word ".repeat(60)).repeat(13);
         assert!(prose.len() <= super::NOTE_MAX_BYTES);
         assert!(super::check_note_size("proj-1", &prose).is_ok());
@@ -64888,6 +64910,7 @@ mod tests {
     /// process is still a zombie that nobody has waited for.
     #[test]
     fn a_flock_lifts_when_its_holder_exits_unreaped() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::io::AsRawFd as _;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("held.flock");
@@ -69328,6 +69351,7 @@ mod tests {
 
     #[test]
     fn a_reading_ack_says_was_and_now_not_closed() {
+        let _env_read = crate::test_env_read_lock();
         let first = serde_json::json!({
             "id": "a1", "kind": "habit", "ts": "2026-09-12T10:00:00.000Z",
             "due_at": "2026-09-19T10:00:00.000Z",
@@ -74824,6 +74848,7 @@ mod tests {
 
     #[test]
     fn the_newest_note_wins_when_the_minute_matches() {
+        let _env_read = crate::test_env_read_lock();
         let v = serde_json::json!({"logbook": [
             {"note": "playbook: release", "timestamp": "[2026-11-19 Wed 12:00]"},
             {"note": "playbook: feature", "timestamp": "[2026-11-19 Wed 12:00]"}
@@ -95018,6 +95043,7 @@ lesson, due yesterday, seat ada
 
     #[test]
     fn a_read_only_out_file_is_named_not_the_store() {
+        let _env_read = crate::test_env_read_lock();
         let err =
             anyhow::anyhow!("workflow: cannot write --out /mnt/ro/page.org: Read-only file system");
         assert_eq!(

@@ -1427,6 +1427,7 @@ mod tests {
     /// [`curl_config_files`].
     #[test]
     fn msdos_home_underscore_curlrc_stays_on_the_list() {
+        let _env_read = crate::test_env_read_lock();
         let notes = include_str!("cloud_hook.rs")
             .split("mod tests")
             .next()

@@ -1445,6 +1445,7 @@ mod tests {
 
     #[test]
     fn the_shared_matcher_refuses_every_word_the_excerpt_refused_before() {
+        let _env_read = crate::test_env_read_lock();
         let heads = ["", "my", "api_", "X-", "(", "\"", "AWS_SECRET_"];
         let marks = [
             "key=",

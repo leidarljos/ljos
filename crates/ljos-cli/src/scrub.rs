@@ -148,6 +148,7 @@ mod tests {
 
     #[test]
     fn diagnostics_are_the_shared_classification() {
+        let _env_read = crate::test_env_read_lock();
         for (text, class) in [
             ("/home/alice/notes.org", Class::Path),
             ("the password is hunter2", Class::Secret),

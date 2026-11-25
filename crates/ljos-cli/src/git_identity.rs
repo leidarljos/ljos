@@ -284,6 +284,7 @@ mod tests {
 
     #[test]
     fn the_identity_variables_and_email_are_unset() {
+        let _env_read = crate::test_env_read_lock();
         let edits = edits(&[("GIT_AUTHOR_NAME", b"a"), ("EMAIL", b"e@box")]).unwrap();
         for key in IDENTITY_ENV {
             assert_eq!(edits.get(*key), Some(&None), "{key}");
@@ -294,6 +295,7 @@ mod tests {
 
     #[test]
     fn identity_keys_are_user_author_committer_and_includes() {
+        let _env_read = crate::test_env_read_lock();
         for key in [
             "user.name",
             "User.Email",
@@ -321,6 +323,7 @@ mod tests {
 
     #[test]
     fn parameters_keep_their_other_entries_as_written() {
+        let _env_read = crate::test_env_read_lock();
         let raw: &[u8] = b"'core.abbrev=9' 'user.name'='bad name' 'author.email=a@box' \
 'committer.name'='c' 'x.y'='it'\\''s' 'core.bare' 'include.path=/x' 'k.v'=";
         assert_eq!(
@@ -331,12 +334,14 @@ mod tests {
 
     #[test]
     fn parameters_with_only_identity_are_unset() {
+        let _env_read = crate::test_env_read_lock();
         let raw: &[u8] = b"'user.name=bad' 'user.email'='bad@box'";
         assert_eq!(edits(&[(PARAMETERS, raw)]).unwrap()[PARAMETERS], None);
     }
 
     #[test]
     fn parameters_with_no_identity_are_left_alone() {
+        let _env_read = crate::test_env_read_lock();
         let raw: &[u8] = b"'core.abbrev=9'";
         assert!(!edits(&[(PARAMETERS, raw)])
             .unwrap()
@@ -345,6 +350,7 @@ mod tests {
 
     #[test]
     fn parameters_that_are_not_utf8_are_read_as_bytes() {
+        let _env_read = crate::test_env_read_lock();
         let raw: &[u8] = b"'ljos.probe=\xff' 'user.name=bytes' 'user.email'='b\xfe@box'";
         assert_eq!(
             after(&[(PARAMETERS, raw)], PARAMETERS).unwrap(),
@@ -354,6 +360,7 @@ mod tests {
 
     #[test]
     fn parameters_git_would_refuse_are_refused() {
+        let _env_read = crate::test_env_read_lock();
         for raw in [
             &b"user.name=bad"[..],
             b"'user.name=bad",
@@ -368,6 +375,7 @@ mod tests {
 
     #[test]
     fn counted_identity_entries_are_dropped_and_the_rest_renumbered() {
+        let _env_read = crate::test_env_read_lock();
         let env: &[(&str, &[u8])] = &[
             (COUNT, b"4"),
             ("GIT_CONFIG_KEY_0", b"author.name"),
@@ -390,6 +398,7 @@ mod tests {
 
     #[test]
     fn a_count_with_no_identity_is_left_alone() {
+        let _env_read = crate::test_env_read_lock();
         let edits = edits(&[
             (COUNT, b"1"),
             ("GIT_CONFIG_KEY_0", b"user.useConfigOnly"),
@@ -404,6 +413,7 @@ mod tests {
     /// and the allocation failure aborted ljos.
     #[test]
     fn a_huge_count_is_a_plain_refusal() {
+        let _env_read = crate::test_env_read_lock();
         for count in [
             &b"99999999999999"[..],
             b"2147483648",
@@ -418,6 +428,7 @@ mod tests {
 
     #[test]
     fn a_count_git_would_refuse_is_a_plain_refusal() {
+        let _env_read = crate::test_env_read_lock();
         for (env, said) in [
             (&[(COUNT, &b"x"[..])][..], "is not a count git reads"),
             (&[(COUNT, b"-1")], "is not a count git reads"),

@@ -2092,6 +2092,7 @@ mod tests {
 
     #[test]
     fn a_failed_public_restore_reports_both_pack_failures() {
+        let _env_read = crate::test_env_read_lock();
         let mut calls = 0;
         let err = post_mark_with_restore(Value::Null, Value::Null, |_| {
             calls += 1;
@@ -2110,6 +2111,7 @@ mod tests {
 
     #[test]
     fn the_row_written_back_after_a_refused_mark_is_not_public() {
+        let _env_read = crate::test_env_read_lock();
         let stored = serde_json::json!({
             "id": "abcd1234",
             "kind": "lesson",
@@ -2153,6 +2155,7 @@ mod tests {
 
     #[test]
     fn public_fields_keep_a_persona_set_and_validity() {
+        let _env_read = crate::test_env_read_lock();
         let stored = serde_json::json!({
             "id": "abcd1234",
             "kind": "lesson",

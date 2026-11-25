@@ -538,6 +538,7 @@ mod tests {
 
     #[test]
     fn one_written_escape_layer_is_read() {
+        let _env_read = crate::test_env_read_lock();
         for (written, want) in [
             ("a%\u{200b}2Db", "a-b"),
             ("a\u{ff05}2Db", "a-b"),
@@ -554,6 +555,7 @@ mod tests {
 
     #[test]
     fn quoted_printable_decodes_any_hex_pair_and_soft_breaks() {
+        let _env_read = crate::test_env_read_lock();
         for (written, want) in [
             ("=2Fhome=2Falice", "/home/alice"),
             ("10=2E0=2E0=2E5", "10.0.0.5"),
@@ -571,6 +573,7 @@ mod tests {
 
     #[test]
     fn every_html5_named_reference_is_decoded() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(read("&sol;home&sol;x&commat;y&period;z"), "/home/x@y.z");
         let canon = canonical("&acy;");
         assert_eq!(canon.outside, vec![('\u{0430}', 0)]);
@@ -579,6 +582,7 @@ mod tests {
 
     #[test]
     fn the_skeleton_folds_slashes_dots_and_look_alikes() {
+        let _env_read = crate::test_env_read_lock();
         for (written, want) in [
             ("\u{2215}home\u{2044}u\u{29f8}x", "/home/u/x"),
             ("\u{2571}a\u{30ce}b\u{2216}c", "/a/b\\c"),
@@ -598,6 +602,7 @@ mod tests {
 
     #[test]
     fn every_line_break_and_space_is_read_alike() {
+        let _env_read = crate::test_env_read_lock();
         let text = "a\rb\r\nc\u{0b}d\u{0c}e\u{85}f\u{2028}g\u{2029}h%0Ai";
         assert_eq!(read(text), "a\nb\nc\nd\ne\nf\ng\nh\ni");
         assert_eq!(read("a\u{a0}b\u{2003}c\u{3000}d\te"), "a b c d e");
@@ -606,6 +611,7 @@ mod tests {
 
     #[test]
     fn a_character_outside_the_allowlist_is_reported() {
+        let _env_read = crate::test_env_read_lock();
         for (text, outside) in [
             ("plain ascii", None),
             ("leiðarljós café", None),
@@ -625,12 +631,14 @@ mod tests {
 
     #[test]
     fn only_one_escape_layer_is_decoded() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(read("%252Fhome"), "%2Fhome");
         assert_eq!(read("&amp;sol;home"), "&sol;home");
     }
 
     #[test]
     fn a_decoded_character_spans_its_escape() {
+        let _env_read = crate::test_env_read_lock();
         let canon = canonical("x%2Dy");
         let dash = canon.decoded().iter().find(|mark| mark.c == '-').unwrap();
         assert_eq!((dash.start, dash.end), (1, 4));

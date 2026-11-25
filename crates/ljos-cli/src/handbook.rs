@@ -1975,6 +1975,7 @@ mod tests {
 
     #[test]
     fn parent_links_nest_and_blockers_order() {
+        let _env_read = crate::test_env_read_lock();
         let memories = [lesson(
             "m1",
             "Publish the signed archive.",
@@ -2016,6 +2017,7 @@ mod tests {
 
     #[test]
     fn tree_follows_blockers_only() {
+        let _env_read = crate::test_env_read_lock();
         let tickets = [
             ticket(
                 "Software-root",
@@ -2077,6 +2079,7 @@ mod tests {
 
     #[test]
     fn date_has_to_be_a_real_calendar_day() {
+        let _env_read = crate::test_env_read_lock();
         let memories = [lesson("m1", "Publish it.", &["project:Software"])];
         let mut options = options();
         options.trees.clear();
@@ -2115,6 +2118,7 @@ mod tests {
 
     #[test]
     fn a_blocker_cycle_is_named_and_the_export_continues() {
+        let _env_read = crate::test_env_read_lock();
         let nodes = ["a", "b", "c"].map(String::from).into();
         let edges = [
             ("a".into(), "b".into()),
@@ -2129,6 +2133,7 @@ mod tests {
 
     #[test]
     fn only_a_real_cycle_is_named() {
+        let _env_read = crate::test_env_read_lock();
         let nodes: BTreeSet<String> = ["a", "b", "c", "d", "e", "f", "g"].map(String::from).into();
         let edges: BTreeSet<(String, String)> = [
             ("a", "b"),
@@ -2152,6 +2157,7 @@ mod tests {
 
     #[test]
     fn a_long_blocker_chain_does_not_overflow_the_stack() {
+        let _env_read = crate::test_env_read_lock();
         let names: Vec<String> = (0..50_000).map(|n| format!("t{n:06}")).collect();
         let nodes: BTreeSet<String> = names.iter().cloned().collect();
         let edges: BTreeSet<(String, String)> = names
@@ -2165,6 +2171,7 @@ mod tests {
 
     #[test]
     fn a_node_downstream_of_a_cycle_is_not_called_cyclic() {
+        let _env_read = crate::test_env_read_lock();
         let tickets = [
             ticket(
                 "Software-c",
@@ -2202,6 +2209,7 @@ mod tests {
 
     #[test]
     fn disjoint_cycles_are_one_line_each() {
+        let _env_read = crate::test_env_read_lock();
         let mut rows = Vec::new();
         for (id, waits) in [
             ("Software-a", "Software-b"),
@@ -2233,6 +2241,7 @@ mod tests {
 
     #[test]
     fn a_cross_project_blocker_is_opaque() {
+        let _env_read = crate::test_env_read_lock();
         let tickets = [
             ticket(
                 "Software-root",
@@ -2252,6 +2261,7 @@ mod tests {
 
     #[test]
     fn an_unmarked_ticket_is_not_exported_and_is_an_external_dependency() {
+        let _env_read = crate::test_env_read_lock();
         let mut hidden = ticket(
             "Software-hidden",
             "Software",
@@ -2288,6 +2298,7 @@ mod tests {
 
     #[test]
     fn the_title_comes_from_a_fixed_string_or_a_checked_flag() {
+        let _env_read = crate::test_env_read_lock();
         let rows = [lesson("m1", "Publish it.", &["project:Software"])];
         let mut options = options();
         options.trees.clear();
@@ -2306,6 +2317,7 @@ mod tests {
 
     #[test]
     fn tags_narrow_the_project() {
+        let _env_read = crate::test_env_read_lock();
         let memories = [
             lesson("bare", "Bare tag only.", &["release"]),
             lesson("other", "Other project.", &["project:Other", "tag:release"]),
@@ -2335,6 +2347,7 @@ mod tests {
 
     #[test]
     fn text_stays_verbatim_and_a_marked_secret_refuses_everything() {
+        let _env_read = crate::test_env_read_lock();
         let memories = [
             lesson("clean", "- keep the leading mark", &["project:Software"]),
             lesson("colon", ":keep this colon", &["project:Software"]),
@@ -2424,6 +2437,7 @@ mod tests {
 
     #[test]
     fn an_unmarked_row_is_never_exported() {
+        let _env_read = crate::test_env_read_lock();
         let rows = [
             lesson("a", "Sign the archive.", &["project:Software"]),
             unmarked(lesson("b", "Hide this plain note.", &["project:Software"])),
@@ -2444,6 +2458,7 @@ mod tests {
 
     #[test]
     fn cancelled_stays_cancelled_and_ids_are_links() {
+        let _env_read = crate::test_env_read_lock();
         let tickets = [ticket(
             "Software-root",
             "Software",
@@ -2469,6 +2484,7 @@ mod tests {
 
     #[test]
     fn a_pack_id_is_shown_and_a_private_id_is_not() {
+        let _env_read = crate::test_env_read_lock();
         let screen = Screen::default();
         let pack = "0123456789abcdef0123456789abcdef";
         assert_eq!(shown_id(true, pack, &screen), Some(pack));
@@ -2493,11 +2509,13 @@ mod tests {
 
     #[test]
     fn dot_ids_are_quoted() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(dot_id("a\"b"), "\"a\\\"b\"");
     }
 
     #[test]
     fn inline_org_syntax_is_detected_and_plain_text_is_not() {
+        let _env_read = crate::test_env_read_lock();
         for markup in [
             "[[https://example.com/notes][the notes]]",
             "[[https://example.com/notes][the notes]",
@@ -2540,6 +2558,7 @@ mod tests {
 
     #[test]
     fn an_error_does_not_repeat_a_value_that_is_not_public() {
+        let _env_read = crate::test_env_read_lock();
         let memories = [lesson("a", "Sign the archive.", &["project:Software"])];
         let mut options = options();
         options.trees.clear();
@@ -2574,6 +2593,7 @@ mod tests {
 
     #[test]
     fn a_marked_vocabulary_word_or_seat_name_refuses_the_export() {
+        let _env_read = crate::test_env_read_lock();
         let plain = lesson("plain", "Sign the archive.", &["project:Software"]);
         let mut options = options();
         options.trees.clear();
@@ -2692,6 +2712,7 @@ mod tests {
 
     #[test]
     fn a_marked_ipv6_address_refuses_every_surface() {
+        let _env_read = crate::test_env_read_lock();
         for address in IPV6 {
             assert_refused_on_every_surface(address, &format!("Reach the box at {address} today."));
         }
@@ -2815,6 +2836,7 @@ mod tests {
 
     #[test]
     fn multiline_text_cannot_inject_org() {
+        let _env_read = crate::test_env_read_lock();
         for ids in [false, true] {
             let plain = render_multiline(ids, "A plain line\nand a second one");
             let hostile = render_multiline(ids, HOSTILE);
@@ -2837,6 +2859,7 @@ mod tests {
 
     #[test]
     fn marked_inline_org_syntax_refuses_every_surface() {
+        let _env_read = crate::test_env_read_lock();
         for markup in [
             "[[https://example.com/notes][the notes]]",
             "[[https://example.com/notes][the notes]",
@@ -2854,6 +2877,7 @@ mod tests {
 
     #[test]
     fn planning_and_lookalike_structure_lines_get_a_backslash() {
+        let _env_read = crate::test_env_read_lock();
         for line in [
             "SCHEDULED: <2026-01-02 Fri>",
             "  deadline: <2026-01-03 Sat>",
@@ -2881,6 +2905,7 @@ mod tests {
 
     #[test]
     fn accepted_text_is_written_as_it_was() {
+        let _env_read = crate::test_env_read_lock();
         let text = "Read src_dir, a << b and [x] and https://example.com/a_b first.";
         let memories = [lesson("m1", text, &["project:Software"])];
         let mut options = options();
@@ -2891,6 +2916,7 @@ mod tests {
 
     #[test]
     fn a_workflow_name_with_a_line_break_stays_one_link() {
+        let _env_read = crate::test_env_read_lock();
         let flows = [flow("no\n* tes]]t\n#+title: x", "Notes")];
         let mut options = options();
         options.trees.clear();
@@ -2909,6 +2935,7 @@ mod tests {
 
     #[test]
     fn the_workflow_header_alone_marks_and_titles() {
+        let _env_read = crate::test_env_read_lock();
         assert!(workflow_public("#+public: yes\n"));
         assert!(workflow_public(
             "# note\n\n#+TITLE: x\n#+public: yes\n* h\n"
@@ -2954,6 +2981,7 @@ mod tests {
 
     #[test]
     fn a_failed_or_cut_short_write_leaves_the_old_file_whole() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("book.org");
         #[expect(
@@ -2983,6 +3011,7 @@ mod tests {
 
     #[test]
     fn a_link_in_the_way_is_replaced_and_never_written_through() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
         let victim = dir.path().join("victim.org");
@@ -3015,6 +3044,7 @@ mod tests {
 
     #[test]
     fn a_directory_out_names_faq_org_inside_it_and_a_link_to_one_is_not_entered() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(file_for(dir.path()), dir.path().join("faq.org"));
@@ -3050,6 +3080,7 @@ mod tests {
 
     #[test]
     fn a_hidden_id_is_redacted_whatever_follows_or_disguises_it() {
+        let _env_read = crate::test_env_read_lock();
         let spellings = [
             "Software-quiet-followup",
             "Software-quiet_2",
@@ -3118,6 +3149,7 @@ mod tests {
 
     #[test]
     fn a_hidden_id_is_redacted_in_every_published_string() {
+        let _env_read = crate::test_env_read_lock();
         let tickets = hidden_in_world();
         let mut lesson = lesson(
             "m1",
@@ -3166,6 +3198,7 @@ mod tests {
 
     #[test]
     fn a_marked_ticket_of_the_project_is_named_outside_a_ticket() {
+        let _env_read = crate::test_env_read_lock();
         let tickets = hidden_in_world();
         let note = lesson(
             "m1",
@@ -3191,6 +3224,7 @@ mod tests {
 
     #[test]
     fn a_token_of_a_known_project_with_an_id_suffix_is_redacted() {
+        let _env_read = crate::test_env_read_lock();
         let tickets = hidden_in_world();
         let options = tracker_options();
         for token in [
@@ -3211,6 +3245,7 @@ mod tests {
 
     #[test]
     fn the_tracker_id_length_and_known_projects_set_the_shape() {
+        let _env_read = crate::test_env_read_lock();
         let tickets = hidden_in_world();
         let mut options = tracker_options();
         options.id_lengths = vec![6];
@@ -3227,6 +3262,7 @@ mod tests {
 
     #[test]
     fn ordinary_hyphenated_words_and_published_ids_are_not_redacted() {
+        let _env_read = crate::test_env_read_lock();
         let mut options = tracker_options();
         options.projects = vec!["acme".into()];
         let words = [
@@ -3272,6 +3308,7 @@ mod tests {
 
     #[test]
     fn a_note_does_not_name_a_ticket_the_page_leaves_out() {
+        let _env_read = crate::test_env_read_lock();
         let mut hidden = ticket("Software-private", "Software", "TODO", "Quiet", None, &[]);
         hidden.public = false;
         let mut other = ticket("Other-1", "Other", "TODO", "Foreign", None, &[]);
@@ -3308,6 +3345,7 @@ mod tests {
 
     #[test]
     fn a_marked_private_workflow_name_refuses_and_an_unmarked_one_is_left_out() {
+        let _env_read = crate::test_env_read_lock();
         let mut hidden = flow("hidden", "Hidden train");
         hidden.public = false;
         let workflows = [flow("release", "Release train"), hidden];

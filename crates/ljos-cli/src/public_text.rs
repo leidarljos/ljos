@@ -3979,6 +3979,7 @@ mod tests {
 
     #[test]
     fn each_class_has_a_name() {
+        let _env_read = crate::test_env_read_lock();
         let cases = [
             ("ask Claude", Class::Term, "term"),
             ("ask saddle", Class::Seat, "seat"),
@@ -4002,6 +4003,7 @@ mod tests {
 
     #[test]
     fn the_same_text_gets_the_same_answer_as_a_line_and_as_a_block() {
+        let _env_read = crate::test_env_read_lock();
         let screen = bare();
         let text = "Tune 3.5 ms latency";
         assert_eq!(classify(text, &screen), None);
@@ -4022,6 +4024,7 @@ mod tests {
 
     #[test]
     fn an_address_on_one_line_is_refused_in_every_form() {
+        let _env_read = crate::test_env_read_lock();
         for text in [
             "Use 10.23.45.67 for it.",
             "at 127.0.0.1",
@@ -4047,6 +4050,7 @@ mod tests {
 
     #[test]
     fn defanging_keeps_following_ipv6_text_aligned() {
+        let _env_read = crate::test_env_read_lock();
         let screen = bare();
         for mark in ["[.]", "(.)", "{.}", "\\.", "[dot]", " dot "] {
             let prefix = format!("1{mark}2");
@@ -4061,6 +4065,7 @@ mod tests {
 
     #[test]
     fn a_number_is_read_as_inet_aton_reads_it() {
+        let _env_read = crate::test_env_read_lock();
         for (text, value) in [
             ("10.0.0.1", Some(0x0a00_0001)),
             ("012.0.0.1", Some(0x0a00_0001)),
@@ -4091,6 +4096,7 @@ mod tests {
 
     #[test]
     fn a_private_number_in_any_inet_aton_form_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         for text in [
             "00012.0.0.1",
             "0000000012.0.0.1",
@@ -4165,6 +4171,7 @@ mod tests {
 
     #[test]
     fn a_private_quad_after_a_glued_v_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         for text in [
             "v10.0.0.1",
             "V127.0.0.1",
@@ -4181,6 +4188,7 @@ mod tests {
 
     #[test]
     fn a_capitalised_hex_group_does_not_hide_an_address() {
+        let _env_read = crate::test_env_read_lock();
         for text in [
             "fd00:Beef::1",
             "fc00:Beef::1",
@@ -4229,6 +4237,7 @@ mod tests {
 
     #[test]
     fn an_edge_double_colon_after_any_other_character_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         for text in ["addr=::", "ip=::", "addr=::1", "::bad", "`::a`"] {
             assert_all_screens_refuse(text);
         }
@@ -4259,6 +4268,7 @@ mod tests {
 
     #[test]
     fn a_non_public_address_is_not_hidden_by_a_separator_or_word_edge() {
+        let _env_read = crate::test_env_read_lock();
         for text in [
             "Iface::Fe80::Be",
             "crate::fd00::1",
@@ -4276,6 +4286,7 @@ mod tests {
 
     #[test]
     fn a_private_quad_is_not_hidden_by_version_punctuation() {
+        let _env_read = crate::test_env_read_lock();
         for text in [
             "1..10.0.0.1",
             "v1..10.0.0.1",
@@ -4290,6 +4301,7 @@ mod tests {
 
     #[test]
     fn a_letter_or_hex_digit_after_a_literal_does_not_hide_it() {
+        let _env_read = crate::test_env_read_lock();
         for text in [
             "10.0.0.1x",
             "192.168.1.1s",
@@ -4313,6 +4325,7 @@ mod tests {
 
     #[test]
     fn a_rust_path_with_a_digit_in_its_first_segment_is_not_an_address() {
+        let _env_read = crate::test_env_read_lock();
         let screen = bare();
         for text in [
             "use bb8::{Pool};",
@@ -4331,6 +4344,7 @@ mod tests {
 
     #[test]
     fn every_non_public_range_is_refused_in_any_case_and_after_any_separator() {
+        let _env_read = crate::test_env_read_lock();
         let spellings = [
             "127.0.0.1",
             "::1",
@@ -4476,6 +4490,7 @@ mod tests {
 
     #[test]
     fn a_digit_free_ipv6_literal_in_a_code_span_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         for text in ["`::a`", "=::a=", "run `dead::beef` now"] {
             assert_all_screens_refuse(text);
         }
@@ -4483,6 +4498,7 @@ mod tests {
 
     #[test]
     fn an_ipv6_literal_after_a_dot_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         for text in ["x.::a", "x..::a", "x.dead::beef"] {
             assert_all_screens_refuse(text);
         }
@@ -4490,6 +4506,7 @@ mod tests {
 
     #[test]
     fn only_a_contiguous_netmask_is_exempt() {
+        let _env_read = crate::test_env_read_lock();
         for text in ["255.0.255.0", "255.255.0.255", "255.254.255.0"] {
             assert_all_screens_refuse(text);
         }
@@ -4503,6 +4520,7 @@ mod tests {
 
     #[test]
     fn an_address_word_after_a_short_private_number_refuses_it() {
+        let _env_read = crate::test_env_read_lock();
         for text in ["127.1 host", "10.1 is the gateway", "167772161 server"] {
             assert_all_screens_refuse(text);
         }
@@ -4516,6 +4534,7 @@ mod tests {
 
     #[test]
     fn an_underscore_is_a_boundary_around_an_ipv6_address() {
+        let _env_read = crate::test_env_read_lock();
         for text in ["_2001:db8::1_", "_[2001:db8::1]:443_", "_fe80::1_"] {
             assert_all_screens_refuse(text);
         }
@@ -4531,6 +4550,7 @@ mod tests {
     /// broken across lines on purpose is out of scope.
     #[test]
     fn an_address_split_across_lines_is_not_flagged() {
+        let _env_read = crate::test_env_read_lock();
         let screen = bare();
         for text in [
             "see 10.0.0\n5 in the lab",
@@ -4548,6 +4568,7 @@ mod tests {
 
     #[test]
     fn ordinary_dotted_numbers_stay_clean() {
+        let _env_read = crate::test_env_read_lock();
         let screen = bare();
         for text in [
             "0.45.3",
@@ -4581,6 +4602,7 @@ mod tests {
 
     #[test]
     fn the_export_and_the_excerpt_read_one_matcher() {
+        let _env_read = crate::test_env_read_lock();
         let screen = bare();
         for text in [
             concat!("Use s", "k-abc for the bench."),
@@ -4605,6 +4627,7 @@ mod tests {
 
     #[test]
     fn the_export_and_the_excerpt_agree_word_for_word_but_where_documented() {
+        let _env_read = crate::test_env_read_lock();
         let screen = bare();
         let both = [
             "key=x",
@@ -4661,6 +4684,7 @@ mod tests {
 
     #[test]
     fn a_run_cut_over_lines_is_found_and_two_words_are_not() {
+        let _env_read = crate::test_env_read_lock();
         let screen = bare();
         let found = scan(
             &[
@@ -4684,6 +4708,7 @@ mod tests {
 
     #[test]
     fn a_secret_split_by_a_line_break_marks_both_lines() {
+        let _env_read = crate::test_env_read_lock();
         let found = scan(
             &[Line::text("AKI"), Line::text("AIOSFODNN7EXAMPLE")],
             &bare(),
@@ -4703,6 +4728,7 @@ mod tests {
 
     #[test]
     fn every_line_of_a_private_key_block_is_flagged() {
+        let _env_read = crate::test_env_read_lock();
         let lines = [
             "keep",
             concat!("-----BEGIN PRIVATE", " KEY-----"),
@@ -4718,6 +4744,7 @@ mod tests {
 
     #[test]
     fn an_id_made_of_hex_digits_is_an_opaque_key_not_a_credential() {
+        let _env_read = crate::test_env_read_lock();
         let id = "0123456789abcdef0123456789abcdef0123";
         assert_eq!(classify_id(id, &bare()), None);
         assert!(refuses(id, &bare()));
@@ -4725,6 +4752,7 @@ mod tests {
 
     #[test]
     fn a_seat_name_is_refused_as_a_word() {
+        let _env_read = crate::test_env_read_lock();
         let screen = Screen {
             seats: vec!["saddle".into()],
             ..Screen::default()
@@ -4735,6 +4763,7 @@ mod tests {
 
     #[test]
     fn the_detection_copy_drops_invisible_characters() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(detection_copy("g\u{200b}pt \u{ff0a}"), "gpt *");
     }
 }
