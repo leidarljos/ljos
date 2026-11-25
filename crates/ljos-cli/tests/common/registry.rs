@@ -2,45 +2,109 @@
 //! and in a sitting gets an answer without the network.
 //!
 //! A crate is answered with the version the program of that name on the
-//! seat's `PATH` prints, which is what an up-to-date seat reads. Any other
-//! URL fails the way curl does when the host does not resolve. Every URL
-//! asked is written to `bin/.curl-asked`, one a line.
+//! seat's `PATH` prints, which is what an up-to-date seat reads. A call
+//! that names anything but one crate's version fails the way curl does
+//! when the host does not resolve. The stand-in reads curl's arguments:
+//! every URL a call names, positional or after `--url`, is written to
+//! `bin/.curl-asked`, one line a call with its URLs in order.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const CRATES: &str = "https://crates.io/api/v1/crates/";
 
+/// Short options of curl that take the next argument as their value.
+const SHORT_VALUED: &str = "AbcdDeEFHKmoQrTuUwxXyYz";
+
+/// Long options of curl that take the next argument as their value, other
+/// than `--url`.
+const LONG_VALUED: &[&str] = &[
+    "--cacert",
+    "--capath",
+    "--cert",
+    "--config",
+    "--connect-timeout",
+    "--connect-to",
+    "--cookie",
+    "--cookie-jar",
+    "--data",
+    "--data-binary",
+    "--data-raw",
+    "--data-urlencode",
+    "--dns-servers",
+    "--dump-header",
+    "--form",
+    "--header",
+    "--interface",
+    "--key",
+    "--limit-rate",
+    "--max-filesize",
+    "--max-time",
+    "--output",
+    "--proxy",
+    "--proxy-user",
+    "--quote",
+    "--range",
+    "--referer",
+    "--request",
+    "--resolve",
+    "--retry",
+    "--retry-delay",
+    "--retry-max-time",
+    "--speed-limit",
+    "--speed-time",
+    "--time-cond",
+    "--upload-file",
+    "--user",
+    "--user-agent",
+    "--write-out",
+];
+
 fn log_of(bin: &Path) -> PathBuf {
     bin.join(".curl-asked")
 }
 
-/// The URLs the seat asked the stand-in for, in order.
+/// The URLs each call of the stand-in named, one entry a call, in order.
 #[allow(dead_code)]
-pub fn asked(bin: &Path) -> Vec<String> {
+pub fn asked(bin: &Path) -> Vec<Vec<String>> {
     match std::fs::read_to_string(log_of(bin)) {
-        Ok(text) => text.lines().map(str::to_owned).collect(),
+        Ok(text) => text
+            .lines()
+            .map(|call| call.split_whitespace().map(str::to_owned).collect())
+            .collect(),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(err) => panic!("read {}: {err}", log_of(bin).display()),
     }
 }
 
-/// Fails when the seat asked curl for anything but a crates.io lookup, or
-/// asked for none: either way the seat read the network or skipped the
-/// lookup this stand-in answers.
+/// Whether `url` is crates.io's endpoint for one crate's versions, and no
+/// other path under it.
+#[allow(dead_code)]
+fn version_endpoint(url: &str) -> bool {
+    url.strip_prefix(CRATES).is_some_and(|name| {
+        name.starts_with(|c: char| c.is_ascii_alphabetic())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    })
+}
+
+/// Fails when a call to curl named anything but one crate's version
+/// endpoint, or when the seat made no call: either way the seat read the
+/// network or skipped the lookup this stand-in answers.
 #[allow(dead_code)]
 pub fn assert_only_registry(bin: &Path, place: &str) {
-    let asked = asked(bin);
-    let off: Vec<&String> = asked
+    let calls = asked(bin);
+    let off: Vec<&Vec<String>> = calls
         .iter()
-        .filter(|url| !url.starts_with(CRATES))
+        .filter(|urls| !matches!(urls.as_slice(), [url] if version_endpoint(url)))
         .collect();
     assert!(
         off.is_empty(),
-        "{place}: the seat asked curl for a URL this test answers from no stand-in: {off:?}"
+        "{place}: the seat asked curl for something other than one crates.io version: {off:?}"
     );
     assert!(
-        !asked.is_empty(),
+        !calls.is_empty(),
         "{place}: the seat asked crates.io for no version, so doctor's lookup did not run"
     );
 }
@@ -54,11 +118,50 @@ pub fn stand_in(bin: &Path, delay: Duration) {
     };
     let body = format!(
         r#"#!/bin/sh
-for arg; do url=$arg; done
-printf '%s\n' "$url" >> '{log}'
+set -f
+urls=
+next=
+ended=
+for arg; do
+  if [ -n "$next" ]; then
+    [ "$next" = url ] && urls="$urls $arg"
+    next=
+    continue
+  fi
+  if [ -n "$ended" ]; then
+    urls="$urls $arg"
+    continue
+  fi
+  case $arg in
+    --) ended=1 ;;
+    --url) next=url ;;
+    --url=*) urls="$urls ${{arg#--url=}}" ;;
+    --*=*) ;;
+    {long}) next=value ;;
+    --*) ;;
+    -?*)
+      rest=${{arg#-}}
+      while [ -n "$rest" ]; do
+        flag=${{rest%"${{rest#?}}"}}
+        rest=${{rest#?}}
+        case $flag in
+          [{short}]) [ -z "$rest" ] && next=value; break ;;
+        esac
+      done ;;
+    *) urls="$urls $arg" ;;
+  esac
+done
+printf '%s\n' "${{urls# }}" >> '{log}'
+set -- $urls
+url=$1
+[ $# -eq 1 ] || url=
 case $url in
   {crates}*) name=${{url#{crates}}} ;;
-  *) echo "curl: (6) Could not resolve host: this test seat has no network" >&2; exit 6 ;;
+  *) name= ;;
+esac
+case $name in
+  ''|[!A-Za-z]*|*[!A-Za-z0-9_-]*)
+    echo "curl: (6) Could not resolve host: this test seat has no network" >&2; exit 6 ;;
 esac
 case $name in
   *-cli) program=${{name%-cli}} ;;
@@ -76,6 +179,8 @@ printf '{{"crate":{{"name":"%s","max_version":"%s"}}}}\n' "$name" "$version"
         fallback = env!("CARGO_PKG_VERSION"),
         log = log_of(bin).display(),
         crates = CRATES,
+        long = LONG_VALUED.join("|"),
+        short = SHORT_VALUED,
     );
     std::fs::create_dir_all(bin).unwrap_or_else(|err| panic!("create {}: {err}", bin.display()));
     ljos_cli::install_executable(&bin.join("curl"), body)

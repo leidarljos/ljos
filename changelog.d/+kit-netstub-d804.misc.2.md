@@ -1,0 +1,1 @@
+The crates.io stand-in in the first-run tests reads curl's arguments and writes down every URL a call names, and the walks fail when a call names more than one URL or anything but one crate's version endpoint, such as a path under the crate.

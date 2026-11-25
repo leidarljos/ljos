@@ -504,6 +504,62 @@ fn the_remember_sample_uses_a_neutral_host() {
     }
 }
 
+/// The crates.io stand-in passes doctor's own lookup, and fails a call
+/// that names another URL beside it, a path under the crate, or a URL
+/// given with `--url`.
+#[test]
+fn the_curl_stand_in_reads_every_url_a_call_names() {
+    let lookup = "https://crates.io/api/v1/crates/ljos";
+    let cases: &[(&[&str], bool)] = &[
+        (
+            &["-sS", "-A", "ljos-doctor", "--max-time", "3", lookup],
+            true,
+        ),
+        (&["-sSm", "3", "--user-agent=ljos-doctor", lookup], true),
+        (
+            &[
+                "-sS",
+                "https://github.com/leidarljos/ljos/releases/latest",
+                lookup,
+            ],
+            false,
+        ),
+        (
+            &["-sS", "https://crates.io/api/v1/crates/ljos/owners"],
+            false,
+        ),
+        (
+            &["-sS", "https://crates.io/api/v1/crates/ljos?page=2"],
+            false,
+        ),
+        (
+            &["--url", "https://github.com/leidarljos/ljos", lookup],
+            false,
+        ),
+        (&["-sS", "-A", "ljos-doctor"], false),
+    ];
+    for (args, passes) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        registry::stand_in(&bin, Duration::ZERO);
+        let said = ljos_cli::program(bin.join("curl"))
+            .unwrap_or_else(|err| panic!("the stand-in: {err}"))
+            .args(*args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|err| panic!("run the stand-in: {err}"));
+        assert_eq!(
+            said.status.success(),
+            *passes,
+            "{args:?} answered {}",
+            String::from_utf8_lossy(&said.stdout)
+        );
+        let checked =
+            std::panic::catch_unwind(|| registry::assert_only_registry(&bin, "a stand-in call"));
+        assert_eq!(checked.is_ok(), *passes, "{args:?}");
+    }
+}
+
 fn repo_file(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
