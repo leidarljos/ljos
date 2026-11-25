@@ -766,6 +766,13 @@ fn curlrc_files(root: &Path) -> Vec<CurlrcFile> {
         env: vec![("XDG_CONFIG_HOME", xdg), ("HOME", blank.clone())],
         passwd_home: None,
     });
+    let xdg_no_dot = make_dir(root, "xdg-no-dot");
+    files.push(CurlrcFile {
+        label: "XDG_CONFIG_HOME/curlrc",
+        file: xdg_no_dot.join("curlrc"),
+        env: vec![("XDG_CONFIG_HOME", xdg_no_dot), ("HOME", blank.clone())],
+        passwd_home: None,
+    });
     let home = make_dir(root, "home");
     files.push(CurlrcFile {
         label: "HOME/.curlrc",
@@ -815,7 +822,90 @@ fn curlrc_files(root: &Path) -> Vec<CurlrcFile> {
         env: vec![("HOME", blank)],
         passwd_home: Some(passwd_home),
     });
+    let passwd_home_no_home = make_dir(root, "passwd-home-no-home");
+    files.push(CurlrcFile {
+        label: "passwd home .curlrc with HOME unset",
+        file: passwd_home_no_home.join(".curlrc"),
+        env: Vec::new(),
+        passwd_home: Some(passwd_home_no_home),
+    });
     files
+}
+
+/// A curl release as `major.minor.patch`.
+type CurlVersion = (u32, u32, u32);
+
+/// The curl releases that read each place [`curlrc_files`] plants, as
+/// `(label, first release, first release that no longer reads it)`. From
+/// `findfile` in curl's `src/tool_findfile.c`, and `homedir` in
+/// `src/tool_homedir.c` before 7.81.0:
+///
+/// - 7.73.0 reads `XDG_CONFIG_HOME/.curlrc` (curl commit 4be1f8dc0, #5837).
+/// - 7.81.0 tries the directory of each variable in turn, then the passwd
+///   home. Before it, the first of `CURL_HOME`, `XDG_CONFIG_HOME` holding a
+///   `.curlrc`, `HOME` and the passwd home was the only place read, so a
+///   set `HOME` hid the passwd home (2be1aa619, #8035).
+/// - 7.82.0 reads `.config/curlrc` under `CURL_HOME` and `HOME` when
+///   `XDG_CONFIG_HOME` is unset or empty (764e4f066, #8213).
+/// - 8.10.0 reads `XDG_CONFIG_HOME/curlrc`, without the dot, in place of
+///   `XDG_CONFIG_HOME/.curlrc` (26e9d3a89, #14600).
+///
+/// `CURL_HOME/.curlrc`, `HOME/.curlrc` and the passwd home with `HOME`
+/// unset are read by every release.
+const CURLRC_READ_BY: &[(&str, CurlVersion, Option<CurlVersion>)] = &[
+    ("CURL_HOME/.curlrc", (0, 0, 0), None),
+    ("XDG_CONFIG_HOME/.curlrc", (7, 73, 0), Some((8, 10, 0))),
+    ("XDG_CONFIG_HOME/curlrc", (8, 10, 0), None),
+    ("HOME/.curlrc", (0, 0, 0), None),
+    ("CURL_HOME/.config/curlrc", (7, 82, 0), None),
+    ("HOME/.config/curlrc", (7, 82, 0), None),
+    (
+        "HOME/.config/curlrc with XDG_CONFIG_HOME empty",
+        (7, 82, 0),
+        None,
+    ),
+    (
+        "CURL_HOME/.config/curlrc with XDG_CONFIG_HOME empty",
+        (7, 82, 0),
+        None,
+    ),
+    ("passwd home .curlrc", (7, 81, 0), None),
+    ("passwd home .curlrc with HOME unset", (0, 0, 0), None),
+];
+
+fn curl_reads(label: &str, version: CurlVersion) -> bool {
+    let Some((_, since, until)) = CURLRC_READ_BY.iter().find(|(name, ..)| *name == label) else {
+        panic!("{label} is not in CURLRC_READ_BY");
+    };
+    version >= *since && until.is_none_or(|until| version < until)
+}
+
+/// The release `curl --version` names on its first line, such as
+/// `curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0 …`.
+fn curl_version(curl: &str) -> CurlVersion {
+    let said = ljos_cli::program(curl)
+        .unwrap_or_else(|err| panic!("{curl}: {err}"))
+        .arg("--version")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|err| panic!("{curl} --version: {err}"));
+    let text = String::from_utf8_lossy(&said.stdout);
+    let first = text.lines().next().unwrap_or("");
+    let number = |part: Option<&str>| -> Option<u32> {
+        let digits: String = part?.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    };
+    let mut parts = first.split_whitespace().nth(1).unwrap_or("").split('.');
+    match (
+        number(parts.next()),
+        number(parts.next()),
+        number(parts.next()),
+    ) {
+        (Some(major), Some(minor), Some(patch)) => (major, minor, patch),
+        _ => panic!("{curl} --version names no release: {first:?}"),
+    }
 }
 
 fn passwd_naming_root(home: &Path) -> String {
@@ -907,9 +997,11 @@ fn curl_body(said: &std::process::Output) -> Result<String, String> {
 
 /// Doctor's crates.io curl starts with the flags in [`ljos_cli::CRATE_CURL_FLAGS`].
 /// A curlrc `url=` in every file curl reads is absent from that run, and
-/// the same arguments without a leading `-q` or `--disable` do fetch it.
+/// the same arguments without a leading `-q` or `--disable` do fetch it
+/// from each place [`CURLRC_READ_BY`] says this curl reads.
 #[test]
 fn a_curlrc_url_in_every_file_curl_reads_is_not_fetched() {
+    let version = curl_version("/usr/bin/curl");
     let root = tempfile::tempdir().unwrap_or_else(|err| panic!("root: {err}"));
     let asked = root.path().join("asked");
     let hidden = root.path().join("hidden");
@@ -928,14 +1020,21 @@ fn a_curlrc_url_in_every_file_curl_reads_is_not_fetched() {
         }
         ljos_cli::write_file(&place.file, &conf)
             .unwrap_or_else(|err| panic!("write {}: {err}", place.file.display()));
-        let loud = match curl_body(&run_curl(&flags_for(&asked_url, false), &place)) {
-            Ok(text) if text.contains(CURLRC_BODY) && text.contains(ASKED_BODY) => None,
-            Ok(text) => Some(format!(
-                "{}: without -q, curl did not read {}\n{text}",
-                place.label,
-                place.file.display()
-            )),
-            Err(err) => Some(format!("{}: control curl failed: {err}", place.label)),
+        let loud = if curl_reads(place.label, version) {
+            match curl_body(&run_curl(&flags_for(&asked_url, false), &place)) {
+                Ok(text) if text.contains(CURLRC_BODY) && text.contains(ASKED_BODY) => None,
+                Ok(text) => Some(format!(
+                    "{}: without -q, curl {}.{}.{} did not read {}\n{text}",
+                    place.label,
+                    version.0,
+                    version.1,
+                    version.2,
+                    place.file.display()
+                )),
+                Err(err) => Some(format!("{}: control curl failed: {err}", place.label)),
+            }
+        } else {
+            None
         };
         if let Some(err) = loud {
             failures.push(err);
