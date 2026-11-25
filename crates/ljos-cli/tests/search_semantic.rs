@@ -264,6 +264,7 @@ fn a_busy_writer_names_the_reason_and_the_next_command() {
     )]
     let warmed = Command::new("curl")
         .args([
+            "-q",
             "--max-time",
             "5",
             "--silent",
@@ -291,7 +292,7 @@ fn a_busy_writer_names_the_reason_and_the_next_command() {
             reason = "starts a program outside git hook code"
         )]
         let status = Command::new("curl")
-            .args(["--max-time", "2", "--silent", &status_url])
+            .args(["-q", "--max-time", "2", "--silent", &status_url])
             .output()
             .expect("status");
         let body = String::from_utf8_lossy(&status.stdout);
@@ -312,6 +313,7 @@ fn a_busy_writer_names_the_reason_and_the_next_command() {
         )]
         let _ = Command::new("curl")
             .args([
+                "-q",
                 "--max-time",
                 "20",
                 "--silent",
