@@ -212,6 +212,30 @@ fn the_hook_server_says_in_one_line_that_it_has_no_place_for_its_socket() {
     );
 }
 
+/// A private `TMPDIR` the runtime directory cannot be made in passes the
+/// check that does not make it. The hook server still says in one line
+/// that it has no place for its socket.
+#[test]
+fn the_hook_server_says_so_when_its_runtime_directory_cannot_be_made() {
+    let seat = Seat::new();
+    let closed = seat.root.path().join("closed");
+    std::fs::create_dir(&closed).unwrap();
+    ljos_cli::change_mode(&closed, 0o500).unwrap();
+    let mut cmd = seat.ljos(false, &["hookd"]);
+    cmd.env("TMPDIR", &closed);
+    let (out, _) = seat.run(cmd, "");
+    let err = seat.stderr_of(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert_eq!(
+        err.trim_end(),
+        format!(
+            "ljos hookd: no runtime directory for the hook server's socket, no private directory could be made in {}; set XDG_RUNTIME_DIR or HOME to an absolute path",
+            closed.canonicalize().unwrap().display()
+        )
+    );
+    assert_eq!(entries(&closed), 0);
+}
+
 #[test]
 fn a_hook_call_is_judged_at_once_with_no_queue_to_wait_in() {
     let seat = Seat::new();

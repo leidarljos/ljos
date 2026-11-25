@@ -658,13 +658,13 @@ fn same_user(_stream: &UnixStream) -> bool {
 /// socket is removed or replaced.
 #[must_use]
 pub fn serve() -> i32 {
-    if let Some(e) =
-        crate::no_runtime_dir_for("the hook server's socket", &crate::runtime_dir_path())
-    {
-        say!("ljos hookd: {e:#}");
-        return 1;
-    }
-    let dir = run_dir();
+    let dir = match crate::runtime_dir_for("the hook server's socket") {
+        Ok(dir) => dir,
+        Err(e) => {
+            say!("ljos hookd: {e:#}");
+            return 1;
+        }
+    };
     let Some(lock) = open_lock(&dir.join("hookd.lock")) else {
         say!(
             "ljos hookd: cannot open {}",
