@@ -54308,6 +54308,35 @@ pub fn format_search_stored_with_flags(
     extra_flags: &[String],
     width: Width,
 ) -> String {
+    format_search_stored_with_flags_and_claims(
+        hits,
+        matched,
+        capped,
+        explain,
+        query,
+        seat_ahead,
+        store,
+        extra_flags,
+        None,
+        width,
+    )
+}
+
+/// [`format_search_stored_with_flags`] with claim facts loaded by ticket search.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn format_search_stored_with_flags_and_claims(
+    hits: &[Hit],
+    matched: usize,
+    capped: bool,
+    explain: bool,
+    query: &str,
+    seat_ahead: bool,
+    store: &[String],
+    extra_flags: &[String],
+    claims: Option<&ticket_search::LoadedClaims>,
+    width: Width,
+) -> String {
     let now = now_utc();
     let mine = seat_name();
     let reading = search_reading(hits.len(), seat_ahead);
@@ -54345,7 +54374,7 @@ pub fn format_search_stored_with_flags(
         )
         .collect();
     let refs: Vec<&str> = store.iter().map(String::as_str).collect();
-    let top_hint = search_finish_hint(hits);
+    let top_hint = search_finish_hint_with_claims(hits, claims);
     scan::search_page_with_flags(
         &scan::SearchPage {
             rows: &rows,
@@ -54367,6 +54396,15 @@ pub fn format_search_stored_with_flags(
 /// When the first search row is a ticket this seat claimed, name finish with a lesson.
 #[must_use]
 pub fn search_finish_hint(hits: &[Hit]) -> Option<String> {
+    search_finish_hint_with_claims(hits, None)
+}
+
+/// [`search_finish_hint`] using claim facts from this search's corpus load.
+#[must_use]
+pub fn search_finish_hint_with_claims(
+    hits: &[Hit],
+    claims: Option<&ticket_search::LoadedClaims>,
+) -> Option<String> {
     let hit = hits.first()?;
     if hit.kind != "ticket" {
         return None;
@@ -54375,8 +54413,16 @@ pub fn search_finish_hint(hits: &[Hit]) -> Option<String> {
     if id.is_empty() {
         return None;
     }
-    let held = held_issue();
-    if held.as_deref() != Some(id) && !ticket_claimed_by_seat(id) {
+    let sitting = recorded_sitting();
+    let seat = seat_name();
+    let ours = if sitting.as_deref() == Some(id) {
+        true
+    } else {
+        claims
+            .and_then(|loaded| loaded.claimed_by_seat(id, &seat))
+            .unwrap_or_else(|| held_issue().as_deref() == Some(id) || ticket_claimed_by_seat(id))
+    };
+    if !ours {
         return None;
     }
     Some(format!(
