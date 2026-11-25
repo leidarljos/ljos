@@ -15,7 +15,7 @@ day-ab12  Ship the codec
   day-ef56  pick a default
 next: day-cd34  measure the files
 tracker: day-ab12 STARTED under ada
-warn	crates.io	did not answer, so the version check was skipped
+warn	crates.io	did not answer, so the version check was skipped; run `ljos doctor` again once it answers.
 matched by words (encoder not installed)
 day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.
 $ ljos finish day-cd34

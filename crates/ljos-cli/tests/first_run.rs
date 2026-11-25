@@ -294,6 +294,24 @@ fn link_programs(bin: &Path) {
             let _ = symlink(&path, bin.join(name));
         }
     }
+    stub_unreachable_crates_io(bin);
+}
+
+/// A `curl` that fails for crates.io and runs the real one for anything
+/// else, so the doctor and first-run rows are the same whether or not this
+/// host can reach the registry.
+fn stub_unreachable_crates_io(bin: &Path) {
+    ljos_cli::install_executable(
+        &bin.join("curl"),
+        "#!/bin/sh\n\
+         for arg in \"$@\"; do\n\
+         \x20 case \"$arg\" in\n\
+         \x20   https://crates.io/*) echo 'curl: (6) Could not resolve host: crates.io' >&2; exit 6;;\n\
+         \x20 esac\n\
+         done\n\
+         exec /usr/bin/curl \"$@\"\n",
+    )
+    .unwrap_or_else(|err| panic!("curl stub: {err}"));
 }
 
 fn which(name: &str) -> Option<PathBuf> {
@@ -1299,6 +1317,48 @@ LJOS_SEAT=alice ljos consensus "$id" --no-file
         !output.contains("DeGroot") && !output.contains("influence:"),
         "the settle sample drifted back:\n{output}"
     );
+}
+
+/// The seat's `curl` cannot reach crates.io, so doctor prints the skipped
+/// version check, and that warn row names the one next command.
+#[test]
+fn an_unreachable_crates_io_row_names_the_next_command() {
+    if !tools_ready() {
+        return;
+    }
+    let mut seat = Seat::open();
+    let cwd = seat.work.clone();
+    let limit = budget("ljos onboard");
+    let (code, output, elapsed) = seat.run("ljos onboard", &cwd, limit);
+    assert_step(
+        "crates.io unreachable: onboard",
+        "ljos onboard",
+        code,
+        &output,
+        elapsed,
+        limit,
+    );
+    for line in [
+        "git config --global user.name \"Your Name\"",
+        "git config --global user.email \"you@example.com\"",
+    ] {
+        let (code, output, _) = seat.run(line, &cwd, Duration::from_secs(20));
+        assert_eq!(code, 0, "{line}\n{output}");
+    }
+    let limit = budget("ljos doctor");
+    let (_, output, elapsed) = seat.run("ljos doctor", &cwd, limit);
+    assert!(
+        elapsed <= limit,
+        "doctor took {}s:\n{output}",
+        elapsed.as_secs()
+    );
+    let row = logical_lines(&output)
+        .into_iter()
+        .find(|line| line.trim().starts_with("warn\tcrates.io\t"))
+        .unwrap_or_else(|| panic!("no crates.io row:\n{output}"));
+    assert!(row.contains("version check was skipped"), "{row}");
+    assert!(names_next(&row), "{row}");
+    assert_plain("crates.io unreachable: doctor", "ljos doctor", &output);
 }
 
 #[test]

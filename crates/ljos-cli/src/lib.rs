@@ -36808,7 +36808,7 @@ fn registry_skipped_row() -> Option<Habitat> {
     }
     (misses > 0 && hits == 0).then(|| Habitat {
         name: "crates.io",
-        state: "did not answer, so the version check was skipped".to_string(),
+        state: "did not answer, so the version check was skipped; run `ljos doctor` again once it answers.".to_string(),
         ok: false,
     })
 }
@@ -65564,14 +65564,14 @@ mod tests {
 
         let registry = super::Habitat {
             name: "crates.io",
-            state: "did not answer, so the version check was skipped".into(),
+            state: "did not answer, so the version check was skipped; run `ljos doctor` again once it answers.".into(),
             ok: false,
         };
         assert_eq!(super::doctor_word(&registry), "warn");
         assert!(super::healthy(std::slice::from_ref(&registry)));
         let short = super::format_doctor_short(&[registry]);
         assert!(
-            short.contains("warn\tcrates.io\tdid not answer, so the version check was skipped\n"),
+            short.contains("warn\tcrates.io\tdid not answer, so the version check was skipped; run `ljos doctor` again once it answers.\n"),
             "{short}"
         );
     }
