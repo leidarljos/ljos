@@ -1,4 +1,4 @@
-//! A test asks for `age-keygen`, `packsetd` or `vissue` before it runs.
+//! A test asks for `age-keygen`, `emacs`, `packsetd` or `vissue` before it runs.
 //!
 //! A missing tool prints one line and the test returns. The line names the
 //! tool, the version and the one command that installs it.
@@ -11,6 +11,8 @@
 //! `--version` line is the number alone, so the check is that `age-keygen`
 //! is a file on `PATH`. A newer age-keygen still runs the test. The number
 //! in the skip line is the package to install.
+//! `emacs` 29.3 is the `emacs-nox` package on Ubuntu 24.04, which ships Org.
+//! It is not version checked either.
 
 #![allow(
     clippy::disallowed_macros,
@@ -29,6 +31,11 @@ pub const REQUIRE_TOOLS: &str = "LJOS_TEST_REQUIRE_TOOLS";
 const AGE_VERSION: &str = "1.1.1";
 
 const AGE_COMMAND: &str = "apt-get install age";
+
+/// `emacs-nox` on Ubuntu 24.04. Org comes with Emacs.
+const EMACS_VERSION: &str = "29.3";
+
+const EMACS_COMMAND: &str = "apt-get install emacs-nox";
 const SIBLING_COMMAND: &str = "source scripts/sibling-tools.sh";
 
 /// One tool a test runs, and does not stub.
@@ -36,6 +43,8 @@ const SIBLING_COMMAND: &str = "source scripts/sibling-tools.sh";
 pub enum Tool {
     /// `age-keygen` from the `age` package.
     AgeKeygen,
+    /// `emacs` with Org, from the `emacs-nox` package.
+    Emacs,
     /// `packsetd` at the commit `scripts/sibling-tools.sh` builds.
     Packsetd,
     /// `vissue` at the commit `.github/sibling-pin` names.
@@ -46,6 +55,7 @@ impl Tool {
     fn name(self) -> &'static str {
         match self {
             Self::AgeKeygen => "age-keygen",
+            Self::Emacs => "emacs",
             Self::Packsetd => "packsetd",
             Self::Vissue => "vissue",
         }
@@ -54,6 +64,7 @@ impl Tool {
     fn command(self) -> &'static str {
         match self {
             Self::AgeKeygen => AGE_COMMAND,
+            Self::Emacs => EMACS_COMMAND,
             Self::Packsetd | Self::Vissue => SIBLING_COMMAND,
         }
     }
@@ -63,6 +74,7 @@ impl Tool {
     fn version(self) -> String {
         match self {
             Self::AgeKeygen => AGE_VERSION.to_string(),
+            Self::Emacs => EMACS_VERSION.to_string(),
             Self::Packsetd => {
                 let pin = pins();
                 format!("{} ({})", pin.packset_version, pin.packset_stamp)
@@ -73,7 +85,7 @@ impl Tool {
 
     /// `true` when `--version` has to be the whole first line.
     fn check_version(self) -> bool {
-        !matches!(self, Self::AgeKeygen)
+        !matches!(self, Self::AgeKeygen | Self::Emacs)
     }
 }
 
@@ -167,12 +179,15 @@ fn consider(path: &OsStr, tool: Tool, require_tools: Option<&str>) -> Action {
     }
 }
 
-fn look(path: &OsStr, tool: Tool) -> Result<(), String> {
-    let found = std::env::split_paths(path).find_map(|dir| {
+fn on(path: &OsStr, tool: Tool) -> Option<PathBuf> {
+    std::env::split_paths(path).find_map(|dir| {
         let bin = dir.join(tool.name());
         bin.is_file().then_some(bin)
-    });
-    let Some(bin) = found else {
+    })
+}
+
+fn look(path: &OsStr, tool: Tool) -> Result<(), String> {
+    let Some(bin) = on(path, tool) else {
         return Err(line(tool, None));
     };
     if !tool.check_version() {
@@ -230,6 +245,18 @@ pub fn halt(tool: Tool) -> bool {
     act(tool, &path, require.as_deref())
 }
 
+/// The tool's path on `PATH`, or `None` after the line [`halt`] prints.
+///
+/// [`REQUIRE_TOOLS`] `=1` panics with that line instead.
+#[must_use]
+#[allow(dead_code, reason = "only the tests that run emacs call it")]
+pub fn find(tool: Tool) -> Option<PathBuf> {
+    if halt(tool) {
+        return None;
+    }
+    on(&std::env::var_os("PATH").unwrap_or_default(), tool)
+}
+
 fn act(tool: Tool, path: &OsStr, require_tools: Option<&str>) -> bool {
     match consider(path, tool, require_tools) {
         Action::Run => false,
@@ -260,7 +287,7 @@ mod tests {
 
     #[test]
     fn a_missing_tool_skips() {
-        for tool in [Tool::AgeKeygen, Tool::Packsetd, Tool::Vissue] {
+        for tool in [Tool::AgeKeygen, Tool::Emacs, Tool::Packsetd, Tool::Vissue] {
             let line = skip_line(tool);
             assert_eq!(line.lines().count(), 1, "{line}");
             assert!(line.contains(tool.name()), "{line}");
@@ -318,8 +345,9 @@ mod tests {
         stand_in(dir.path(), "vissue", &vissue);
         stand_in(dir.path(), "packsetd", &packsetd);
         stand_in(dir.path(), "age-keygen", "#!/bin/sh\nexit 0\n");
+        stand_in(dir.path(), "emacs", "#!/bin/sh\nexit 0\n");
         let path = dir.path().as_os_str();
-        for tool in [Tool::AgeKeygen, Tool::Packsetd, Tool::Vissue] {
+        for tool in [Tool::AgeKeygen, Tool::Emacs, Tool::Packsetd, Tool::Vissue] {
             assert_eq!(consider(path, tool, None), Action::Run, "{tool:?}");
             assert_eq!(consider(path, tool, Some("1")), Action::Run, "{tool:?}");
             assert!(!act(tool, path, Some("1")), "{tool:?} did not run");

@@ -249,27 +249,27 @@ const TYPO_LINES: &[(&[&str], &str)] = &[
     ),
     (
         &["finsh", "proj-1a2b"],
-        "ljos: no command finsh, and the closest is finish, so run `ljos finish proj-1a2b`.\n",
+        "ljos: no command finsh, and the closest is finish, so run `ljos finish <value>`.\n",
     ),
     (
         &["search", "--josn", "kiln"],
-        "ljos: search has no flag --josn, and the closest is --json, so run `ljos search --json kiln`.\n",
+        "ljos: search has no flag --josn, and the closest is --json, so run `ljos search --json <value>`.\n",
     ),
     (
         &["find", "kiln"],
-        "ljos: no command find, and the closest is search, so run `ljos search kiln`.\n",
+        "ljos: no command find, and the closest is search, so run `ljos search <value>`.\n",
     ),
     (
         &["add", "cold metal"],
-        "ljos: no command add, and the closest is remember, so run `ljos remember \"cold metal\"`.\n",
+        "ljos: no command add, and the closest is remember, so run `ljos remember <value>`.\n",
     ),
     (
         &["note-add", "the", "door", "sticks"],
-        "ljos: no command note-add, and the closest is note, so run `ljos note the door sticks`.\n",
+        "ljos: no command note-add, and the closest is note, so run `ljos note <value>`.\n",
     ),
     (
         &["--seat", "ada", "find", "kiln"],
-        "ljos: no command find, and the closest is search, so run `ljos --seat ada search kiln`.\n",
+        "ljos: no command find, and the closest is search, so run `ljos --seat <value> search <value>`.\n",
     ),
     (
         &["search", "-x"],
@@ -402,23 +402,23 @@ fn close_create_delete_rm_status_and_stats_point_at_real_verbs() {
     let cases: [(&[&str], &str); 9] = [
         (
             &["close", "demo-4b1s"],
-            "ljos: no command close, and the closest is finish, so run `ljos finish demo-4b1s`.\n",
+            "ljos: no command close, and the closest is finish, so run `ljos finish <value>`.\n",
         ),
         (
             &["create", "Pick a codec"],
-            "ljos: no command create, and the closest is file, so run `ljos file \"Pick a codec\"`.\n",
+            "ljos: no command create, and the closest is file, so run `ljos file <value>`.\n",
         ),
         (
             &["new", "Pick a codec"],
-            "ljos: no command new, and the closest is file, so run `ljos file \"Pick a codec\"`.\n",
+            "ljos: no command new, and the closest is file, so run `ljos file <value>`.\n",
         ),
         (
             &["delete", "a6ae2751"],
-            "ljos: no command delete, and the closest is forget, so run `ljos forget a6ae2751`.\n",
+            "ljos: no command delete, and the closest is forget, so run `ljos forget <value>`.\n",
         ),
         (
             &["rm", "a6ae2751"],
-            "ljos: no command rm, and the closest is forget, so run `ljos forget a6ae2751`.\n",
+            "ljos: no command rm, and the closest is forget, so run `ljos forget <value>`.\n",
         ),
         (
             &["status"],
@@ -446,7 +446,7 @@ fn close_create_delete_rm_status_and_stats_point_at_real_verbs() {
     }
 }
 
-const LESSONS_LINE: &str = "To find lessons run `ljos search \"lexical default\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.";
+const LESSONS_LINE: &str = "To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.";
 
 #[test]
 fn lessons_names_search_remember_and_proposals() {
@@ -471,20 +471,20 @@ fn lessons_names_search_remember_and_proposals() {
 }
 
 #[test]
-fn words_after_lessons_become_the_search() {
+fn words_after_lessons_are_not_repeated() {
     let dir = tempfile::tempdir().unwrap();
     let cases: [(&[&str], &str); 3] = [
         (
             &["lessons", "kiln"],
-            "ljos: no command lessons. To find lessons run `ljos search \"kiln\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
+            "ljos: no command lessons. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
         ),
         (
             &["--seat", "ada", "lessons", "cold", "metal", "-p", "demo"],
-            "ljos: no command lessons. To find lessons run `ljos search \"cold metal\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
+            "ljos: no command lessons. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
         ),
         (
             &["lessons", "--json"],
-            "ljos: no command lessons. To find lessons run `ljos search \"lexical default\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
+            "ljos: no command lessons. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
         ),
     ];
     for (args, want) in cases {
@@ -506,23 +506,23 @@ fn a_stem_a_start_or_a_part_of_a_verb_names_that_verb() {
         ),
         (
             &["remembering", "cold metal"],
-            "ljos: no command remembering, and the closest is remember, so run `ljos remember \"cold metal\"`.\n",
+            "ljos: no command remembering, and the closest is remember, so run `ljos remember <value>`.\n",
         ),
         (
             &["searches", "kiln"],
-            "ljos: no command searches, and the closest is search, so run `ljos search kiln`.\n",
+            "ljos: no command searches, and the closest is search, so run `ljos search <value>`.\n",
         ),
         (
             &["search-lessons", "kiln"],
-            "ljos: no command search-lessons, and the closest is search, so run `ljos search kiln`.\n",
+            "ljos: no command search-lessons, and the closest is search, so run `ljos search <value>`.\n",
         ),
         (
             &["note_add", "the door sticks"],
-            "ljos: no command note_add, and the closest is note, so run `ljos note \"the door sticks\"`.\n",
+            "ljos: no command note_add, and the closest is note, so run `ljos note <value>`.\n",
         ),
         (
             &["memorize", "cold metal"],
-            "ljos: no command memorize, and the closest is remember, so run `ljos remember \"cold metal\"`.\n",
+            "ljos: no command memorize, and the closest is remember, so run `ljos remember <value>`.\n",
         ),
         (
             &["review"],
@@ -549,7 +549,7 @@ fn a_word_two_verbs_start_with_is_not_guessed() {
     assert_eq!(out.status.code(), Some(2), "{}", text(&out));
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "ljos: no command mem, so run `ljos help`.\n"
+        "ljos: that is not a command, so run `ljos help`.\n"
     );
 }
 
@@ -559,31 +559,31 @@ fn recall_with_several_words_prints_the_search_that_runs() {
     let cases: [(&[&str], &str); 7] = [
         (
             &["recall", "some", "words"],
-            "ljos: recall takes one ticket id, so run `ljos search \"some words\"` to look up words.\n",
+            "ljos: recall takes one ticket id, so run `ljos search \"<words>\"` to look up words.\n",
         ),
         (
             &["recall", "some", "words", "--json"],
-            "ljos: recall takes one ticket id, so run `ljos search \"some words\"` to look up words.\n",
+            "ljos: recall takes one ticket id, so run `ljos search \"<words>\"` to look up words.\n",
         ),
         (
             &["--seat", "ada", "recall", "cold", "metal"],
-            "ljos: recall takes one ticket id, so run `ljos search \"cold metal\"` to look up words.\n",
+            "ljos: recall takes one ticket id, so run `ljos search \"<words>\"` to look up words.\n",
         ),
         (
             &["recall", "x", "y z"],
-            "ljos: recall takes one ticket id, so run `ljos search \"x y z\"` to look up words.\n",
+            "ljos: recall takes one ticket id, so run `ljos search \"<words>\"` to look up words.\n",
         ),
         (
             &["recall", "--", "--odd", "words"],
-            "ljos: recall takes one ticket id, so run `ljos search -- \"--odd words\"` to look up words.\n",
+            "ljos: recall takes one ticket id, so run `ljos search \"<words>\"` to look up words.\n",
         ),
         (
             &["recall", "demo-1a2b", "and", "more"],
-            "ljos: recall takes one ticket id, so run `ljos recall demo-1a2b`.\n",
+            "ljos: recall takes one ticket id, so run `ljos recall <id>`.\n",
         ),
         (
             &["recall", "usability"],
-            "recall: \"usability\" is not a ticket id, so run `ljos search \"usability\"`.\n",
+            "recall: that text is not a ticket id, so run `ljos search \"<words>\"`.\n",
         ),
     ];
     for (args, want) in cases {

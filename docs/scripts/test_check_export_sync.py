@@ -85,6 +85,63 @@ class ExportSyncTests(unittest.TestCase):
 
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
 
+    def test_only_checks_the_named_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = pathlib.Path(directory)
+            repo = fixture / "repo"
+            base_export = fixture / "base-export"
+            head_export = fixture / "head-export"
+            (repo / "docs/source").mkdir(parents=True)
+            base_export.mkdir()
+            head_export.mkdir()
+            subprocess.run(["git", "init", "--quiet", str(repo)], check=True)
+            for page in ["a.rst", "b.rst"]:
+                (repo / "docs/source" / page).write_text("hello world\n")
+                (base_export / page).write_text("hello world\n")
+                (head_export / page).write_text("hello world\n")
+            (head_export / "a.rst").write_text("hello new world\n")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "-c",
+                    "user.name=Docs Test",
+                    "-c",
+                    "user.email=docs@example.test",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "base",
+                ],
+                check=True,
+            )
+
+            def check(page: str) -> int:
+                return subprocess.run(
+                    [
+                        "python3",
+                        str(ROOT / "docs/scripts/check_export_sync.py"),
+                        "--root",
+                        str(repo),
+                        "--base-ref",
+                        "HEAD",
+                        "--head-ref",
+                        "HEAD",
+                        "--base-export",
+                        str(base_export),
+                        "--head-export",
+                        str(head_export),
+                        "--only",
+                        f"docs/source/{page}",
+                    ],
+                    capture_output=True,
+                ).returncode
+
+            self.assertEqual(check("a.rst"), 1)
+            self.assertEqual(check("b.rst"), 0)
+
     def test_shallow_topic_clone_fetches_develop_for_comparison(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = pathlib.Path(directory)

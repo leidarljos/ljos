@@ -81,10 +81,18 @@ def main() -> int:
     parser.add_argument("--head-ref", required=True)
     parser.add_argument("--base-export", type=pathlib.Path, required=True)
     parser.add_argument("--head-export", type=pathlib.Path, required=True)
+    parser.add_argument(
+        "--only",
+        action="append",
+        help="check only this docs/source path; may be given more than once",
+    )
     args = parser.parse_args()
 
+    names = rst_names(args.root, args.base_ref, args.head_ref)
+    if args.only is not None:
+        names = [relative for relative in names if relative in args.only]
     mismatches = []
-    for relative in rst_names(args.root, args.base_ref, args.head_ref):
+    for relative in names:
         name = pathlib.Path(relative).name
         base_export = args.base_export / name
         head_export = args.head_export / name

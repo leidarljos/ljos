@@ -38,7 +38,10 @@ The script needs `git`, the Rust toolchain in `rust-toolchain.toml`, and the pac
 `apt-get install age` installs that package on Ubuntu 24.04, and `brew install age` installs it on macOS.
 The script does not build them.
 `source scripts/sibling-tools.sh` builds the pinned `vissue` 0.25.0 and `packsetd` 0.18.2 and puts them on `PATH`.
-A test that needs `age-keygen`, `packsetd` or that `vissue` checks for the tool first.
+A test that needs `age-keygen`, `emacs`, `packsetd` or that `vissue` checks for the tool first.
+`emacs` 29.3 with Org comes from the `emacs-nox` package: `apt-get install emacs-nox` on Ubuntu 24.04, `brew install emacs` on macOS.
+The handbook and workflow render tests run `org-lint` in the `emacs` they find on `PATH`.
+They load `ob-dot`, so the Org 9.8 in Homebrew's `emacs` and the Org 9.6 in `emacs-nox` both know the `dot` block.
 When it is missing the test prints one line naming the tool, the version and that command, and the test does not fail.
 `LJOS_TEST_REQUIRE_TOOLS=1` fails the test with that same line.
 A `packsetd` a test starts runs with `INSIDE_EMBED=off` unless the test names an encoder with `PACKSET_EMBED`, so an installed `packset-embed` does not change what a test or a doc sample prints.

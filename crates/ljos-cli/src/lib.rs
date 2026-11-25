@@ -136,6 +136,8 @@ pub mod gates;
 pub mod git_hooks;
 mod git_identity;
 pub mod graphify;
+pub mod handbook;
+mod handbook_ids;
 mod handover_scope;
 pub mod hookd;
 pub mod hud;
@@ -167,6 +169,7 @@ pub mod plan;
 pub mod plugin;
 pub mod policy_label;
 pub mod proc_tree;
+pub mod public_text;
 pub mod quiet_claims;
 pub mod quoted_yes;
 pub mod readability;
@@ -178,6 +181,7 @@ pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;
 pub mod scan;
+pub mod scrub;
 #[cfg(test)]
 mod seat_mcp_layout;
 pub mod seat_resolve;
@@ -191,6 +195,7 @@ pub mod swap_log;
 pub mod sync;
 pub mod table;
 pub mod takeover;
+mod text_canon;
 pub mod ticket_search;
 pub mod tool_bound;
 pub mod tools;
@@ -210,6 +215,7 @@ mod verbatim;
 mod version_skew;
 pub mod wake;
 pub mod word_rank;
+pub mod workflow_skel;
 
 #[cfg(test)]
 mod cursor_event_scan;
@@ -24064,6 +24070,12 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
             add_entities(&mut atom, [format!("project:{project}")]);
         }
     }
+    if kind == "lesson" && lesson_is_public() {
+        add_entities(&mut atom, [PUBLIC_ENTITY.to_string()]);
+    }
+    if kind == "preference" || kind == "rule" {
+        add_entities(&mut atom, active_policy_entities());
+    }
     atom
 }
 
@@ -24148,8 +24160,38 @@ fn url_at_start(text: &str) -> bool {
 pub const VALID_FROM: &str = "valid_from:";
 pub const VALID_TO: &str = "valid_to:";
 
+/// The entity that marks a lesson, a preference or a rule as one the person
+/// chose to publish. `ljos handbook` exports only rows that carry it.
+pub const PUBLIC_ENTITY: &str = "visibility:public";
+
 thread_local! {
     static REMEMBER_PROJECT: std::cell::Cell<Option<String>> = const { std::cell::Cell::new(None) };
+    static REMEMBER_PUBLIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks lessons written while this guard is alive as public. Dropping it
+/// restores the previous setting.
+#[must_use = "lessons are marked public until this guard drops"]
+pub struct RememberPublic {
+    prev: bool,
+}
+
+impl RememberPublic {
+    /// Mark each lesson written before this guard drops when `public` is set.
+    pub fn set(public: bool) -> Self {
+        let prev = REMEMBER_PUBLIC.with(|cell| cell.replace(public));
+        Self { prev }
+    }
+}
+
+impl Drop for RememberPublic {
+    fn drop(&mut self) {
+        REMEMBER_PUBLIC.with(|cell| cell.set(self.prev));
+    }
+}
+
+fn lesson_is_public() -> bool {
+    REMEMBER_PUBLIC.with(std::cell::Cell::get)
 }
 
 /// The project `ljos remember -p` records on lessons written while this
@@ -24181,6 +24223,125 @@ fn lesson_project_entity() -> Option<String> {
         cell.set(current);
         out
     })
+}
+
+thread_local! {
+    static POLICY_SCOPE: std::cell::RefCell<Option<PolicyScope>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[derive(Clone, Debug, Default)]
+struct PolicyScope {
+    project: Option<String>,
+    tags: Vec<String>,
+    public: bool,
+}
+
+/// Restores the previous project and tag scope when dropped.
+pub struct PolicyScopeGuard {
+    previous: Option<PolicyScope>,
+}
+
+impl Drop for PolicyScopeGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        POLICY_SCOPE.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// The project and tags recorded on preferences and rules written while
+/// this value is alive.
+pub struct PolicyHold {
+    _guard: PolicyScopeGuard,
+}
+
+/// The refusal every `--public` path gives a runner: marking an item public
+/// is the person's to give.
+///
+/// # Errors
+///
+/// `public` is set and a runner is the caller.
+pub fn refuse_public_under_a_runner(command: &str, public: bool) -> Result<()> {
+    if public && under_a_runner() {
+        bail!(
+            "{command}: --public is the person's to give, so run it from a terminal with no runner"
+        );
+    }
+    Ok(())
+}
+
+/// Record `project` and `tags` on preferences and rules written before the
+/// returned value drops, and mark them public when `public` is set. An
+/// explicit project must be one the tracker knows. An empty tag is refused.
+/// A tag or the public mark given with no project records the checkout's
+/// project when one resolves. With none of the three, nothing is recorded,
+/// so a preference or rule written without these flags is unchanged.
+///
+/// # Errors
+///
+/// A tag is empty, an explicit project is not on the tracker, or `public` is
+/// set and no project resolves.
+pub fn policy_hold(
+    command: &str,
+    project: Option<String>,
+    tags: Vec<String>,
+    public: bool,
+) -> Result<PolicyHold> {
+    refuse_public_under_a_runner(command, public)?;
+    if tags.iter().any(|tag| tag.trim().is_empty()) {
+        bail!("{command}: --tag needs a name");
+    }
+    let scope = if project.is_none() && tags.is_empty() && !public {
+        None
+    } else {
+        let project = match project {
+            Some(name) => Some(require_known_project(&name)?),
+            None => seat_tracker_project(),
+        };
+        if public && project.is_none() {
+            bail!("{command}: --public needs a project, so pass -p");
+        }
+        Some(PolicyScope {
+            project,
+            tags,
+            public,
+        })
+    };
+    let previous = POLICY_SCOPE.with(|slot| slot.replace(scope));
+    Ok(PolicyHold {
+        _guard: PolicyScopeGuard { previous },
+    })
+}
+
+pub(crate) fn active_policy_entities() -> Vec<String> {
+    POLICY_SCOPE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|scope| {
+                let mut list = policy_entity_list(scope.project.as_deref(), &scope.tags);
+                if scope.public {
+                    list.push(PUBLIC_ENTITY.to_string());
+                }
+                list
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// `project:` and `tag:` entities for a preference or a rule.
+#[must_use]
+pub fn policy_entity_list(project: Option<&str>, tags: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(project) = project.map(str::trim).filter(|name| !name.is_empty()) {
+        out.push(format!("project:{project}"));
+    }
+    for tag in tags {
+        let tag = tag.trim();
+        if !tag.is_empty() {
+            out.push(format!("tag:{tag}"));
+        }
+    }
+    out
 }
 
 static VALIDITY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
@@ -24415,9 +24576,13 @@ fn post_claim_horizon(
     Ok(posted)
 }
 
-/// Post a new lesson, or reinforce the live memory it says again
-/// ([`memories::reinforce_held`]).
+/// Post a new lesson, mark a private repeat public, or reinforce the live
+/// memory it says again ([`memories::publish_repeat`],
+/// [`memories::reinforce_held`]).
 fn post_or_reinforce(client: &PacksetClient, atom: &Value, prefix: &str) -> Result<Value> {
+    if let Some(marked) = memories::publish_repeat(client, atom)? {
+        return Ok(marked);
+    }
     if let Some(held) = memories::reinforce_held(client, atom) {
         return Ok(held);
     }
@@ -24460,6 +24625,9 @@ pub fn packset_write_agent(
     if let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) {
         add_entities(&mut atom, [persona_entity(name)]);
         atom["set"] = Value::String(persona_set(name));
+    }
+    if let Some(marked) = memories::publish_repeat(&client, &atom)? {
+        return Ok(marked);
     }
     if let Some(held) = memories::reinforce_held(&client, &atom) {
         return Ok(held);
@@ -24617,9 +24785,12 @@ pub fn packset_write_mcp(
     let prefix = format!("{label}: POST /v1/atoms failed");
     let posted = match basis {
         Basis::Person => post_or_reinforce(&client, &atom, &prefix)?,
-        Basis::Agent => match memories::reinforce_held(&client, &atom) {
-            Some(held) => held,
-            None => store_agent_atom(&client, atom, &prefix)?,
+        Basis::Agent => match memories::publish_repeat(&client, &atom)? {
+            Some(marked) => marked,
+            None => match memories::reinforce_held(&client, &atom) {
+                Some(held) => held,
+                None => store_agent_atom(&client, atom, &prefix)?,
+            },
         },
     };
     admit::satisfy_text(text.trim());
@@ -24724,8 +24895,9 @@ fn store_agent_atom(client: &PacksetClient, atom: Value, prefix: &str) -> Result
     }
 }
 
-/// Queue a lesson the writer did not take. A refusal is not queued. The
-/// error keeps the words that say the copy is waiting.
+/// Queue a lesson the writer did not take. A refusal is not queued, and
+/// neither is a public lesson. The error keeps the words that say the copy
+/// is waiting.
 fn queue_waiting_lesson(atom: &Value, err: anyhow::Error, prefix: &str) -> anyhow::Error {
     // A busy pack did not take the lesson. Remember says so and exits.
     // Queueing it would store a copy the command says was not stored.
@@ -24737,7 +24909,7 @@ fn queue_waiting_lesson(atom: &Value, err: anyhow::Error, prefix: &str) -> anyho
     } else {
         with_post_failure(prefix, err)
     };
-    if atom["kind"].as_str() != Some("lesson") || !note_can_wait(&err) {
+    if atom["kind"].as_str() != Some("lesson") || lesson_is_public() || !note_can_wait(&err) {
         return err;
     }
     if let Some(line) = sandbox_memory_off() {
@@ -24770,8 +24942,9 @@ fn with_queue_outcome(err: anyhow::Error, queued: Result<Option<bool>>) -> anyho
     }
 }
 
-/// The pack client, or a queued lesson when the pack is off. `supersedes`
-/// is the atoms that lesson closes. A note passes none.
+/// The pack client, or a queued lesson when the pack is off. A public
+/// lesson is not queued. `supersedes` is the atoms that lesson closes. A
+/// note passes none.
 fn client_or_queue(
     prefix: &str,
     kind: &str,
@@ -24781,7 +24954,7 @@ fn client_or_queue(
 ) -> Result<PacksetClient> {
     match pack() {
         Ok(client) => Ok(client),
-        Err(e) if kind == "lesson" && note_can_wait(&e) => {
+        Err(e) if kind == "lesson" && !lesson_is_public() && note_can_wait(&e) => {
             if let Some(line) = sandbox_memory_off() {
                 return Err(anyhow::Error::msg(line));
             }
@@ -25589,6 +25762,10 @@ pub fn user_fault_for(err: &anyhow::Error, again: &str) -> String {
             .unwrap_or("pack busy, try again")
             .to_string();
     }
+    // A file the person named with `--out` is not the store.
+    if top.contains("--out ") {
+        return top;
+    }
     if let Some(line) = storage_line(err, again) {
         return line;
     }
@@ -25945,6 +26122,11 @@ pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) 
             Err(err) if is_reported_busy(&err) => Err(anyhow::Error::msg(REMEMBER_NOT_STORED_LINE)),
             Err(err) if is_memory_starting(&err) => Err(err),
             Err(err) if pack_turned_off(&err) => Err(err),
+            Err(err) if lesson_is_public() && remember_should_queue(&err) => {
+                Err(anyhow::Error::msg(
+                    "remember: the pack did not take it, and a public lesson is not queued. Run `ljos remember --public` again.",
+                ))
+            }
             Err(err) if remember_should_queue(&err) => {
                 // A sandbox home does not queue a lesson nobody will send.
                 // The line says why memory is off and which HOME to use.
@@ -27406,9 +27588,11 @@ pub fn latest_note_value(v: &Value, prefix: &str) -> Option<String> {
         dated.push((ts, live));
     }
     if dated.iter().any(|(ts, _)| !ts.is_empty()) {
+        // The logbook lists the newest note first. A shared minute keeps that
+        // first note. A greater timestamp replaces it.
         dated
             .into_iter()
-            .max_by_key(|(ts, _)| ts.clone())
+            .reduce(|best, next| if next.0 > best.0 { next } else { best })
             .and_then(|(_, n)| n)
     } else {
         dated.into_iter().next().and_then(|(_, n)| n)
@@ -28048,8 +28232,23 @@ pub(crate) fn workflow_child(
 /// An unknown workflow, a parent under another workflow, or the tracker
 /// refusing a write.
 pub fn workflow_start(parent: &str, name: &str, width: Width) -> Result<String> {
+    let parent = parent.trim();
     let name = parse_workflow_name(name)?;
     let v = tracker_show_json(parent)?;
+    if let Some(have) = workflow_skel::bound_skeleton(&v) {
+        return Err(policy_label::labelled(
+            "workflow-warning",
+            format!("workflow: {parent} already runs the {have} skeleton; nothing was written"),
+        ));
+    }
+    let _lock = workflow_skel::acquire_run_lock(parent)?;
+    let v = tracker_show_json(parent)?;
+    if let Some(have) = workflow_skel::bound_skeleton(&v) {
+        return Err(policy_label::labelled(
+            "workflow-warning",
+            format!("workflow: {parent} already runs the {have} skeleton; nothing was written"),
+        ));
+    }
     let mut out = String::new();
     match workflow_name_from_issue(&v) {
         Some(have) if have != name => {
@@ -29837,7 +30036,15 @@ fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
     // under. While the pack still shows that stamp nothing in it has
     // moved, so the kept rules and preferences are what a listing would
     // say: one status read stands in for two listings.
-    let stamp = with_pack_timeout(HOOK_PACK_MS, || pack_stamp(&client));
+    let Ok(stamp) = with_pack_timeout(HOOK_PACK_MS, || pack_stamp(&client)) else {
+        let _ = std::fs::create_dir_all(runtime_dir());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        let _ = std::fs::write(pack_slow_mark(), b"");
+        return kept_only(kept);
+    };
     if let (Some(path), Some(stamp)) = (&kept, stamp.as_deref()) {
         if gate_kept_under(path, stamp) {
             #[expect(
@@ -29893,16 +30100,19 @@ fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
 /// seat's client drops the mark at once ([`forget_gate_fresh`]).
 const GATE_FRESH: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// The pack's last-write stamp, from one status read; None when the
-/// pack does not answer or has no stamp yet.
-fn pack_stamp(client: &PacksetClient) -> Option<String> {
-    client
-        .status(None)
-        .ok()?
-        .get("last_write_ts")?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+/// The pack's last-write stamp, from one status read. `Ok(None)` when the
+/// pack answers with no stamp yet or with an error that is not a timeout.
+/// `Err` when the read ran out of time, so the caller can stop asking.
+fn pack_stamp(client: &PacksetClient) -> Result<Option<String>, ()> {
+    match client.status(None) {
+        Ok(status) => Ok(status
+            .get("last_write_ts")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)),
+        Err(err) if pack_link::error_is_timeout(&err) => Err(()),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Whether the kept rules and preferences were read under `stamp`: the
@@ -49065,6 +49275,10 @@ pub fn complete(
     if node.trim().is_empty() {
         bail!("complete: the id is empty; pass a tracker id, or a 32-hex claim-graph id");
     }
+    // A signoff step stays open until the run, its blockers, a ship
+    // consensus and any required deed are in place. A claim id that is
+    // not a ticket is left to the claim graph.
+    workflow_skel::signoff_block(node)?;
     complete_as(node, status, assignee, gen, false)
 }
 
@@ -50106,6 +50320,9 @@ pub fn finish(
     verbose: bool,
     width: Width,
 ) -> Result<String> {
+    // A signoff step stays open until its workflow gates pass, even when it
+    // is also a checklist item.
+    workflow_skel::signoff_block(issue)?;
     if let Some(mut ticked) = plan::tick_checklist(issue, width)? {
         if let Some(text) = lesson.map(str::trim).filter(|text| !text.is_empty()) {
             for claim in lesson_claims(text) {
@@ -50643,6 +50860,51 @@ impl CommitLock {
             }
             if std::time::Instant::now() >= deadline {
                 return None;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            std::thread::sleep(flock_pause(pause, left));
+            pause = pause.saturating_mul(2).min(MAX_PAUSE);
+        }
+    }
+
+    /// [`Self::acquire_by`] for a caller that must not go on without the
+    /// lock.
+    ///
+    /// `Ok(Some)` carries the file. `Ok(None)` means another holder still had
+    /// it at `deadline`. `Err` means the file could not be opened, or
+    /// `flock` failed for a reason other than a busy lock, where
+    /// [`Self::acquire_by`] returns a lock that owns nothing.
+    pub fn try_acquire_by(
+        path: &std::path::Path,
+        mut deadline: std::time::Instant,
+    ) -> std::io::Result<Option<Self>> {
+        use std::os::unix::io::AsRawFd;
+        if let Some(wall) = wall_deadline() {
+            deadline = deadline.min(wall);
+        }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        let mut pause = std::time::Duration::from_millis(10);
+        const MAX_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
+        loop {
+            // SAFETY: flock on a descriptor this function owns.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                admit::note_list_lock();
+                return Ok(Some(Self(Some(file))));
+            }
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::EWOULDBLOCK | libc::EINTR) => {}
+                _ => return Err(err),
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
             }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             std::thread::sleep(flock_pause(pause, left));
@@ -72895,6 +73157,18 @@ mod tests {
     }
 
     #[test]
+    fn the_newest_note_wins_when_the_minute_matches() {
+        let v = serde_json::json!({"logbook": [
+            {"note": "playbook: release", "timestamp": "[2026-11-19 Wed 12:00]"},
+            {"note": "playbook: feature", "timestamp": "[2026-11-19 Wed 12:00]"}
+        ]});
+        assert_eq!(
+            latest_note_value(&v, PLAYBOOK_NOTE_PREFIX).as_deref(),
+            Some("release")
+        );
+    }
+
+    #[test]
     fn a_stage_is_the_tag_else_the_title() {
         assert_eq!(
             stage_of("anything", &["stage-review".into()]),
@@ -92601,6 +92875,53 @@ lesson, due yesterday, seat ada
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_read_only_out_file_is_named_not_the_store() {
+        let err =
+            anyhow::anyhow!("workflow: cannot write --out /mnt/ro/page.org: Read-only file system");
+        assert_eq!(
+            super::user_fault_for(&err, "ljos workflow render"),
+            "workflow: cannot write --out /mnt/ro/page.org: Read-only file system"
+        );
+    }
+
+    #[test]
+    fn a_public_lesson_a_reachable_pack_did_not_take_is_not_queued() {
+        let _lock = super::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let _env = HoldEnv::set(&[
+            ("HOME", dir.path().to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ("PACKSET_URL", "http://127.0.0.1:9"),
+        ]);
+        let queue = state.join("ljos/note-queue.jsonl");
+        let atom = |text: &str| serde_json::json!({"kind": "lesson", "text": text, "issue": "", "workspace": "hand"});
+        let down = || anyhow::anyhow!("connection refused");
+        {
+            let _public = super::RememberPublic::set(true);
+            let err = super::queue_waiting_lesson(
+                &atom("Oil the east hinge every week."),
+                down(),
+                "remember",
+            );
+            assert!(!format!("{err:#}").contains("queued"), "{err:#}");
+        }
+        let rows = std::fs::read_to_string(&queue).unwrap_or_default();
+        assert!(
+            !rows.contains("east hinge"),
+            "a public lesson was queued:\n{rows}"
+        );
+        let err =
+            super::queue_waiting_lesson(&atom("Sweep the west bench daily."), down(), "remember");
+        assert!(format!("{err:#}").contains("queued"), "{err:#}");
+        let rows = std::fs::read_to_string(&queue).unwrap_or_default();
+        assert!(
+            rows.contains("west bench"),
+            "the private control was not queued:\n{rows}"
+        );
     }
 
     /// A proposal row as an older ljos wrote it to `proposals.jsonl`.

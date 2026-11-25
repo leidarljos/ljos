@@ -892,6 +892,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_WORKFLOW_LOCK_WAIT",
+        default: "30",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_WRITER_PIDFILE",
         default: "unset",
         group: "ljos",
