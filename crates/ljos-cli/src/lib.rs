@@ -2784,11 +2784,11 @@ fn stamp_env() -> Vec<(String, String)> {
     };
     above.unwrap_or_else(|| {
         if cfg!(test) {
-            std::env::vars().collect()
+            env_vars().collect()
         } else {
             proc_tree::environ(std::process::id())
                 .map(|e| clean_shell_environ(e, true))
-                .unwrap_or_else(|| std::env::vars().collect())
+                .unwrap_or_else(|| env_vars().collect())
         }
     })
 }
@@ -2960,7 +2960,7 @@ fn stamp_from_ancestors() -> Option<Vec<(String, String)>> {
             active
                 .iter()
                 .filter_map(|(pid, _)| proc_tree::environ(*pid))
-                .chain(std::iter::once_with(|| std::env::vars().collect()))
+                .chain(std::iter::once_with(|| env_vars().collect()))
                 .find_map(|env| {
                     env.into_iter()
                         .find(|(k, _)| k == key)
@@ -3357,10 +3357,18 @@ fn runner_stamp_env() -> Vec<(String, String)> {
     }
 }
 
+/// This process's environment, without the variables whose name or value
+/// is not UTF-8. [`std::env::vars`] panics on those, and a caller may
+/// export any bytes.
+pub(crate) fn env_vars() -> impl Iterator<Item = (String, String)> {
+    std::env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+}
+
 /// Every usable session variable in this process's own environment,
 /// sorted. A parent that did not pass the variable in does not count.
 pub(crate) fn own_stamped_sessions() -> Vec<(String, String)> {
-    let mut found: Vec<(String, String)> = std::env::vars()
+    let mut found: Vec<(String, String)> = env_vars()
         .filter(|(k, v)| runner_session_var(k, v) && usable_session_id(v).is_some())
         .map(|(k, v)| (k, v.trim().to_string()))
         .collect();
@@ -4224,7 +4232,7 @@ fn cause_of(
 /// The names of the runner variables set here, sorted. Never their values.
 #[must_use]
 pub fn runner_marks() -> Vec<String> {
-    let mut names: Vec<String> = std::env::vars()
+    let mut names: Vec<String> = env_vars()
         .filter(|(k, v)| runner_session_var(k, v) || RUNNER_MARKS.contains(&k.as_str()))
         .map(|(k, _)| k)
         .collect();
@@ -5444,7 +5452,7 @@ fn live_harness_session() -> Option<LiveSession> {
     }
     let id = call_cursor_conversation().filter(|id| !subagent_id(id))?;
     let family = if own_mark("CLAUDECODE")
-        || std::env::vars().any(|(key, value)| key.starts_with("CLAUDE_") && !value.is_empty())
+        || env_vars().any(|(key, value)| key.starts_with("CLAUDE_") && !value.is_empty())
     {
         "claude"
     } else if own_mark("CURSOR_AGENT") {
@@ -24373,7 +24381,7 @@ pub fn atom_source() -> Value {
     if let Some(node) = mesh::joined_node() {
         source["mesh"] = serde_json::json!({"node": node, "seat": seat.seat});
     }
-    let turn = std::env::vars()
+    let turn = env_vars()
         .filter(|(k, v)| k.ends_with("_TURN_ID") && !v.trim().is_empty())
         .map(|(_, v)| v.trim().to_string())
         .next();

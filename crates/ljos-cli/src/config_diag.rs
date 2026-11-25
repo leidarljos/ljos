@@ -1446,7 +1446,7 @@ fn report(cwd: Option<&Path>) -> Report {
     for layer in &files {
         parse_file(layer, &mut warnings, &mut found);
     }
-    for (key, value) in std::env::vars() {
+    for (key, value) in crate::env_vars() {
         if !key.starts_with("LJOS_") || known_var(&key) {
             continue;
         }
