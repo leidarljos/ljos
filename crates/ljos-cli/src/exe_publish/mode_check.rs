@@ -210,7 +210,7 @@ const ALLOWED: &[(&str, &str, usize, &str)] = &[
         "runs the configured notmuch binary",
     ),
     (
-        "crates/ljos-cli/src/main_impl.rs",
+        "crates/ljos-cli/src/main.rs",
         "prompt_as_text",
         1,
         "restarts the current executable",

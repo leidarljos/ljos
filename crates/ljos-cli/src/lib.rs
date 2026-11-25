@@ -22405,8 +22405,6 @@ fn proc_comm(pid: u32) -> String {
 fn in_seat_chain(comm: &str) -> bool {
     comm == "ljos"
         || comm == "ljos-mcp"
-        // Linux truncates the test-only child's comm to fifteen bytes.
-        || cfg!(feature = "test-hooks") && comm == "ljos-hook-test-"
         || matches!(comm, "sh" | "bash" | "dash" | "zsh" | "ash" | "ksh")
 }
 
@@ -22527,7 +22525,6 @@ pub(crate) fn seat_binary() -> bool {
     };
     let name = path.file_name().and_then(|name| name.to_str());
     matches!(name, Some("ljos" | "ljos-mcp"))
-        || cfg!(feature = "test-hooks") && name == Some("ljos-hook-test-child")
 }
 
 /// Start the default writer when a memory verb could not connect.
