@@ -2488,7 +2488,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when a number the seat tracks has been measured again: a benchmark score, a latency, a count. With a value it takes the reading, closes the habit's earlier reading (kept as `was`), and sets the next reading due one cadence on, so ljos_due and the hook say when it is late. Without a value it lists the habits as they stand, each with the change since the last reading and when the next is due. ljos_search with as_of answers what a habit stood at then.",
+        description = "Call this when a number the seat tracks has been measured again: a benchmark score, a latency, a count. With a value it takes the reading; a new reading supersedes the previous one (output `NAME: was X (age), now Y` / `NAME: first reading, Y`), kept as `was`, and sets the next reading due one cadence on, so ljos_due and the hook say when it is late. Without a value it lists the habits as they stand, each with the change since the last reading and when the next is due. ljos_search with as_of answers what a habit stood at then.",
         annotations(
             title = "Take or read a habit's reading",
             read_only_hint = false,

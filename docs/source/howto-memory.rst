@@ -62,10 +62,11 @@ The one below is an example:
    $ ljos habit mab-cr-all 0.535 --unit acc --every 7d --source example-0000
    remembered (habit): habit mab-cr-all stands at 0.535 acc (example-0000).
      id 7b1c0e5a, next review 2026-09-22 10:00 +00:00
+   mab-cr-all: first reading, 0.535 acc
    $ ljos habit mab-cr-all 0.579 --unit acc --every 7d --source example-0001
    remembered (habit): habit mab-cr-all stands at 0.579 acc (example-0001).
      id 9e0a41d2, next review 2026-09-30 09:12 +00:00
-   was 0.535 acc (8 days ago), now closed
+   mab-cr-all: was 0.535 acc (8 days ago), now 0.579 acc
    $ ljos habit
    mab-cr-all  0.579 acc   +0.044 since 0.535 (8 days ago) today   next reading in 7 days  example-0001
 

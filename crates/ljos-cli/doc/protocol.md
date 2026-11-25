@@ -211,8 +211,9 @@ cloud seat git runs only the hooks the repository and the login name.
   `ljos conflicts` lists the likeliest contradictions by distance rather
   than by words, when the `landscape` habitat is installed.
 - Every number the seat keeps measuring is a habit: `ljos habit NAME VALUE
-  [--unit U] [--every 7d] [--source JOB]` takes a reading, closes the one
-  before it (kept as what it was), and puts the next reading on the review
+  [--unit U] [--every 7d] [--source JOB]` takes a reading; a new reading
+  supersedes the previous one (output `NAME: was X (age), now Y` /
+  `NAME: first reading, Y`), and puts the next reading on the review
   clock one cadence on, so `ljos due` and the hook say when it is late.
   `ljos habit` lists the habits as they stand with the change since the
   last reading; `ljos search --as-of` answers what one stood at then. A

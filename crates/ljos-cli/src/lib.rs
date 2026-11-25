@@ -41513,7 +41513,7 @@ pub fn habits() -> Result<Vec<Reading>> {
 
 /// Take a reading: write it as a claim that supersedes the habit's earlier
 /// reading, carrying that reading as `was`, with its review due one
-/// cadence from now. Returns the pack's answer and the reading it closed.
+/// cadence from now. Returns the pack's answer and the reading it supersedes.
 pub fn habit(
     name: &str,
     value: f64,
@@ -41572,6 +41572,33 @@ pub fn format_change(r: &Reading, now: &str) -> String {
             )
         }
         None => "first reading".to_string(),
+    }
+}
+
+/// `ljos habit NAME VALUE`: the line after the write, the reading before
+/// and the one stored, or `first reading` and the one stored. The habit
+/// stays open, so the line never says the reading closed.
+#[must_use]
+pub fn format_reading_ack(
+    name: &str,
+    value: f64,
+    unit: &str,
+    prev: Option<&Reading>,
+    now: &str,
+) -> String {
+    let with_unit = |v: f64, u: &str| {
+        let u = u.trim();
+        format!("{}{}{u}", trim_num(v), if u.is_empty() { "" } else { " " })
+    };
+    let name = name.trim();
+    let new = with_unit(value, unit);
+    match prev {
+        Some(p) => format!(
+            "{name}: was {} ({}), now {new}",
+            with_unit(p.value, &p.unit),
+            age_of(p.ts.as_deref(), now)
+        ),
+        None => format!("{name}: first reading, {new}"),
     }
 }
 
@@ -67831,6 +67858,33 @@ mod tests {
         let late = readings_of(&[first]);
         assert!(format_readings(&late, now).contains("next reading late (yesterday)"));
         assert_eq!(format_change(&late[0], now), "first reading");
+    }
+
+    #[test]
+    fn a_reading_ack_says_was_and_now_not_closed() {
+        let first = serde_json::json!({
+            "id": "a1", "kind": "habit", "ts": "2026-09-12T10:00:00.000Z",
+            "due_at": "2026-09-19T10:00:00.000Z",
+            "habit": {"name": "mab cr all", "value": 0.535, "unit": "acc", "source": "example-0000", "every_s": 604800}
+        });
+        let second = serde_json::json!({
+            "id": "a2", "kind": "habit", "ts": "2026-09-19T10:00:00.000Z",
+            "supersedes": ["a1"],
+            "habit": {"name": "mab cr all", "value": 0.579, "unit": "acc", "source": "example-0001", "every_s": 604800,
+                       "was": 0.535, "was_ts": "2026-09-12T10:00:00.000Z"}
+        });
+        let prev = readings_of(std::slice::from_ref(&first));
+        let now = "2026-09-20T09:00:00.000Z";
+        let ack = format_reading_ack("mab cr all", 0.579, "acc", Some(&prev[0]), now);
+        assert_eq!(ack, "mab cr all: was 0.535 acc (8 days ago), now 0.579 acc");
+        assert!(!ack.contains("closed"), "{ack}");
+        let ack = format_reading_ack("mab cr all", 0.579, "", None, now);
+        assert_eq!(ack, "mab cr all: first reading, 0.579");
+        assert!(!ack.contains("closed"), "{ack}");
+        // The habit stays open: one live reading for the name, the new one.
+        let rows = readings_of(&[first, second]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.as_deref(), Some("a2"));
     }
 
     #[test]
