@@ -1,2 +1,0 @@
-A sitting on a decision now gives the panel its own pack budget, the interactive one, so the panel is written when doctor, sync and the earlier sections used up the sitting's one-second memory read.
-Before, a slow crates.io answer to doctor, or a loaded machine, left the panel with no time and it printed `the panel could not be written: persona: GET /v1/atoms?kind=persona failed: io: the pack did not answer`.
