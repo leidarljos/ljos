@@ -1,4 +1,4 @@
-//! `ljos claim` with no id stops when the claim graph does not answer
+//! `ljos claim --next` stops when the claim graph does not answer
 //! within the sitting claim budget. A ready row that answers at once is
 //! claimed.
 
@@ -25,10 +25,8 @@ const READY_SLEEP_SECS: u64 = 30;
 const READY_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn ljos(dir: &Path, claim_wait: Option<u64>, args: &[&str]) -> (Output, Duration) {
@@ -37,6 +35,10 @@ fn ljos(dir: &Path, claim_wait: Option<u64>, args: &[&str]) -> (Output, Duration
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&runtime).unwrap();
     let path = format!("{dir}:/usr/bin:/bin", dir = dir.display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .current_dir(dir)
@@ -95,7 +97,7 @@ fn a_slow_ready_exits_inside_the_claim_budget() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("claimdag.log");
     slow_ready(dir.path(), &log);
-    let (out, took) = ljos(dir.path(), Some(CLAIM_WAIT_SECS), &["claim"]);
+    let (out, took) = ljos(dir.path(), Some(CLAIM_WAIT_SECS), &["claim", "--next"]);
     let err = stderr_of(&out);
     let bound = Duration::from_secs(CLAIM_WAIT_SECS + START_SLACK_SECS);
     assert!(
@@ -119,7 +121,7 @@ fn a_ready_row_is_claimed() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("claimdag.log");
     one_ready_row(dir.path(), &log);
-    let (out, took) = ljos(dir.path(), None, &["claim"]);
+    let (out, took) = ljos(dir.path(), None, &["claim", "--next"]);
     let err = stderr_of(&out);
     assert!(
         out.status.success(),

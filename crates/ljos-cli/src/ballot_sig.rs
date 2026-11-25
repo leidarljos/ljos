@@ -421,6 +421,10 @@ pub fn seat_key_file(seat: &str) -> Option<PathBuf> {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         let _ = std::fs::rename(&layout.folded_old, &path);
     }
     Some(path)
@@ -503,6 +507,10 @@ pub fn load_or_create(path: &std::path::Path) -> Result<SigningKey> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1357,7 +1365,7 @@ fn pin_first(path: &Path, voter: &str, mine: &str) -> Result<BTreeMap<String, St
     if !pinned.contains_key(voter) {
         pinned.insert(voter.to_string(), mine.to_string());
         let text: String = pinned.iter().map(|(v, k)| format!("{v} {k}\n")).collect();
-        vissue_core::store::replace_file_atomically(path, &text)?;
+        crate::tracker_tmp::replace_file(path, &text)?;
     }
     Ok(pinned)
 }
@@ -2025,6 +2033,10 @@ mod tests {
         });
         let folded = data.path().join("ljos/seats/.dotseat/ballot.key");
         std::fs::create_dir_all(folded.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&folded, [9u8; 32]).unwrap();
         let line = seat_key_copy_line(".dotseat").expect("copy line");
         assert!(line.contains("cp -- "), "{line}");
@@ -2041,6 +2053,10 @@ mod tests {
         });
         let folded = data.path().join("ljos/seats/judge_model-1.5/ballot.key");
         std::fs::create_dir_all(folded.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&folded, [7u8; 32]).unwrap();
         let path = seat_key_file("judge:model-1.5").unwrap();
         assert_ne!(path, folded);
@@ -2201,6 +2217,10 @@ mod tests {
             &["config", "user.email", "rgoswami@ieee.org"],
             &[],
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &file,
             "* TODO [#C] old\n:PROPERTIES:\n:ID:         probe-old\n:END:\n- [X] elder: rail\n",
@@ -2208,9 +2228,17 @@ mod tests {
         .unwrap();
         git(dir.path(), &["add", "issues.org"], &[]);
         git(dir.path(), &["commit", "-m", "old ballot"], &[]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.path().join(PIN_FILE), "inky 00\n").unwrap();
         git(dir.path(), &["add", PIN_FILE], &[]);
         git(dir.path(), &["commit", "-m", "first pin"], &[]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &file,
             "* TODO [#C] old\n:PROPERTIES:\n:ID:         probe-old\n:END:\n- [X] elder: rail\n\

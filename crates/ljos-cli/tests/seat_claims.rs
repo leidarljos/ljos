@@ -9,10 +9,8 @@ use std::path::Path;
 use std::process::Command;
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn log_has_claim(log: &str) -> bool {
@@ -50,6 +48,10 @@ fn a_raw_or_legacy_name_does_not_hold_the_claim() {
         std::env::var("PATH").unwrap_or_default()
     );
     let session = "0e610c5a-32e0-7dab-eb9b-ab7d13ce6556";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let ljos = |seat: &str, args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
@@ -68,6 +70,10 @@ fn a_raw_or_legacy_name_does_not_hold_the_claim() {
     };
     let read_log = || std::fs::read_to_string(&log).unwrap_or_default();
     let clear_log = || {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let _ = std::fs::write(&log, "");
     };
 

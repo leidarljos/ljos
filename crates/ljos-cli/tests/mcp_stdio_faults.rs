@@ -108,6 +108,10 @@ struct Session {
 impl Session {
     fn open(extra: &[(&str, &str)]) -> Self {
         let home = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
         cmd.env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -272,6 +276,10 @@ fn a_bad_line_names_the_command_and_the_server_stays_up() {
             assert!(value["result"]["isError"] == true, "{value}");
             assert!(line.contains("ljos help search"), "{line}");
             assert!(!line.contains('\n'), "{line}");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let help = Command::new(env!("CARGO_BIN_EXE_ljos"))
                 .args(["help", "search"])
                 .output()
@@ -337,11 +345,7 @@ fn a_word_search_with_only_curl_points_at_the_install_page() {
     let url = lexical_hits();
     let tools = tempfile::tempdir().unwrap();
     let curl = tools.path().join("curl");
-    std::fs::write(&curl, "#!/bin/sh\nexit 0\n").unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    ljos_cli::install_executable(&curl, "#!/bin/sh\nexit 0\n").unwrap();
     let path = tools.path().display().to_string();
     let mut session = Session::open(&[("PACKSET_URL", &url), ("PATH", &path)]);
     let search = call(
@@ -424,11 +428,7 @@ fn a_busy_pack_names_the_search_to_run_again() {
     let reading = search["result"]["structuredContent"]["reading"]
         .as_str()
         .unwrap_or("");
-    assert_eq!(
-        reading,
-        ljos_cli::MEMORY_SEARCH_BUSY_EMPTY_LINE,
-        "{reading}"
-    );
+    assert_eq!(reading, ljos_cli::degraded::BUSY_LINE, "{reading}");
     let quoted = call(
         &mut session,
         4,
@@ -440,7 +440,7 @@ fn a_busy_pack_names_the_search_to_run_again() {
         .as_str()
         .unwrap_or("")
         .to_string();
-    assert_eq!(quoted, ljos_cli::MEMORY_SEARCH_BUSY_EMPTY_LINE, "{quoted}");
+    assert_eq!(quoted, ljos_cli::degraded::BUSY_LINE, "{quoted}");
     assert!(session.alive());
     let remember = call(
         &mut session,
@@ -472,16 +472,17 @@ fn a_busy_pack_with_a_word_match_is_one_result_line() {
     let reading = search["result"]["structuredContent"]["reading"]
         .as_str()
         .unwrap_or("");
-    assert_eq!(reading, ljos_cli::MEMORY_SEARCH_BUSY_LINE, "{search}");
+    assert_eq!(reading, ljos_cli::degraded::BUSY_LINE, "{search}");
     let body = search.to_string();
     assert!(
         body.contains("Seat the kiln door only when cold."),
         "{search}"
     );
     assert!(!body.contains("pack busy, try again"), "{search}");
-    assert!(
-        !body.contains(ljos_cli::MEMORY_SEARCH_BUSY_EMPTY_LINE),
-        "{search}"
+    assert_eq!(
+        body.matches(ljos_cli::degraded::BUSY_LINE).count(),
+        2,
+        "the line is the reading and its text copy, and nothing else: {search}"
     );
     assert!(session.alive());
 }
@@ -634,8 +635,16 @@ fn show_over_mcp_prints_the_ticket() {
     let home = tempfile::tempdir().unwrap();
     let root = home.path().join("tracker");
     std::fs::create_dir_all(&root).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(root.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
     let long_title = "Pick a kiln damper codec that handles cold winter condensation and keeps every reading under eighty columns cleanly";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let filed = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args([
             "file",
@@ -667,6 +676,10 @@ fn show_over_mcp_prints_the_ticket() {
         .unwrap()
         .trim()
         .to_string();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let noted = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["note", &id, "measured cold damper clearance"])
         .env_clear()
@@ -684,6 +697,10 @@ fn show_over_mcp_prints_the_ticket() {
         "{}",
         String::from_utf8_lossy(&noted.stderr)
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let cli_out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["show", &id])
         .env_clear()
@@ -699,6 +716,10 @@ fn show_over_mcp_prints_the_ticket() {
         .unwrap();
     assert!(cli_out.status.success());
     let cli_page = String::from_utf8_lossy(&cli_out.stdout).into_owned();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
         .env("PATH", &path)
@@ -810,6 +831,10 @@ fn every_tool_that_names_a_help_command_names_one_that_answers() {
             .unwrap_or_else(|| panic!("{name} named no command: {line}"));
         let words: Vec<&str> = command.split_whitespace().collect();
         assert_eq!(&words[..1], &["ljos"], "{name}: {line}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let help = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(&words[1..])
             .output()

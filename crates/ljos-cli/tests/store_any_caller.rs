@@ -4,6 +4,11 @@
 //! --lesson`, a choice a prompt states and a proposal an older ljos left
 //! open are found by `ljos search` right after.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::path::Path;
@@ -57,10 +62,8 @@ fn get(port: u16, path: &str) -> String {
 }
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 /// A seat on `port` with a tracker holding one ticket and stand-ins for the
@@ -97,7 +100,7 @@ impl Seat {
         script(
             &bin,
             "claimdag",
-            "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\n  claim) echo gen=1 ;;\n  complete) echo done ;;\n  *) echo '[]' ;;\nesac\nexit 0\n",
+            "#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\n  claim) echo gen=1 ;;\n  complete) echo done ;;\n  *) echo '[]' ;;\nesac\nexit 0\n",
         );
         script(&bin, "deedar", "#!/bin/sh\necho head\nexit 0\n");
         Self { root, port, issue }
@@ -108,6 +111,10 @@ impl Seat {
     fn ljos(&self, args: &[&str], stdin: &str) -> Output {
         let root = self.root.path();
         let home = root.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(root)
@@ -305,6 +312,10 @@ fn a_proposal_an_older_ljos_left_open_is_found_after_session_start() {
     });
     let rows = seat.root.path().join("home/state/ljos/proposals.jsonl");
     std::fs::create_dir_all(rows.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&rows, format!("{row}\n")).unwrap();
 
     seat.hook("SessionStart", "");

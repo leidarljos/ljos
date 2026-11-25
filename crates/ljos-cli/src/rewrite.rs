@@ -727,12 +727,10 @@ esac
     /// as the recheck swaps in only an accepted line.
     #[test]
     fn the_real_guard_lets_only_an_accepted_rewrite_run() {
-        use std::os::unix::fs::PermissionsExt as _;
         let _g = crate::tests::env_guard();
         let home = tempfile::tempdir().unwrap();
         let bin = home.path().join("policyd");
-        std::fs::write(&bin, FAKE_POLICYD).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&bin, FAKE_POLICYD).unwrap();
         let keys = [
             "HOME",
             "POLICYD_BIN",
@@ -799,7 +797,6 @@ esac
     /// the declined swap is still kept.
     #[test]
     fn a_policyd_rewrite_is_passed_on_and_also_noted_and_logged() {
-        use std::os::unix::fs::PermissionsExt as _;
         let _g = crate::tests::env_guard();
         let home = tempfile::tempdir().unwrap();
         let repo = home.path().join("proj");
@@ -811,12 +808,11 @@ esac
             .unwrap();
         assert!(init.status.success(), "{init:?}");
         let bin = home.path().join("policyd");
-        std::fs::write(
+        crate::install_executable(
             &bin,
             "#!/bin/sh\ncase \"$5\" in\n  \"python x.py --n 3\") printf \"allow\\trewrite\\tbash -c 'uv run x.py --n 3'\\n\" ;;\n  *) echo allow ;;\nesac\n",
         )
         .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         // SAFETY: under the lock every environment-reading test takes,
         // which puts each name back when it drops.
         unsafe {
@@ -852,6 +848,10 @@ esac
         assert!(kept[0].applied, "{kept:?}");
         assert_eq!(kept[0].ran, "uv run x.py --n 3");
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("ljos.toml"), "rewrite = false\n").unwrap();
         let _ = crate::take_guard_note();
         let verdict = crate::tcb_verdict_in(&call.cue, dir);

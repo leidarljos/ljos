@@ -35,7 +35,7 @@ What it has done
 ================
 
 ============ ==============================================================================================================================================
-10,504 tokens for the 22 core Model Context Protocol (MCP) tools, against 23,477 for all 54
+10,520 tokens for the 22 core Model Context Protocol (MCP) tools, against 24,612 for all 57
 139.1 ms     warm prompt hook median on a pack of 10,000 lessons, down from 196.3 ms; ``prompt-hook.rows-10000.after`` in hook-latency.txt
 0 of 186     near-topic pairs merged; 12 of 78 duplicate pairs found
 2,293        tests passed on the 0.40.0 release commit, 0 failed
@@ -90,11 +90,14 @@ First commands
 .. code:: console
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
-   remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
+   remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on
+   turns.
      id a6ae2751, next review 2026-11-12 21:40 +00:00
    saved as a standing lesson; run `ljos search "QUERY"` to read it
    $ ljos search "lexical default"
-   matched by words (encoder not installed), so read https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`.
+   matched by words (encoder not installed), so read
+   https://leidarljos.github.io/ljos/getting-started.html#install or run
+   `ljos doctor`.
    shown 1 of 1.
    The first row is the closest match.
 

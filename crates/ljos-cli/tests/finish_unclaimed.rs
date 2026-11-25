@@ -26,7 +26,11 @@ the codec is one file
 fn run(root: &Path, args: &[&str]) -> std::process::Output {
     let home = root.join("home");
     let tracker = root.join("tracker");
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -46,7 +50,7 @@ fn run(root: &Path, args: &[&str]) -> std::process::Output {
         .current_dir(&home)
         .stdin(Stdio::null())
         .output()
-        .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")))
+        .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")));
 }
 
 fn seat(root: &Path) {
@@ -57,7 +61,15 @@ fn seat(root: &Path) {
     std::fs::create_dir_all(root.join("tmp")).unwrap();
     let project = root.join("tracker/Software/demo");
     std::fs::create_dir_all(&project).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(project.join("issues.org"), ORG).unwrap();
 }
 

@@ -722,10 +722,42 @@ fn hook_name(component: &str) -> Option<&'static str> {
         .map(|(_, runner)| *runner)
 }
 
+#[cfg(test)]
+static TEST_OWN_HOME: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) struct HoldOwnHome(Option<std::path::PathBuf>);
+
+#[cfg(test)]
+impl HoldOwnHome {
+    pub(crate) fn set(path: &std::path::Path) -> Self {
+        crate::require_env_lock();
+        let mut guard = TEST_OWN_HOME.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = guard.replace(path.to_path_buf());
+        Self(prev)
+    }
+}
+
+#[cfg(test)]
+impl Drop for HoldOwnHome {
+    fn drop(&mut self) {
+        let mut guard = TEST_OWN_HOME.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = self.0.take();
+    }
+}
+
 /// The home this user's passwd entry names. A tool call sets `HOME` for
 /// whatever it starts, but cannot change this.
 #[must_use]
 pub fn own_home() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = TEST_OWN_HOME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return Some(home);
+    }
     use std::os::unix::ffi::OsStrExt as _;
     let mut buf = vec![0u8; 1024];
     loop {
@@ -1114,6 +1146,10 @@ impl From<&std::fs::Metadata> for Owner {
 /// the caller holds for `file`. `None` unless every component above
 /// `file` is a directory and the file the walk ends on is a regular
 /// file that is `expect`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "owns a descriptor this function opened, never stdout or stderr"
+)]
 fn pinned_walk(file: &Path, expect: (u64, u64)) -> Option<Vec<Owner>> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
     use std::os::unix::ffi::OsStrExt as _;
@@ -1124,6 +1160,10 @@ fn pinned_walk(file: &Path, expect: (u64, u64)) -> Option<Vec<Owner>> {
     let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     let open = |dir: libc::c_int, name: &std::ffi::CStr| {
         // SAFETY: name is NUL-terminated, and openat only reads it.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
         // SAFETY: a descriptor openat returned is open and owned here.
         (fd >= 0).then(|| std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }))
@@ -1713,14 +1753,22 @@ fn looked_in(dirs: &[PathBuf]) -> String {
 }
 
 fn mkdir_private(dir: &Path) -> bool {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .is_ok()
     }
-    builder.create(dir).is_ok()
+    #[cfg(not(unix))]
+    {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .create(dir)
+            .is_ok()
+    }
 }
 
 /// The calling process's session id.
@@ -1777,6 +1825,10 @@ fn mark_broken() {
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let _ = options.open(dir.join("tool-calls.broken"));
     }
 }
@@ -1794,6 +1846,10 @@ fn append_record(dir: &Path, name: &str, line: &str) -> bool {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut file = match options.open(dir.join(name)) {
         Ok(file) => file,
         Err(_) => return false,
@@ -2183,7 +2239,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_install_root_holds_only_what_resolves_inside_it() {
-        use std::os::unix::fs::PermissionsExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-roots-")
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
@@ -2194,8 +2249,7 @@ mod tests {
         let program = |dir: &Path, name: &str| {
             std::fs::create_dir_all(dir).unwrap();
             let path = dir.join(name);
-            std::fs::write(&path, "").unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::install_executable(&path, "").unwrap();
             path
         };
         let bin = home.join(".local/bin");
@@ -2206,6 +2260,10 @@ mod tests {
         );
 
         let away = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(program(away.path(), "codex"), bin.join("codex")).unwrap();
         assert_eq!(
             runner_here(&bin.join("codex"), Some(&home), &store, &person),
@@ -2216,7 +2274,7 @@ mod tests {
         let climbed = home.join("../other/.local/bin/claude");
         assert_eq!(runner_here(&climbed, Some(&home), &store, &person), None);
 
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o757)).unwrap();
+        crate::change_mode(&claude, 0o757).unwrap();
         assert_eq!(runner_here(&claude, Some(&home), &store, &person), None);
 
         let open = bin.join("open");
@@ -2225,7 +2283,7 @@ mod tests {
             runner_here(&grok, Some(&home), &store, &person),
             Some("grok")
         );
-        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        crate::change_mode(&open, 0o777).unwrap();
         assert_eq!(runner_here(&grok, Some(&home), &store, &person), None);
     }
 
@@ -2236,7 +2294,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_root_in_a_directory_others_may_write_is_refused() {
-        use std::os::unix::fs::PermissionsExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-above-")
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
@@ -2263,10 +2320,14 @@ mod tests {
         );
         for file in &files {
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(file, "").unwrap();
         }
         let set = |dir: &Path, mode| {
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+            crate::change_mode(dir, mode).unwrap();
         };
         for root in install_roots(Some(&home))
             .iter()
@@ -2316,6 +2377,10 @@ mod tests {
         let other = home.join("other");
         for dir in [&versions, &other] {
             std::fs::create_dir_all(dir).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(dir.join("2.1.3"), "").unwrap();
         }
         let id = |path: &Path| {
@@ -2327,12 +2392,24 @@ mod tests {
         let runner = |expect| runner_at(&file, Some(&home), &store, &person, expect);
         assert_eq!(runner(running), Some("claude"));
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         std::fs::rename(&versions, home.join("held")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&other, &versions).unwrap();
         assert_eq!(runner(running), None);
         assert_eq!(runner(planted), None);
 
         std::fs::remove_file(&versions).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         std::fs::rename(&other, &versions).unwrap();
         assert_eq!(runner(running), None);
     }
@@ -2343,7 +2420,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_executable_that_cannot_be_read_is_no_runner() {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        use std::os::unix::fs::MetadataExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-exe-")
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
@@ -2352,8 +2429,7 @@ mod tests {
         let bin = home.join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
         let claude = bin.join("claude");
-        std::fs::write(&claude, "").unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&claude, "").unwrap();
         let meta = std::fs::metadata(&claude).unwrap();
         let person = Person::new(&SystemAccounts);
         let store = PathBuf::from(NIX_STORE);
@@ -2369,7 +2445,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_script_names_the_runner_only_for_an_installed_runtime() {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        use std::os::unix::fs::MetadataExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-runtime-")
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
@@ -2379,8 +2455,7 @@ mod tests {
         let program = |dir: &Path, name: &str| {
             std::fs::create_dir_all(dir).unwrap();
             let path = dir.join(name);
-            std::fs::write(&path, "").unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::install_executable(&path, "").unwrap();
             path
         };
         let id = |path: &Path| {
@@ -2419,7 +2494,7 @@ mod tests {
                 planted.display()
             );
         }
-        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o757)).unwrap();
+        crate::change_mode(&node, 0o757).unwrap();
         assert_eq!(runner(&node, id(&node)), None);
     }
 
@@ -2431,7 +2506,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_nix_entry_is_a_runner_only_in_a_store_nix_keeps() {
-        use std::os::unix::fs::PermissionsExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-store-")
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
@@ -2440,11 +2514,10 @@ mod tests {
         let bin = store.join("0c9yapqd0b8y4mj5xj7mrpmhy3l5ykh8-claude-code-2.0.1/bin");
         std::fs::create_dir_all(&bin).unwrap();
         let claude = bin.join("claude");
-        std::fs::write(&claude, "").unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&claude, "").unwrap();
         let person = Person::new(&SystemAccounts);
         let set = |mode| {
-            std::fs::set_permissions(&store, std::fs::Permissions::from_mode(mode)).unwrap();
+            crate::change_mode(&store, mode).unwrap();
         };
         let runner = || runner_here(&claude, None, &store, &person);
 
@@ -2539,7 +2612,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_group_write_counts_only_from_a_group_the_person_has_alone() {
-        use std::os::unix::fs::PermissionsExt as _;
         // SAFETY: getuid takes no arguments and only reads the process
         // identity.
         let uid = unsafe { libc::getuid() };
@@ -2579,8 +2651,7 @@ mod tests {
         let bin = home.join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
         let claude = bin.join("claude");
-        std::fs::write(&claude, "").unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o775)).unwrap();
+        crate::install_executable_mode(&claude, "", 0o775).unwrap();
         let store = PathBuf::from(NIX_STORE);
 
         for accounts in [alone(&[], vec![uid]), alone(&["u"], vec![uid, uid])] {
@@ -2604,6 +2675,10 @@ mod tests {
     #[test]
     fn a_primary_group_is_listed_only_from_a_passwd_file_read_whole() {
         let etc = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let write = |name: &str, text: &str| std::fs::write(etc.path().join(name), text).unwrap();
         let passwd = "root:x:0:0::/root:/bin/sh\nu:x:1000:1000::/home/u:/bin/sh\n";
         write("passwd", passwd);
@@ -2649,6 +2724,10 @@ mod tests {
     #[test]
     fn a_group_is_read_only_from_one_line_of_a_group_file_read_whole() {
         let etc = tempfile::tempdir().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let write = |name: &str, text: &str| std::fs::write(etc.path().join(name), text).unwrap();
         let group = "root:x:0:\nu:x:1000:\nstaff:x:50:u,v\n";
         write("group", group);
@@ -2711,6 +2790,10 @@ mod tests {
         assert!(why.contains("tool call"), "{why}");
         assert!(confirm_runner(&opener).is_ok(), "the opener recorded it");
         assert!(confirm_runner(&old).is_ok(), "older than the record");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(crate::runtime_dir().join("tool-calls"), "nope\n").unwrap();
         let why = confirm_runner(&old).unwrap_err();
         assert!(why.contains("corrupt"), "{why}");
@@ -2786,6 +2869,10 @@ mod tests {
         // A broken sentinel means a record should exist; with no records, the
         // error names every location that was checked.
         std::fs::create_dir_all(home.path().join(".cache/ljos/run")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(home.path().join(".cache/ljos/run/tool-calls.broken"), "").unwrap();
         let why = match tool_marks() {
             Ok(_) => panic!("tool marks unexpectedly found"),
@@ -2904,6 +2991,10 @@ mod tests {
 
     #[test]
     fn a_reaped_child_is_not_alive() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
@@ -2919,6 +3010,10 @@ mod tests {
 
     #[test]
     fn a_child_is_read_with_the_environment_it_was_started_with() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .env("LJOS_PROC_TREE_PROBE", "started-with")

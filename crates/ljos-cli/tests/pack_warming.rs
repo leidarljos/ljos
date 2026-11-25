@@ -104,7 +104,11 @@ fn serve() -> Seat {
 
 fn run(seat: &Seat, args: &[&str]) -> std::process::Output {
     let home = seat.home.path();
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .current_dir(home)
         .env_clear()
@@ -129,7 +133,7 @@ fn run(seat: &Seat, args: &[&str]) -> std::process::Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 #[test]

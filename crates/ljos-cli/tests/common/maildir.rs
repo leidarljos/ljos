@@ -17,6 +17,10 @@ impl Mailbox {
     }
 
     pub fn notmuch(&self, args: &[&str]) -> String {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("notmuch")
             .env("NOTMUCH_CONFIG", &self.config)
             .args(args)
@@ -54,9 +58,13 @@ pub fn mailbox() -> Mailbox {
         .collect();
     names.sort();
     for (n, path) in names.iter().enumerate() {
-        std::fs::copy(path, maildir.join("new").join(format!("{n}.fixture:2,"))).unwrap();
+        ljos_cli::copy_file(path, maildir.join("new").join(format!("{n}.fixture:2,"))).unwrap();
     }
     let config = dir.path().join("notmuch-config");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         &config,
         format!(

@@ -31,13 +31,13 @@
 //! its own, in a session it keeps (see `persona_session`).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
 
 /// Which judge answers the questions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
     /// Jev over TypeSafe's API or OpenRouter's Decisions API.
@@ -69,7 +69,7 @@ impl Backend {
 }
 
 /// One judge: where a decision is sent and how.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Judge {
     #[serde(default)]
     pub backend: Backend,
@@ -110,7 +110,7 @@ pub const DECISIONS: &[(&str, &str)] = &[
 ];
 
 /// `~/.config/ljos/jev.toml`.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     /// Off unless set: the call sends the prompt and claims off the machine.
     #[serde(default)]
@@ -315,6 +315,10 @@ fn key_by_command(judge: &str, argv: &[String]) -> Option<String> {
         return Some(key);
     }
     let (prog, args) = argv.split_first()?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = std::process::Command::new(prog);
     cmd.args(args);
     let out = crate::output_within(cmd, None, std::time::Duration::from_secs(3)).ok()?;
@@ -322,6 +326,10 @@ fn key_by_command(judge: &str, argv: &[String]) -> Option<String> {
         return None;
     }
     let key = key_from(&String::from_utf8_lossy(&out.stdout))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     if let Some(path) = cache {
         let _ = std::fs::create_dir_all(path.parent()?);
         if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -435,7 +443,7 @@ pub fn config() -> Option<(Config, String)> {
 }
 
 /// What Jev said about one prompt.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Judgment {
     /// Probability that each candidate, by its index, bears on the prompt.
     pub bears: Vec<f64>,
@@ -570,7 +578,7 @@ fn judge_name(j: &Judge) -> String {
 
 /// A claim the prompt judge saw, by id and kind. The log keeps these and
 /// not the claim text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LoggedClaim {
     pub id: String,
     pub kind: String,
@@ -609,7 +617,7 @@ struct Attempt {
 
 /// One judge's reply to `body`, from the cache or inside its budget.
 /// A miss is still an attempt, so the log can score a timeout.
-fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64) -> Attempt {
+fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64, cache: Option<&Path>) -> Attempt {
     let started = std::time::Instant::now();
     let backend = j.backend.name();
     let model = j.model.clone();
@@ -627,14 +635,14 @@ fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64) -> Attempt {
     let price = match j.price_in() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("jev: {e}");
+            say!("jev: {e}");
             return miss("error", 0);
         }
     };
     let mut body = body.clone();
     body["model"] = Value::String(j.model.clone());
     let request = format!("{}\n{body}", judge_name(j));
-    if let Some(reply) = cached(&request, cache_days) {
+    if let Some(reply) = cached_in(cache, &request, cache_days) {
         let latency_ms = started.elapsed().as_millis();
         return Attempt {
             name: String::new(),
@@ -659,7 +667,7 @@ fn ask_one(j: &Judge, key: &str, body: &Value, cache_days: u64) -> Attempt {
     if answered {
         if let Some(reply) = reply.as_ref() {
             if cache_days > 0 {
-                keep(&request, reply);
+                keep_in(cache, &request, reply);
             }
         }
     }
@@ -691,6 +699,17 @@ fn post(
     about: Value,
     claims: &[LoggedClaim],
 ) -> Option<Value> {
+    post_in(cfg, body, kind, about, claims, &Dirs::from_env())
+}
+
+fn post_in(
+    cfg: &Config,
+    body: Value,
+    kind: &str,
+    about: Value,
+    claims: &[LoggedClaim],
+    dirs: &Dirs,
+) -> Option<Value> {
     let decision = DECISIONS
         .iter()
         .find(|(_, k)| *k == kind)
@@ -699,19 +718,24 @@ fn post(
     if judges.is_empty() {
         return None;
     }
-    let replies = ask_all(&judges, &body, cfg.cache_days);
-    finish_post(&body, kind, about, claims, replies)
+    let replies = ask_all(&judges, &body, cfg.cache_days, dirs.cache.as_deref());
+    finish_post_in(&body, kind, about, claims, replies, dirs.state.as_deref())
 }
 
 /// Ask each judge at once, each inside its own budget.
-fn ask_all(judges: &[(String, Judge, String)], body: &Value, cache_days: u64) -> Vec<Attempt> {
+fn ask_all(
+    judges: &[(String, Judge, String)],
+    body: &Value,
+    cache_days: u64,
+    cache: Option<&Path>,
+) -> Vec<Attempt> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = judges
             .iter()
             .map(|(name, j, key)| {
                 let name = name.clone();
                 scope.spawn(move || {
-                    let mut attempt = ask_one(j, key, body, cache_days);
+                    let mut attempt = ask_one(j, key, body, cache_days, cache);
                     attempt.name = name;
                     attempt
                 })
@@ -745,12 +769,13 @@ fn stamp_confidence(answers: &mut Value) {
 
 /// Pool the replies, record the cost and log every attempt, including a
 /// timeout or a failure. `None` when no judge answered.
-fn finish_post(
+fn finish_post_in(
     body: &Value,
     kind: &str,
     about: Value,
     claims: &[LoggedClaim],
     replies: Vec<Attempt>,
+    state: Option<&Path>,
 ) -> Option<Value> {
     if replies.is_empty() {
         return None;
@@ -762,9 +787,9 @@ fn finish_post(
     let cost: f64 = ok.iter().map(|r| r.cost).sum();
     if !ok.is_empty() {
         if ok.iter().all(|r| r.cached) {
-            count("cached");
+            count_in(state, "cached");
         } else {
-            record_cost(cost);
+            record_cost_in(state, cost);
         }
     }
     let weighted: Vec<(f64, Value)> = ok
@@ -806,22 +831,25 @@ fn finish_post(
         .iter()
         .map(|c| serde_json::json!({"id": c.id, "kind": c.kind}))
         .collect();
-    log(&serde_json::json!({
-        "ts": crate::now_utc(),
-        "kind": kind,
-        "judges": replies.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
-        "about": about,
-        "answers": answers.clone(),
-        "per_judge": per,
-        "why": why,
-        "cost": cost,
-        "prompt_hash": prompt_hash,
-        "claims": claims,
-        "latency_ms": latency_ms,
-        "status": status,
-        "backend": replies.first().map(|r| r.backend).unwrap_or(""),
-        "model": replies.first().map(|r| r.model.clone()).unwrap_or_default(),
-    }));
+    log_in(
+        state,
+        &serde_json::json!({
+            "ts": crate::now_utc(),
+            "kind": kind,
+            "judges": replies.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+            "about": about,
+            "answers": answers.clone(),
+            "per_judge": per,
+            "why": why,
+            "cost": cost,
+            "prompt_hash": prompt_hash,
+            "claims": claims,
+            "latency_ms": latency_ms,
+            "status": status,
+            "backend": replies.first().map(|r| r.backend).unwrap_or(""),
+            "model": replies.first().map(|r| r.model.clone()).unwrap_or_default(),
+        }),
+    );
     if ok.is_empty() {
         None
     } else {
@@ -1082,6 +1110,10 @@ fn command_post(cfg: &Judge, body: &Value) -> Option<Value> {
     let argv = cfg.command.as_deref()?;
     let (prog, args) = argv.split_first()?;
     let secs = (cfg.budget_ms.div_ceil(1000)).max(1);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = std::process::Command::new(prog);
     cmd.args(args).env("LJOS_JUDGE", "1");
     let text = body.to_string();
@@ -1099,14 +1131,44 @@ fn command_post(cfg: &Judge, body: &Value) -> Option<Value> {
     (!answers.as_object()?.is_empty()).then(|| serde_json::json!({"answers": answers}))
 }
 
+/// State and cache directories resolved once on the calling thread before
+/// spawning a background judge, so a late reply writes into the `HOME`
+/// and XDG directories that were current at spawn.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Dirs {
+    pub state: Option<PathBuf>,
+    pub cache: Option<PathBuf>,
+}
+
+impl Dirs {
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            state: state_dir(),
+            cache: cache_dir_path(),
+        }
+    }
+}
+
 /// Ask Jev about one prompt, inside the configured budget. `claims` are
 /// the ids and kinds that line up with `candidates`; the log keeps those
 /// and a hash of the prompt, not the text.
 #[must_use]
 pub fn judge(prompt: &str, candidates: &[&str], claims: &[LoggedClaim]) -> Option<Judgment> {
     let (cfg, _) = config()?;
+    judge_with(&cfg, prompt, candidates, claims, &Dirs::from_env())
+}
+
+#[must_use]
+pub fn judge_with(
+    cfg: &Config,
+    prompt: &str,
+    candidates: &[&str],
+    claims: &[LoggedClaim],
+    dirs: &Dirs,
+) -> Option<Judgment> {
     let body = request(&cfg.model, prompt, candidates);
-    let reply = post(&cfg, body, "hook", Value::Null, claims)?;
+    let reply = post_in(cfg, body, "hook", Value::Null, claims, dirs)?;
     let mut judged = parse(&reply, candidates.len())?;
     judged.cost = price_in(cfg.backend, cfg.usd_per_mtok_in)
         .map(|p| cost_of(&reply, p))
@@ -1337,36 +1399,40 @@ pub fn sha256_hex(data: &[u8]) -> String {
     h.iter().map(|x| format!("{x:08x}")).collect()
 }
 
-/// `$XDG_CACHE_HOME/ljos/jev`, mode 0700, one file per request hash.
-fn cache_dir() -> Option<PathBuf> {
-    let dir = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?
-        .join("ljos")
-        .join("jev");
-    std::fs::create_dir_all(&dir).ok()?;
+/// `$XDG_CACHE_HOME/ljos/jev` without creating it yet.
+fn cache_dir_path() -> Option<PathBuf> {
+    Some(
+        std::env::var_os("XDG_CACHE_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?
+            .join("ljos")
+            .join("jev"),
+    )
+}
+
+fn ensure_cache_dir(dir: &Path) -> Option<()> {
+    std::fs::create_dir_all(dir).ok()?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        let _ = crate::change_mode(dir, 0o700);
     }
-    Some(dir)
+    Some(())
 }
 
 /// The file an identical request lands in. The name is the hash. The file
 /// holds the hash and the reply, not the request.
-fn cache_file(request: &str) -> Option<PathBuf> {
-    Some(cache_dir()?.join(sha256_hex(request.as_bytes())))
+fn cache_file_in(cache: Option<&Path>, request: &str) -> Option<PathBuf> {
+    Some(cache?.join(sha256_hex(request.as_bytes())))
 }
 
 /// The answer to an identical request made within `days`.
-fn cached(request: &str, days: u64) -> Option<Value> {
+fn cached_in(cache: Option<&Path>, request: &str, days: u64) -> Option<Value> {
     if days == 0 {
         return None;
     }
     let hash = sha256_hex(request.as_bytes());
-    let path = cache_file(request)?;
+    let path = cache_file_in(cache, request)?;
     let age = std::fs::metadata(&path)
         .ok()?
         .modified()
@@ -1381,12 +1447,25 @@ fn cached(request: &str, days: u64) -> Option<Value> {
     (entry["hash"].as_str() == Some(hash.as_str())).then(|| entry["reply"].clone())
 }
 
-fn keep(request: &str, reply: &Value) {
+#[cfg(test)]
+fn cached(request: &str, days: u64) -> Option<Value> {
+    cached_in(cache_dir_path().as_deref(), request, days)
+}
+
+fn keep_in(cache: Option<&Path>, request: &str, reply: &Value) {
     let hash = sha256_hex(request.as_bytes());
-    let Some(path) = cache_file(request) else {
+    let Some(dir) = cache else {
         return;
     };
+    if ensure_cache_dir(dir).is_none() {
+        return;
+    }
+    let path = dir.join(&hash);
     let entry = serde_json::json!({"hash": hash, "reply": reply});
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -1400,30 +1479,34 @@ fn keep(request: &str, reply: &Value) {
         {
             let _ = f.write_all(entry.to_string().as_bytes());
             use std::os::unix::fs::PermissionsExt;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "sets the mode of a path that is not a git hook"
+            )]
             let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         }
     }
     #[cfg(not(unix))]
     {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let _ = std::fs::write(path, entry.to_string());
     }
 }
 
+#[cfg(test)]
+fn keep(request: &str, reply: &Value) {
+    keep_in(cache_dir_path().as_deref(), request, reply);
+}
+
 /// Add one to this month's tally named `what` (`calls`, `cached`).
-fn count(what: &str) {
-    let Some(dir) = state_dir() else { return };
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("jev-cost.toml");
-    let mut totals: BTreeMap<String, f64> = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|t| toml::from_str(&t).ok())
-        .unwrap_or_default();
-    *totals
-        .entry(format!("{}-{what}", this_month()))
-        .or_default() += 1.0;
-    if let Ok(text) = toml::to_string(&totals) {
-        let _ = std::fs::write(path, text);
-    }
+fn count_in(state: Option<&Path>, what: &str) {
+    let key = format!("{}-{what}", this_month());
+    update_cost_in(state, |totals| {
+        *totals.entry(key).or_default() += 1.0;
+    });
 }
 
 /// The stop audit's cuts. A stop is held back only on a near-certain
@@ -1568,13 +1651,7 @@ pub fn audit_reason(a: &Audit, test_ran: bool) -> Option<String> {
 }
 
 fn state_dir() -> Option<PathBuf> {
-    Some(
-        std::env::var_os("XDG_STATE_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?
-            .join("ljos"),
-    )
+    Some(crate::absolute_state_base()?.join("ljos"))
 }
 
 /// The judge log, one JSON object per line. Missing file is an empty log.
@@ -1674,9 +1751,9 @@ pub fn score_log(entries: &[Value], outcomes: &BTreeMap<String, String>) -> Stri
 
 /// Every answer Jev gave, one JSON line each in the state directory, so
 /// its probabilities can be scored once the outcomes are known.
-fn log(entry: &Value) {
-    let Some(dir) = state_dir() else { return };
-    let _ = std::fs::create_dir_all(&dir);
+fn log_in(state: Option<&Path>, entry: &Value) {
+    let Some(dir) = state else { return };
+    let _ = std::fs::create_dir_all(dir);
     let Ok(mut line) = serde_json::to_string(entry) else {
         return;
     };
@@ -1688,22 +1765,99 @@ fn log(entry: &Value) {
     );
 }
 
-/// Add a call's cost to this month's running total in the state directory,
-/// so `ljos doctor` can say what Jev has cost.
-fn record_cost(cost: f64) {
-    let Some(dir) = state_dir() else { return };
-    let _ = std::fs::create_dir_all(&dir);
-    let month = crate::now_utc().chars().take(7).collect::<String>();
+#[cfg(test)]
+fn log(entry: &Value) {
+    log_in(state_dir().as_deref(), entry);
+}
+
+fn update_cost_in(state: Option<&Path>, mutate: impl FnOnce(&mut BTreeMap<String, f64>)) {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let Some(dir) = state else { return };
+    let _ = std::fs::create_dir_all(dir);
+
+    #[cfg(unix)]
+    let _lock = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::io::AsRawFd as _;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
+        let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(dir.join(".jev-cost.lock"))
+        else {
+            return;
+        };
+        loop {
+            // SAFETY: `file` owns a valid descriptor for the duration of this guard.
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if rc == 0 {
+                break;
+            }
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                return;
+            }
+        }
+        file
+    };
+
     let path = dir.join("jev-cost.toml");
     let mut totals: BTreeMap<String, f64> = std::fs::read_to_string(&path)
         .ok()
         .and_then(|t| toml::from_str(&t).ok())
         .unwrap_or_default();
-    *totals.entry(format!("{month}-calls")).or_default() += 1.0;
-    *totals.entry(month).or_default() += cost;
-    if let Ok(text) = toml::to_string(&totals) {
-        let _ = std::fs::write(path, text);
+    mutate(&mut totals);
+    let Ok(text) = toml::to_string(&totals) else {
+        return;
+    };
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".jev-cost.{}.{}.tmp", std::process::id(), seq));
+    #[cfg(unix)]
+    let wrote = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
+        let opened = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(text.as_bytes()));
+        opened.is_ok()
+    };
+    #[cfg(not(unix))]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    let wrote = std::fs::write(&tmp, text.as_bytes()).is_ok();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
+    if !wrote || std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
+}
+
+/// Add a call's cost to this month's running total in the state directory,
+/// so `ljos doctor` can say what Jev has cost.
+fn record_cost_in(state: Option<&Path>, cost: f64) {
+    let month = this_month();
+    update_cost_in(state, |totals| {
+        *totals.entry(format!("{month}-calls")).or_default() += 1.0;
+        *totals.entry(month).or_default() += cost;
+    });
 }
 
 fn month_totals() -> Option<BTreeMap<String, f64>> {
@@ -1862,13 +2016,25 @@ mod tests {
         assert!(config().is_none(), "no file, no call");
         std::fs::create_dir_all(dir.path().join("ljos")).unwrap();
         let key = dir.path().join("key");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&key, "sk-or-test\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.path().join("ljos/jev.toml"),
             format!("enabled = false\nkey_file = \"{}\"\n", key.display()),
         )
         .unwrap();
         assert!(config().is_none(), "a file that says off is off");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.path().join("ljos/jev.toml"),
             format!("enabled = true\nkey_file = \"{}\"\n", key.display()),
@@ -2281,6 +2447,10 @@ mod tests {
             std::env::set_var("XDG_CACHE_HOME", cache.path());
         }
         std::fs::create_dir_all(cfg_dir.path().join("ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             cfg_dir.path().join("ljos/jev.toml"),
             "enabled = true\nbackend = \"command\"\nmodel = \"local-1\"\ncommand = [\"sh\", \"-c\", \
@@ -2303,6 +2473,10 @@ mod tests {
         assert!(log.contains("\"model\":\"local-1\""), "{log}");
         assert!(log.contains("\"status\":\"ok\""), "{log}");
         assert!(log.contains("latency_ms"), "{log}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             cfg_dir.path().join("ljos/jev.toml"),
             "enabled = true\nbackend = \"command\"\ncommand = [\"sh\", \"-c\", \"exit 1\"]\n",
@@ -2330,6 +2504,10 @@ mod tests {
         let mut bytes =
             b"{\"kind\":\"hook\",\"n\":1}\nnot json\n{\"kind\":\"hook\",\"n\":2}\n".to_vec();
         bytes.extend_from_slice(b"{\"kind\":\"hook\",\"prompt\":\"caf\xc3");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("jev-log.jsonl"), bytes).unwrap();
         let rows = read_log();
         assert_eq!(rows.len(), 2, "{rows:?}");

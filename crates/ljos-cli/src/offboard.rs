@@ -149,17 +149,7 @@ impl Journal {
 }
 
 fn state_root() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".local/state"))
-        })
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos")
-        .join("onboard")
+    crate::state_base_dir().join("onboard")
 }
 
 fn manifest_path() -> PathBuf {
@@ -192,7 +182,15 @@ fn write_manifest(manifest: &Manifest) -> Result<()> {
     let mut text = serde_json::to_string_pretty(manifest)?;
     text.push('\n');
     let temporary = path.with_extension("json.tmp");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&temporary, text)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     fs::rename(temporary, path)?;
     Ok(())
 }
@@ -202,6 +200,10 @@ fn store_backup(bytes: &[u8]) -> Result<String> {
     let path = backup_dir().join(&name);
     if !path.is_file() {
         fs::create_dir_all(backup_dir())?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(&path, bytes)?;
     }
     Ok(name)
@@ -233,18 +235,12 @@ fn file_mode(_path: &Path) -> Option<u32> {
     None
 }
 
-#[cfg(unix)]
-fn set_mode(path: &Path, mode: Option<u32>) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    if let Some(mode) = mode {
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: Option<u32>) -> std::io::Result<()> {
-    Ok(())
+/// Put `bytes` back at `path` with `mode`, or `0o600` when none was
+/// recorded. A restored file may be a hook or a script a runner starts, so
+/// every restore is a publish: a symlink at `path` is replaced, not
+/// written or chmod'd through, and the mode never gains setuid or setgid.
+fn restore_file(path: &Path, bytes: &[u8], mode: Option<u32>) -> std::io::Result<()> {
+    crate::install_executable_mode(path, bytes, mode.unwrap_or(0o600))
 }
 
 fn same_state(left: Option<&FileState>, right: Option<&FileState>) -> bool {
@@ -519,6 +515,7 @@ fn missing_manifest(error: &anyhow::Error) -> bool {
 }
 
 fn reverse_entry(entry: &Entry, dry: bool) -> Result<(Step, bool)> {
+    let _hooks = hooks_lock(&entry.path);
     let before = entry.before.as_deref().map(load_backup).transpose()?;
     let after = entry.after.as_deref().map(load_backup).transpose()?;
     let current = read_state(&entry.path);
@@ -574,13 +571,7 @@ fn reverse_entry(entry: &Entry, dry: bool) -> Result<(Step, bool)> {
         ));
     }
     match action.0 {
-        Some(bytes) => {
-            if let Some(parent) = entry.path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(&entry.path, bytes)?;
-            set_mode(&entry.path, action.1)?;
-        }
+        Some(bytes) => restore_file(&entry.path, &bytes, action.1)?,
         None => {
             let _ = fs::remove_file(&entry.path);
             remove_empty_parents(entry.path.parent(), home_path().as_deref());
@@ -594,6 +585,16 @@ fn reverse_entry(entry: &Entry, dry: bool) -> Result<(Step, bool)> {
         },
         true,
     ))
+}
+
+/// The lock on the directory of `path` when `path` is a git hook, so the
+/// hook is read and put back with no other ljos hook edit in between.
+fn hooks_lock(path: &Path) -> Option<crate::exe_publish::HeldDirectory> {
+    let name = path.file_name()?.to_str()?;
+    if !crate::git_hooks::HOOK_NAMES.contains(&name) {
+        return None;
+    }
+    crate::exe_publish::HeldDirectory::open(path.parent()?).ok()
 }
 
 fn reverse_changed(before: &[u8], after: &[u8], current: &[u8]) -> Option<Vec<u8>> {
@@ -691,6 +692,10 @@ fn clean_shipped_shape(path: &Path, runner: &str, dry: bool, steps: &mut Vec<Ste
         fs::remove_file(path)?;
         remove_empty_parents(path.parent(), home_path().as_deref());
     } else {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(path, out)?;
     }
     steps.push(removed(runner, path));
@@ -898,6 +903,10 @@ fn clean_json_pointer(
         } else {
             let mut out = serde_json::to_string_pretty(&root)?;
             out.push('\n');
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             fs::write(path, out)?;
         }
         steps.push(removed(runner, path));
@@ -970,6 +979,10 @@ fn clean_config_marker(
             fs::remove_file(path)?;
             remove_empty_parents(path.parent(), home_path().as_deref());
         } else {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             fs::write(path, out)?;
         }
         steps.push(removed(runner, path));
@@ -1011,6 +1024,10 @@ fn clean_hooks(path: &Path, harness: &Harness, dry: bool, steps: &mut Vec<Step>)
     } else {
         let mut out = serde_json::to_string_pretty(&root)?;
         out.push('\n');
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(path, out)?;
         steps.push(removed(&harness.name, path));
     }
@@ -1123,6 +1140,10 @@ fn clean_env(path: &Path, harness: &Harness, dry: bool, steps: &mut Vec<Step>) -
     if kept.iter().all(|line| line.trim().is_empty()) {
         let _ = fs::remove_file(path);
     } else {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(path, kept.join("\n") + "\n")?;
     }
     let _ = fs::remove_file(mark);
@@ -1154,6 +1175,10 @@ fn legacy_aider(dry: bool, steps: &mut Vec<Step>) -> Result<()> {
             remove_empty_parents(config.parent(), home_path().as_deref());
             steps.push(removed("aider", &config));
         } else {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             fs::write(&config, out)?;
             steps.push(removed("aider", &config));
         }
@@ -1252,6 +1277,38 @@ fn remove_empty_parents(mut parent: Option<&Path>, stop: Option<&Path>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hook that was not executable before onboarding was put back with
+    /// `fs::write` and then chmod'd by path, so a symlink at its name had
+    /// its target rewritten and given the hook's mode.
+    #[cfg(unix)]
+    #[test]
+    fn restoring_a_non_executable_hook_over_a_symlink_leaves_the_target() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode_of =
+            |path: &Path| fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777;
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        crate::install_executable_mode(&victim, "SECRET\n", 0o700).unwrap();
+        let hooks = dir.path().join("hooks");
+        fs::create_dir(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the symlinked hook the restore must not write through"
+        )]
+        std::os::unix::fs::symlink(&victim, &hook).unwrap();
+        let before = b"#!/bin/sh\necho mine\n";
+        restore_file(&hook, before, Some(0o100644)).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "SECRET\n");
+        assert_eq!(mode_of(&victim), 0o700);
+        let meta = fs::symlink_metadata(&hook).unwrap();
+        assert!(meta.file_type().is_file(), "{meta:?}");
+        assert_eq!(mode_of(&hook), 0o644);
+        assert_eq!(fs::read(&hook).unwrap(), before);
+        restore_file(&hook, before, Some(0o4755)).unwrap();
+        assert_eq!(mode_of(&hook), 0o755, "a restore kept setuid");
+    }
 
     #[test]
     fn a_later_edit_survives_the_reverse_span() {

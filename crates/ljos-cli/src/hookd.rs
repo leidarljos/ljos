@@ -110,8 +110,8 @@ pub fn admit() {
     // binds the conversation from that record after this process exits.
     if !args.iter().any(|a| a == "--prompt") {
         if let Some((output, code)) = crate::cursor_side_answer(&input, event.as_deref()) {
-            let call = crate::hook_call_as(&input, event.as_deref());
-            crate::bind_call_conversation(&input, &call);
+            let mut call = crate::hook_call_as(&input, event.as_deref());
+            crate::bind_hook_call(&input, &mut call);
             let _ = crate::subagent::note_hook_call(&input, &call.event);
             std::process::exit(crate::emit_side_answer(
                 &input,
@@ -132,7 +132,7 @@ pub fn admit() {
         }
         Err(why) => {
             note_time("allowed", started().elapsed(), Duration::ZERO);
-            eprintln!("ljos hook: hook queue: {why}; the call is judged in this process");
+            say!("ljos hook: hook queue: {why}; the call is judged in this process");
             let _ = (gate, input, event);
         }
     }
@@ -152,8 +152,8 @@ pub fn release() {
 }
 
 /// Whether `args` (after the program name) are a hook call that reads a
-/// payload and answers it. The git and runner forms, `--text` and the
-/// queue's own verbs are not admitted here.
+/// payload and answers it. The git, runner and judge-worker forms,
+/// `--text` and the queue's own verbs are not admitted here.
 fn admitted_command(args: &[String]) -> bool {
     if args.first().map(String::as_str) != Some("hook") {
         return false;
@@ -170,6 +170,7 @@ fn admitted_command(args: &[String]) -> bool {
                 | "--drain"
                 | "--apply-book"
                 | "--finish-session"
+                | "--judge-worker"
                 | "-h"
                 | "--help"
         )
@@ -313,12 +314,16 @@ fn binary_stamp(path: &Path) -> Option<(u64, u64, i64)> {
 }
 
 fn open_lock(path: &Path) -> Option<std::fs::File> {
-    std::fs::OpenOptions::new()
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
+    return std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
         .open(path)
-        .ok()
+        .ok();
 }
 
 fn try_flock(file: &std::fs::File) -> bool {
@@ -336,6 +341,10 @@ fn start_server(dir: &Path) -> Option<std::fs::File> {
         return None;
     }
     let exe = std::env::current_exe().ok()?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("hookd")
         .env_clear()
@@ -644,7 +653,7 @@ fn same_user(_stream: &UnixStream) -> bool {
 pub fn serve() -> i32 {
     let dir = run_dir();
     let Some(lock) = open_lock(&dir.join("hookd.lock")) else {
-        eprintln!(
+        say!(
             "ljos hookd: cannot open {}",
             dir.join("hookd.lock").display()
         );
@@ -658,10 +667,14 @@ pub fn serve() -> i32 {
     let listener = match UnixListener::bind(&sock) {
         Ok(listener) => listener,
         Err(e) => {
-            eprintln!("ljos hookd: cannot listen on {}: {e}", sock.display());
+            say!("ljos hookd: cannot listen on {}: {e}", sock.display());
             return 1;
         }
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
     let ino = std::fs::metadata(&sock).map(|m| m.ino()).unwrap_or(0);
     // The binary this server runs. An install replaces the file under its
@@ -723,6 +736,10 @@ fn times_path() -> PathBuf {
 pub fn note_time(kind: &str, took: Duration, waited: Duration) {
     let path = times_path();
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_CAP) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         let _ = std::fs::rename(&path, path.with_extension("log.1"));
     }
     let Some(mut file) = open_lock(&path) else {
@@ -925,6 +942,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("hookd.flight-gone");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
@@ -932,6 +953,10 @@ mod tests {
         let pid = child.id();
         child.kill().unwrap();
         let _ = child.wait();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, format!("{pid}\n")).unwrap();
         let leaked = std::fs::File::open(&path).unwrap();
         assert!(try_flock(&leaked), "the test could not hold the old inode");

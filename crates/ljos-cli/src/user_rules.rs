@@ -193,13 +193,21 @@ fn remember_good(path: &std::path::Path, text: &str) {
     let Ok(tmp) = unique_rules_temp(parent) else {
         return;
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     if std::fs::write(&tmp, text).is_err() {
         let _ = std::fs::remove_file(&tmp);
         return;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     if std::fs::rename(&tmp, &good).is_err() {
         let _ = std::fs::remove_file(&tmp);
-    }
+    };
 }
 
 /// The last whole document when this seat has read one. Otherwise `err`,
@@ -295,6 +303,10 @@ fn rules_read_gave_up(
 fn read_rules_text(path: &std::path::Path) -> Result<Option<String>> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let file = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
@@ -387,6 +399,10 @@ fn store(rules: &[UserRule]) -> Result<()> {
     // truncated document from this write.
     let tmp = unique_rules_temp(parent)?;
     let write_tmp = (|| -> Result<()> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -402,6 +418,10 @@ fn store(rules: &[UserRule]) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(err);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     if let Err(err) = std::fs::rename(&tmp, &path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(err).context(format!("user rules: rename into {} failed", path.display()));
@@ -996,6 +1016,10 @@ pub fn note_cutoff() {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let _ = std::fs::write(&path, format!("{}\n", super::now_utc()));
 }
 
@@ -1290,7 +1314,7 @@ fn note_rules_read_error(err: &anyhow::Error) {
     if NOTED.swap(true, Ordering::Relaxed) {
         return;
     }
-    eprintln!("ljos: {err:#}");
+    say!("ljos: {err:#}");
 }
 
 /// A GitHub write the rules cover, warned on because the file could not
@@ -1873,6 +1897,10 @@ mod tests {
         ] {
             let test = format!("user_rules::tests::{test}");
             for env in [runner, &[("CURSOR_CONVERSATION_ID", "x")]] {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "starts a program outside git hook code"
+                )]
                 let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
                 cmd.args(["--exact", &test, "--test-threads=1"]);
                 for (key, value) in env {
@@ -1977,6 +2005,10 @@ mod tests {
             lesson_hash: None,
             due_at: Some("2020-01-02T00:00:00Z".into()),
         });
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             rules_path().unwrap(),
             serde_json::to_string_pretty(&file).unwrap(),
@@ -2102,6 +2134,10 @@ mod tests {
         assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
         let _ = std::fs::remove_dir(&path);
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(RULES_FILE_CAP + 1).unwrap();
         drop(file);
@@ -2138,6 +2174,10 @@ mod tests {
         let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
         let read_tool = r#"{"tool_name":"list_issues","mcp_server_name":"github","tool_input":{"owner":"org"}}"#;
         let path = rules_file();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, "").unwrap();
         let hit = guard_payload(benign).expect("empty file allowed a write");
         assert_eq!(hit.verdict, "warn");
@@ -2155,6 +2195,10 @@ mod tests {
             shell.reason
         );
         assert!(guard_line("gh issue list").is_none(), "a read was denied");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, " \n").unwrap();
         let hit = guard_payload(benign).expect("blank file allowed a write");
         assert!(
@@ -2163,6 +2207,10 @@ mod tests {
             hit.reason
         );
         std::fs::remove_file(&path).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(path.with_file_name("no-such-rules.json"), &path).unwrap();
         let hit = guard_payload(benign).expect("dangling link allowed a write");
         assert_eq!(hit.verdict, "warn");
@@ -2183,6 +2231,10 @@ mod tests {
             guard_payload(benign).is_none(),
             "a missing file denied a write"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, "{\"rules\":[]}\n").unwrap();
         assert!(
             guard_payload(benign).is_none(),
@@ -2197,8 +2249,16 @@ mod tests {
         let (_lock, _dir) = isolated();
         let path = rules_file();
         let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, "{\"rules\":[]}\n").unwrap();
         assert!(load().unwrap().is_empty());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, "").unwrap();
         assert!(
             load().unwrap().is_empty(),
@@ -2208,6 +2268,10 @@ mod tests {
             guard_payload(benign).is_none(),
             "an emptied file denied a write"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, "{\"rules\":[").unwrap();
         assert!(
             load().unwrap().is_empty(),
@@ -2236,9 +2300,17 @@ mod tests {
             ("wrongtype", "{\"rules\":{\"id\":1}}"),
         ];
         for (name, body) in cases {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&path, body).unwrap();
             if *name == "unreadable" {
                 use std::os::unix::fs::PermissionsExt;
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "sets the mode of a path that is not a git hook"
+                )]
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
             }
             let hit = guard_payload(benign).unwrap_or_else(|| panic!("{name}: allowed"));
@@ -2277,6 +2349,10 @@ mod tests {
             );
             if *name == "unreadable" {
                 use std::os::unix::fs::PermissionsExt;
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "sets the mode of a path that is not a git hook"
+                )]
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
             }
         }
@@ -2351,6 +2427,10 @@ mod tests {
         const TOKEN: &str = "7a6b5c4d3e2f10017a6b5c4d3e2f10017a6b5c4d3e2f10017a6b5c4d3e2f1001";
         let dir = home.join("pack");
         std::fs::create_dir_all(&dir).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("token"), format!("{TOKEN}\n")).unwrap();
         // SAFETY: the caller holds the process env lock for the whole test.
         unsafe { std::env::set_var("PACKSET_TOKEN", TOKEN) };
@@ -2419,7 +2499,7 @@ mod tests {
     #[test]
     fn a_deleted_lesson_is_not_stated_by_a_long_lived_reader() {
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         a_dropped_lesson_stays_dropped(None);
@@ -2428,7 +2508,7 @@ mod tests {
     #[test]
     fn a_retracted_lesson_is_not_stated_by_a_long_lived_reader() {
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         a_dropped_lesson_stays_dropped(Some("deed-patch-overlay"));
@@ -2440,7 +2520,7 @@ mod tests {
     #[test]
     fn a_pack_that_stops_answering_confirms_no_rule() {
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let (_lock, dir) = isolated();
@@ -2489,7 +2569,7 @@ mod tests {
     #[test]
     fn a_person_read_in_one_workspace_does_not_answer_for_another() {
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let (_lock, dir) = isolated();
@@ -2625,6 +2705,10 @@ mod tests {
         row.basis = None;
         row.written_at = "2020-01-01T00:00:00.000Z".into();
         let path = rules_path().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, render_rules(&[row.clone()]).unwrap()).unwrap();
         let head = preface();
         assert!(head.contains("not confirmed"), "{head}");
@@ -2656,6 +2740,10 @@ mod tests {
         later.written_at = "2999-01-01T00:00:00.000Z".into();
         let mut rows = read_all().unwrap();
         rows.push(later);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, render_rules(&rows).unwrap()).unwrap();
         let head = preface();
         assert!(head.contains("Alan"), "{head}");
@@ -2676,6 +2764,10 @@ mod tests {
         let mut row = alan();
         row.basis = None;
         row.written_at = "not-a-time".into();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             rules_path().unwrap(),
             render_rules(std::slice::from_ref(&row)).unwrap(),
@@ -2763,6 +2855,10 @@ mod tests {
         let mut rows = read_all().unwrap();
         rows[0].pattern = Some("git status*".into());
         rows[0].verdict = Some("deny".into());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(rules_path().unwrap(), render_rules(&rows).unwrap()).unwrap();
         let mcp = r#"{"tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"please ask @ocaisa"}}"#;
         for denied in [
@@ -2830,12 +2926,20 @@ mod tests {
         let dir = cfg.join("ljos");
         std::fs::create_dir_all(&dir).unwrap();
         let key = dir.join("age.key");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let made = std::process::Command::new("age-keygen")
             .arg("-o")
             .arg(&key)
             .output()
             .unwrap();
         assert!(made.status.success(), "age-keygen must be installed");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let public = std::process::Command::new("age-keygen")
             .arg("-y")
             .arg(&key)
@@ -2914,6 +3018,10 @@ mod tests {
                 let a = age_identity(&cfg_a);
                 let b = age_identity(&cfg_b);
                 std::fs::create_dir_all(seed.join(".ljos")).unwrap();
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "writes a file that is not a git hook"
+                )]
                 std::fs::write(
                     seed.join(".ljos/sync.toml"),
                     format!("name = \"home\"\nrecipients = [\"{a}\", \"{b}\"]\n"),
@@ -3074,7 +3182,15 @@ mod tests {
         let text = std::fs::read_to_string(homes.cfg_b.join("ljos/user-rules.json")).unwrap();
         let dir = homes.b.join(".ljos/user-rules");
         std::fs::create_dir_all(&dir).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("old-host.json"), &text).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("laptop.json"), &text).unwrap();
         git_ok(&homes.b, &["add", ".ljos/user-rules"]);
         git_ok(&homes.b, &["commit", "-q", "-m", "plaintext rules"]);
@@ -3306,6 +3422,10 @@ mod tests {
         git_ok(&repo, &["remote", "add", "origin", &url]);
         // A scope, so the sync reaches the fetch that does not answer.
         std::fs::create_dir_all(repo.join(".ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             repo.join(".ljos/sync.toml"),
             "name = \"home\"\nrecipients = []\n",

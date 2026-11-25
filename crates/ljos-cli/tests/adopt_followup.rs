@@ -69,12 +69,8 @@ impl World {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let deedar = bin.join("deedar");
-        std::fs::write(&deedar, "#!/bin/sh\necho \"no such deed $2\" >&2\nexit 1\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&deedar, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        ljos_cli::install_executable(&deedar, "#!/bin/sh\necho \"no such deed $2\" >&2\nexit 1\n")
+            .unwrap();
         let path = format!(
             "{}:{}",
             bin.display(),
@@ -91,6 +87,10 @@ impl World {
     }
 
     fn ljos(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
@@ -123,6 +123,10 @@ fn text(out: &Output) -> String {
 fn a_mapped_main_conversation_sits_and_an_unresolved_one_exits_2() {
     let world = World::new();
     let id = "bc-1234abcd-rest-main";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.home.join(".config/ljos/seats.toml"),
         format!("{id:?} = \"saddle\"\n"),
@@ -160,6 +164,10 @@ fn an_unlisted_seat_exits_2() {
     let world = World::new();
     let tracker = world.home.join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let out = world.ljos(
         &["note", "proj-aaaa", "progress"],
@@ -201,7 +209,9 @@ fn a_failed_command_is_left_out_of_search_until_asked() {
     let said = text(&asked);
     assert!(asked.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&asked.stdout);
-    assert!(stdout.contains("zircon-missing"), "{said}");
+    // The row wraps long paths, and a wrap may fall inside the file name.
+    let unwrapped: String = stdout.split_whitespace().collect();
+    assert!(unwrapped.contains("zircon-missing"), "{said}");
     // A missing import file is the caller's input, so the label is input-warning.
     assert!(stdout.contains("attempt, input-warning"), "{said}");
 }
@@ -332,7 +342,7 @@ fn default_search_keeps_this_seats_topic_and_drops_routine_logs() {
     assert!(hourly.status.success(), "{said}");
     assert_eq!(
         String::from_utf8_lossy(&hourly.stdout),
-        ljos_cli::scan::empty_store_page("hourly"),
+        ljos_cli::scan::empty_store_page("hourly", ljos_cli::scan::Width::FIXED),
         "{said}"
     );
 
@@ -349,7 +359,7 @@ fn default_search_keeps_this_seats_topic_and_drops_routine_logs() {
     assert!(stop.status.success(), "{said}");
     assert_eq!(
         String::from_utf8_lossy(&stop.stdout),
-        ljos_cli::scan::empty_store_page("the"),
+        ljos_cli::scan::empty_store_page("the", ljos_cli::scan::Width::FIXED),
         "{said}"
     );
 }
@@ -467,10 +477,8 @@ fn a_refused_pack_search_is_one_line_and_exits_75() {
     );
     let said = text(&out);
     assert!(out.status.success(), "{said}");
-    assert!(
-        said.contains("The memory writer is not running") && said.contains("packset ensure"),
-        "{said}"
-    );
+    assert!(said.contains("Memory is not running, so these results are ranked by words. If this persists, run `ljos doctor`."), "{said}");
+    assert_eq!(said.matches("ranked by words").count(), 1, "{said}");
     assert!(!said.contains("Caused by"), "{said}");
     assert!(!said.contains("packsetd is unreachable"), "{said}");
 }

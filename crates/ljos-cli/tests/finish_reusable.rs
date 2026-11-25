@@ -2,7 +2,6 @@
 
 ljos_test_boot::harness!();
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -33,11 +32,19 @@ impl World {
             std::fs::create_dir_all(path).unwrap();
         }
         script(&root.path().join("bin/deedar"), "#!/bin/sh\necho head\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.path().join("tracker/vissue.toml"),
             "prefix = \"Software\"\n",
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.path().join("tracker/Software/ljos/issues.org"),
             "\
@@ -61,7 +68,11 @@ impl World {
 
     fn run(&self, args: &[&str]) -> Output {
         let home = self.root.path().join("home");
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env(
@@ -87,7 +98,7 @@ impl World {
             .current_dir(self.root.path())
             .stdin(Stdio::null())
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn org(&self) -> String {
@@ -96,8 +107,7 @@ impl World {
 }
 
 fn script(path: &Path, body: &str) {
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 fn text(out: &Output) -> String {

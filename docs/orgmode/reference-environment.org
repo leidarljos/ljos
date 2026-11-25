@@ -18,6 +18,9 @@
 | =LJOS_HUD_SOCKET= | summon socket; else =$XDG_RUNTIME_DIR/ljos/hud.sock= |
 | =LJOS_TRACKER_GIT= | =commit= commits the ticket's =issues.org=, and the sitting's and finish's sealed sync log, without pushing; =off= skips the commit and push, and the sync in passing; unset, commit and push. A landed commit or push is not printed. A refusal is one sentence. =--verbose= prints the lines. =ljos sync= by hand always pushes |
 | =LJOS_TRACKER_PUSH_WAIT= | seconds the tracker push after a claim or finish waits; 5 when unset |
+| =LJOS_TRACKER_BATCH_SECS= | seconds between tracker commits for notes. A plain note within that time of the checkout's last tracker commit stays on disk and on the pending list. The first note after it, any other tracker write, a push, the exit of the process that held it or the end of the session commits the held notes in one commit that names them. A claim, a ballot or a finish never waits. 60 when unset, =0= commits every write |
+| =LJOS_TRACKER_SPLIT_BYTES= | an =issues.org= at least this many bytes is split into one file per issue under =issues/= on its next tracker write, as =vissue migrate-ledger= does, in one commit with every issue file. That split also migrates every unsplit sibling board under the same prefix, in the same commit. A split whose commit does not land is rolled back; when another write lands in =issues/= first, the failed split is kept and waits for a later commit. Later writes append to that issue's file and commit it alone; =issues.org= stays as it was at the split. 1048576 when unset, =0= never splits |
+| =LJOS_CLAIM_NOW= | the instant claim ages are counted to, in RFC 3339 such as =2026-11-16T12:00:00+00:00= in any offset, for tests that print a claim age; unset or unparsable, the clock |
 | =LJOS_SEARCH_BUSY_WAIT= | seconds =ljos search=, =ljos recall=, and =ljos remember= keep asking a pack that reports busy; 2 when unset, =0= does not wait. A =Retry-After= or a JSON =retry_ms= sets one pause when it is longer |
 | =LJOS_SEARCH_WAIT= | seconds =ljos search= waits for an encoder that is still loading; 3 when unset, =0= does not wait. Rows shown while it loads are word matches, and the line reports the load time when known or says the encoder has not answered yet. When nothing is shown, the line names how long to wait before running the search again |
 | =LJOS_SEARCH_WARMUP_WAIT= | seconds =ljos search= waits when the encoder is loading and the reported remaining time fits; 5 when unset, =0= does not wait. The wait stays inside =LJOS_CALL_TIMEOUT=. A longer or unknown load keeps =LJOS_SEARCH_WAIT= |
@@ -84,6 +87,7 @@ ljos reads =ljos.toml= from the user config (~/.config/ljos/ljos.toml), then the
 - =LJOS_CAPTURE= default on
 - =LJOS_CARDS_DIR= default unset
 - =LJOS_CITE= default unset
+- =LJOS_CLAIM_NOW= default unset, the clock
 - =LJOS_CLOUD_AGE_SECRET= default unset
 - =LJOS_CONFIG= default unset
 - =LJOS_DEBUG= default unset
@@ -173,12 +177,14 @@ ljos reads =ljos.toml= from the user config (~/.config/ljos/ljos.toml), then the
 - =LJOS_TEST_HOSTNAME= default unset
 - =LJOS_TEST_REQUIRE_TOOLS= default unset
 - =LJOS_TEST_SESSION= default unset
+- =LJOS_TRACKER_BATCH_SECS= default 60 seconds
 - =LJOS_TRACKER_DIR= default unset
 - =LJOS_TRACKER_GIT= default push
 - =LJOS_TRACKER_LOCK_WAIT= default 20 seconds
 - =LJOS_TRACKER_PUSH_WAIT= default 5 seconds
 - =LJOS_TRACKER_REMOTE= default unset
 - =LJOS_TRACKER_SEARCH= default unset
+- =LJOS_TRACKER_SPLIT_BYTES= default 1048576 bytes
 - =LJOS_TRACKER_TOKEN= default unset
 - =LJOS_TRACK_WORK= default off
 - =LJOS_UNATTENDED= default unset
@@ -221,7 +227,21 @@ ljos reads =ljos.toml= from the user config (~/.config/ljos/ljos.toml), then the
 
 ** A temporary HOME or working directory
 
-ljos treats a =HOME= under =/tmp=, =/var/tmp=, =/private/tmp=, =/dev/shm= or =$TMPDIR= as a test sandbox. There the hook's command check is off, and memory is off, unless =PACKSET_URL= names a writer. With no writer address the memory row, the guard row, =ljos remember=, =ljos search= and =ljos consensus= print one line, =memory and the command guard are off because the home is under /tmp (HOME); set HOME to a directory outside /tmp=, naming whichever of those directories the home is under. Search and consensus exit 1 with that line. That home does not start a pack writer: =ljos onboard= and =ljos doctor --fix= do not run =packset ensure= there, so a trial install does not leave a writer that nothing stops. A working directory under one of those, with a =HOME= outside them, is not a sandbox: =cd /tmp && rm -rf ~/proj= is judged. ~LJOS_GUARD=on~ keeps the check on under a temporary =HOME=, which is how a test suite exercises it; =LJOS_OFF= still switches it off. When =PACKSET_URL= is set the guard row keeps the temporary-directory reason. =ljos doctor= shows a =guard= row marked =warn= whenever the check is off, from =LJOS_OFF= or from a temporary =HOME=. =install.sh= prints the same line at the end of an install into a temporary =HOME=.
+ljos treats a =HOME= under =/tmp=, =/var/tmp=, =/private/tmp=, =/dev/shm= or an absolute per-session =$TMPDIR= at least two components below =/= and not equal to or an ancestor of the passwd home as a test sandbox.
+There the hook's command check is off, and memory is off, unless =PACKSET_URL= or the selected writer port is nonblank.
+The selected port is =PACKSET_PORT= when it is set, and =LJOS_MEM_PORT= otherwise.
+With no writer address or selected port, five outputs print one line: the memory row, the guard row, =ljos remember=, =ljos search= and =ljos consensus=.
+That line reads =memory and the command guard are off because the home is under /tmp (HOME); set HOME to a directory outside /tmp=, naming whichever of those directories the home is under.
+A failed first =ljos remember= prints no seat notice before that line.
+Search and consensus exit 1 with that line.
+That home does not start a pack writer: =ljos onboard= and =ljos doctor --fix= do not run =packset ensure= there, so a trial install does not leave a writer that nothing stops.
+A working directory under one of those, with a =HOME= outside them, is not a sandbox: =cd /tmp && rm -rf ~/proj= is judged.
+~LJOS_GUARD=on~ keeps the check on under a temporary =HOME=, which is how a test suite exercises it; =LJOS_OFF= still switches it off.
+When a writer address or a nonblank selected port is set the guard row keeps the temporary-directory reason.
+=ljos doctor= shows a =guard= row marked =warn= whenever the check is off, from =LJOS_OFF= or from a temporary =HOME=.
+With no writer address or selected port, =install.sh= prints that memory-and-guard line.
+When =PACKSET_URL= is =off=, the setup line says memory is off and the guard-only line follows.
+When =PACKSET_URL= names a writer, the setup line names the memory writer and the guard-only line follows.
 
 A runner's table may also name =start= and =resume=, the argv that open
 a session in a persona's home and resume the latest one there; a
@@ -318,17 +338,19 @@ stdin is an argv line and answered in plain lines.
 | =Stop= | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript; then uses one turn for unread interrupt mail (=decision: block=, or =followup_message= in the editor harness) and receipts it |
 | =SubagentStop= | names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once |
 
-The hook's book names the runner that owns its sitting, and the next
-session or MCP call finishes the sitting once that process is gone. The
-owner is the nearest harness ljos knows by name above the hook, else the
-nearest program that is neither a shell nor a wrapper, else the outermost
-shell. The walk stops below a terminal, a multiplexer or init, none of
-which owns a sitting. The book keeps the owner's pid and start time, so a
-pid used again by another process is gone. The walk reads =/proc= and
-holds on Linux only. On macOS and other systems the hook's parent owns
-the sitting: a runner starts the hook through =sh -c=, which exits with
-it, so there the next MCP call finishes the hook's sitting, and
-=ljos_start= files a new claim instead of keeping the one a Write took.
+No hook takes or finishes a claim, and a Write files no claim. A later
+sitting hands an expired claim back. The reclaim step of =ljos sitting=
+and of =ljos_sitting= releases a claim-graph node quiet longer than
+=LJOS_LEASE_SECS= (900 when unset; 0 turns the step off) whose
+conversation is gone, or that no conversation on this host names, and
+keeps one whose runner still runs. That release does not depend on
+=LJOS_TRACKER_GIT=. Only when =LJOS_TRACKER_GIT= is exactly =push= does
+the step first hand back this machine's =STARTED= tracker claims older
+than the lease whose conversation on this host is gone. Unset is not
+=push=. A tracker claim that no conversation on this host names stays.
+A claim the step keeps, or one not yet past the lease, stays until
+=ljos finish=, =ljos release= or =ljos complete= (=ljos_finish=, =ljos_release=,
+=ljos_complete=) ends it, or another seat takes it over as stale.
 On Linux, a child of the recorded client does not keep the MCP connection
 alive after that client exits.
 
@@ -337,5 +359,5 @@ alive after that client exits.
 | File | Contents |
 |---+---|
 | =.ljos/sync.toml= (in the tracker repository) | the repository's scope and its age recipients; a =[projects]= table sends one project's lessons to another scope |
-| =.ljos/atoms/= | one sealed log per machine. =<host>/snap-<seq>.jsonl.age= is a snapshot sealed once, =<host>/seg-<seq>-<hash>.jsonl.age= is a segment sealed once, and =<host>/plain.sha256= is the plaintext hash. A sync writes nothing when that hash matches. =ljos sync --compact=, or more than 64 segments, folds them into one new snapshot. A log from before this layout, =<host>.jsonl.age= and =<host>.chunks/=, is copied once into =snap-0= and the segments, and the old path is removed |
+| =.ljos/atoms/= | one sealed log per machine. =<host>/snap-<seq>.jsonl.age= is a snapshot sealed once, =<host>/seg-<seq>-<hash>.jsonl.age= is a segment sealed once, and =<host>/plain.sha256= is the plaintext hash. No sync reads what that hash says: a sync writes nothing when this home noted, in =sync/logs/= below the state directory, that the snapshots and segments, with the bytes they have now, open to the atoms it would write. A sync never removes or seals again a snapshot or segment; when one does not open on this machine, or =age= cannot authenticate it, the next sync with atoms not yet sealed seals them whole into one new snapshot and prints a warning; that snapshot carries the atoms the pack lists, the same atoms a log that opens gives a peer, and an atom the pack no longer lists is dropped as on any sync; when this machine's key is not a recipient it writes nothing and prints a warning that names =ljos sync --key=. Only =ljos sync --compact= folds them into one new snapshot, and it exits non-zero and removes nothing when the newest snapshot, or a segment after it, does not open on this machine; an older piece that does not open is covered by the newest snapshot and is removed with the rest; a sync with new atoms adds one segment of those atoms, however many segments there are. A sync keeps the plaintext of each piece it seals below the state directory, in =sync/opened/= beside what an import keeps, so its next sync reads its own log without running =age -d=. Those plaintexts are files of mode 0600 in a directory of mode 0700, as =age.key= is. Each kept plaintext and note is signed with a random key kept in =sync/kept.key= of mode 0600, and is used only when that signature and the sealed bytes it names agree; otherwise the log is read again with =age -d=, so removing =sync/opened/= always gives back the committed log. A sync commits only those files, so the temp file of a write that was cut off is never committed. A committed snapshot or segment that was changed or removed in the checkout is not committed again; only =ljos sync --compact= commits a removal. A new snapshot or segment takes the seq one past every piece in the checkout and in =HEAD=, so its path is never one =HEAD= has. Before =ljos sync --compact= removes a piece, it reads its new snapshot again with =age -d=, and removes nothing unless that snapshot is at a path =HEAD= does not have and opens to every atom the pack lists; when a snapshot or segment still differs from =HEAD= after the fold, it commits nothing and exits non-zero. A log from before this layout, =<host>.jsonl.age= and =<host>.chunks/=, is copied once into =snap-0= and the segments, and the old path is removed |
 | =.ljos/user-rules/= | one file of user rules per machine, sealed to the scope's recipients (=<host>.json.age=); a plaintext =<host>.json= is from before the seal |

@@ -6,6 +6,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn help(args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env("LJOS_OFF", "1")
@@ -43,11 +47,11 @@ fn status_and_verdict_help_start_with_a_capital() {
     for (args, line) in [
         (
             &["finish", "--help"][..],
-            "Status to record: done, failed, or cancelled",
+            "Status: done, failed, or cancelled. Only `--close` with done or cancelled records it",
         ),
         (
             &["finish", "-h"][..],
-            "Status to record: done, failed, or cancelled",
+            "Status: done, failed, or cancelled. Only `--close` with done or cancelled records it",
         ),
         (
             &["complete", "--help"][..],

@@ -25,16 +25,17 @@ impl Scratch {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let gitconfig = dir.path().join("gitconfig");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&gitconfig, "").unwrap();
         for sub in ["home", "run"] {
             std::fs::create_dir_all(dir.path().join(sub)).unwrap();
         }
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(
-            dir.path().join("run"),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
+        {
+            ljos_cli::change_mode(dir.path().join("run"), 0o700).unwrap();
+        }
         Self { dir, gitconfig }
     }
 
@@ -45,7 +46,11 @@ impl Scratch {
     /// git for the test's own setup and reads. No hook runs, whatever the
     /// global file names.
     fn git(&self, cwd: &Path, args: &[&str]) -> Output {
-        Command::new("git")
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new("git")
             .arg("-c")
             .arg("core.hooksPath=/dev/null")
             .arg("-C")
@@ -58,7 +63,7 @@ impl Scratch {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .stdin(Stdio::null())
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn must(&self, cwd: &Path, args: &[&str]) -> String {
@@ -116,6 +121,10 @@ impl Scratch {
         let remote = self.bare("tracker.git");
         let other = self.clone(&remote, "other", "other");
         std::fs::create_dir_all(other.join(".ljos/user-rules")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             other.join(".ljos/sync.toml"),
             format!(
@@ -124,9 +133,17 @@ impl Scratch {
             ),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(other.join(".ljos/user-rules/other.json"), RULE).unwrap();
         self.commit_all(&other, "scope");
         let tracker = self.clone(&remote, "tracker", "seat");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(other.join("ahead"), "ahead\n").unwrap();
         self.commit_all(&other, "upstream ahead");
         (remote, tracker)
@@ -136,6 +153,10 @@ impl Scratch {
     fn caller(&self) -> (PathBuf, PathBuf) {
         let remote = self.bare("caller.git");
         let caller = self.clone(&remote, "caller", "caller");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(caller.join("README"), "caller\n").unwrap();
         self.must(&caller, &["add", "README"]);
         self.must(&caller, &["commit", "-q", "-m", "caller"]);
@@ -146,6 +167,10 @@ impl Scratch {
     /// `ljos prefer --user --sync` against `tracker`, pushing.
     fn exchange(&self, tracker: &Path, env: &[(&str, &Path)]) -> Output {
         let home = self.path("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(["prefer", "--user", "--sync"])
             .current_dir(&home)
@@ -188,12 +213,20 @@ fn said(out: &Output) -> String {
 fn age_recipient(dir: &Path) -> String {
     let key = dir.join("age.key");
     let _ = std::fs::remove_file(&key);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let made = Command::new("age-keygen")
         .arg("-o")
         .arg(&key)
         .output()
         .expect("age-keygen is on PATH");
     assert!(made.status.success(), "age-keygen");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let public = Command::new("age-keygen")
         .arg("-y")
         .arg(&key)
@@ -244,11 +277,10 @@ const HOOKS: &[&str] = &[
 
 /// Hooks in `dir` that append `who NAME` to `marks` and refuse.
 fn refusing_hooks(dir: &Path, marks: &Path, who: &str, names: &[&str]) {
-    use std::os::unix::fs::PermissionsExt as _;
     std::fs::create_dir_all(dir).unwrap();
     for name in names {
         let hook = dir.join(name);
-        std::fs::write(
+        ljos_cli::install_executable(
             &hook,
             format!(
                 "#!/bin/sh\necho '{who} {name}' >> '{}'\nexit 1\n",
@@ -256,7 +288,6 @@ fn refusing_hooks(dir: &Path, marks: &Path, who: &str, names: &[&str]) {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
 

@@ -327,6 +327,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_CLAIM_NOW",
+        default: "unset, the clock",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_CLOUD_AGE_SECRET",
         default: "unset",
         group: "ljos",
@@ -772,6 +777,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_TRACKER_BATCH_SECS",
+        default: "60 seconds",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_TRACKER_DIR",
         default: "unset",
         group: "ljos",
@@ -799,6 +809,11 @@ const VARS: &[Var] = &[
     Var {
         name: "LJOS_TRACKER_SEARCH",
         default: "unset",
+        group: "ljos",
+    },
+    Var {
+        name: "LJOS_TRACKER_SPLIT_BYTES",
+        default: "1048576 bytes",
         group: "ljos",
     },
     Var {
@@ -1614,7 +1629,7 @@ pub fn warnings(cwd: Option<&Path>) -> Vec<String> {
 pub fn emit() {
     let cwd = std::env::current_dir().ok();
     for line in warnings(cwd.as_deref()) {
-        eprintln!("warning: {line}");
+        say!("warning: {line}");
     }
 }
 

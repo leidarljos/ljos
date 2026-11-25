@@ -310,7 +310,7 @@ pub(crate) fn helper(token_file: &Path) -> String {
 
 /// Store `token` mode 0600 and return the helper that reads it.
 pub(crate) fn store_token(home: &Path, token: &str) -> Result<String> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::OpenOptionsExt;
     let path = token_path(home);
     let dir = path.parent().context("token path has no parent")?;
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
@@ -322,6 +322,10 @@ pub(crate) fn store_token(home: &Path, token: &str) -> Result<String> {
     }
     let tmp = dir.join(format!(".tracker.token.tmp-{}", std::process::id()));
     let _ = fs::remove_file(&tmp);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -330,10 +334,14 @@ pub(crate) fn store_token(home: &Path, token: &str) -> Result<String> {
         .open(&tmp)
         .with_context(|| format!("create {}", tmp.display()))?;
     let wrote = (|| -> Result<()> {
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        crate::change_mode_of(&file, 0o600)?;
         file.write_all(token.as_bytes())?;
         file.write_all(b"\n")?;
         file.sync_all()?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         fs::rename(&tmp, &path).with_context(|| format!("install {}", path.display()))?;
         Ok(())
     })();
@@ -531,6 +539,10 @@ mod tests {
         for file in files {
             let path = at.join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             fs::write(&path, "").unwrap();
         }
         git(&["add", "."]);

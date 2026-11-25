@@ -31,10 +31,8 @@ const RELEASED_CLAIM_BUDGET_SECS: u64 = 5;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 struct Board {
@@ -57,6 +55,10 @@ impl Board {
         std::fs::create_dir_all(layout.projects_dir()).unwrap();
         vissue_core::ops::create(&layout, "probe", "wait for the writer", Default::default())
             .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let initialized = Command::new("git")
             .arg("-C")
             .arg(&root)
@@ -94,7 +96,7 @@ esac
         script(
             dir.path(),
             "claimdag",
-            "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\n",
         );
         script(dir.path(), "deedar", "#!/bin/sh\necho head\n");
 
@@ -122,6 +124,10 @@ esac
     }
 
     fn hold_lock(path: &Path) -> std::fs::File {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -146,7 +152,15 @@ esac
     }
 
     fn sitting_with_tracker(&self, budget_secs: u64, tracker_git: &str) -> Child {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        self.sitting_with_env(budget_secs, tracker_git, &[])
+    }
+
+    fn sitting_with_env(&self, budget_secs: u64, tracker_git: &str, env: &[(&str, &str)]) -> Child {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["sitting", &self.issue, "--verbose"])
             .current_dir(self._dir.path())
             .env_clear()
@@ -167,11 +181,12 @@ esac
             .env("LJOS_SITTING_CLAIM_WAIT", budget_secs.to_string())
             .env("LJOS_USER_RULES_SYNC", "off")
             .env("PACKSET_URL", "off")
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .unwrap()
+            .unwrap();
     }
 
     fn state(&self) -> String {
@@ -299,6 +314,35 @@ fn a_held_tracker_git_lock_exits_before_the_claim() {
     );
     assert!(
         out.contains("tracker git lock") || err.contains("tracker git lock"),
+        "stdout:\n{out}\nstderr:\n{err}"
+    );
+    assert_eq!(board.state(), "TODO", "{out}\n{err}");
+}
+
+#[test]
+fn a_lock_wait_shorter_than_the_claim_budget_is_the_limit_named() {
+    let board = Board::new();
+    let _held = board.hold_issue_lock();
+    let started = Instant::now();
+    let mut child = board.sitting_with_env(
+        RELEASED_CLAIM_BUDGET_SECS,
+        "off",
+        &[("LJOS_TRACKER_LOCK_WAIT", "1")],
+    );
+    let (_, stdout) = first_line(&mut child);
+    let (status, out, err) = finish(
+        child,
+        stdout,
+        HELD_LOCK_LIMIT.saturating_sub(started.elapsed()),
+    );
+    assert_eq!(status.code(), Some(0), "stdout:\n{out}\nstderr:\n{err}");
+    let said = format!("{out}{err}");
+    assert!(
+        said.contains("for 1s, until LJOS_TRACKER_LOCK_WAIT ran out; nothing was claimed"),
+        "stdout:\n{out}\nstderr:\n{err}"
+    );
+    assert!(
+        !said.contains("claim budget"),
         "stdout:\n{out}\nstderr:\n{err}"
     );
     assert_eq!(board.state(), "TODO", "{out}\n{err}");

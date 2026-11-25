@@ -94,14 +94,12 @@ fn run(seat: &Seat, args: &[&str]) -> (i32, String, String, Duration) {
     let home = seat.home.path();
     // cargo is on PATH and cargo-binstall is not, so doctor names
     // `cargo install` rather than `cargo binstall`.
-    std::fs::write(home.join("cargo"), "#!/bin/sh\nexit 0\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(home.join("cargo"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-    }
+    ljos_cli::install_executable(&home.join("cargo"), "#!/bin/sh\nexit 0\n").unwrap();
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
@@ -194,11 +192,11 @@ fn each_encoder_state_names_itself_on_doctor_and_on_search() {
         let doctor_row = match *name {
             "ready" => None,
             "loading with remaining_ms" => Some((
-                "warn",
+                "info",
                 "loading, about 120 s left. Search matches words until then.".to_string(),
             )),
             "loading without remaining_ms" => Some((
-                "warn",
+                "info",
                 "loading. Search matches words until it is ready.".to_string(),
             )),
             "failed" => Some((
@@ -393,16 +391,15 @@ fn a_loading_search_with_no_rows_says_to_rerun() {
 }
 
 fn exe(dir: &std::path::Path, name: &str) {
-    std::fs::write(dir.join(name), "#!/bin/sh\nexit 1\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    ljos_cli::install_executable(&dir.join(name), "#!/bin/sh\nexit 1\n").unwrap();
 }
 
 fn packset_embed_line(path: &str, cwd: &std::path::Path) -> String {
     let home = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["doctor", "--all"])
         .current_dir(cwd)
@@ -448,6 +445,10 @@ fn doctor_names_an_encoder_install_command_that_runs_here() {
     exe(&curl_only, "curl");
     let script_home = root.path().join("checkout");
     std::fs::create_dir_all(script_home.join("scripts")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         script_home.join("scripts/install.sh"),
         "#!/bin/sh\nexit 0\n",
@@ -467,17 +468,13 @@ fn doctor_names_an_encoder_install_command_that_runs_here() {
         "{cargo}"
     );
     assert!(!cargo.contains("cargo binstall"), "{cargo}");
+    let release_hint = format!("so run `{}`.", ljos_cli::RELEASE_INSTALL_COMMAND);
     let from_checkout = packset_embed_line(&curl_only.display().to_string(), &script_home);
     assert!(
-        from_checkout.contains("so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`."),
+        from_checkout.contains(&release_hint),
         "a checkout in the working directory changes nothing: {from_checkout}"
     );
     let release = packset_embed_line(&curl_only.display().to_string(), &bare);
-    assert!(
-        release.contains(
-            "so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`."
-        ),
-        "{release}"
-    );
+    assert!(release.contains(&release_hint), "{release}");
     assert!(!release.contains("cargo binstall"), "{release}");
 }

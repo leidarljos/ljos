@@ -18,13 +18,12 @@ use std::time::Duration;
 
 const LESSON: &str = "Cold metal seats the door.";
 const QUEUED: &str = "Memory busy: queued 1 write, it will be saved on a later call.";
-const WORDS: &str = "These are word matches; the pack did not answer.";
+const WORDS: &str =
+    "Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`.";
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 /// Every request is 503, with no Retry-After, so a caller does not sleep.
@@ -130,7 +129,15 @@ impl Seat {
         std::fs::create_dir_all(root.path().join("state")).unwrap();
         std::fs::create_dir_all(root.path().join("run")).unwrap();
         std::fs::create_dir_all(&project).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             project.join("issues.org"),
             "\
@@ -170,7 +177,11 @@ impl Seat {
     fn run(&self, pack: &str, args: &[&str]) -> std::process::Output {
         let home = self.root.path().join("home");
         let path = format!("{}:/usr/bin:/bin", self.root.path().display());
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.root.path())
             .env_clear()
@@ -192,7 +203,7 @@ impl Seat {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn queue(&self) -> String {
@@ -305,6 +316,10 @@ fn a_busy_pack_queues_the_lesson_and_a_healthy_pack_saves_it_once() {
         seat.queue()
     );
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         seat.root.path().join("state/ljos/note-queue.jsonl"),
         &waiting,

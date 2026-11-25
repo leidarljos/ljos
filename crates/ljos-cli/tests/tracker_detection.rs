@@ -8,6 +8,11 @@
 //! committed into it. Each is left byte-for-byte as it was, and the write
 //! says which tracker it looked for.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -21,11 +26,9 @@ fn vissue_bin() -> Option<PathBuf> {
 }
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn said(out: &Output) -> String {
@@ -71,9 +74,13 @@ impl Seat {
         script(
             &bin,
             "claimdag",
-            "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\n",
         );
         script(&bin, "deedar", "#!/bin/sh\necho head\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.path().join("gitconfig"),
             "[user]\n\tname = seat\n\temail = seat@example.test\n\
@@ -90,6 +97,10 @@ impl Seat {
 
     fn command(&self, program: &Path, from: &Path) -> Command {
         let home = self.home();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(program);
         cmd.current_dir(from)
             .env_clear()
@@ -144,6 +155,10 @@ impl Seat {
     fn product(&self, name: &str) -> PathBuf {
         let at = self.dir.path().join(name);
         self.git(&at, &["init", "-q"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(at.join("README"), "a product\n").unwrap();
         self.git(&at, &["add", "README"]);
         self.git(&at, &["commit", "-q", "-m", "product"]);
@@ -154,6 +169,10 @@ impl Seat {
     /// one issue the cloned project's boards hold.
     fn checkouts(&self) -> ([PathBuf; 3], String) {
         let untracked = self.product("untracked");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(untracked.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
         let bare = self.product("bare");
         std::fs::create_dir_all(bare.join("Software")).unwrap();
@@ -185,6 +204,10 @@ impl Seat {
         std::fs::create_dir_all(root.join("Software")).unwrap();
         let cfg = self.home().join(".config/vissue/config.toml");
         std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &cfg,
             format!(
@@ -260,11 +283,57 @@ fn a_write_from_a_product_checkout_lands_in_the_configured_tracker() {
         let sat = seat.ljos(product, &["sitting", &id]);
         assert!(sat.status.success(), "{}", said(&sat));
         assert_eq!(seat.snapshot(product), before, "{}", product.display());
-        let log = seat.git(&tracker, &["log", "--format=%s"]);
+        // A note held for the batch commit is named in the body of the
+        // commit that carries it.
+        let log = seat.git(&tracker, &["log", "--format=%B"]);
         for verb in ["filed", "noted", "claimed"] {
             assert!(log.contains(&format!("{id} {verb} by saddle")), "{log}");
         }
     }
+}
+
+/// A note the batch window holds is a commit once the process that held
+/// it exits, with no session-end hook and no later write or push.
+#[test]
+fn a_held_note_is_committed_when_its_process_exits() {
+    let Some(seat) = Seat::new() else {
+        return;
+    };
+    let tracker = seat.configured_tracker();
+    let product = seat.product("work");
+    let env = [("LJOS_TRACKER_BATCH_SECS", "600")];
+    let filed = seat.ljos_with(&product, &["file", "-p", "app", "crash on start"], &env);
+    assert!(filed.status.success(), "{}", said(&filed));
+    let stdout = String::from_utf8_lossy(&filed.stdout);
+    let id = stdout.split_whitespace().next().unwrap().to_string();
+    let before = seat.git(&tracker, &["rev-list", "--count", "HEAD"]);
+    let noted = seat.ljos_with(&product, &["note", &id, "seen again", "--verbose"], &env);
+    assert!(noted.status.success(), "{}", said(&noted));
+    assert!(
+        said(&noted).contains("held for the batch"),
+        "{}",
+        said(&noted)
+    );
+    let status = seat.git(
+        &tracker,
+        &[
+            "status",
+            "--porcelain",
+            "--",
+            "Software/app/issues.org",
+            "Software/app/issues",
+        ],
+    );
+    assert!(status.is_empty(), "{status}\n{}", said(&noted));
+    let after = seat.git(&tracker, &["rev-list", "--count", "HEAD"]);
+    assert_eq!(
+        after.trim().parse::<u32>().unwrap(),
+        before.trim().parse::<u32>().unwrap() + 1
+    );
+    let body = seat.git(&tracker, &["log", "-1", "--format=%B"]);
+    assert!(body.contains(&format!("{id} noted by saddle")), "{body}");
+    let shown = seat.git(&tracker, &["show", "HEAD:Software/app/issues.org"]);
+    assert!(shown.contains("seen again"), "{shown}");
 }
 
 /// A tracker whose projects sit under `VISSUE_PREFIX` is the tracker when
@@ -277,6 +346,10 @@ fn a_tracker_under_vissue_prefix_is_the_tracker() {
     let root = seat.dir.path().join("work");
     seat.git(&root, &["init", "-q"]);
     std::fs::create_dir_all(root.join("Work")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(root.join("vissue.toml"), "").unwrap();
     seat.git(&root, &["add", "vissue.toml"]);
     seat.git(&root, &["commit", "-q", "-m", "tracker"]);

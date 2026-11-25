@@ -6,6 +6,8 @@
 //! The ranker score stays off the page. `--json` and the MCP rows do not
 //! use this module. A pipe, and `NO_COLOR`, carry no ANSI.
 
+pub use crate::output_wrap::Width;
+
 /// Columns a human page fits, including a pipe read in an 80-column terminal.
 pub const COLS: usize = 80;
 
@@ -46,10 +48,37 @@ pub fn fit_title(title: &str, room: usize) -> String {
 ///
 /// `lead` includes the spaces before the title. The title is not wrapped
 /// onto the next line. A blank title is [`NO_TITLE`].
-#[must_use]
-pub fn line_with_title(lead: &str, title: &str, cols: usize) -> String {
+fn line_with_title(lead: &str, title: &str, cols: usize) -> String {
     let room = cols.saturating_sub(lead.chars().count());
     format!("{lead}{}", fit_title(title, room))
+}
+
+/// `lead` and the title on one line of at most [`COLS`] columns, the
+/// title cut with `...`, at [`Width::FIXED`]. At a terminal width the
+/// title wraps under `lead`, indented to the title's column.
+#[must_use]
+pub fn line_with_title_for(lead: &str, title: &str, width: Width) -> String {
+    let Some(cols) = width.terminal() else {
+        return line_with_title(lead, title, COLS);
+    };
+    let title = if title.trim().is_empty() {
+        NO_TITLE
+    } else {
+        title
+    };
+    let cont = " ".repeat(crate::output_wrap::prose_display_width(lead));
+    crate::output_wrap::wrap_hanging_prose(title, cols, lead, &cont)
+}
+
+/// Whether `line` fits on one line at `width`: [`COLS`] characters at
+/// [`Width::FIXED`], else that many display columns.
+#[must_use]
+pub fn fits_for(line: &str, width: Width) -> bool {
+    !line.contains('\n')
+        && match width.terminal() {
+            Some(cols) => crate::output_wrap::prose_display_width(line) <= cols,
+            None => line.chars().count() <= COLS,
+        }
 }
 
 /// Whether a human page may keep ANSI. `NO_COLOR` set to a non-empty
@@ -75,46 +104,43 @@ pub fn for_reader(text: &str, allow_color: bool) -> String {
 /// Drop CSI and OSC sequences. Other characters stay.
 #[must_use]
 pub fn strip_ansi(text: &str) -> String {
-    let mut out = String::new();
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '\u{1b}' {
-            out.push(ch);
-            continue;
-        }
-        match chars.peek().copied() {
-            Some('[') => {
-                chars.next();
-                for ch in chars.by_ref() {
-                    if ('@'..='~').contains(&ch) {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                chars.next();
-                while let Some(ch) = chars.next() {
-                    if ch == '\u{7}' {
-                        break;
-                    }
-                    if ch == '\u{1b}' && chars.peek() == Some(&'\\') {
-                        chars.next();
-                        break;
-                    }
-                }
-            }
-            Some(_) => {}
-            None => {}
-        }
+    crate::output_wrap::strip_ansi(text)
+}
+
+/// [`crate::output_wrap::wrap_prose`] at a terminal width, and each line
+/// at most [`COLS`] characters at [`Width::FIXED`].
+#[must_use]
+pub fn wrap_for(text: &str, width: Width) -> String {
+    match width.terminal() {
+        Some(cols) => crate::output_wrap::wrap_prose(text, Some(cols)),
+        None => wrap(text, COLS),
     }
-    out
+}
+
+/// [`crate::output_wrap::wrap_prose`] at a terminal width. At
+/// [`Width::FIXED`] the text is unchanged.
+#[must_use]
+pub fn wrap_on_terminal(text: &str, width: Width) -> String {
+    crate::output_wrap::wrap_prose(text, width.terminal())
+}
+
+/// `line` under a hanging prefix: at most [`COLS`] characters at
+/// [`Width::FIXED`], else [`crate::output_wrap::wrap_hanging_prose`] at the
+/// terminal width.
+#[must_use]
+pub fn wrap_hang_for(line: &str, width: Width, first: &str, cont: &str) -> String {
+    match width.terminal() {
+        Some(cols) => {
+            crate::output_wrap::wrap_hanging_prose(&line.replace('\t', " "), cols, first, cont)
+        }
+        None => wrap_hang(line, COLS, first, cont),
+    }
 }
 
 /// Wrap `text` so each line is at most `cols` characters. A tab is a
 /// space. A word longer than the line breaks. Continuation keeps a
 /// leading run of spaces.
-#[must_use]
-pub fn wrap(text: &str, cols: usize) -> String {
+fn wrap(text: &str, cols: usize) -> String {
     let cols = cols.max(1);
     let mut out = String::new();
     for (index, line) in text.split('\n').enumerate() {
@@ -128,8 +154,7 @@ pub fn wrap(text: &str, cols: usize) -> String {
 }
 
 /// Wrap `line` under a hanging prefix. The prefix counts toward `cols`.
-#[must_use]
-pub fn wrap_hang(line: &str, cols: usize, first: &str, cont: &str) -> String {
+fn wrap_hang(line: &str, cols: usize, first: &str, cont: &str) -> String {
     let cols = cols.max(1);
     let room = cols.saturating_sub(first.chars().count()).max(1);
     let body = wrap(&line.replace('\t', " "), room);
@@ -377,35 +402,35 @@ fn prefix_shared(prefix: &str, id: &str, store: &[&str]) -> bool {
 /// `indent` is the head's left margin. The text and the foot sit two
 /// columns further in.
 #[must_use]
-pub fn claim_block(head: &str, text: &str, foot: &str, indent: usize) -> String {
-    let cols = COLS;
+pub fn claim_block(head: &str, text: &str, foot: &str, indent: usize, width: Width) -> String {
+    let cols = width.terminal().unwrap_or(COLS);
     let pad = " ".repeat(indent.min(cols.saturating_sub(8)));
-    let mut out = wrap(&format!("{pad}{head}"), cols);
+    let mut out = wrap_for(&format!("{pad}{head}"), width);
     let text = text.trim();
     if !text.is_empty() {
-        let body = wrap_hang(text, cols, &format!("{pad}  "), &format!("{pad}  "));
+        let body = wrap_hang_for(text, width, &format!("{pad}  "), &format!("{pad}  "));
         out.push('\n');
         out.push_str(&body);
     }
     let foot = foot.trim();
     if !foot.is_empty() {
-        let meta = wrap_hang(foot, cols, &format!("{pad}  "), &format!("{pad}  "));
+        let meta = wrap_hang_for(foot, width, &format!("{pad}  "), &format!("{pad}  "));
         out.push('\n');
         out.push_str(&meta);
     }
     out
 }
 
-/// `Title  shown N of M` and an optional note, wrapped to [`COLS`].
+/// `Title  shown N of M` and an optional note, wrapped to `width`.
 #[must_use]
-pub fn count_line(title: &str, shown: usize, total: usize, note: &str) -> String {
+pub fn count_line(title: &str, shown: usize, total: usize, note: &str, width: Width) -> String {
     let note = note.trim();
     let line = if note.is_empty() {
         format!("{title}  shown {shown} of {total}")
     } else {
         format!("{title}  shown {shown} of {total}, {note}")
     };
-    wrap(&line, COLS)
+    wrap_for(&line, width)
 }
 
 /// The hook's pack header. One line at [`COLS`] for the counts a prompt shows.
@@ -437,7 +462,7 @@ fn head(title: &str, shown: usize, matched: usize, tail: &str, more: bool) -> St
     } else {
         line.push_str(", so run `ljos search`.");
     }
-    wrap(&line, COLS)
+    wrap_for(&line, crate::HOOK_WIDTH)
 }
 
 /// One search hit a person reads. The id is the short prefix.
@@ -489,6 +514,8 @@ pub struct SearchPage<'a> {
     /// Ids the printed prefix is unique among. Empty means the rows on
     /// this page.
     pub store: &'a [&'a str],
+    /// The destination's terminal width, or `None` for the fixed layout.
+    pub width: Width,
 }
 
 /// The human search page.
@@ -502,7 +529,7 @@ pub fn search_page(page: &SearchPage<'_>) -> String {
 #[must_use]
 pub fn search_page_with_flags(page: &SearchPage<'_>, extra_flags: &[String]) -> String {
     if page.rows.is_empty() {
-        return nothing_matched_page(page.query);
+        return nothing_matched_page(page.query, page.width);
     }
     let mut out = String::new();
     if let Some(hint) = page.top_hint.filter(|line| !line.trim().is_empty()) {
@@ -516,13 +543,17 @@ pub fn search_page_with_flags(page: &SearchPage<'_>, extra_flags: &[String]) -> 
     if page.explain {
         let reading = page.reading.trim();
         if !reading.is_empty() {
-            out.push_str(&wrap(reading, COLS));
+            out.push_str(&wrap_for(reading, page.width));
             out.push('\n');
         }
-    } else if page.seat_ahead {
-        out.push_str("The first row is the closest match. This seat's rows come first.\n");
     } else {
-        out.push_str("The first row is the closest match.\n");
+        let legend = if page.seat_ahead {
+            "The first row is the closest match. This seat's rows come first."
+        } else {
+            "The first row is the closest match."
+        };
+        out.push_str(&wrap_for(legend, page.width));
+        out.push('\n');
     }
     out.push('\n');
     let page_ids: Vec<&str> = page.rows.iter().filter_map(|row| row.id).collect();
@@ -539,7 +570,7 @@ pub fn search_page_with_flags(page: &SearchPage<'_>, extra_flags: &[String]) -> 
         } else {
             shown_prefix(row.id.unwrap_or(""), store)
         };
-        out.push_str(&search_row(row, &id_label));
+        out.push_str(&search_row(row, &id_label, page.width));
         out.push_str("\n\n");
     }
     while out.ends_with("\n\n") {
@@ -569,14 +600,15 @@ fn shown_line(page: &SearchPage<'_>, extra_flags: &[String]) -> String {
     } else {
         format!("shown {shown} of {matched}. Run {cmd_span} to see all {matched}.")
     };
-    if one.chars().count() <= COLS && !one.contains('\n') {
+    if fits_for(&one, page.width) {
         return one;
     }
-    if page.capped {
-        format!("shown {shown} of {matched}. To see more, run:\n{cmd_span}")
+    let lead = if page.capped {
+        format!("shown {shown} of {matched}. To see more, run:")
     } else {
-        format!("shown {shown} of {matched}. To see all {matched}, run:\n{cmd_span}")
-    }
+        format!("shown {shown} of {matched}. To see all {matched}, run:")
+    };
+    format!("{}\n{cmd_span}", wrap_for(&lead, page.width))
 }
 
 fn next_limit(matched: usize, capped: bool) -> usize {
@@ -604,16 +636,16 @@ pub fn nothing_matched_line(query: &str) -> String {
 /// wrapped. When the sentence fits, the command stays on that line. When
 /// it does not, the command is the next line.
 #[must_use]
-pub fn nothing_matched_page(query: &str) -> String {
+pub fn nothing_matched_page(query: &str, width: Width) -> String {
     let query = query.trim();
     let shown = crate::word_rank::quote_query(query);
     let head = format!("Nothing matched {shown}.");
     match crate::word_rank::shorter_search(query) {
         Some(cmd) => {
             let prose = format!("{head} Try a shorter query, such as:");
-            plain_command_page(&prose, Some(&cmd))
+            plain_command_page(&prose, Some(&cmd), width)
         }
-        None => plain_command_page(&head, None),
+        None => plain_command_page(&head, None, width),
     }
 }
 
@@ -621,16 +653,16 @@ pub fn nothing_matched_page(query: &str) -> String {
 /// `--min-score 0`. It stays whole, on the next line when the sentence
 /// does not fit.
 #[must_use]
-pub fn no_relevant_page(query: &str) -> String {
+pub fn no_relevant_page(query: &str, width: Width) -> String {
     let query = query.trim();
     let shown = crate::word_rank::quote_query(query);
     let head = format!("No relevant matches for {shown}.");
     let hint = "Pass --min-score 0 to see every row.";
     let one = format!("{head} {hint}");
-    if one.chars().count() <= COLS && !one.contains('\n') {
+    if fits_for(&one, width) {
         return ended(&one);
     }
-    let mut out = wrap(&head, COLS);
+    let mut out = wrap_for(&head, width);
     if !out.ends_with('\n') {
         out.push('\n');
     }
@@ -655,10 +687,10 @@ pub fn empty_store_line(query: &str) -> String {
 
 /// [`empty_store_line`] for a terminal. The command is not wrapped.
 #[must_use]
-pub fn empty_store_page(query: &str) -> String {
+pub fn empty_store_page(query: &str, width: Width) -> String {
     let shown = crate::word_rank::quote_query(query.trim());
     let cmd = store_lesson_command(query);
-    plain_command_page(&empty_store_prose(&shown), Some(&cmd))
+    plain_command_page(&empty_store_prose(&shown), Some(&cmd), width)
 }
 
 /// The sentences before the command of an empty-store search.
@@ -678,15 +710,15 @@ pub fn store_lesson_command(_query: &str) -> String {
 /// Prose stays within [`COLS`]. `cmd`, when set, is not wrapped. It stays
 /// on the prose line when the whole sentence fits, and is the next line
 /// when it does not.
-fn plain_command_page(prose: &str, cmd: Option<&str>) -> String {
+fn plain_command_page(prose: &str, cmd: Option<&str>, width: Width) -> String {
     let Some(cmd) = cmd else {
-        return ended(&wrap(prose, COLS));
+        return ended(&wrap_for(prose, width));
     };
     let one = format!("{prose} {cmd}");
-    if one.chars().count() <= COLS && !one.contains('\n') {
+    if fits_for(&one, width) {
         return ended(&one);
     }
-    let mut out = wrap(prose, COLS);
+    let mut out = wrap_for(prose, width);
     if !out.ends_with('\n') {
         out.push('\n');
     }
@@ -791,7 +823,7 @@ fn search_more_command(extra_flags: &[String], query: &str, limit: usize) -> Str
     parts.join(" ")
 }
 
-fn search_row(row: &SearchRow<'_>, id_label: &str) -> String {
+fn search_row(row: &SearchRow<'_>, id_label: &str, width: Width) -> String {
     let ticket = row.ticket.filter(|ticket| !ticket.is_empty());
     let mut head = if row.label == "ticket" {
         match ticket {
@@ -827,14 +859,7 @@ fn search_row(row: &SearchRow<'_>, id_label: &str) -> String {
         foot.push_str(", id ");
         foot.push_str(id_label);
     }
-    claim_block(&head, row.text, &foot, 0)
-}
-
-/// `vissue ready` rows, relaid so the title is not pushed past column 80
-/// by a padded id. JSON stays with the caller. Every row is printed.
-#[must_use]
-pub fn ready_text(raw: &str) -> String {
-    ready_page(raw, None)
+    claim_block(&head, row.text, &foot, 0, width)
 }
 
 enum ReadyPiece {
@@ -846,11 +871,13 @@ enum ReadyPiece {
 /// tickets or narrow the page.
 const READY_HINT: &str = "See more with `--limit` or `--all`. Narrow with `-p` or `--mine`.";
 
-/// The ready page. `limit` is how many tickets to print. `None` prints
-/// every row. The header is `ready  shown X of Y`. A page that leaves
-/// tickets off ends with [`READY_HINT`].
+/// The ready page at `width`: `vissue ready` rows, relaid so a padded id
+/// does not push the title out. `limit` is how many tickets to print.
+/// `None` prints every row. The header is `ready  shown X of Y`. A limited
+/// page ends with [`READY_HINT`] only when more rows are available.
+/// JSON stays with the caller.
 #[must_use]
-pub fn ready_page(raw: &str, limit: Option<usize>) -> String {
+pub fn ready_page(raw: &str, limit: Option<usize>, width: Width) -> String {
     let raw = strip_ansi(raw);
     let mut pieces = Vec::new();
     for line in raw.lines() {
@@ -865,28 +892,35 @@ pub fn ready_page(raw: &str, limit: Option<usize>) -> String {
     }
     let total = pieces.len();
     let take = limit.unwrap_or(total).min(total);
-    let mut out = count_line("ready", take, total, "");
+    let mut out = count_line("ready", take, total, "", width);
     out.push('\n');
+    let wrap_line = |line: &str| wrap_for(line, width);
     if total == 0 {
-        out.push_str("no open ticket is free of an open blocker, so run `ljos file TITLE`.\n");
+        out.push_str(&wrap_line(
+            "no open ticket is free of an open blocker, so run `ljos file TITLE`.",
+        ));
+        out.push('\n');
         return out;
     }
-    out.push_str("open and not waiting on an open ticket, so run `ljos show ID`.\n");
+    out.push_str(&wrap_line(
+        "open and not waiting on an open ticket, so run `ljos show ID`.",
+    ));
+    out.push('\n');
     for piece in pieces.into_iter().take(take) {
         out.push('\n');
         match piece {
             ReadyPiece::Row(row) => {
-                out.push_str(&ready_row(&row));
+                out.push_str(&ready_row(&row, width));
                 out.push('\n');
             }
             ReadyPiece::Loose(line) => {
-                out.push_str(&wrap(&line, COLS));
+                out.push_str(&wrap_line(&line));
                 out.push('\n');
             }
         }
     }
     if take < total {
-        out.push_str(&wrap(READY_HINT, COLS));
+        out.push_str(&wrap_line(READY_HINT));
         out.push('\n');
     }
     out
@@ -951,12 +985,12 @@ fn split_claim(rest: &str) -> (&str, &str) {
     (rest.trim(), "")
 }
 
-fn ready_row(row: &ReadyRow) -> String {
+fn ready_row(row: &ReadyRow, width: Width) -> String {
     let head = format!("{}  {}  [#{}]", row.id, row.state, row.priority);
-    let mut out = line_with_title(&format!("{head}  "), &row.title, COLS);
+    let mut out = line_with_title_for(&format!("{head}  "), &row.title, width);
     if !row.claim.is_empty() {
         out.push('\n');
-        out.push_str(&wrap_hang(&row.claim, COLS, "  ", "  "));
+        out.push_str(&wrap_hang_for(&row.claim, width, "  ", "  "));
     }
     out
 }
@@ -979,7 +1013,7 @@ mod tests {
             "ufuv-attn", "STARTED", "A", "MultiHeadAttention and LayerNorm"
         );
         let raw = format!("{kiln}\n{attn}\n");
-        let text = ready_text(&raw);
+        let text = ready_page(&raw, None, Width::FIXED);
         assert!(text.contains("ready  shown 2 of 2"), "{text}");
         assert!(text.contains("so run `ljos show ID`."), "{text}");
         assert!(
@@ -987,6 +1021,8 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("claimed 3d by ada"), "{text}");
+        let limited = ready_page(&raw, Some(20), Width::FIXED);
+        assert!(!limited.contains(READY_HINT), "{limited}");
         assert!(
             text.lines().all(|line| line.chars().count() <= COLS),
             "{text}"
@@ -994,9 +1030,53 @@ mod tests {
         assert!(!text.contains('\u{1b}'));
         let colored =
             "\u{1b}[31mufuv-kiln              TODO      [#B]  Kiln damper schedule\u{1b}[0m\n";
-        let plain = ready_text(colored);
+        let plain = ready_page(colored, None, Width::FIXED);
         assert!(!plain.contains('\u{1b}'), "{plain}");
         assert!(plain.contains("Kiln damper schedule"), "{plain}");
+    }
+
+    #[test]
+    fn ready_tty_keeps_zwj_cluster_together() {
+        let raw = format!(
+            "{:<22} {:<9} [#{}]  {}\n",
+            "demo-uqy6",
+            "STARTED",
+            "C",
+            "⚠️ 👨‍👩‍👧 👍🏽 1️⃣ 你好 世界 https://example.com/a/very/long/path/here"
+        );
+        let text = ready_page(&raw, None, Width::columns(30));
+        assert!(!text.contains("👨‍👩\\\n"), "{text}");
+        assert!(!text.contains("\u{200d}\n"), "{text}");
+    }
+
+    #[test]
+    fn ready_tty_with_prefix_at_or_past_cols_falls_back() {
+        let raw = format!(
+            "{:<22} {:<9} [#{}]  {}\n",
+            "demo-uqy6", "STARTED", "C", "This title wraps"
+        );
+        let text = ready_page(&raw, None, Width::columns(20));
+        assert!(text.contains("demo-uqy6  STARTED"), "{text}");
+        assert!(!text.contains("                          "), "{text}");
+        assert!(!text.contains("\\\n"), "{text}");
+    }
+
+    #[test]
+    fn ready_tty_empty_title_shows_no_title() {
+        let raw = format!("{:<22} {:<9} [#{}]  \n", "demo-uqy6", "STARTED", "C");
+        let text = ready_page(&raw, None, Width::columns(40));
+        assert!(text.contains("(no title)"), "{text}");
+    }
+
+    #[test]
+    fn ready_tty_loose_lines_keep_backticks_and_urls_whole() {
+        let raw = "open and not waiting on an open ticket, so run `ljos show ID`.\nhttps://example.com/a/very/long/path\n";
+        let text = ready_page(raw, Some(2), Width::columns(28));
+        assert!(!text.contains("`ljos show\n ID`"), "{text}");
+        assert!(
+            !text.contains("https://example.com/a/very/\nlong/path"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1010,7 +1090,7 @@ mod tests {
                 "B"
             ));
         }
-        let text = ready_page(&raw, Some(2));
+        let text = ready_page(&raw, Some(2), Width::FIXED);
         assert!(text.contains("ready  shown 2 of 3"), "{text}");
         assert!(text.contains("demo-0000"), "{text}");
         assert!(text.contains("demo-0001"), "{text}");
@@ -1026,7 +1106,7 @@ mod tests {
         assert!(hint.contains("`--mine`"), "{hint}");
         assert_eq!(text.matches(READY_HINT).count(), 1, "{text}");
         assert!(text.trim_end().ends_with(READY_HINT), "{text}");
-        let all = ready_page(&raw, None);
+        let all = ready_page(&raw, None, Width::FIXED);
         assert!(all.starts_with("ready  shown 3 of 3\n"), "{all}");
         assert!(!all.contains(READY_HINT), "{all}");
         assert!(
@@ -1066,7 +1146,7 @@ mod tests {
         for (id, state, priority, title) in shapes {
             raw.push_str(&format!("{id:<22} {state:<9} [#{priority}]  {title}\n"));
         }
-        let text = ready_text(&raw);
+        let text = ready_page(&raw, None, Width::FIXED);
         assert!(text.contains("ready  shown 4 of 4"), "{text}");
         for (id, state, priority, title) in shapes {
             let lead = format!("{id}  {state}  [#{priority}]  ");
@@ -1143,6 +1223,7 @@ mod tests {
             reading,
             seat_ahead,
             store: &[],
+            width: Width::FIXED,
         };
         let meaning = search_page(&page(false, true));
         assert_eq!(
@@ -1201,6 +1282,7 @@ mod tests {
             reading: "",
             seat_ahead: false,
             store: &[],
+            width: Width::FIXED,
         };
         let page_text = search_page(&page);
         let first = page_text.lines().next().unwrap_or("");
@@ -1220,6 +1302,7 @@ mod tests {
             reading: "",
             seat_ahead: false,
             store: &[],
+            width: Width::FIXED,
         };
         let quoted_text = search_page(&quoted);
         assert!(
@@ -1242,6 +1325,7 @@ mod tests {
             reading: "",
             seat_ahead: false,
             store: &[],
+            width: Width::FIXED,
         };
         let dash_text = search_page(&dash);
         assert!(
@@ -1261,6 +1345,7 @@ mod tests {
                 reading: "",
                 seat_ahead: false,
                 store: &[],
+                width: Width::FIXED,
             },
             &["--source-seat".to_string(), "alice".to_string()],
         );
@@ -1314,7 +1399,7 @@ mod tests {
 
     #[test]
     fn a_miss_names_a_shorter_query_without_splitting_the_command() {
-        let short = nothing_matched_page("which fusion");
+        let short = nothing_matched_page("which fusion", crate::output_wrap::Width::FIXED);
         assert_eq!(
             short,
             "Nothing matched \"which fusion\". Try a shorter query, such as: ljos search fusion\n"
@@ -1325,7 +1410,10 @@ mod tests {
         );
         assert!(!short.contains('`'), "{short}");
 
-        let long = nothing_matched_page("usability friction confusing error");
+        let long = nothing_matched_page(
+            "usability friction confusing error",
+            crate::output_wrap::Width::FIXED,
+        );
         assert!(
             long.lines().any(|line| line == "ljos search usability"),
             "{long}"
@@ -1339,7 +1427,7 @@ mod tests {
         );
         let wide = "x".repeat(90);
         let query = format!("note {wide}");
-        let page = nothing_matched_page(&query);
+        let page = nothing_matched_page(&query, crate::output_wrap::Width::FIXED);
         let cmd = format!("ljos search {wide}");
         assert!(page.lines().any(|line| line == cmd), "{page}");
         assert!(!page.contains('`'), "{page}");

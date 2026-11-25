@@ -165,8 +165,16 @@ fn change_suffix(before: &str, after: &str, template: &str) -> String {
 
 fn write_new(path: &Path, text: &str, template: &str) -> std::io::Result<()> {
     ensure_parent(path)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, text)?;
-    std::fs::write(mark_path(path), template)
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    return std::fs::write(mark_path(path), template);
 }
 
 /// Write the env file, or leave a hand edit and a file ljos did not write.
@@ -177,6 +185,10 @@ pub(crate) fn install(path: &Path, name: &str, dry: bool) -> crate::Step {
     let verb = if dry { "would leave" } else { "left" };
     match classify(path, &template) {
         Kind::Current => {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             if !dry && read_mark(path).as_deref() != Some(template.as_str()) {
                 if let Err(err) =
                     ensure_parent(path).and_then(|()| std::fs::write(mark_path(path), &template))
@@ -250,20 +262,20 @@ fn refresh_one(name: &str, path: &Path) -> bool {
     let before = std::fs::read_to_string(path).unwrap_or_default();
     let done = install(path, name, false);
     if !done.ok {
-        eprintln!("ljos: {}", done.detail);
+        say!("ljos: {}", done.detail);
         return false;
     }
     let after = std::fs::read_to_string(path).unwrap_or_default();
     if after != before {
-        eprintln!(
+        say!(
             "ljos: refreshed {name}: {}{}",
             path.display(),
             change_suffix(&before, &after, &template)
         );
     } else if done.detail.contains("edited by hand") {
-        eprintln!("ljos: {name}: {}{EDITED_MARK}", path.display());
+        say!("ljos: {name}: {}{EDITED_MARK}", path.display());
     } else if done.detail.contains("did not write") {
-        eprintln!("ljos: {name}: {}{FOREIGN_MARK}", path.display());
+        say!("ljos: {name}: {}{FOREIGN_MARK}", path.display());
     }
     true
 }
@@ -276,7 +288,7 @@ pub fn refresh_installed() -> bool {
     let all = match crate::harnesses_with_shipped(&crate::harnesses_path()) {
         Ok(all) => all,
         Err(err) => {
-            eprintln!("ljos: runner env files were not refreshed: {err:#}");
+            say!("ljos: runner env files were not refreshed: {err:#}");
             return true;
         }
     };
@@ -312,6 +324,10 @@ fn write_stamp() {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let _ = std::fs::write(path, format!("{stamp}\n"));
 }
 
@@ -374,6 +390,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("example_host.env");
         let text = crate::seat_env_text("example_host");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, &text).unwrap();
         assert!(install(&path, "example_host", false)
             .detail

@@ -19,6 +19,11 @@
 //! `--out DIR` writes `summary.json` and `per_question.csv` for the BM25+ arm.
 //! The download names a dataset revision. `main` is not a pin.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a benchmark run by bench/hf/run.sh, not shipped; its report is recorded as printed"
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -296,6 +301,10 @@ fn write_summary(path: &Path, tally: &Tally, wall: f64) -> Result<()> {
     push_string(&mut body, &mut comma, "cpu_model", &cpu_model())?;
     push_string(&mut body, &mut comma, "date", &utc_date())?;
     body.push_str("\n}\n");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, body).context("write summary.json")?;
     Ok(())
 }
@@ -331,6 +340,10 @@ fn push_key(body: &mut String, comma: &mut bool, key: &str) -> Result<()> {
 }
 
 fn write_csv(path: &Path, rows: &[Row]) -> Result<()> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let mut file = std::fs::File::create(path).context("write per_question.csv")?;
     writeln!(
         file,
@@ -572,6 +585,10 @@ fn download(dest: &Path) -> Result<()> {
     let response = agent.get(&data_url()).call().context("GET dataset")?;
     let mut reader = response.into_reader();
     let partial = dest.with_extension("partial");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let mut file = std::fs::File::create(&partial).context("create dataset file")?;
     let mut hasher = sha2::Sha256::new();
     let mut buf = [0u8; DOWNLOAD_CHUNK];
@@ -590,6 +607,10 @@ fn download(dest: &Path) -> Result<()> {
         let _ = std::fs::remove_file(&partial);
         bail!("sha256 {got} does not match the pin {DATA_SHA256}");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     std::fs::rename(&partial, dest).context("rename dataset file")?;
     eprintln!("dataset sha256 matches the pin");
     Ok(())
@@ -641,6 +662,10 @@ fn lock_packset_versions(lock: &str) -> Vec<&str> {
 }
 
 fn git_head() -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let Ok(output) = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))

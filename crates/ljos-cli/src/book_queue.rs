@@ -42,6 +42,10 @@ struct Job {
     session: String,
     #[serde(default)]
     payload_session: Option<String>,
+    /// The conversation the queuing hook bound. A job spooled before this
+    /// field binds from its payload again.
+    #[serde(default)]
+    bound: Option<crate::CallConversation>,
     owner: (u32, u64),
     ancestry: Vec<(u32, String)>,
     head: Option<String>,
@@ -88,6 +92,7 @@ fn write_job(raw: &str, call: &crate::HookCall) {
         cue: call.cue.clone(),
         session: crate::bookkeep::session_key(call),
         payload_session: call.session.clone(),
+        bound: Some(crate::call_conversation()),
         owner: crate::bookkeep::hook_owner(),
         ancestry: crate::ancestry(),
         head: head_now(&place),
@@ -109,12 +114,20 @@ fn write_job(raw: &str, call: &crate::HookCall) {
         .map_or(0, |d| d.as_nanos());
     let name = format!("{stamp:024}-{:010}.job", std::process::id());
     let tmp = dir.join(format!(".{name}.tmp"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let written = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .mode(0o600)
         .open(&tmp)
         .and_then(|mut f| f.write_all(&body));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     if written.is_err() || std::fs::rename(&tmp, dir.join(&name)).is_err() {
         let _ = std::fs::remove_file(&tmp);
         crate::bookkeep::log_line("book queue: a job could not be written; nothing booked");
@@ -179,12 +192,16 @@ fn head_now(dir: &Path) -> Option<String> {
 }
 
 fn open_lock(path: &Path) -> Option<std::fs::File> {
-    std::fs::OpenOptions::new()
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
+    return std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
         .open(path)
-        .ok()
+        .ok();
 }
 
 fn flock(file: &std::fs::File, wait: bool) -> bool {
@@ -216,6 +233,10 @@ fn kick() {
     let Some(exe) = ljos_exe() else {
         return;
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = std::process::Command::new(exe);
     cmd.args(["hook", "--drain", "--no-wait"])
         .stdin(std::process::Stdio::null())
@@ -406,8 +427,8 @@ fn same_env(a: &Job, b: &Job) -> bool {
     kept(a) == kept(b)
 }
 
-/// Set the variables of [`PER_CALL`] and the payload's session as the
-/// call that left `job` had them.
+/// Set the variables of [`PER_CALL`], the payload's session and the bound
+/// conversation as the call that left `job` had them.
 fn wear_call(job: &Job) {
     crate::with_env_mutation(|| {
         for key in PER_CALL {
@@ -418,7 +439,13 @@ fn wear_call(job: &Job) {
         }
     });
     crate::ballot_sig::export_hook_session(job.payload_session.as_deref());
-    crate::bind_call_conversation(&job.raw, &crate::hook_call_as(&job.raw, Some(&job.event)));
+    match &job.bound {
+        Some(bound) => crate::rebind_call_conversation(bound.clone()),
+        None => crate::bind_call_conversation(
+            &job.raw,
+            &crate::hook_call_as(&job.raw, Some(&job.event)),
+        ),
+    }
 }
 
 /// Apply `batch` in a child that has the first job's environment and
@@ -434,11 +461,16 @@ fn run_batch(head: &Job, batch: &[PathBuf]) -> bool {
     } else {
         PathBuf::from("/")
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("hook")
         .arg("--apply-book")
         .args(batch)
         .env_clear()
+        .env("TMPDIR", std::env::temp_dir())
         .envs(head.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .current_dir(dir)
         .stdin(std::process::Stdio::null())
@@ -510,6 +542,42 @@ pub fn apply(files: &[PathBuf]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_queued_blank_payload_books_under_the_conversation_its_hook_resolved() {
+        let _g = crate::tests::env_guard();
+        let resolved = "0199-hook-conversation-aaaa";
+        unsafe { std::env::set_var("CURSOR_CONVERSATION_ID", resolved) };
+        let raw = r#"{"conversation_id":"","cursor_version":"1","hook_event_name":"afterShellExecution"}"#;
+        let mut call = crate::hook_call_as(raw, None);
+        crate::bind_hook_call(raw, &mut call);
+        let job = Job {
+            raw: raw.to_string(),
+            event: call.event.clone(),
+            cue: call.cue.clone(),
+            session: crate::bookkeep::session_key(&call),
+            payload_session: call.session.clone(),
+            bound: Some(crate::call_conversation()),
+            owner: (0, 0),
+            ancestry: Vec::new(),
+            head: None,
+            cwd: String::new(),
+            env: Vec::new(),
+        };
+        assert_eq!(job.session, resolved);
+        let spooled: Job = serde_json::from_str(&serde_json::to_string(&job).unwrap()).unwrap();
+        // The drainer runs where the environment names another conversation.
+        unsafe { std::env::set_var("CURSOR_CONVERSATION_ID", "0199-drainer-conversation") };
+        crate::rebind_call_conversation(crate::CallConversation::Unbound);
+        wear_call(&spooled);
+        assert_eq!(
+            crate::resolve_conversation().map(|(id, _)| id).as_deref(),
+            Some(resolved)
+        );
+        assert_eq!(spooled.session, resolved);
+        crate::rebind_call_conversation(crate::CallConversation::Unbound);
+        unsafe { std::env::remove_var("CURSOR_CONVERSATION_ID") };
+    }
 
     fn git(dir: &Path, args: &[&str]) {
         let ok = crate::git_cmd()

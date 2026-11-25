@@ -3,6 +3,11 @@
 //! person who says a derived lesson again, or the opposite of their own,
 //! gets a memory of their own.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 #[path = "common/terminal.rs"]
 mod terminal;
@@ -25,10 +30,8 @@ const OTHERS: [&str; 3] = [
 ];
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 /// A seat on `url` with a tracker holding one ticket, `Database
@@ -45,6 +48,10 @@ impl Seat {
         let home = root.path().join("home");
         std::fs::create_dir_all(home.join(".cursor")).unwrap();
         std::fs::create_dir_all(root.path().join("run")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             home.join(".cursor/mcp.json"),
             r#"{"mcpServers":{"ljos":{"command":"/no/such/ljos-mcp"}}}"#,
@@ -71,7 +78,7 @@ impl Seat {
         script(
             &bin,
             "claimdag",
-            "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
+            "#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\nesac\necho '[]'\nexit 0\n",
         );
         script(&bin, "deedar", "#!/bin/sh\necho head\nexit 0\n");
         Self {
@@ -84,6 +91,10 @@ impl Seat {
     fn command(&self, bin: &str, args: &[&str]) -> Command {
         let root = self.root.path();
         let home = root.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(bin);
         cmd.args(args)
             .current_dir(root)

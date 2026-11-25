@@ -5,6 +5,11 @@
 //! that already has a basis keeps it. An edit under a runner is stored as
 //! the agent's.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 #[path = "common/terminal.rs"]
 mod terminal;
@@ -42,6 +47,10 @@ impl Seat {
 
     fn command(&self, bin: &str, args: &[&str]) -> Command {
         let path = format!("{}:/usr/bin:/bin", self.home.path().join("bin").display());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(bin);
         cmd.args(args)
             .current_dir(self.home.path())

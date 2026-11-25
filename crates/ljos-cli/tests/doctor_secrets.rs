@@ -21,8 +21,16 @@ const IDENTITY: &str =
     "AGE-SECRET-KEY-1FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE";
 
 fn command(home: &Path) -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     let gitconfig = home.join("gitconfig");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&gitconfig, "").unwrap();
     cmd.env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -64,6 +72,10 @@ fn mcp_doctor(mut cmd: Command) -> (String, Vec<Value>) {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(90));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let lines = [
@@ -183,6 +195,10 @@ fn a_named_variable_that_is_set_is_named() {
 fn a_host_key_path_is_printed_as_a_path() {
     let home = tempfile::tempdir().unwrap();
     let key = home.path().join("host.key");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&key, [7u8; 32]).unwrap();
     let mut cmd = command(home.path());
     cmd.env("DEEDAR_HOST_SIGNING_KEY", &key);
@@ -196,6 +212,10 @@ fn a_host_key_path_is_printed_as_a_path() {
 fn a_seat_key_path_is_printed_and_its_contents_are_not() {
     let home = tempfile::tempdir().unwrap();
     let key = home.path().join("ballot.key");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&key, SEAT_KEY).unwrap();
     let mut cmd = command(home.path());
     cmd.env("LJOS_SEAT_KEY", &key);

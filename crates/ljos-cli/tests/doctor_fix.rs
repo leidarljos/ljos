@@ -31,12 +31,7 @@ fn write_exe(path: &Path, body: &str) {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).unwrap();
     }
-    std::fs::write(path, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 struct Seat {
@@ -87,6 +82,10 @@ impl Seat {
 
     fn run(&self, args: &[&str], extra: &[(&str, &str)]) -> (i32, String, String) {
         scrub();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .env_clear()
@@ -120,6 +119,10 @@ fn row<'a>(text: &'a str, name: &str) -> Option<&'a str> {
 }
 
 fn dead_pid() -> u32 {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new("sleep")
         .arg("30")
         .stdin(Stdio::null())
@@ -140,6 +143,10 @@ struct Live {
 
 impl Live {
     fn spawn() -> Self {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let child = Command::new("sleep")
             .arg("60")
             .stdin(Stdio::null())
@@ -252,6 +259,10 @@ fn doctor_fix_moves_a_stale_lock_aside_and_leaves_a_live_one() {
     let seat = Seat::new("locks");
     std::fs::create_dir_all(seat.state()).unwrap();
     std::fs::create_dir_all(seat.config().parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(seat.config(), "project = \"kept\"\n").unwrap();
     let gone = dead_pid();
     let live = Live::spawn();
@@ -262,12 +273,40 @@ fn doctor_fix_moves_a_stale_lock_aside_and_leaves_a_live_one() {
     let notes = seat.state().join("note-queue.jsonl");
     let outside = seat.home.join("outside.pid");
     let body = format!("{gone}\n");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&pid_file, &body).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&flight, &body).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&live_file, format!("{}\n", live.pid)).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&key, &body).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&notes, "{\"text\":\"keep\"}\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&outside, &body).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink(&pid_file, seat.state().join("linked.pid")).unwrap();
 
     let (_, text, _) = seat.run(&["doctor"], &[]);
@@ -326,6 +365,10 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
     let seat = Seat::outside("pack");
     std::fs::create_dir_all(seat.state()).unwrap();
     std::fs::create_dir_all(seat.config().parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(seat.config(), CONFIG_KEEP).unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -333,6 +376,10 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
     let log = seat.home.join("packset.log");
     let pid = seat.home.join("pack.pid");
     let py = seat.home.join("pack.py");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&py, PACK_PY).unwrap();
     write_exe(&seat.bin.join("packset"), PACKSET_SH);
     write_exe(
@@ -341,6 +388,10 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
     );
     let run = |args: &[&str]| {
         scrub();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
@@ -373,6 +424,10 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
     let (after, err) = run(&["doctor", "--fix"]);
     if let Ok(text) = std::fs::read_to_string(&pid) {
         if let Ok(server) = text.trim().parse::<u32>() {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new("kill")
                 .args(["-TERM", &server.to_string()])
                 .status();
@@ -394,6 +449,10 @@ fn doctor_fix_records_a_runner_session_seat() {
     let seat = Seat::new("session");
     std::fs::create_dir_all(seat.state()).unwrap();
     std::fs::create_dir_all(seat.config().parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(seat.config(), CONFIG_KEEP).unwrap();
     let id = "cursor-conv-0199a1b2";
     let name = format!("cursor-{}", ljos_cli::session_tag(id));
@@ -448,11 +507,19 @@ fn doctor_fix_leaves_a_missing_packset_with_one_command() {
     let seat = Seat::new("nopack");
     std::fs::create_dir_all(seat.state()).unwrap();
     std::fs::create_dir_all(seat.config().parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(seat.config(), CONFIG_KEEP).unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     scrub();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["doctor", "--fix"])
         .env_clear()

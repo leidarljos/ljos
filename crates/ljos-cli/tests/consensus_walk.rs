@@ -2,14 +2,12 @@
 
 ljos_test_boot::harness!();
 
-use std::os::unix::fs::PermissionsExt;
-
 #[test]
 fn a_consensus_reading_does_not_pick_the_whole_history() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("git.log");
     let git = dir.path().join("git");
-    std::fs::write(
+    ljos_cli::install_executable(
         &git,
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
@@ -17,7 +15,6 @@ fn a_consensus_reading_does_not_pick_the_whole_history() {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!(
         "{}:{}",
         dir.path().display(),

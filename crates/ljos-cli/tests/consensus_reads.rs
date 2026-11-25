@@ -8,10 +8,8 @@ use std::path::Path;
 use std::process::Command;
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 #[test]
@@ -37,6 +35,10 @@ fn a_consensus_reads_each_ticket_once() {
         dir.path().display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["consensus", "demo-1", "--no-file"])
         .current_dir(dir.path())

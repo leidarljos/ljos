@@ -2,6 +2,11 @@
 //! the word-count line only under `--verbose`, a paragraph split into
 //! claims, an edit, and recall with no ticket or no lesson of its own.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 
 #[path = "common/tools.rs"]
@@ -16,10 +21,8 @@ const SHORT: &str = "Fire the kiln before dusk on the north bench.";
 const PARA: &str = "Fire the kiln before dusk. Leave the door shut until the shelf is cold. Write the batch number on the shelf card. Sweep the floor after the last tray.";
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 struct Seat {
@@ -44,6 +47,10 @@ impl Seat {
                     .map(|dir| dir.join(name))
                     .find(|p| p.is_file())
             }) {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "links a path that is not a git hook"
+                )]
                 let _ = std::os::unix::fs::symlink(&path, bin.join(name));
             }
         }
@@ -64,6 +71,10 @@ impl Seat {
         let root = self.root.path();
         let home = root.join("home");
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(root)

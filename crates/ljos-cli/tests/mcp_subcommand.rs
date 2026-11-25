@@ -36,6 +36,10 @@ const CORE: &[&str] = &[
 /// Speak to `program` and return its stdout.
 fn ask(program: &str, args: &[&str], tools: Option<&str>, methods: &[serde_json::Value]) -> String {
     let home = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(program);
     cmd.args(args)
         .env("HOME", home.path())

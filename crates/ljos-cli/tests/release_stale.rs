@@ -11,10 +11,8 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn actor(fill: char) -> String {
@@ -40,6 +38,10 @@ fn self_comm() -> String {
     }
     #[cfg(target_os = "macos")]
     {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("/bin/ps")
             .args(["-o", "comm=", "-p", &pid.to_string()])
             .output()
@@ -62,6 +64,10 @@ fn self_comm() -> String {
 fn write_hold(run: &Path, actor: &str, seat: &str, pid: u32, comm: &str, ticket: &str) {
     let dir = run.join("ljos");
     std::fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         dir.join(format!("hold-{actor}")),
         format!("{seat}\n{seat}\n{pid}\n{comm}\n2026-01-01T00:00:00Z\n{ticket}\n-\n"),
@@ -156,6 +162,10 @@ impl Seat {
             })
             .collect();
         let graph = root.path().join("graph.json");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&graph, serde_json::to_string(&rows).unwrap()).unwrap();
         let log = root.path().join("claimdag.log");
         script(
@@ -207,7 +217,11 @@ impl Seat {
 
     fn run(&self, args: &[&str]) -> Output {
         let home = self.root.path().join("home");
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.root.path())
             .env_clear()
@@ -229,7 +243,7 @@ impl Seat {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .stdin(Stdio::null())
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -311,6 +325,10 @@ fn release_stale_drops_quiet_claims_and_leaves_the_rest() {
     assert_eq!(wide, "would release 0 quiet claims\n", "{wide}");
     assert_eq!(std::fs::read(&seat.org).unwrap(), before);
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&seat.log, "").unwrap();
     let said = seat.ok(&["release", "--stale"]);
     assert_eq!(
@@ -390,6 +408,10 @@ fn a_silent_claim_graph_is_one_line_inside_the_deadline() {
     );
     let home = seat.root.path().join("home");
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["release", "--stale"])
         .current_dir(seat.root.path())
@@ -430,6 +452,10 @@ fn a_silent_claim_graph_is_one_line_inside_the_deadline() {
     assert_eq!(std::fs::read(&seat.org).unwrap(), before);
     let pid = std::fs::read_to_string(&pidfile).unwrap_or_default();
     assert!(!pid.trim().is_empty(), "the sleeper did not start\n{err}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let alive = Command::new("kill")
         .args(["-0", pid.trim()])
         .stdout(Stdio::null())
@@ -530,6 +556,10 @@ fn release_stale_drops_older_holders_of_same_seat_and_keeps_live_and_other() {
         }),
     ];
     let graph = root.path().join("graph.json");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&graph, serde_json::to_string(&rows).unwrap()).unwrap();
     script(
         &bin,
@@ -567,6 +597,10 @@ fn release_stale_drops_older_holders_of_same_seat_and_keeps_live_and_other() {
         &ids[4],
     );
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["release", "--stale"])
         .current_dir(root.path())
@@ -622,6 +656,10 @@ struct LiveSleeper(std::process::Child);
 
 impl LiveSleeper {
     fn spawn() -> Self {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let child = Command::new("sleep")
             .arg("30")
             .stdin(Stdio::null())
@@ -686,6 +724,10 @@ fn release_stale_keeps_a_ticket_when_a_live_hold_sits_beside_a_dead_one() {
     let dead = actor('a');
     let live = actor('b');
     let graph = root.path().join("graph.json");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         &graph,
         serde_json::to_string(&vec![serde_json::json!({
@@ -718,6 +760,10 @@ fn release_stale_keeps_a_ticket_when_a_live_hold_sits_beside_a_dead_one() {
     let sleeper = LiveSleeper::spawn();
     write_hold(&run, &live, "dseams-paper", sleeper.pid(), "sleep", &id);
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["release", "--stale"])
         .current_dir(root.path())

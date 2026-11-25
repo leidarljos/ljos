@@ -26,6 +26,10 @@ fn review_env() -> (EnvLock, tempfile::TempDir) {
 
 fn put(path: &std::path::Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, text).unwrap();
 }
 

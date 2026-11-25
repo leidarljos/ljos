@@ -1,7 +1,7 @@
 # A fresh machine
 
 <!-- [[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]] -->
-These notes describe ljos 0.45.3.
+These notes describe ljos 0.45.4.
 <!-- [[[end]]] -->
 
 `ljos cloud up` installs the release binaries into `~/.local/bin`, and on a cloud VM the encoder `packset-embed`. It checks the SHA-256 sums, puts that directory first on PATH for this process and in `~/.profile` and `~/.bashrc`, then writes `~/.cursor/mcp.json`. The command is always the absolute path of `ljos-mcp`. A client that spawns servers with its own PATH never reads the edited profile, and it still starts this install. It clones `LJOS_TRACKER_REMOTE`. Run it again and it refreshes the clone and the MCP command, rewrites env-owned wake entries from `LJOS_WAKE_<SEAT>_URL`, and refreshes the scope `cloud` age identity from the named secret.
@@ -14,7 +14,7 @@ This tree's `ljos` answers `cloud up`, and `scripts/install.sh --cloud` runs tha
 
 `LJOS_TRACKER_REMOTE` is the https git URL of the shared tracker. Unset, `cloud up` installs the binaries and does not turn push mode on.
 
-`LJOS_TRACKER_GIT=push` commits each tracker write, fetches, rebases with the per-issue field merge, and pushes. It retries a few times and never forces. A failed push stays committed. The next write and the end of the session try again. `commit` commits and does not fetch or push. `off` skips the commit.
+`LJOS_TRACKER_GIT=push` commits each tracker write, fetches, rebases with the per-issue field merge, and pushes. It retries a few times and never forces. A failed push stays committed. The next write and the end of the session try again. A plain note within `LJOS_TRACKER_BATCH_SECS` (60 by default) of the last tracker commit waits for the next one: the first note after the window, any other tracker write, a push, the exit of the process that held it or the end of the session commits it. A claim, a ballot or a finish never waits. A board of `LJOS_TRACKER_SPLIT_BYTES` (1048576 by default) or more is split into `issues/ID.org` on its next write, in one commit with the board and every issue file, and later writes commit only that issue's file. That split also migrates every unsplit sibling board under the same prefix, in the same commit. A split whose commit does not land is rolled back, and the board stays one file. When another write lands in `issues/` before the rollback, the failed split is kept instead, and that write and this one wait for the commit that lands it. `commit` commits and does not fetch or push. `off` skips the commit.
 
 `ljos send` and `ljos reply` in push mode push the sealed log from the detached wake before the wake fires, so the woken seat does not read an empty inbox. The send does not wait on that push. A failed push is a line in the wake log, and the wake still runs.
 
@@ -48,7 +48,7 @@ A `STARTED` claim this machine made, whose process is gone and that is older tha
 
 On a cloud VM, `cloud up` installs `packset-embed` and the ONNX Runtime that binary finds through its rpath `$ORIGIN/../lib/onnxruntime`. It fetches `onnxruntime-TARGET.tar.gz` and `packset-embed-TARGET.tar.gz` from the release of its own version, each beside its `.sha256`. TARGET is `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin` or `aarch64-apple-darwin`, the triple of this machine. Any other machine leaves search lexical.
 
-It checks both sums before it unpacks either archive. A sum that does not match unpacks neither and stops `cloud up`; the seat binaries already installed stay. The runtime is `lib/onnxruntime` under the parent of the binary directory, which is `~/.local/lib/onnxruntime` when the binaries are in `~/.local/bin`. A release with no such archives leaves search lexical and does not stop the command.
+It checks both sums before it unpacks either archive. A sum that does not match unpacks neither and stops `cloud up`; the seat binaries already installed stay. Both archives unpack into one new directory under `lib/packset-embed` beside the binary directory, which is `~/.local/lib/packset-embed` when the binaries are in `~/.local/bin`. That directory holds `bin/packset-embed` and `lib/onnxruntime`. Once it is synced to disk, `packset-embed` in the binary directory becomes a symlink to the binary in it, in one rename, and the previous encoder's directory is removed. The rpath follows the link to the real binary, so the binary and its runtime always come from one directory, and a crash leaves either the previous pair or the new one. When the sync after that rename fails, `cloud up` says the new encoder is in place and keeps the previous directory. A release with no such archives leaves search lexical and does not stop the command.
 
 A hosted VM is a run with `CURSOR_AGENT_ID` or `CLOUD_AGENT_ID` set, or a machine with `/run/cursor/api.sock`. A CI job is not one, including GitHub Actions. Anywhere else `cloud up` downloads no encoder and installs none. `sh scripts/install.sh --cloud` sets `WITH_EMBED=0` and does not build `packset-embed`. Search stays lexical.
 

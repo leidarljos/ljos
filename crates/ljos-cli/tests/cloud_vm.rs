@@ -43,13 +43,17 @@ impl Drop for Guard {
 }
 
 fn sh_at(dir: &Path, script: &str) -> std::process::Output {
-    Command::new("sh")
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new("sh")
         .current_dir(dir)
         .arg("-c")
         .arg(script)
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
-        .unwrap_or_else(|e| panic!("sh -c in {}: {e}", dir.display()))
+        .unwrap_or_else(|e| panic!("sh -c in {}: {e}", dir.display()));
 }
 
 fn sh_ok(dir: &Path, script: &str) -> String {
@@ -68,6 +72,10 @@ fn sh_ok(dir: &Path, script: &str) -> String {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -100,6 +108,10 @@ fn identity(dir: &Path) {
 
 fn isolate_git(root: &Path) {
     let cfg = root.join("gitconfig");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&cfg, b"").unwrap();
     std::env::set_var("GIT_CONFIG_GLOBAL", &cfg);
     std::env::set_var("GIT_CONFIG_SYSTEM", &cfg);
@@ -138,6 +150,10 @@ fn write_project(repo: &Path, project: &str, body: &str) -> PathBuf {
     let dir = repo.join("Software").join(project);
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("issues.org");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&path, body).unwrap();
     path
 }
@@ -172,7 +188,15 @@ fn seed(root: &Path, origin: &Path, body: &str) {
     );
     identity(&repo);
     write_project(&repo, "probe", body);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(repo.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         repo.join(".gitattributes"),
         "*.org merge=ljos-org\n.ljos/atoms/* merge=ljos-atoms\n",
@@ -230,12 +254,14 @@ fn state_of(text: &str, id: &str) -> String {
 }
 
 fn executable(path: &Path, body: &str) {
-    fs::write(path, body).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 fn sha256(path: &Path) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sha256sum").arg(path).output().unwrap();
     assert!(
         out.status.success(),
@@ -261,6 +287,10 @@ fn sums(dir: &Path, names: &[&str]) -> String {
 }
 
 fn assert_shell_line_is_safe(line: &str, mark: &Path) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let check = Command::new("bash")
         .args(["-n", "-c", line])
         .output()
@@ -270,6 +300,10 @@ fn assert_shell_line_is_safe(line: &str, mark: &Path) {
         "{line}\n{}",
         String::from_utf8_lossy(&check.stderr)
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let run = Command::new("bash")
         .arg("-c")
         .arg(line)
@@ -300,6 +334,10 @@ fn a_checksum_mismatch_installs_nothing() {
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         1,
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join("SHA256SUMS"), listed).unwrap();
     std::env::set_var("HOME", root.path().join("home"));
     std::env::set_var("LJOS_RELEASE_DIR", &rel);
@@ -362,7 +400,15 @@ fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
     // `cloud up` records the repository it runs in as the seat. Run from
     // the test's cwd, that is this checkout.
     let gitconfig = root.path().join("gitconfig");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&gitconfig, b"").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let init = Command::new("git")
         .arg("-C")
         .arg(&seat)
@@ -372,12 +418,20 @@ fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
         .output()
         .unwrap();
     assert!(init.status.success(), "{init:?}");
-    fs::copy(env!("CARGO_BIN_EXE_ljos"), rel.join("ljos")).unwrap();
+    ljos_cli::copy_executable(Path::new(env!("CARGO_BIN_EXE_ljos")), &rel.join("ljos")).unwrap();
     executable(&rel.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
     executable(&rel.join("ljos-policyd"), "#!/bin/sh\nexit 0\n");
     let names = ["ljos", "ljos-mcp", "ljos-policyd"];
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
     let up = |ljos: &Path| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(ljos)
             .args(["cloud", "up"])
             .current_dir(&seat)
@@ -407,12 +461,20 @@ fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
     use std::os::unix::fs::MetadataExt;
     let first = fs::metadata(&installed).unwrap().ino();
     // Trailing bytes leave the ELF runnable and give it a new sum.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     fs::OpenOptions::new()
         .append(true)
         .open(rel.join("ljos"))
         .unwrap()
         .write_all(b"\0next release")
         .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
     let said = up(&installed);
     assert!(said.contains("binaries: installed ljos into"), "{said}");
@@ -445,6 +507,17 @@ fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
     );
 }
 
+/// The runtime the rpath of the encoder `bin` starts finds.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn runtime_of(bin: &Path) -> PathBuf {
+    fs::canonicalize(bin)
+        .unwrap()
+        .ancestors()
+        .nth(2)
+        .unwrap()
+        .join("lib/onnxruntime/libonnxruntime.so.1")
+}
+
 /// A home and a release directory with the required binaries and the
 /// encoder archives as the release workflow packs them, each beside its
 /// `.sha256`.
@@ -459,7 +532,15 @@ fn encoder_machine(root: &Path) -> (PathBuf, PathBuf) {
     for name in names {
         executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         rel.join("rt/lib/onnxruntime/libonnxruntime.so.1"),
         b"runtime",
@@ -471,6 +552,10 @@ fn encoder_machine(root: &Path) -> (PathBuf, PathBuf) {
         ("embed", "bin", "packset-embed"),
     ] {
         let name = format!("{base}-x86_64-unknown-linux-gnu.tar.gz");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("tar")
             .arg("-C")
             .arg(rel.join(dir))
@@ -481,6 +566,10 @@ fn encoder_machine(root: &Path) -> (PathBuf, PathBuf) {
             .unwrap();
         assert!(out.status.success(), "{out:?}");
         let line = format!("{}  {name}\n", sha256(&rel.join(&name)));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(rel.join(format!("{name}.sha256")), line).unwrap();
     }
     std::env::set_var("HOME", &home);
@@ -506,17 +595,27 @@ fn cloud_up_installs_the_release_encoder_on_a_cloud_vm() {
     let said = ljos_cli::cloud::up(false).unwrap();
     assert!(said.contains("encoder: installed"), "{said}");
     assert!(said.contains("(checksums match)"), "{said}");
-    assert!(home.join(".local/bin/packset-embed").is_file(), "{said}");
+    let bin = home.join(".local/bin/packset-embed");
+    assert!(bin.is_file(), "{said}");
     assert_eq!(
-        fs::read(home.join(".local/lib/onnxruntime/libonnxruntime.so.1")).unwrap(),
+        fs::read(runtime_of(&bin)).unwrap(),
         b"runtime",
-        "the rpath $ORIGIN/../lib/onnxruntime finds the runtime here"
+        "the rpath $ORIGIN/../lib/onnxruntime finds the runtime beside the binary"
     );
     let left: Vec<_> = fs::read_dir(home.join(".local/lib"))
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .collect();
-    assert_eq!(left, ["onnxruntime"], "the staging directory stays behind");
+    assert_eq!(left, ["packset-embed"], "{said}");
+    let versions: Vec<_> = fs::read_dir(home.join(".local/lib/packset-embed"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(
+        versions,
+        [fs::canonicalize(&bin).unwrap().ancestors().nth(2).unwrap()],
+        "the staging directory stays behind"
+    );
     let again = ljos_cli::cloud::up(false).unwrap();
     assert!(
         again.contains("encoder: packset-embed already in"),
@@ -532,13 +631,19 @@ fn an_encoder_checksum_mismatch_installs_neither_archive() {
     let (home, rel) = encoder_machine(root.path());
     let name = "packset-embed-x86_64-unknown-linux-gnu.tar.gz";
     let forged = format!("{}  {name}\n", "0".repeat(64));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join(format!("{name}.sha256")), forged).unwrap();
     let err = ljos_cli::cloud::up(false).unwrap_err().to_string();
     assert!(err.contains("checksum mismatch"), "{err}");
     assert!(err.contains("nothing was installed"), "{err}");
     assert!(!home.join(".local/bin/packset-embed").exists());
     assert_eq!(
-        fs::read_dir(home.join(".local/lib")).unwrap().count(),
+        fs::read_dir(home.join(".local/lib/packset-embed"))
+            .unwrap()
+            .count(),
         0,
         "the runtime's own sum matched, and it still waits for both"
     );
@@ -551,6 +656,10 @@ fn a_missing_encoder_archive_shell_quotes_the_release_dir() {
     let root = tempfile::tempdir().unwrap();
     let (_home, rel) = encoder_machine(root.path());
     let quoted = root.path().join("rel; touch MARK #");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     fs::rename(&rel, &quoted).unwrap();
     std::env::set_var("LJOS_RELEASE_DIR", &quoted);
     fs::remove_file(quoted.join("packset-embed-x86_64-unknown-linux-gnu.tar.gz")).unwrap();
@@ -570,6 +679,10 @@ fn a_missing_encoder_archive_shell_quotes_the_release_dir() {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn repack(rel: &Path, archive: &str, work: &Path, top: &str, transform: Option<&str>) {
     let dest = rel.join(archive);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new("tar");
     cmd.arg("-C").arg(work);
     if let Some(expr) = transform {
@@ -582,6 +695,10 @@ fn repack(rel: &Path, archive: &str, work: &Path, top: &str, transform: Option<&
         String::from_utf8_lossy(&out.stderr)
     );
     let line = format!("{}  {archive}\n", sha256(&dest));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join(format!("{archive}.sha256")), line).unwrap();
 }
 
@@ -590,8 +707,16 @@ fn repack(rel: &Path, archive: &str, work: &Path, top: &str, transform: Option<&
 fn plant_hostile(root: &Path, case: &str) -> (PathBuf, PathBuf) {
     let (home, rel) = encoder_machine(root);
     let outside = root.join("outside-secret");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&outside, b"secret").unwrap();
     use std::os::unix::fs::PermissionsExt;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     fs::set_permissions(&outside, fs::Permissions::from_mode(0o644)).unwrap();
     let work = root.join("work");
     let embed = "packset-embed-x86_64-unknown-linux-gnu.tar.gz";
@@ -599,18 +724,34 @@ fn plant_hostile(root: &Path, case: &str) -> (PathBuf, PathBuf) {
     match case {
         "symlink" => {
             fs::create_dir_all(work.join("bin")).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             std::os::unix::fs::symlink(&outside, work.join("bin/packset-embed")).unwrap();
             repack(&rel, embed, &work, "bin", None);
         }
         "runtime-symlink" => {
             fs::create_dir_all(work.join("lib/onnxruntime")).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             std::os::unix::fs::symlink(&outside, work.join("lib/onnxruntime/libonnxruntime.so.1"))
                 .unwrap();
             repack(&rel, runtime, &work, "lib", None);
         }
         "hardlink" => {
             fs::create_dir_all(work.join("bin")).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             fs::write(work.join("bin/packset-embed"), b"#!/bin/sh\nexit 0\n").unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             fs::hard_link(work.join("bin/packset-embed"), work.join("bin/also")).unwrap();
             repack(&rel, embed, &work, "bin", None);
         }
@@ -626,6 +767,10 @@ fn plant_hostile(root: &Path, case: &str) -> (PathBuf, PathBuf) {
         }
         "fifo" => {
             fs::create_dir_all(work.join("bin")).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let made = Command::new("mkfifo")
                 .arg(work.join("bin/packset-embed"))
                 .status()
@@ -659,8 +804,11 @@ fn a_hostile_encoder_archive_installs_nothing() {
             !home.join(".local/bin/packset-embed").exists(),
             "{case}: encoder installed: {err}"
         );
-        assert!(
-            !home.join(".local/lib/onnxruntime").exists(),
+        assert_eq!(
+            fs::read_dir(home.join(".local/lib/packset-embed"))
+                .unwrap()
+                .count(),
+            0,
             "{case}: runtime installed: {err}"
         );
         if case == "symlink" || case == "runtime-symlink" {
@@ -679,6 +827,10 @@ fn replace_archive(rel: &Path, base: &str, top: &str, files: &[(&str, &[u8])]) {
     for (rel_path, bytes) in files {
         let path = work.join(rel_path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(&path, bytes).unwrap();
     }
     let archive = format!("{base}-x86_64-unknown-linux-gnu.tar.gz");
@@ -689,15 +841,13 @@ fn replace_archive(rel: &Path, base: &str, top: &str, files: &[(&str, &[u8])]) {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn lock_bin_dir(home: &Path) -> PathBuf {
     let bin_dir = home.join(".local/bin");
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&bin_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    ljos_cli::change_mode(&bin_dir, 0o555).unwrap();
     bin_dir
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn unlock_bin_dir(bin_dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = fs::set_permissions(bin_dir, fs::Permissions::from_mode(0o755));
+    let _ = ljos_cli::change_mode(bin_dir, 0o755);
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -709,9 +859,8 @@ fn a_failed_encoder_swap_keeps_the_previous_pair() {
     let said = ljos_cli::cloud::up(false).unwrap();
     assert!(said.contains("encoder: installed"), "{said}");
     let bin = home.join(".local/bin/packset-embed");
-    let soname = home.join(".local/lib/onnxruntime/libonnxruntime.so.1");
     let old_bin = fs::read(&bin).unwrap();
-    assert_eq!(fs::read(&soname).unwrap(), b"runtime");
+    assert_eq!(fs::read(runtime_of(&bin)).unwrap(), b"runtime");
     replace_archive(
         &rel,
         "onnxruntime",
@@ -727,9 +876,16 @@ fn a_failed_encoder_swap_keeps_the_previous_pair() {
     let bin_dir = lock_bin_dir(&home);
     let err = ljos_cli::cloud::up(true).unwrap_err().to_string();
     unlock_bin_dir(&bin_dir);
-    assert_eq!(fs::read(&soname).unwrap(), b"runtime", "{err}");
+    assert_eq!(fs::read(runtime_of(&bin)).unwrap(), b"runtime", "{err}");
     assert_eq!(fs::read(&bin).unwrap(), old_bin, "{err}");
     assert!(err.contains("nothing was installed"), "{err}");
+    assert_eq!(
+        fs::read_dir(home.join(".local/lib/packset-embed"))
+            .unwrap()
+            .count(),
+        1,
+        "the failed install left its directory: {err}"
+    );
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -741,15 +897,16 @@ fn a_failed_first_encoder_install_leaves_no_runtime() {
     let bin_dir = home.join(".local/bin");
     fs::create_dir_all(&bin_dir).unwrap();
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
-        fs::copy(rel.join(name), bin_dir.join(name)).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(bin_dir.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::copy_executable(&rel.join(name), &bin_dir.join(name)).unwrap();
     }
     lock_bin_dir(&home);
     let err = ljos_cli::cloud::up(false).unwrap_err().to_string();
     unlock_bin_dir(&bin_dir);
-    assert!(
-        !home.join(".local/lib/onnxruntime").exists(),
+    assert_eq!(
+        fs::read_dir(home.join(".local/lib/packset-embed"))
+            .unwrap()
+            .count(),
+        0,
         "a failed first install left the runtime: {err}"
     );
     assert!(!bin_dir.join("packset-embed").exists(), "{err}");
@@ -809,19 +966,24 @@ fn an_encoder_directory_is_not_already_installed() {
     let bin_dir = home.join(".local/bin");
     fs::create_dir_all(&bin_dir).unwrap();
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
-        fs::copy(rel.join(name), bin_dir.join(name)).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(bin_dir.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::copy_executable(&rel.join(name), &bin_dir.join(name)).unwrap();
     }
     let encoder = bin_dir.join("packset-embed");
     fs::create_dir(&encoder).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&encoder, fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::change_mode(&encoder, 0o755).unwrap();
     let soname = home.join(".local/lib/onnxruntime/libonnxruntime.so.1");
     fs::create_dir_all(soname.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&soname, b"planted").unwrap();
     let name = "packset-embed-x86_64-unknown-linux-gnu.tar.gz";
     let forged = format!("{}  {name}\n", "ab".repeat(32));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join(format!("{name}.sha256")), forged).unwrap();
     let err = ljos_cli::cloud::up(false).unwrap_err().to_string();
     assert!(err.contains("checksum mismatch"), "{err}");
@@ -841,7 +1003,7 @@ fn a_ci_job_downloads_no_encoder() {
     let said = ljos_cli::cloud::up(false).unwrap();
     assert!(said.contains("encoder: not a cloud VM"), "{said}");
     assert!(!home.join(".local/bin/packset-embed").exists());
-    assert!(!home.join(".local/lib/onnxruntime").exists());
+    assert!(!home.join(".local/lib/packset-embed").exists());
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -857,7 +1019,7 @@ fn a_generic_ci_job_downloads_no_encoder() {
         "CI=true is not a cloud VM: {said}"
     );
     assert!(!home.join(".local/bin/packset-embed").exists());
-    assert!(!home.join(".local/lib/onnxruntime").exists());
+    assert!(!home.join(".local/lib/packset-embed").exists());
 }
 
 #[test]
@@ -880,11 +1042,19 @@ fn cloud_up_installs_points_the_harness_and_clones() {
     let rel = root.path().join("rel");
     fs::create_dir_all(&rel).unwrap();
     fs::create_dir_all(home.join(".config/ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(home.join(".config/ljos/env"), "LJOS_SEAT=baked-seat\n").unwrap();
     let names = ["ljos", "ljos-mcp", "ljos-policyd", "packsetd"];
     for name in names {
         executable(&rel.join(name), "#!/bin/sh\necho ok\n");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
     let runtime = root.path().join("run");
     fs::create_dir_all(&runtime).unwrap();
@@ -899,6 +1069,10 @@ fn cloud_up_installs_points_the_harness_and_clones() {
     std::env::set_var("CURSOR_AGENT_ID", "abcdef012345");
     let host_key = home.join(".config/deedar/host.key");
     fs::create_dir_all(host_key.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&host_key, [9u8; 32]).unwrap();
     let first = ljos_cli::cloud::up(false).unwrap();
     assert!(first.contains("checksums match"), "{first}");
@@ -964,6 +1138,10 @@ fn cloud_up_installs_points_the_harness_and_clones() {
 
 /// What `ljos seat` prints for the `LJOS_SEAT` this process has, in `home`.
 fn ljos_seat(home: &Path) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("seat")
         .env_clear()
@@ -1049,6 +1227,10 @@ fn a_different_seat_in_the_env_file_is_reported_and_the_caller_s_seat_is_used() 
     std::env::set_var("XDG_RUNTIME_DIR", &runtime);
     std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
     fs::create_dir_all(home.join(".config/ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(home.join(".config/ljos/env"), "LJOS_SEAT=other-seat\n").unwrap();
     std::env::set_var("LJOS_SEAT", "caller-seat");
     std::env::set_var("CURSOR_AGENT_ID", "abcdef012345");
@@ -1091,6 +1273,10 @@ fn tracker_vm(root: &Path) -> (PathBuf, PathBuf) {
     for name in names {
         executable(&rel.join(name), "#!/bin/sh\necho ok\n");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
     let runtime = root.join("run");
     fs::create_dir_all(&runtime).unwrap();
@@ -1176,6 +1362,10 @@ fn cloud_up_does_not_take_an_enclosing_checkout_as_the_tracker() {
     );
     git(&enclosing, &["add", "-A"]);
     git(&enclosing, &["commit", "-q", "-m", "boards"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(enclosing.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
 
     // Case 1: workspace search points to an enclosing product checkout with boards and an untracked vissue.toml.
@@ -1213,7 +1403,7 @@ fn a_tracker_token_stays_private_and_answers_for_the_clone() {
     let (home, origin) = tracker_vm(root.path());
     let hosted = "https://github.com/example/tracker";
     let cfg = root.path().join("gitconfig");
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         &cfg,
         format!(
             "[url \"{}\"]\n\tinsteadOf = https://x-access-token@github.com/example/tracker\n\
@@ -1244,6 +1434,10 @@ fn a_tracker_token_stays_private_and_answers_for_the_clone() {
         git(&tracker, &["config", "--get", "remote.origin.url"]).trim(),
         "https://x-access-token@github.com/example/tracker"
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut fill = Command::new("git")
         .arg("-C")
         .arg(&tracker)
@@ -1262,7 +1456,15 @@ fn a_tracker_token_stays_private_and_answers_for_the_clone() {
     let answer = String::from_utf8_lossy(&out.stdout);
     assert!(answer.contains("password=tracker-secret\n"), "{answer}");
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&file, "rotated\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut fill = Command::new("git")
         .arg("-C")
         .arg(&tracker)
@@ -1319,6 +1521,10 @@ fn a_password_in_the_workspace_origin_stays_out_of_the_clone() {
     let bare = "https://x-access-token@github.com/example/tracker";
     // Both forms lead to the local bare repository, so a clone of either
     // succeeds offline and shows which one git stored.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         root.path().join("gitconfig"),
         format!(
@@ -1418,6 +1624,10 @@ fn a_global_rewrite_or_helper_sends_the_tracker_no_other_token() {
             asked.display()
         ),
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         root.path().join("gitconfig"),
         format!(
@@ -1473,7 +1683,7 @@ fn a_rewrite_of_the_exact_tracker_url_to_a_password_is_refused() {
     let root = tempfile::tempdir().unwrap();
     let (_home, _origin) = tracker_vm(root.path());
     let remote = "https://127.0.0.1:1/example/tracker";
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         root.path().join("gitconfig"),
         format!("[url \"https://x-access-token:tied-token@127.0.0.1:1/example/tracker\"]\n\tinsteadOf = {remote}\n"),
     )
@@ -1504,6 +1714,10 @@ fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
     let rel = root.path().join("rel");
     fs::create_dir_all(&rel).unwrap();
     fs::create_dir_all(&home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".bashrc"),
         "# test rc\n[ -z \"$PS1\" ] && return\necho after\n",
@@ -1513,6 +1727,10 @@ fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
     executable(&rel.join("ljos"), "#!/bin/sh\nexit 0\n");
     executable(&rel.join("ljos-policyd"), "#!/bin/sh\nexit 0\n");
     executable(&rel.join("ljos-mcp"), "#!/bin/sh\nprintf ran > \"$1\"\n");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
     std::env::set_var("HOME", &home);
     std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
@@ -1532,6 +1750,10 @@ fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
         "PATH should start with the install dir: {path}\n{said}"
     );
     let marker = root.path().join("marker");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let ran = Command::new("ljos-mcp").arg(&marker).output().unwrap();
     assert!(
         ran.status.success(),
@@ -1594,6 +1816,10 @@ fn cloud_up_puts_the_install_dir_ahead_of_a_stale_binary() {
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
         executable(&rel.join(name), "#!/bin/sh\nprintf fresh > \"$1\"\n");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         rel.join("SHA256SUMS"),
         sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
@@ -1620,6 +1846,10 @@ fn cloud_up_puts_the_install_dir_ahead_of_a_stale_binary() {
         "{path}\n{said}"
     );
     assert_eq!(path.matches(custom.to_str().unwrap()).count(), 1, "{path}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let found = Command::new("sh")
         .arg("-c")
         .arg("command -v ljos-mcp")
@@ -1631,6 +1861,10 @@ fn cloud_up_puts_the_install_dir_ahead_of_a_stale_binary() {
         "command -v: {found}"
     );
     let marker = root.path().join("marker");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let ran = Command::new("ljos-mcp").arg(&marker).output().unwrap();
     assert!(ran.status.success(), "{ran:?}");
     assert_eq!(fs::read_to_string(&marker).unwrap(), "fresh");
@@ -1656,6 +1890,10 @@ fn cloud_up_command(root: &Path, bin: &Path, path: &str) -> String {
     for name in names {
         executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
     std::env::set_var("HOME", &home);
     std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
@@ -1699,6 +1937,10 @@ fn cloud_up_writes_the_absolute_server_whatever_path_it_found() {
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(&stale).unwrap();
         executable(&stale.join("ljos-mcp"), "#!/bin/sh\nexit 1\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&bin, &link).unwrap();
         let path = shape
             .replace("{stale}", stale.to_str().unwrap())
@@ -1710,6 +1952,10 @@ fn cloud_up_writes_the_absolute_server_whatever_path_it_found() {
             bin.join("ljos-mcp").display().to_string(),
             "{shape}"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let client = Command::new(&command)
             .env_clear()
             .env("PATH", format!("{}:/usr/bin:/bin", stale.display()))
@@ -1732,6 +1978,10 @@ fn cloud_up_writes_custom_ljos_bin_dir_into_shell_profiles() {
     let custom = root.path().join("custom/bin");
     fs::create_dir_all(&rel).unwrap();
     fs::create_dir_all(&home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".bashrc"),
         "if [ -z \"$PS1\" ]; then return; fi\necho prompt\n",
@@ -1740,6 +1990,10 @@ fn cloud_up_writes_custom_ljos_bin_dir_into_shell_profiles() {
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
         executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         rel.join("SHA256SUMS"),
         sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
@@ -1816,10 +2070,18 @@ fn assert_path_before_guard(rc: &str, guard: &str) {
     let rel = root.path().join("rel");
     fs::create_dir_all(&rel).unwrap();
     fs::create_dir_all(&home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(home.join(".bashrc"), rc).unwrap();
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
         executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         rel.join("SHA256SUMS"),
         sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
@@ -1845,6 +2107,10 @@ fn assert_path_before_guard(rc: &str, guard: &str) {
     let path_at = bashrc.find(&line).unwrap_or_else(|| panic!("{bashrc}"));
     let guard_at = bashrc.find(guard).unwrap_or_else(|| panic!("{bashrc}"));
     assert!(path_at < guard_at, "{bashrc}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("bash")
         .arg("-c")
         .arg(". \"$HOME/.bashrc\"; command -v ljos-mcp")
@@ -1875,8 +2141,16 @@ fn cloud_up_wakes_box_seats_with_keys_passed_by_name() {
     for name in names {
         executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
     let wakes = config.join("ljos/wake.toml");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&wakes, "[claude-review]\ncommand = \"true\"\n").unwrap();
     std::env::set_var("HOME", &home);
     std::env::set_var("XDG_CONFIG_HOME", &config);
@@ -1994,12 +2268,20 @@ fn cloud_up_retires_stale_env_wakes_and_keeps_a_hand_set_wake() {
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
         executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         rel.join("SHA256SUMS"),
         sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
     )
     .unwrap();
     let wakes = config.join("ljos/wake.toml");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         &wakes,
         "\
@@ -2134,12 +2416,20 @@ fn cloud_up_retires_env_wakes_even_when_cloud_age_fails() {
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
         executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         rel.join("SHA256SUMS"),
         sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
     )
     .unwrap();
     let wakes = config.join("ljos/wake.toml");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         &wakes,
         "\
@@ -2195,6 +2485,10 @@ fn cloud_up_refuses_to_overwrite_a_broken_wake_toml() {
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
         executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         rel.join("SHA256SUMS"),
         sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
@@ -2202,6 +2496,10 @@ fn cloud_up_refuses_to_overwrite_a_broken_wake_toml() {
     .unwrap();
     let wakes = config.join("ljos/wake.toml");
     let broken = "[inky\nwebhook = \"https://old.example/hook\"\n";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&wakes, broken).unwrap();
     std::env::set_var("HOME", &home);
     std::env::set_var("XDG_CONFIG_HOME", &config);
@@ -2240,6 +2538,10 @@ fn seat_env(root: &Path) -> PathBuf {
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
         executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         rel.join("SHA256SUMS"),
         sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
@@ -2724,38 +3026,46 @@ fn cloud_guard_refuses_gh_api_ref_writes() {
 
     let rest_cursor = root.path().join("rest-cursor.json");
     let rest_force = root.path().join("rest-force.json");
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         &rest_cursor,
         "{\"ref\":\"refs/heads/cursor/from-input\",\"sha\":\"0123456789012345678901234567890123456789\"}\n",
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         &rest_force,
         "{\"sha\":\"0123456789012345678901234567890123456789\",\"force\":true}\n",
     )
     .unwrap();
 
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         root.path().join("create-cursor.graphql"),
         "mutation { createRef(input: {repositoryId: \"R\", name: \"refs/heads/cursor/from-graphql\", oid: \"O\"}) { clientMutationId } }\n",
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         root.path().join("delete-ref.graphql"),
         "mutation { deleteRef(input: {refId: \"R\"}) { clientMutationId } }\n",
     )
     .unwrap();
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         root.path().join("force-update.graphql"),
         "mutation { updateRef(input: {refId: \"R\", oid: \"O\", force: true}) { clientMutationId } }\n",
     )
     .unwrap();
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         root.path().join("update-refs.graphql"),
         "mutation { updateRefs(input: {repositoryId: \"R\", refUpdates: [{name: \"refs/heads/main\", afterOid: \"A\", beforeOid: \"B\", force: true}]}) { clientMutationId } }\n",
     )
     .unwrap();
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         root.path().join("safe-create.graphql"),
         "mutation { createRef(input: {repositoryId: \"R\", name: \"refs/heads/feature/safe\", oid: \"O\"}) { clientMutationId } }\n",
     )
@@ -2821,6 +3131,10 @@ fn write_seat_branches(home: &Path, branches: &[&str]) {
         .map(|name| format!("  \"{name}\""))
         .collect::<Vec<_>>()
         .join(",\n");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         dir.join("ljos.toml"),
         format!("[cloud]\nbranches = [\n{items}\n]\n"),
@@ -2875,15 +3189,39 @@ fn cloud_guard_judges_ref_writes_by_the_seat_allowlist() {
     git(&repo, &["branch", "cursor/local"]);
     let push_main = root.path().join("push-main.sh");
     let push_dev = root.path().join("push-dev.sh");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&push_main, "git push origin main\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&push_dev, "git push origin develop\n").unwrap();
     let ref_file = root.path().join("refname.txt");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&ref_file, "refs/heads/cursor/from-file\n").unwrap();
     let develop_file = root.path().join("develop-ref.txt");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&develop_file, "refs/heads/develop\n").unwrap();
     let missing = root.path().join("no-such-script.sh");
     let unread = root.path().join("unread.sh");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&unread, "git push origin main\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     let _ = std::fs::set_permissions(&unread, std::os::unix::fs::PermissionsExt::from_mode(0o000));
 
     let ref_at = format!(
@@ -2971,6 +3309,10 @@ fn cloud_guard_judges_ref_writes_by_the_seat_allowlist() {
         "gh api graphql -f query='mutation { mergeBranch(input: {base: \"develop\", head: \"feature-x\"}) { clientMutationId } }'",
         here,
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     let _ = std::fs::set_permissions(&unread, std::os::unix::fs::PermissionsExt::from_mode(0o644));
 }
 
@@ -3217,6 +3559,10 @@ fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
         executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         rel.join("SHA256SUMS"),
         sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
@@ -3263,6 +3609,10 @@ fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
     assert_eq!(ljos_cli::doctor_word(&unset), "info");
     assert!(ljos_cli::failing(std::slice::from_ref(&unset)).is_empty());
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let made = Command::new("age-keygen")
         .arg("-o")
         .arg(root.path().join("id.txt"))
@@ -3279,6 +3629,10 @@ fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
         .find(|line| line.starts_with("AGE-SECRET-KEY-"))
         .unwrap()
         .to_string();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let public = Command::new("age-keygen")
         .arg("-y")
         .arg(root.path().join("id.txt"))
@@ -3317,7 +3671,15 @@ fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
     assert!(!path.exists());
 
     let outside = root.path().join("outside");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&outside, b"keep\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink(&outside, &path).unwrap();
     std::env::set_var("LJOS_CLOUD_AGE_KEY", &identity);
     let linked = ljos_cli::cloud::up(false).unwrap_err().to_string();
@@ -3351,6 +3713,10 @@ fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
     assert!(!env.contains("cloud.age"), "{env}");
 
     let sealed = root.path().join("msg.age");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new("age")
         .args(["-r", &public, "-o"])
         .arg(&sealed)
@@ -3370,6 +3736,10 @@ fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
         "{}",
         String::from_utf8_lossy(&done.stderr)
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let opened = Command::new("age")
         .args(["-d", "-i"])
         .arg(&path)
@@ -3395,6 +3765,10 @@ fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
     assert!(again.contains("already holds"), "{again}");
     assert_eq!(fs::read(&path).unwrap(), bytes);
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     let loose = ljos_cli::cloud::cloud_age_row();
     assert!(!loose.ok, "{loose:?}");
@@ -3482,6 +3856,10 @@ fn two_vms_land_different_issues_and_merge_notes_on_one() {
     let add = |path: &Path, line: &str| {
         let text = fs::read_to_string(path).unwrap();
         let next = text.replacen(":LOGBOOK:\n", &format!(":LOGBOOK:\n{line}\n"), 1);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(path, next).unwrap();
     };
     add(&note_a, "- Note: \"from vm-a only\" [2026-02-01 Sun 01:00]");
@@ -3525,7 +3903,7 @@ fn a_refused_push_stays_queued_until_the_next_drain() {
     let vm = clone_of(root.path(), &origin, "vm");
     let issues = vm.join("Software/probe/issues.org");
     let text = fs::read_to_string(&issues).unwrap();
-    fs::write(
+    ljos_cli::write_file(
         &issues,
         text.replacen(
             ":LOGBOOK:\n",
@@ -3552,9 +3930,9 @@ fn a_refused_push_stays_queued_until_the_next_drain() {
         "packset-embed",
         "ljos-hud",
     ] {
-        fs::write(cache.join("ljos").join(format!("crate-{name}")), "9.9.9\n").unwrap();
+        ljos_cli::write_file(cache.join("ljos").join(format!("crate-{name}")), "9.9.9\n").unwrap();
     }
-    fs::write(
+    ljos_cli::write_file(
         home.join(".cursor/mcp.json"),
         "{\"mcpServers\":{\"ljos\":{\"command\":\"/no/such/ljos-mcp\",\"args\":[]}}}\n",
     )
@@ -3574,7 +3952,8 @@ fn a_refused_push_stays_queued_until_the_next_drain() {
         "a refused push still updated the remote"
     );
 
-    let doctor = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let doctor = ljos_cli::program(env!("CARGO_BIN_EXE_ljos"))
+        .unwrap()
         .arg("doctor")
         .env("HOME", &home)
         .env("XDG_RUNTIME_DIR", &runtime)
@@ -3611,6 +3990,10 @@ fn a_claim_from_another_machine_stays_claimed() {
     let root = tempfile::tempdir().unwrap();
     isolate_git(root.path());
     let origin = init_bare(root.path());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let fresh = Command::new("date")
         .args(["+%Y-%m-%d %a %H:%M"])
         .output()
@@ -3650,6 +4033,10 @@ fn a_claim_from_another_machine_stays_claimed() {
     let open = stat.find('(').unwrap();
     let close = stat.rfind(')').unwrap();
     let comm = &stat[open + 1..close];
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         runtime.join("ljos").join("hold-vm-kept"),
         format!(
@@ -3658,11 +4045,19 @@ fn a_claim_from_another_machine_stays_claimed() {
         ),
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         runtime.join("ljos").join("hold-vm-mine"),
         "vm-mine\nseat\n4194303\nno-such-runner\n2020-01-01T00:00:00Z\nprobe-mine\n-\n",
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         runtime.join("ljos").join("hold-vm-them"),
         "vm-them\nseat\n4194303\nno-such-runner\n2020-01-01T00:00:00Z\nprobe-them\n-\n",
@@ -3711,6 +4106,10 @@ fn a_dead_hold_with_no_issue_releases_no_claim_of_its_seat() {
     let vm = clone_of(root.path(), &origin, "vm");
     let runtime = root.path().join("run");
     fs::create_dir_all(runtime.join("ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         runtime.join("ljos").join("hold-vm-mine"),
         "vm-mine\nseat\n4194303\nno-such-runner\n2020-01-01T00:00:00Z\n\n-\n",
@@ -3753,6 +4152,10 @@ fn a_live_hold_keeps_its_issue_and_a_dead_process_is_released() {
     let close = stat.rfind(')').unwrap();
     let comm = &stat[open + 1..close];
     let hold = |actor: &str, assignee: &str, pid: u32, comm: &str, issue: &str| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(
             runtime.join("ljos").join(format!("hold-{actor}")),
             format!("{assignee}\n{assignee}\n{pid}\n{comm}\n2020-01-01T00:00:00Z\n{issue}\n-\n"),
@@ -3808,13 +4211,17 @@ fn ljos_claim_commits_the_issue() {
     fs::create_dir_all(&bin).unwrap();
     executable(
         &bin.join("claimdag"),
-        "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\n  *) exit 0 ;;\nesac\n",
+        "#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\n  *) exit 0 ;;\nesac\n",
     );
     executable(&bin.join("vissue"), "#!/bin/sh\nexit 0\n");
     let home = root.path().join("home");
     let runtime = root.path().join("run");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&runtime).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["claim", "probe-1a2b"])
         .env("HOME", &home)
@@ -3867,6 +4274,10 @@ fn a_missing_mcp_binary_is_named() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     fs::create_dir_all(home.join(".cursor")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".cursor/mcp.json"),
         "{\"mcpServers\":{\"ljos\":{\"command\":\"/no/such/ljos-mcp\",\"args\":[]}}}\n",
@@ -3887,6 +4298,10 @@ fn a_missing_mcp_binary_is_named() {
 
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let plugin = repo.join("bin/ljos-plugin");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(&plugin)
         .arg("ljos-mcp")
@@ -3913,6 +4328,10 @@ fn doctor_advises_cloud_up_only_on_a_cloud_vm() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     fs::create_dir_all(home.join(".cursor")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".cursor/mcp.json"),
         "{\"mcpServers\":{\"ljos\":{\"command\":\"/no/such/ljos-mcp\",\"args\":[]}}}\n",
@@ -3928,6 +4347,10 @@ fn doctor_advises_cloud_up_only_on_a_cloud_vm() {
 
     std::env::remove_var("CURSOR_AGENT_ID");
     fs::create_dir_all(home.join(".config/ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".config/ljos/env"),
         "LJOS_SEAT=cursor-bc0a1b2c3d\n",
@@ -3952,6 +4375,10 @@ fn desktop_cursor_and_ci_values_choose_cloud_up() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     fs::create_dir_all(home.join(".cursor")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".cursor/mcp.json"),
         "{\"mcpServers\":{\"ljos\":{\"command\":\"/no/such/ljos-mcp\",\"args\":[]}}}\n",
@@ -4025,29 +4452,49 @@ fn doctor_flags_a_command_from_another_home() {
     let home = root.path().join("home");
     let foreign = "/home/box/.cargo/bin/ljos-mcp";
     fs::create_dir_all(home.join(".codex")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".codex/config.toml"),
         format!("[mcp_servers.ljos]\ncommand = \"{foreign}\"\nargs = []\n"),
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".claude.json"),
         format!("{{\"mcpServers\":{{\"ljos\":{{\"command\":\"{foreign}\"}}}}}}\n"),
     )
     .unwrap();
     fs::create_dir_all(home.join(".config/opencode")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".config/opencode/opencode.json"),
         format!("{{\"mcp\":{{\"servers\":{{\"ljos\":{{\"command\":[\"{foreign}\"]}}}}}}}}\n"),
     )
     .unwrap();
     fs::create_dir_all(home.join(".config/goose")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".config/goose/config.yaml"),
         format!("extensions:\n  ljos:\n    cmd: \"{foreign}\"\n"),
     )
     .unwrap();
     fs::create_dir_all(home.join(".config/zed")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".config/zed/settings.json"),
         "// zed allows comments\n{ \"context_servers\": {} }\n",
@@ -4073,6 +4520,10 @@ fn doctor_flags_a_command_from_another_home() {
     assert!(!row.ok, "{line}");
     assert_eq!(ljos_cli::doctor_word(&row), "no");
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".codex/config.toml"),
         "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\nargs = []\n",
@@ -4092,6 +4543,10 @@ fn doctor_flags_a_command_from_another_home() {
     let bin = home.join(".local/bin");
     fs::create_dir_all(&bin).unwrap();
     executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".codex/config.toml"),
         "[mcp_servers.ljos]\ncommand = \"$HOME/.local/bin/ljos-mcp\"\nargs = []\n",
@@ -4126,6 +4581,10 @@ fn doctor_leaves_dollar_home_literal_for_opencode() {
         let doc = serde_json::json!({
             "mcp": { "servers": { "ljos": { "command": [command] } } }
         });
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(
             home.join(".config/opencode/opencode.json"),
             serde_json::to_string(&doc).unwrap(),
@@ -4158,6 +4617,10 @@ fn doctor_leaves_dollar_home_literal_for_opencode() {
     );
     fs::remove_file(home.join(".config/opencode/opencode.json")).unwrap();
     let config = root.path().join("mcp.json");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         &config,
         serde_json::json!({
@@ -4179,6 +4642,10 @@ fn doctor_leaves_dollar_home_literal_for_opencode() {
 fn doctor_on_command(path: &Path, command: &str) -> Option<String> {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let doc = serde_json::json!({ "mcpServers": { "ljos": { "command": command } } });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(path, doc.to_string()).unwrap();
     ljos_cli::cloud::missing_mcp_line()
 }
@@ -4263,6 +4730,10 @@ fn doctor_harness_advice_clears_after_running_onboard() {
     fs::create_dir_all(root.path().join("run")).unwrap();
     let foreign = "/home/box/.cargo/bin/ljos-mcp";
     fs::create_dir_all(home.join(".codex")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".codex/config.toml"),
         format!("[mcp_servers.ljos]\ncommand = \"{foreign}\"\nargs = []\n"),
@@ -4275,6 +4746,10 @@ fn doctor_harness_advice_clears_after_running_onboard() {
     let line = ljos_cli::cloud::missing_mcp_line().unwrap();
     assert!(line.contains("onboard --harness codex"), "{line}");
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["onboard", "--harness", "codex"])
         .env("HOME", &home)
@@ -4318,6 +4793,10 @@ fn doctor_warns_when_shell_path_finds_ljos_mcp() {
     fs::create_dir_all(&bin).unwrap();
     executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
     fs::create_dir_all(home.join(".codex")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".codex/config.toml"),
         "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\nargs = []\n",
@@ -4364,6 +4843,10 @@ fn doctor_warns_on_an_absolute_ljos_mcp_from_another_install() {
         let doc = serde_json::json!({
             "mcpServers": { "ljos": { "command": command, "args": [] } }
         });
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(home.join(".cursor/mcp.json"), doc.to_string()).unwrap();
     };
     std::env::set_var("HOME", &home);
@@ -4426,6 +4909,10 @@ fn doctor_accepts_a_wrapper_that_runs_this_install() {
     let doc = serde_json::json!({
         "mcpServers": { "ljos": { "command": wrapper, "args": [] } }
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(home.join(".cursor/mcp.json"), doc.to_string()).unwrap();
     std::env::set_var("HOME", &home);
     std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
@@ -4451,7 +4938,7 @@ fn doctor_respects_env_path_in_the_entry() {
     fs::create_dir_all(&bin).unwrap();
     executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
     fs::create_dir_all(home.join(".cursor")).unwrap();
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         home.join(".cursor/mcp.json"),
         format!(
             "{{\"mcpServers\":{{\"ljos\":{{\"command\":\"ljos-mcp\",\"args\":[],\"env\":{{\"PATH\":\"{}\"}}}}}}}}\n",
@@ -4480,7 +4967,7 @@ fn doctor_reads_path_from_the_ljos_entry_only() {
     fs::create_dir_all(&bin).unwrap();
     executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
     fs::create_dir_all(home.join(".codex")).unwrap();
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         home.join(".codex/config.toml"),
         "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\nargs = []\n\n[mcp_servers.ljos.env]\nNODE_PATH = \"/no/such/node\"\nLD_LIBRARY_PATH = \"/no/such/lib\"\n\n[mcp_servers.other]\ncommand = \"other\"\nPATH = \"/no/such/bin\"\n",
     )
@@ -4496,7 +4983,7 @@ fn doctor_reads_path_from_the_ljos_entry_only() {
         line.unwrap_or_default()
     );
 
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         home.join(".codex/config.toml"),
         "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\n\n[mcp_servers.ljos.env]\nPATH = \"/no/such/bin\"\nNODE_PATH = \"/no/such/node\"\n",
     )
@@ -4531,6 +5018,10 @@ fn doctor_expands_env_path_the_way_each_client_does() {
         let doc = serde_json::json!({
             "mcpServers": { "ljos": { "command": "ljos-mcp", "env": { "PATH": value } } }
         });
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(path, doc.to_string()).unwrap();
         ljos_cli::cloud::missing_mcp_line()
     };
@@ -4567,6 +5058,10 @@ fn doctor_expands_env_path_the_way_each_client_does() {
     let hermes = home.join(".hermes/config.yaml");
     fs::create_dir_all(hermes.parent().unwrap()).unwrap();
     for ready in ["${PATH}", "${env:PATH}"] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         fs::write(
             &hermes,
             format!(
@@ -4580,6 +5075,10 @@ fn doctor_expands_env_path_the_way_each_client_does() {
     fs::remove_file(&hermes).unwrap();
 
     fs::create_dir_all(home.join(".codex")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".codex/config.toml"),
         "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\n\n[mcp_servers.ljos.env]\nPATH = \"$PATH\"\n",
@@ -4608,6 +5107,10 @@ fn install_sh_cloud_reuses_binaries_that_already_answer() {
     executable(&bins.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
     executable(&bins.join("ljos-policyd"), "#!/bin/sh\nexit 0\n");
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/install.sh");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let help = Command::new("sh")
         .arg(&script)
         .arg("--help")
@@ -4620,6 +5123,10 @@ fn install_sh_cloud_reuses_binaries_that_already_answer() {
         String::from_utf8_lossy(&help.stderr)
     );
     assert!(help_text.contains("--cloud"), "{help_text}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(&script)
         .arg("--cloud")
@@ -4650,6 +5157,10 @@ fn cloud_up_tags_vm_writes_scope_cloud_without_a_default_scope() {
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
         executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         rel.join("SHA256SUMS"),
         sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
@@ -4862,6 +5373,10 @@ fn a_ci_seat_and_a_cloud_seat_vote_note_and_push_and_the_box_does_not_re_sign() 
     std::env::set_var("VISSUE_AGENT", "box");
     let host = root.path().join("box-config/deedar/host.key");
     fs::create_dir_all(host.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&host, [4u8; 32]).unwrap();
     std::env::set_var("LJOS_SEAT_KEY", &host);
     std::env::set_var("DEEDAR_HOST_SIGNING_KEY", &host);
@@ -4887,14 +5402,26 @@ fn a_handover_keeps_an_existing_signature_and_uses_the_host_key_for_a_new_one() 
     let seat_key = ljos_cli::cloud::prepare_seat_key("ridley-ci-a-555001").unwrap();
     let host = home.join(".config/deedar/host.key");
     fs::create_dir_all(host.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&host, [8u8; 32]).unwrap();
     std::env::set_var("DEEDAR_HOST_SIGNING_KEY", &host);
 
     let bag = root.path().join("bag");
     fs::create_dir_all(&bag).unwrap();
     let manifest = bag.join("manifest-sha256.txt");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&manifest, b"abc\n").unwrap();
     let sig = bag.join("manifest-sha256.txt.sig");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&sig, b"seat-sig\n").unwrap();
     let log = root.path().join("deedar.log");
     let bin = root.path().join("bin");
@@ -4931,8 +5458,16 @@ fn pin_at(repo: &Path, seat: &str, unix: &str) -> String {
     let pins = repo.join(".ljos-seat-keys");
     let mut text = fs::read_to_string(&pins).unwrap_or_default();
     text.push_str(&format!("{seat} {public}\n"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&pins, text).unwrap();
     git(repo, &["add", ".ljos-seat-keys"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -5056,6 +5591,10 @@ fn a_launcher_slots_the_seat_its_run_takes() {
     let pins = box_repo.join(".ljos-seat-keys");
     let mut text = fs::read_to_string(&pins).unwrap();
     text.push_str(&format!("ridley-taken-cafebabe0001abcd {public}\n"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&pins, text).unwrap();
     let err = slot_run("probe-slot", "ridley-taken", "cafebabe0001abcd")
         .unwrap_err()
@@ -5304,6 +5843,10 @@ fn rewrite_pins(repo: &Path, edit: impl Fn(&str) -> Option<String>) {
         .filter_map(edit)
         .map(|line| format!("{line}\n"))
         .collect();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&path, text).unwrap();
     git(repo, &["commit", "-q", "-am", "rewrite pins"]);
     git(repo, &["push", "-q", "origin", "HEAD"]);
@@ -5486,6 +6029,10 @@ fn commit_dated(repo: &Path, paths: &[&str], message: &str, unix: &str) {
     let mut args = vec!["add", "--"];
     args.extend_from_slice(paths);
     git(repo, &args);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -5571,6 +6118,10 @@ fn a_slot_line_replayed_from_another_issue_does_not_backdate_it() {
     let pins = repo.join(".ljos-seat-keys");
     let mut text = fs::read_to_string(&pins).unwrap();
     text.push_str(&format!("{run} {public}\n"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&pins, text).unwrap();
     commit_dated(
         &repo,
@@ -5716,6 +6267,10 @@ fn a_run_pin_merged_from_a_branch_without_its_slot_does_not_count() {
         "{run} {}\n",
         run_key("ridley-review", "cafebabe0001abcd")
     ));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&pins, text).unwrap();
     git(
         &repo,
@@ -5774,6 +6329,10 @@ fn a_slotted_run_counts_on_a_tracker_that_is_not_a_git_repository() {
     )
     .unwrap();
     let (public, _) = ljos_cli::ballot_sig::signed_hex(&key, b"pin");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         tracker.join(".ljos-seat-keys"),
         format!("ljosbot {public}\n"),

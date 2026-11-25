@@ -15,13 +15,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn git(dir: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -137,7 +139,15 @@ fn a_sitting_claims_when_the_tracker_remote_cannot_be_reached() {
             &["commit", "-q", "--allow-empty", "-m", &format!("local {n}")],
         );
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("Software/other.org"), "* TODO side\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("Software/sixth.org"), "* TODO sixth\n").unwrap();
 
     let show = format!(r#"{{"id":"{issue}","title":"probe work","state":"TODO","blocked_by":[]}}"#);
@@ -155,7 +165,7 @@ fn a_sitting_claims_when_the_tracker_remote_cannot_be_reached() {
         root.path(),
         "claimdag",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\nesac\necho '[]'\nexit 0\n",
             log.display()
         ),
     );
@@ -170,6 +180,10 @@ fn a_sitting_claims_when_the_tracker_remote_cannot_be_reached() {
 
     let path = format!("{}:/usr/bin:/bin", root.path().display());
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["sitting", &issue])
         .current_dir(root.path())

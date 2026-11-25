@@ -14,10 +14,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 const LESSON: &str = "the pack keeps a lesson about ferrule";
@@ -84,7 +82,7 @@ fn serve_held_write() -> (u16, Arc<AtomicBool>) {
 }
 
 fn hold_write(port: u16) -> std::process::Child {
-    Command::new("python3")
+    #[expect(clippy::disallowed_methods, reason = "starts a program outside git hook code")] return Command::new("python3")
         .arg("-c")
         .arg(format!(
             "import socket\n\
@@ -103,7 +101,7 @@ fn hold_write(port: u16) -> std::process::Child {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .unwrap()
+        .unwrap();
 }
 
 struct Reader {
@@ -213,6 +211,10 @@ fn a_held_write_does_not_fail_readers() {
     let home = root.path().join("home");
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
     std::fs::create_dir_all(root.path().join("run")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.join(".cursor/mcp.json"),
         r#"{"mcpServers":{"ljos":{"command":"/no/such/ljos-mcp"}}}"#,
@@ -233,7 +235,7 @@ fn a_held_write_does_not_fail_readers() {
         root.path(),
         "claimdag",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\nesac\necho '[]'\nexit 0\n",
             log.display()
         ),
     );
@@ -265,6 +267,10 @@ fn a_held_write_does_not_fail_readers() {
     }
     let path = format!("{}:/usr/bin:/bin", root.path().display());
     let ljos = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(root.path())
@@ -313,7 +319,7 @@ fn a_held_write_does_not_fail_readers() {
             );
         } else {
             assert!(
-                stderr.contains("The memory pack was busy, so these rows are word matches; run the search again for ranked results."),
+                stderr.contains("Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`."),
                 "{what}:\n{said}"
             );
             assert!(!stderr.contains("pack busy, try again"), "{what}:\n{said}");

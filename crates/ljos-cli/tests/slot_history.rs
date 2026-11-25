@@ -3,17 +3,19 @@
 
 ljos_test_boot::harness!();
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
 fn script(dir: &Path, name: &str, body: &str) {
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn git(repo: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -39,22 +41,42 @@ fn tracker(repo: &Path) {
     let hooks = repo.join("no-hooks");
     std::fs::create_dir_all(&hooks).unwrap();
     git(repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(repo.join("issues.org"), "board\n").unwrap();
     git(repo, &["add", "."]);
     git(repo, &["commit", "-q", "-m", "board"]);
     for n in 0..30 {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("filler"), format!("before {n}\n")).unwrap();
         git(repo, &["add", "filler"]);
         git(repo, &["commit", "-q", "-m", &format!("before {n}")]);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(repo.join(".ljos-seat-keys"), "mina bb\n").unwrap();
     git(repo, &["add", ".ljos-seat-keys"]);
     git(repo, &["commit", "-q", "-m", "pin mina"]);
     for n in 0..20 {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("filler"), format!("mid {n}\n")).unwrap();
         git(repo, &["add", "filler"]);
         git(repo, &["commit", "-q", "-m", &format!("mid {n}")]);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         repo.join("issues.org"),
         "board\n- Note: \"slot: mina model=m run=r key=k ada aa bb\"\n",
@@ -63,10 +85,18 @@ fn tracker(repo: &Path) {
     git(repo, &["add", "issues.org"]);
     git(repo, &["commit", "-q", "-m", "slot"]);
     for n in 0..20 {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("filler"), format!("after {n}\n")).unwrap();
         git(repo, &["add", "filler"]);
         git(repo, &["commit", "-q", "-m", &format!("after {n}")]);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(repo.join(".ljos-seat-keys"), "mina bb\neessi aa\n").unwrap();
     git(repo, &["add", ".ljos-seat-keys"]);
     git(repo, &["commit", "-q", "-m", "pin eessi"]);
@@ -147,6 +177,10 @@ fn a_vote_on_a_long_tracker_matches_and_does_not_pickaxe() {
         bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let ljos = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
@@ -166,6 +200,10 @@ fn a_vote_on_a_long_tracker_matches_and_does_not_pickaxe() {
             .output()
             .unwrap()
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(home.join("gitconfig"), b"").unwrap();
 
     let mina = ljos(&[

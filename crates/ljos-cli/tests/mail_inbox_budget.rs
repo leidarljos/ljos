@@ -197,6 +197,10 @@ fn ljos_env(
     args: &[&str],
     token: Option<&str>,
 ) -> (Output, Duration) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
@@ -368,6 +372,10 @@ fn a_stalled_pack_returns_inside_the_budget() {
     );
     assert!(sent.contains("pack busy, try again"), "{sent}");
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(["hook"])
         .env_clear()
@@ -439,6 +447,10 @@ fn a_token_proof_does_not_restart_when_the_writer_stays_silent() {
     );
 
     let (hook_port, hook_accepts) = serve_stall();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(["hook"])
         .env_clear()

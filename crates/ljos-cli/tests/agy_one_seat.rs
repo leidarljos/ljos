@@ -6,6 +6,10 @@ fn tracker(seats: &str) -> tempfile::TempDir {
     // The person's global config may carry commit hooks; the fixture's
     // repository reads none of it.
     let git = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(dir.path())
@@ -17,6 +21,10 @@ fn tracker(seats: &str) -> tempfile::TempDir {
         assert!(out.status.success(), "{args:?}");
     };
     git(&["init", "-q"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.path().join("vissue.toml"), seats).unwrap();
     git(&["add", "vissue.toml"]);
     git(&["config", "user.email", "ada@example.invalid"]);

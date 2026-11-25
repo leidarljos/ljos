@@ -105,15 +105,10 @@ pub struct SetAside {
     pub bytes: usize,
 }
 
-/// The state dir that holds the queue: `$XDG_STATE_HOME/ljos`, else
-/// `~/.local/state/ljos`.
+/// The state dir that holds the queue: [`crate::state_base_dir`].
 #[must_use]
 pub fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos")
+    crate::state_base_dir()
 }
 
 fn queue_file(dir: &Path) -> PathBuf {
@@ -463,6 +458,10 @@ mod tests {
     #[test]
     fn an_old_line_without_kind_is_a_note() {
         let dir = dir("old");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.join("note-queue.jsonl"),
             "{\"issue\":\"p-1\",\"text\":\"one line\",\"workspace\":\"ws\",\"at\":1}\n",
@@ -499,6 +498,10 @@ mod tests {
         let mut bytes =
             format!("{}\n", serde_json::to_string(&note("p-1", "kept")).unwrap()).into_bytes();
         bytes.extend_from_slice(b"{\"issue\":\"p-2\",\"text\":\"caf\xc3");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join("note-queue.jsonl"), bytes).unwrap();
         let pending = pending_in(&dir);
         assert_eq!(pending.len(), 1, "{pending:?}");
@@ -578,8 +581,16 @@ mod tests {
         assert_eq!(lock_mode, 0o600, "lock mode {lock_mode:o}");
 
         let outside = dir.join("outside");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&outside, "kept\n").unwrap();
         std::fs::remove_file(&path).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&outside, &path).unwrap();
         assert!(replace_in(&dir, vec![note("p-9", "forged")]).is_err());
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "kept\n");
@@ -591,6 +602,10 @@ mod tests {
     fn emptying_a_dangling_linked_queue_is_refused() {
         let dir = dir("empty-dangling");
         let path = queue_file(&dir);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(dir.join("gone"), &path).unwrap();
         assert!(replace_in(&dir, Vec::new()).is_err());
         assert!(std::fs::symlink_metadata(&path).unwrap().is_symlink());
@@ -616,6 +631,10 @@ mod tests {
         bytes.extend_from_slice(cut);
         bytes.extend_from_slice(waits.as_bytes());
         bytes.extend_from_slice(tail);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(queue_file(&dir), &bytes).unwrap();
         let done = drain_in(&dir, |n| match n.issue.as_str() {
             "p-1" => Sent::Kept("id".into()),
@@ -646,6 +665,10 @@ mod tests {
     #[test]
     fn a_tidy_sets_aside_a_queue_with_no_note_in_it() {
         let dir = dir("tidy");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(queue_file(&dir), b"{\"issue\":\"p-1\",\"te").unwrap();
         let aside = tidy_in(&dir, |notes| notes).unwrap().expect("set aside");
         assert_eq!(
@@ -663,11 +686,27 @@ mod tests {
     fn a_linked_damaged_name_is_not_followed() {
         let dir = dir("linked");
         let real = dir.join("note-queue.jsonl.2026-01-01.damaged");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&real, b"cut").unwrap();
         let outside = dir.parent().unwrap().join("linked-outside");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&outside, b"not ljos's own").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&outside, dir.join("note-queue.jsonl.2026-01-02.damaged"))
             .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(
             dir.join("gone"),
             dir.join("note-queue.jsonl.2026-01-03.damaged"),
@@ -685,8 +724,16 @@ mod tests {
         let root = dir("linked-dir");
         let outside = root.join("outside");
         std::fs::create_dir(&outside).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(outside.join("note-queue.jsonl.2026-01-01.damaged"), b"x").unwrap();
         let state = root.join("ljos");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&outside, &state).unwrap();
         assert_eq!(set_aside_in(&state), []);
     }

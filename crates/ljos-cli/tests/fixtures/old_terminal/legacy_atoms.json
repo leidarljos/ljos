@@ -1,0 +1,41 @@
+{
+  "terminal_by_version": [
+    {
+      "version": "0.17.0",
+      "workspace": "v0170",
+      "preference_text": "Keep the 0.17.0 notes in one paper file.",
+      "lesson_text": "The 0.17.0 staging host reboots on its own night."
+    },
+    {
+      "version": "0.22.0",
+      "workspace": "v0220",
+      "preference_text": "Keep the 0.22.0 notes in one paper file.",
+      "lesson_text": "The 0.22.0 staging host reboots on its own night."
+    },
+    {
+      "version": "0.25.0",
+      "workspace": "v0250",
+      "preference_text": "Keep the 0.25.0 notes in one paper file.",
+      "lesson_text": "The 0.25.0 staging host reboots on its own night."
+    },
+    {
+      "version": "0.29.0",
+      "workspace": "v0290",
+      "preference_text": "Keep the 0.29.0 notes in one paper file.",
+      "lesson_text": "The 0.29.0 staging host reboots on its own night."
+    }
+  ],
+  "held_workspace": "held",
+  "runner_lesson": {
+    "text": "The lint job must pass before a merge.",
+    "origin": "user-declared",
+    "harness": "claude",
+    "session": "claude@runnerlesson01"
+  },
+  "agent_lesson": {
+    "text": "The deploy window closes at four on Friday.",
+    "origin": "agent-derived",
+    "harness": "claude",
+    "session": "claude@agentlesson01"
+  }
+}

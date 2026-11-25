@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::output_wrap::Width;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
@@ -80,17 +81,25 @@ pub struct Edge {
 /// A file that is present but not a supported graph yields the refusal in
 /// the section. Recall still returns the working set.
 #[must_use]
-pub fn recall_section(issue: &str) -> String {
+pub fn recall_section(issue: &str, width: Width) -> String {
     let Some(path) = located_graph() else {
         return String::new();
     };
     match read_graph(&path) {
-        Ok(graph) => section(&graph, &recall_query(issue)),
-        Err(err) => {
-            let msg = format!("{err:#}").replace('\n', " ");
-            format!("\nCode context\n  {msg}\n")
-        }
+        Ok(graph) => section(&graph, &recall_query(issue), width),
+        Err(err) => refusal_section(&err, width),
     }
+}
+
+/// The section that names why the graph could not be read, laid out at
+/// `width` like the rest of the page.
+fn refusal_section(err: &anyhow::Error, width: Width) -> String {
+    let msg = format!("{err:#}").replace('\n', " ");
+    let shown = match width.terminal() {
+        Some(cols) => crate::output_wrap::wrap_hanging_prose(&msg, cols, "  ", "  "),
+        None => format!("  {msg}"),
+    };
+    format!("\nCode context\n{shown}\n")
 }
 
 /// Read `path`. A leading `//` comment block is ignored so a fixture can
@@ -127,7 +136,7 @@ pub fn located_graph() -> Option<PathBuf> {
 
 /// Matching nodes and their top edges, or empty when nothing matches.
 #[must_use]
-pub fn section(graph: &Graph, query: &str) -> String {
+pub fn section(graph: &Graph, query: &str, width: Width) -> String {
     let mut hits = matching(graph, query);
     if hits.is_empty() {
         return String::new();
@@ -137,7 +146,7 @@ pub fn section(graph: &Graph, query: &str) -> String {
     let shown = hits.len();
     let mut out = format!(
         "\n{}\n",
-        crate::scan::count_line("Code context", shown, total, "")
+        crate::scan::count_line("Code context", shown, total, "", width)
     );
     if shown < total {
         out.push_str("graphify-out/graph.json has the rest.\n");
@@ -150,11 +159,11 @@ pub fn section(graph: &Graph, query: &str) -> String {
         }
         line.push_str("  degree ");
         line.push_str(&node.degree.to_string());
-        out.push_str(&crate::scan::wrap(&line, crate::scan::COLS));
+        out.push_str(&crate::scan::wrap_for(&line, width));
         out.push('\n');
         for edge in top_edges(&graph.edges, &node.id) {
             let edge = format!("    {}", edge_line(graph, edge, &node.id));
-            out.push_str(&crate::scan::wrap(&edge, crate::scan::COLS));
+            out.push_str(&crate::scan::wrap_for(&edge, width));
             out.push('\n');
         }
     }
@@ -727,7 +736,11 @@ mod tests {
     #[test]
     fn a_section_lists_file_line_and_confidence_tags() {
         let graph = fixture();
-        let text = section(&graph, "MultiHeadAttention");
+        let text = section(
+            &graph,
+            "MultiHeadAttention",
+            crate::output_wrap::Width::FIXED,
+        );
         assert_eq!(
             text,
             "\nCode context  shown 1 of 1\n  \
@@ -735,14 +748,14 @@ mod tests {
              <-- Transformer  contains  [EXTRACTED]\n    \
              --> attention mechanism  implements  [INFERRED]\n"
         );
-        let layer = section(&graph, "LayerNorm");
+        let layer = section(&graph, "LayerNorm", crate::output_wrap::Width::FIXED);
         assert!(
             layer.contains("LayerNorm  model.py:20  community 0  degree 2"),
             "{layer}"
         );
         assert!(layer.contains("[EXTRACTED]"), "{layer}");
         assert!(layer.contains("[AMBIGUOUS]"), "{layer}");
-        assert!(section(&graph, "quay schedule").is_empty());
+        assert!(section(&graph, "quay schedule", crate::output_wrap::Width::FIXED).is_empty());
     }
 
     #[test]
@@ -769,7 +782,7 @@ mod tests {
         assert_eq!(ok.schema_major, 1);
         assert_eq!(ok.nodes[0].line, Some(3));
         assert_eq!(ok.nodes[0].degree, 1);
-        let text = section(&ok, "Alpha");
+        let text = section(&ok, "Alpha", crate::output_wrap::Width::FIXED);
         assert!(text.contains("a.rs:3"), "{text}");
         assert!(text.contains("[EXTRACTED]"), "{text}");
         let err = parse_graph(r#"{"graph":{"schema_version":"2.0"},"nodes":[]}"#).unwrap_err();
@@ -781,6 +794,29 @@ mod tests {
         let err = parse_graph(r#"{"graph":{"schema_version":1.5},"nodes":[]}"#).unwrap_err();
         assert!(err.contains("is not supported"), "{err}");
         assert!(err.contains("this ljos reads major 1"), "{err}");
+    }
+
+    #[test]
+    fn a_refusal_is_laid_out_at_the_page_width() {
+        let err = anyhow::anyhow!(
+            parse_graph(r#"{"graph":{"schema_version":"2.0"},"nodes":[]}"#).unwrap_err()
+        );
+        let msg = format!("{err:#}");
+        assert!(msg.chars().count() > 40, "{msg}");
+        for cols in [24, 40] {
+            let text = refusal_section(&err, Width::columns(cols));
+            let once = crate::output_wrap::wrap_hanging_prose(&msg, cols, "  ", "  ");
+            assert_eq!(text, format!("\nCode context\n{once}\n"));
+            assert!(text.lines().count() > 3, "{cols}\n{text}");
+            for line in text.lines() {
+                assert!(
+                    crate::output_wrap::prose_display_width(line) <= cols,
+                    "{cols}: {line:?}"
+                );
+            }
+        }
+        let fixed = refusal_section(&err, Width::FIXED);
+        assert_eq!(fixed, format!("\nCode context\n  {msg}\n"));
     }
 
     #[test]
@@ -801,7 +837,7 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        let text = section(&graph, "Hub");
+        let text = section(&graph, "Hub", crate::output_wrap::Width::FIXED);
         let lines: Vec<&str> = text
             .lines()
             .filter(|line| line.starts_with("    "))
@@ -832,6 +868,10 @@ mod tests {
         let outer = tempfile::tempdir().unwrap();
         let outer_out = outer.path().join("graphify-out");
         std::fs::create_dir(&outer_out).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(outer_out.join("graph.json"), "{}").unwrap();
         let repo = outer.path().join("repo");
         let nested = repo.join("src");
@@ -841,6 +881,10 @@ mod tests {
         let inner = repo.join("graphify-out");
         std::fs::create_dir(&inner).unwrap();
         let file = inner.join("graph.json");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&file, "{}").unwrap();
         assert_eq!(find_default_graph(&nested).unwrap(), file);
     }
@@ -849,6 +893,10 @@ mod tests {
     fn a_graphify_key_resolves_against_its_file() {
         let dir = tempfile::tempdir().unwrap();
         let toml = dir.path().join("ljos.toml");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&toml, "graphify = \"custom/graph.json\"\n").unwrap();
         assert_eq!(graphify_key(&toml).as_deref(), Some("custom/graph.json"));
         let setting = resolve_setting(&graphify_key(&toml).unwrap(), dir.path());

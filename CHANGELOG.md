@@ -5,6 +5,315 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.45.4 (2026-11-24)
+
+### Features
+
+- An atom sync (kkma) now adds only a segment of the new atoms, and only a compacting sync folds the log into a new snapshot. A large store no longer pays for the whole log on every sync, and one piece that does not open no longer stops an export or drops atoms.
+- `ljos deed --show ACCESSION [--out FILE]` prints a stored file's bytes, or writes them to a file, after `deedar evidence` passes and the copy in the store hashes to the digest the deed names.
+  A missing or altered copy exits 1, names the deed, and prints nothing.
+  The `ljos_deed_show` MCP tool reads the same way.
+- `ljos file --from FILE` files one ticket per row of a JSONL or CSV file (title, body, tags, parent, priority, type) in one tracker commit and prints the new ids one per line, so 150 rows are one commit rather than 150.
+  A row that cannot be filed files none of them: the error names the row and the tickets written before it are taken back.
+  The `ljos_file_from` MCP tool takes the rows inline or a file path.
+- `ljos table ISSUE --add FILE.csv [--name NAME]` checks a CSV (a header row, the same column count on every row, UTF-8, at most 8 MiB), stores it in `deedar` and cites it on the ticket in one tracker commit, so a scoreboard is one deed rather than one ticket per row.
+  Adding the same name again makes the next version, which supersedes the one before, and `ljos current` on an older accession names the newer one.
+  `ljos table ISSUE` lists the tables with rows, columns, version and accession, and `--show NAME [--version N] [--csv|--json]` prints one after the same check `ljos deed --show` makes.
+  The `ljos_table` MCP tool does the same.
+- A tracker board of 1 MiB or more is split into one file per issue under `issues/` on its next tracker write, in one commit with the board and every issue file, as `vissue migrate-ledger` does.
+  A split whose commit fails is rolled back and the board stays one file. A split left on disk without its commit is committed whole before the next write.
+  Files a killed split left are removed before the next split, and a write that waits out another writer's split still records its seat line.
+  Each later claim, note or finish appends to that issue's file and commits it alone, so history grows by about the size of the event instead of the size of the board.
+  `LJOS_TRACKER_SPLIT_BYTES` sets the size, and `0` never splits.
+  A rebase that meets the same per-issue file on both sides keeps both sides' records.
+- Tracker notes within 60 seconds of the checkout's last tracker commit now share the next commit, instead of making one commit each.
+  A held note stays on disk and on the pending list until a commit carries it.
+  The first note after the window commits it, and so do any other tracker write, a push, the end of the session and the exit of the process that wrote the note.
+  Its body names every held note.
+  Only a plain note waits.
+  Claims, ballots, finishes, filings and notes on options commit at once.
+  A push commits every held note, also one missing from the pending list, and a commit forgets only the held notes it carried.
+  `LJOS_TRACKER_BATCH_SECS` sets the window, and `0` commits every write.
+- `ljos` now wraps human prose to the terminal width.
+  `ljos` wraps prose that it prints through its output module when the stream is a terminal.
+  This covers messages, listings, pages, help and the panic message.
+  On a terminal, a `COLUMNS` value that is a whole number from 1 up sets the width.
+  `ljos` raises a width below 20 to 20 and lowers a width above 240 to 240.
+  When `COLUMNS` is unset, 0 or not a whole number, `ljos` reads the terminal's own width with the same limits.
+  `ljos` does not wrap on a terminal that reports a width of 0.
+  `ljos` never wraps machine output, on stdout or on stderr.
+  Before it dispatches a command or writes, `ljos` decides the output kind once from the command-line arguments.
+  Machine output is any run with `--json`, `--porcelain` or `--out -`, a hook, the hook server, the tool server, and JSON lines and tab-separated rows.
+  This includes hook queue admission and its fallback line.
+  `ljos-mcp` never wraps anything it writes.
+  Output to a pipe or a file is unchanged.
+  A program that `ljos` runs with the terminal writes to it directly, and `ljos` does not wrap that output.
+  The passphrase prompt on `/dev/tty` is not wrapped.
+- `tcb_check_in_with_env` runs a guard check with extra environment set only on the `ljos-policyd` child.
+
+### Fixes
+
+- A project name written with a hyphen or an underscore in a sitting title, such as `oak-tree` on project `oak-tree`, counted as a title identifier, so `Fix the oak-tree draft` kept `The oak-tree damper needs oil.`.
+  A title word is now the project name when its pieces, split at a hyphen, an underscore or a change of case and taken in lower case, are exactly the project's pieces, so `OAK_TREE`, `OakTree` and `a-b` on project `a-b` are left out too.
+  A word with any other piece, such as `sha-2` on project `sha-1`, `oak_2` on project `oak` or `to-oak` on project `for-oak`, still keeps the lesson that names it, in the title, in the issue's body, or as one segment of a URL or a path such as `https://example.com/sha-2/issues`.
+- A sitting read another ticket's id from a lesson with ASCII letters only, so `On café-1-wxyz the damper needs oil.` on `café-1-lk1e` was shown as if it were about this issue, and `école-2 must run weekly.` on project `cole` was dropped as a `cole` ticket.
+  That id is now one of the same words the rest of the sitting reads, compared in lower case in any script, so the first lesson stays out like `On sha-1-wxyz the damper needs oil.` on `sha-1-lk1e`, and the second is shown.
+- A sitting title or body word beside a dot, a colon, an `@`, an apostrophe, a `?` or a `#`, such as `sha-2` in `sha-2.txt`, `sha-2:8080` or `sha-2@example.com` on project `sha-1`, was not an identifier, so the lesson that names it was dropped, and a letter outside ASCII was cut from the word, so `école-2` was recorded as `cole-2` and `café-2` was dropped.
+  A word is now a run of letters and digits in any script, or such runs joined by `-` or `_`, every other character ends it, and the word is kept as written, so those lessons are shown and `a-b`, `OakTree` and `sha-1` on their own projects are still removed.
+- A sitting title whose only strong word was the project name, such as `Review the kiln` on project `kiln`, ended with no subject words and dropped a lesson such as `Review lessons weekly.`.
+  The project name now comes out before weak words are judged, so that title has `review` as its subject, the same as `Review` on another project.
+- A sitting's due list kept a lesson that only shared weak words such as review and order, and the due count listed those lessons with this issue.
+  Due cards keep a lesson whose share of the issue's subject words, times the memory's weight, reaches 0.34.
+  This seat's own lesson weighs 1.15, so a share of about 30 percent clears it, and a lesson of weight 1 needs 34 percent.
+  The project name is not a subject word, in the title or on its own line, and a lesson that shares only that name stays out.
+  An identifier in the title, such as review_order, keeps a lesson that contains that name.
+  The timeline lists those related memories.
+  The sitting's recall list uses that same rule, so a lesson that only shares weak words is not what the seat remembers for the task.
+  A lesson filed on another issue in the same project follows that rule, and only a tag for this issue skips it.
+  When the issue's text and history together have no strong word, the older word list is the subject.
+  A pack read that fails still applies the same rule to the slot's word matches.
+  When none of the due lessons name the issue, the verbose due section says nothing relevant is due, and the short form leaves that line out.
+  An empty pack still says this seat has remembered nothing yet.
+- A snapshot of this machine's atom log that `age` could not authenticate stopped every sync with new atoms with `failed to decrypt and authenticate payload chunk`.
+  The next sync now seals the atoms the pack lists whole into one new snapshot once and prints a warning, as it does for a segment that does not open, so a peer takes the same atoms as from a log that opens, and an atom the pack no longer lists is dropped as on any sync.
+- A sync past 64 atom segments folded them into a new snapshot, so the whole log was sealed into the tracker again every 64 changes.
+  A sync now only adds a segment of the new atoms, and only `ljos sync --compact` folds.
+- A sync skipped this machine's atom log whenever `plain.sha256` matched its atoms, so a changed hash in the checkout hid an added or dropped atom and was committed as it was.
+  A sync now skips the log only when this home noted, in a signed note keyed to the bytes of the snapshots and segments, that they open to those atoms, and never reads what `plain.sha256` says.
+- A sync staged every snapshot and segment of this machine's atom log as it was in the checkout, so a sealed piece that was changed or removed there was committed that way, even by a sync with nothing new.
+  A committed snapshot or segment that differs from `HEAD` is now left out of the commit, and only `ljos sync --compact` commits a removal.
+  A new snapshot or segment now takes the seq one past every piece in the checkout and in `HEAD`, and `ljos sync --compact` removes a piece only after it reads its new snapshot again and that snapshot, at a path `HEAD` does not have, opens to every atom the pack lists; a snapshot or segment that still differs from `HEAD` after the fold stops the compaction before it commits.
+- A sync staged this machine's whole atom directory, so the temp file of a write that was cut off was committed, even by a sync with no new atoms.
+  A sync now stages only the snapshots, segments and plaintext hash.
+- A sync trusted any plaintext it had kept of a sealed atom log, so a changed or stale kept file could drop a new atom or keep a removed one, and the plaintext hash written after it kept the error after the files were removed.
+  A kept plaintext is now used only when its signature, made with a random key kept in `sync/kept.key` below the state directory, agrees with the ciphertext it names, and is read again with `age -d` otherwise.
+- A sync whose own atom log did not open on this machine removed the unread segments and sealed the rest of the log again, up to the whole log in one new segment.
+  It now removes nothing and seals the atoms whole into one new snapshot once, or, when this machine's key is not a recipient, writes nothing and prints a warning that names `ljos sync --key`.
+- A tracker write such as `ljos note` waits up to `LJOS_TRACKER_LOCK_WAIT` seconds, 20 when unset, for another writer's commit lock, as the docs say.
+  It waited two seconds, while a background push keeps that lock until git exits, so a note during a push was left uncommitted until `ljos sync`.
+- Atoms that waited while this machine's own atom log did not open were not exported by later syncs, even after this machine was a recipient again; only `ljos sync --compact` sealed them.
+  A sync now seals them whole into one new snapshot once this machine can open what it seals.
+- Drain PTY reader threads after child exit in terminal tests and make `search_raw_rows` and `old_terminal` deterministic offline without network fetches.
+- Each sync ran `age -d` on every snapshot and segment of this machine's own log to find what was new, and a large log that did not open in time left the sync unable to add atoms.
+  A sync now keeps the plaintext of each piece it seals, so its next sync reads its own log without `age -d`.
+- The plaintexts a sync keeps of sealed atom logs were written as files of mode 0644 in a directory of mode 0755.
+  They are now files of mode 0600 in a directory of mode 0700, as `age.key` is.
+- Tighten identity-gate coverage for `noreply@github.com` committers, seed `old_terminal` from documented legacy atom fixtures, assert legacy atoms stay unverified through `ljos doctor`, punctuate the busy pack doctor row like other command tails, and make person gate and key tests assert PTY output that `finish_reading` drains.
+- `ljos file --from` files a row with no parent under the held issue, as `ljos file` does, and says so on stderr; `--top` now works with `--from` to file such rows at the top. Before, the batch ignored the hold and refused rows with no project.
+- `ljos file --from` files each row in its parent's project, as `ljos file --parent` does, instead of putting every row in the project of the first parent; a refused row takes back every project the batch wrote.
+- `ljos file --from` refuses a CSV whose header names a column twice once spaces are trimmed, such as `title` and `title `, naming both columns, instead of keeping the second one's values.
+- `ljos file -p .` and `-p ..`, a project name that folds to one of them under Unicode NFKC such as U+2024, and the same name on an MCP tool, are refused as project names, so a ticket is no longer written to `issues.org` beside the prefix directory, in the prefix directory, or under a dot-named project directory.
+- `ljos mcp` refuses a tool call whose arguments include a name the schema does not list, names the unknown name and the accepted ones, and does not run the tool. Tools that take an issue id accept `id` as an alias for `issue`.
+- `ljos seat add` and `ljos seat grant` run in a directory that only vissue would guess as the tracker now stop with the `No tracker found` line, and no longer write `vissue.toml` and a commit lock into a product checkout.
+- `ljos seat add`, `ljos sync` and `ljos mesh pull` no longer create the default tracker directory under the data home when a checkout has its own untracked `vissue.toml` and `ljos onboard` has not run.
+- `ljos sync --compact` removed every snapshot and segment of this machine's atom log even when one did not open on this machine, so atoms that only those pieces carried were lost.
+  It now exits non-zero, names `ljos sync --key`, and removes nothing when the newest snapshot or a segment after it does not open in full.
+  A damaged older piece no longer blocks it: once a sync has sealed the atoms whole into a newer snapshot that opens, `ljos sync --compact` folds from that snapshot and removes the damaged piece with the rest.
+- `ljos sync` run in a checkout where no tracker is named now stops with the `No tracker found` line, and no longer writes `.gitattributes` and a commit lock into that checkout.
+- `ljos table --add` no longer fails with `deed frozen` when a second table's name differs from the first only in case, `.`, `_` or `-`, such as `Scores` and `scores`: it passes deedar an accession of its own, with a short digest for a name deedar would fold, and refuses an accession another deed already uses.
+- Keep runner stderr in call order when checking the final shell status. ([#18](https://github.com/leidarljos/ljos/pull/18))
+- Write each concurrent hook trace row as one atomic append. ([#18](https://github.com/leidarljos/ljos/pull/18))
+- Publishing an executable compiles on macOS.
+  `st_mode` and rustix's raw mode are a `u16` there and a `u32` on Linux, and the permission bits pass through one conversion each way. ([#35](https://github.com/leidarljos/ljos/pull/35))
+- A board split in a checkout reached through a symlink, as `/tmp` is on macOS, now commits the issues directory and its marker with the board.
+  Paths are made relative to the checkout top with their existing part resolved, so a directory not made yet is still found under the top.
+- A board split no longer leaves a sibling board it did not split on the tracker pending list, where a later push would commit another seat's change to it.
+  Only the boards the split changed go on the list.
+- A board split now writes its split marker before it adds its issues directory to the tracker pending list.
+  A writer killed partway through the split no longer leaves a list that makes the next push commit issue files with no marker, and a push or flush drops such a directory from the list instead of committing it.
+- A board split whose commit is refused is rolled back only when it is still exactly what the migrate wrote: the marker digest matches `issues.org`, the issues directory has one file per heading and nothing more, and no issue file has a record appended.
+  A rollback no longer deletes a note or a new issue that reached the split first. The split is kept, and the write waits with it.
+- A call that `env -i` starts under a `CURSOR_AGENT` shell now reads the hold its own `ljos sitting` wrote, so the doctor's sitting gate row, the `pre-push` sitting check and a stale-hold line from `ljos plan` find that sitting.
+  Whether a call is an id-less Cursor agent, and whether `LJOS_HOLD` may name its claimant, is read only when the call's own environment carries a runner variable, the same rule the holder follows.
+- A conversation id that only a parent shell carries no longer tags the holder, so `env -i HOME=... LJOS_SEAT=alice ljos seat` under that shell holds as `alice`.
+  `ljos sitting`, `ljos seat` and the doctor's seat source row no longer name that parent's `CURSOR_CONVERSATION_ID`.
+  The hold a sitting records, a hook's book and a blank `conversation_id` in a hook payload read the conversation the same way as the holder, so none of them names that parent's id either.
+  A queued hook book is applied under the conversation the hook resolved, not one the drainer's environment names.
+- A failed command's note shows the highest scored lessons.
+  The pack's list order carries age, and a lower score listed earlier no longer takes a place ahead of a higher one.
+- A first remember in a temporary home now prints only the memory-off error.
+- A freshly written executable is published by rename from a temporary file written in another process, so a fork in this process does not keep a write descriptor on it.
+  While another thread is still forking, that file now starts without failing with "Text file busy".
+  `ljos offboard` publishes each file it puts back the same way.
+  It no longer writes and chmods through a symlink left at the name of a hook that was not executable.
+  When ljos removes its block from a git hook that keeps user lines, it publishes the hook the same way and keeps its mode.
+  ljos flushes a copied executable to disk before the rename and the destination directory after it.
+  Adding the ljos block to your own git hook now keeps its mode: a 700 or 750 hook stays 700 or 750.
+  ljos writes an executable inside a new directory of its own, beside the destination, before the rename.
+  It never writes through a symlink another user left at a temporary name or makes it executable.
+  A failed publish names the path it could not create or rename onto.
+  When ljos rewrites a git hook, it drops setuid, setgid and sticky.
+  When a hook lacks an execute bit, ljos gives one to its owner and to each class that can read it.
+  `ljos git-hooks install` refuses a hook that is a symlink before it writes any hook.
+  `ljos git-hooks uninstall` leaves a symlinked hook whose target has no ljos block and strips the other hooks.
+  It refuses a symlink whose target contains the ljos block before it changes a hook, and the error names the link and its target and says to replace the link with a regular file.
+  Rollback copies are flushed under unpredictable temporary names and published without replacing an existing final name, so a crash cannot leave a partial rollback at that final name.
+  `ljos upgrade` skips a binary that already reports the release.
+  It saves the old binary as `NAME.bak-pre-VERSION`.
+  When that name is taken, it uses the first free `NAME.bak-pre-VERSION.N`.
+  It reads the copy back before it replaces the binary, and names it in the output after the replace.
+  An entry already at one of those names, of any kind, is left where it is and never counts as the rollback.
+  Lint rejects rustix open, openat, chmod, link, symlink and rename calls.
+  Each call except chmod can create or replace a hook, and chmod can change its mode.
+- A loading encoder stays on the short doctor as info, so the first doctor does not count it as a row that needs action.
+  Search still matches words until the encoder is ready.
+- A search spends the start wait once, not once for `/health` and again for the search, so a pack that is slow to open no longer keeps a command waiting past `LJOS_SEARCH_WARMUP_WAIT`.
+- A search, a recall and a sitting that meet a writer that is starting, busy or not running now answer with word-ranked hits from this seat's kept listing and print one stderr line that says which and names `ljos doctor`. The kept listing is named by the whole workspace, seat and token, so `a.b` and `ab` no longer share a file. A hook and a search open it without following a link and read it only when it is a plain file of this user, with one name, that no other user can write, in a directory of this user that no other user can write. Every directory above it, up to `$HOME`, must be this user's or root's and not writable by a group or another user unless sticky, and a link on that way, a linked `XDG_DATA_HOME` among them, is followed only when this user or root owns it and its target passes the same rule. A hook takes group and other write off that directory, and keeps nothing in a link. The listing is read only by a command that carries that token now, is used by a hook only when the file names this seat, and is written `0600` in a `0700` directory. A search no longer finds another seat's kept or attempt rows in the tracker's memory slot, and reads the slot's files only as plain files that not every user can write. A search, `ljos show`, `ljos forget` and `ljos memory integrate` read the slot's index and kept rows, and forget and integrate its receipts and watermark, only when the file has one name and no directory from the slot down to it is a link, so a pipe there, or where a slot directory belongs, no longer hangs them and a linked index or seat directory is not read. The `ljos doctor` line is quoted in whole code spans in help and docs.
+- A seat that claims a ticket another seat minted and claimed a moment earlier is told who holds it, and no longer stops with `claim: could not mint a node`.
+  A claim graph that cannot be read is reported as `claim: could not read the node` with the read's own error, and not as a failed mint. The node it holds is not minted over.
+- A sitting that gives up on a tracker lock names the wall budget that ended the wait, such as the sitting wall budget.
+  With no wall budget armed, the line still names the claim budget.
+- A sitting whose pack read answers with no matching memories now prints `No matching memories for this task.` under its island heading instead of leaving that part blank, whether the writer searched or listed.
+- A split commit stages the board, the split marker and each finished per-issue file.
+  A young temporary a dead writer left in the issues directory, which the sweep keeps, is no longer committed with the split.
+- A tracker checkout no longer stays "rebasing" after a sync is killed between replaying and restoring its autostash. The next tracker write clears that finished rebase with `git rebase --quit`, which keeps `HEAD` and the work tree and saves the autostash to `git stash list`. A rebase that still names a branch or a todo list, or was touched in the last two minutes, is left alone.
+- A tracker commit that carries held notes now puts the count before the seat, `ISSUE VERB with N held by SEAT`, so `ljos log --seat` and the usage table count it.
+  Subjects with the count after the seat, from older history, still read.
+- A tracker file write that fails or panics no longer leaves a `.NAME.tmp.*` file beside the board.
+  The first tracker write in a process removes such files in the board's directory and its `issues/` directory once they are an hour old and the process named in the file is no longer running.
+- A tracker lock line for a wait of 1 to 99 ms past a whole second printed a zero tenth, such as "0.0s" or "2.0s".
+  It now prints the whole second, such as "0s" or "2s".
+- A tracker write that a sitting, claim or finish wall budget cut short named the hook wall budget in its lock line.
+  The line now names the budget that armed the bound, such as the sitting wall budget or the claim wall budget.
+- A tracker write that gives up on another writer's commit lock now names the wait it made, not `LJOS_TRACKER_LOCK_WAIT`.
+  When a hook wall budget or a tool budget ended the wait sooner, the line names that budget too.
+  It said "for 60s" with `LJOS_TRACKER_LOCK_WAIT=60` after a three-second wait.
+- A tracker write that waits at a board split keeps its other paths, such as a deed bag or a second board, on the pending list with its own, so the commit that records the write also records them.
+- A tracker write whose change another writer's commit already carried, such as a board split, now commits the write's seat line instead of saying nothing to commit.
+  Even inside the batch window, a note whose only change is its seat line commits at once. With other changes in the file, it waits for the batch as before.
+  If its first git status read fails, a note commits instead of holding the line for the batch commit with no error.
+  A single-file write that misses the tracker lock keeps its seat line in the file until a later commit carries it.
+  A write that spans more than one project adds no seat line until it gets the lock.
+  A tracker checkout git cannot read gets no seat line.
+  Persisting the same write again does not add a second seat line.
+  When a board split is kept because its commit was refused and could not be rolled back, a waiting single-file write puts its seat line in the kept issue file.
+- An `ljos mcp` server that had been up longer than `LJOS_CALL_TIMEOUT` gave a new search, recall, remember or finish call no room to wait for a starting pack. Each call now gets its own deadline, counted from where the call begins, and one recall shares one deadline across its reads.
+- An empty or relative `XDG_STATE_HOME` is no longer a state directory under the working directory.
+  `cargo test` runs in the package directory, and that relative `ljos` wrote memory, sync and mail state into the crate.
+  A seat with no absolute `HOME` keeps that state in a new private directory, mode `0700`, removes it on exit, and is told the directory is temporary.
+  A directory that already exists or is a symlink is refused, and the refusal names `HOME` and `XDG_STATE_HOME`.
+- Before it removes anything, a refused board split takes its issue files out of the index. When they stay staged, the split is kept, instead of leaving them staged with the marker gone for the next plain commit to carry.
+  With no commit yet the files leave the index through `git rm --cached`.
+- By default the tracker prints no line for a note in the batch window, and a board split prints one plain sentence.
+  A rolled back split says the board stays one file.
+- Cargo can build a bare `ljos` into a `CARGO_TARGET_DIR` not named `target`.
+  Its opening screen now names the README install, `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`, there too, as it does for a build under `target`.
+- Classify `TMPDIR` as a temporary root only when it is an absolute per-session directory and not a top-level path or an ancestor of the passwd home.
+- Compare each committed reStructuredText edit with its Org export.
+- Correct the getting-started output for `ready --mine` during a non-plan sitting.
+- Describe temporary-home installs without claiming that a memory writer was started.
+- Doctor no longer calls vissue, vissue-mcp, claimdag or deedar behind crates.io when the installed version is the one `install.sh` pins, and says `pinned by install.sh` on that row.
+  packset and its programs are installed at their latest release and are still called behind.
+  When vissue, vissue-mcp, claimdag, deedar or a packset program is not on `PATH`, its doctor row, the tickets, claim graph and deeds rows, and the error a command prints for it now name the installer instead of an unpinned Cargo install.
+  The memory row, the encoder row and the onboarding pack and deed store steps keep their own install lines.
+- Each temporary now keeps one leading dot when it replaces a dotfile such as the tracker pending list or batch record.
+  `git status` hides it through the `info/exclude` line ljos writes.
+  A tracker write also sweeps stale temporaries at the checkout root, where those two files live.
+- Every push, tag push and pull request now checks each commit reachable from it.
+  No commit is skipped, so a bad commit fails every later run that reaches it.
+- Exercise every installer shell line and require configured test shells in full test runs.
+- Install fish so the installer quoting check runs the printed fish lines.
+- Keep a named pack setting from being reported as temporary-home memory shutdown.
+- Lock `jev-cost.toml` updates across concurrent `record_cost_in` and `count_in` writers and replace the file atomically so concurrent replies never drop calls or spend.
+- Print shell-specific command guard and completion hints for installer paths.
+- Quote installer command and shell-profile paths for each shell when the install directory contains metacharacters.
+- Read the passwd home with `dscl` where `getent` is missing, as on macOS, in the guard shim and `scripts/install.sh`.
+  When no passwd home can be read, a `TMPDIR` is no longer a temp root in the shim, `scripts/install.sh` or ljos, so the guard and memory stay on when a `TMPDIR` contains the real home.
+- Refuse an empty installer bin directory before copying any programs.
+- Refuse installer bin directories containing a colon or newline before copying programs.
+- Resolve `jev` state and cache paths before spawning prompt judges and run `ljos hook` judges in a detached `--judge-worker` session so late replies within `budget_ms` persist after the hook exits.
+- Show the ready and list flag hint only when the page leaves tickets out.
+- Skip probing or blaming foreign default-port `packsetd` writers when `HOME` is a temporary directory and no writer URL or port is configured.
+- The `ljos_file_from` and `ljos_table` MCP tools now write their rows to a 0600 file in a 0700 directory with a random name, and remove that directory when the write fails, where they used a name two calls could share and left the text readable by other users.
+- The book queue batch and the notmuch reader pass `TMPDIR` to the children they start with a cleared environment.
+- The flush a process runs at exit writes a refused commit through the stderr prose writer.
+- The flush of held tracker notes keeps the tracker lock from the batch read through the commit, then reads the batch again.
+  A note another writer held while that commit released the lock is committed too, including by the flush a process runs at exit.
+- The flush of held tracker notes reads the batch record under the tracker lock it commits under, and skips a file whose held notes another seat already committed, instead of committing it with an empty subject.
+  The flush a process runs at exit prints on stderr what did not commit.
+- The guard shim and `scripts/install.sh` run `id`, `getent` and `dscl` from their system paths instead of looking them up on `PATH`, so a stand-in `getent` on `PATH` cannot name another passwd home and make a `TMPDIR` that contains the real home pass for a sandbox.
+- The installer now treats a writer port like a writer address under a temporary home.
+  It keeps memory on when the selected writer port is nonblank, as `ljos` does.
+  The selected port is `PACKSET_PORT` when it is set, and `LJOS_MEM_PORT` otherwise.
+- The locked url crate is 2.5.9, the first release that fixes RUSTSEC-2026-0592 in 2.5.8.
+- The opening screen now names the README installer command, including the encoder, when run from a Cargo build.
+- The tracker push leaves the per-issue files of a split board out of its duplicate heading fold.
+  A replace record repeats its issue's `:ID:`, so the fold read it as a duplicate heading and broke the record framing and the issue file.
+- When another tracker writer holds a lock past a sitting's wait, the line says how long the sitting waited and which limit ended the wait: `LJOS_TRACKER_LOCK_WAIT`, the claim budget or the tool budget.
+  It used to name the claim budget and its length even when a shorter `LJOS_TRACKER_LOCK_WAIT` had ended the wait.
+- `LJOS_CLAIM_NOW`, an RFC 3339 instant, sets the time claim ages are counted to, so the `ljos list` tests no longer fail when a minute turns between the `ready` run and the `list` run they compare.
+- `ljos --help` and `ljos --version` no longer record a memory error for the person's next session.
+- `ljos claim` with no id claims the first ready ticket in `ljos ready` order that no other seat holds, passes over a ticket another seat claims during node creation, and the first claim creates the claim graph.
+  A seat that already holds a ready ticket gets the busy refusal.
+  When no ticket is left, one line names `ljos file "TITLE" -p PROJECT`, and a host with no tracker names `ljos onboard`.
+  `--role` and `--slack` need `--next`, and `ljos claim --next` on a seat with no claim graph names `ljos claim`.
+- `ljos cloud up` downloads the encoder archives into an unpredictable private directory and extracts the encoder and its runtime library into a new directory of their own.
+  It then makes `packset-embed` in the binary directory a symlink to that encoder in one rename, so a crash leaves the previous encoder and runtime or the new pair, never one of each.
+  It removes the previous encoder's directory only after that rename is synced, and when the sync fails it says the new encoder is in place and keeps the previous directory.
+  `ljos cloud up` publishes its identity file relative to a held directory descriptor.
+  `ljos mesh up`, offboard restoration, upgrades, and git hook rewrites use the same publication boundary for executable or secret files.
+- `ljos file --from` across several projects now writes the `Filed by` logbook lines only after it holds the checkout's commit lock, and writes none when the commit is deferred or refused, where it used to leave them in every project but the first.
+- `ljos file --from` no longer removes a project's `issues.org.lock` when it takes back a refused batch, so a writer waiting on that lock and the next one to open it cannot both hold it.
+  It checks each row's write and puts a refused batch back while it holds the project's lock, and stops instead when another writer changed the project directory, so that writer's change is never put back over.
+- `ljos file --from` now takes a filed row as its own only when the one file that create writes changed and the new heading is exactly the row, so a refused later row no longer deletes a file another writer put under `issues/`, a logbook line another writer added to the new ticket, or a ledger record it could not read.
+  When anything else changed, the batch stops and leaves the tracker as it is.
+- `ljos finish --close` now retries a pending claim only after the person, decision and workflow checks pass, so a refused close writes nothing.
+  The warning on a raw `vissue cancel`, or an update to `CANCELLED`, under a runner now names `ljos finish ID --status cancelled --close`, the finish that cancels the ticket.
+- ljos opens the destination directory the user configured, following a symlink there, and keeps a descriptor to it.
+  ljos creates, marks, syncs, renames and removes its own names relative to that descriptor and never follows a symlink at them.
+  Temporary stage names use operating-system randomness and exclusive creation.
+  ljos returns an error when a file or directory sync fails.
+  The error says the new file is in place when a directory sync fails after a rename.
+  `ljos upgrade` then says it replaced the binary or kept the rollback.
+  On failure, cleanup removes the staged file and removes the stage directory when its original name still refers to it.
+  Mode changes no longer retry through a pathname after an open is denied.
+- ljos takes a lock on the git hooks directory while it reads and rewrites hooks there, so two ljos commands that edit hooks at once take turns and neither loses the other's edit.
+- The published `ljos` crate carries the installer release pins it embeds, so Cargo can verify the package outside the repository.
+
+### Documentation
+
+- The MCP reference says `ljos_start` and `ljos_sitting` claim on the call, not on the first write.
+- The vote docs now explain that candidate authors can cast labelled ballots that advice reads and the verdict leaves out.
+- The cloud VM page and the environment reference now cover two split cases. A board split also migrates every unsplit sibling board under the same prefix. A failed split commit is kept when another write reaches `issues/` first.
+- The protocol, the seat skill, the MCP reference, the environment reference and the ljos-mcp instructions and tool descriptions now say which calls claim a ticket: `ljos_start`, `ljos_sitting` and `ljos_claim`, plus `ljos_note` and `ljos_finish` when they retry a claim a sitting left pending, and `ljos_complete` when a gone conversation of this seat holds the node under a hold record written for another claim graph.
+  They also say that `ljos_finish` releases the claim rather than completing the node, that `ljos_complete` completes a node a gone conversation of this seat holds under that conversation's name with no new claim, that a plain `ljos finish` releases the node and completes it only with `--close` and a status of `done` or `cancelled`, that a later sitting hands back an expired claim-graph node whose conversation is gone whatever `LJOS_TRACKER_GIT` says, that no hook files a claim or cites a commit as a deed, that a git commit is only logged as a note, and that Stop, session end, shutdown and idle finish no claim.
+  The command reference, the seat page, the explanation, the finish slash command and `ljos finish --help` now say that a plain finish files the lesson tagged with the ticket and releases the node, that only `--verbose` links related memories, and that `--close` with `done` or `cancelled` completes the node and closes the ticket.
+  The rustdoc on `complete` and `complete_as` says what a completion does, and that finish calls `release` when it does not complete.
+  The protocol and the seat skill say a claim reopens a node only after a completion, and the opencode plugins say a commit gets a `note:` line from git's post-commit hook and cites no deed.
+  The rustdoc on `complete`, the `complete` entry in the command reference and the `release` entry say a node a gone conversation of this seat holds is taken under that conversation's name, and that `complete` claims it first when its hold record names another claim graph.
+  The sit and land recipes, the explanation and the finish slash command say a plain finish hands the node back and leaves the ticket open, and that `--close` with `failed` still hands it back.
+  The finish lesson rustdoc says the lesson is filed before the node is released or completed, and the release rustdoc says a completed node is left as it is.
+  `ljos finish --help` and the command reference say a runner is refused only on `--close` and only without a standing grant, that `--status` is recorded only by `--close` with `done` or `cancelled`, and that the unclaimed TODO check runs only without `--close`.
+  The getting started page says a runner's close is refused only without a standing grant that covers this seat and this ticket, and the explanation says only a close that uses the grant cites the record.
+  The seat skill says a conversation of the seat completes, finishes or releases another conversation's claim only once that conversation has exited, and the finish rustdoc says the wall bound is three seconds.
+- The troubleshooting page's registry section now names the installer for a missing packset, as the doctor row prints it, instead of a Cargo install.
+
+### Miscellaneous
+
+- Accept commits authored by the owner with the GitHub web-flow committer in `scripts/identity-gate.sh` and quiet its missing-revision fallback probe.
+- Cover `ljos_start` claim takeover between a bare seat and its `SEAT@TAG` session holder in both call orders against the pinned `vissue` and `claimdag` binaries.
+- A `packsetd` a test or a doc sample starts keeps its encoder off unless the test names one with `PACKSET_EMBED`, so a host with `packset-embed` installed beside `packsetd` or on `PATH` prints the same pages as one without.
+- A source lint scans production Rust files and `build.rs` in every workspace member for common mode-publication mistakes, non-literal command programs, and shell programs.
+  The lint does not see generated code, native code, or commands hidden in shell strings.
+  It has 45 exceptions, each matched by file, item path, and exact hit count: one lets the `ljos-hud` summon socket set the mode of its private socket directory, and 44 let a named function build or start a program.
+- A tracker write that cannot wait for the batch commit, or that carries no write of its own, no longer runs an extra `git status` before its commit.
+- On macOS, which has no `/proc/self/fd`, the tracker lock-wait test counts open descriptors through `/dev/fd` and `fcntl(F_GETPATH)`.
+  It used to wait out 50 seconds there and fail.
+- The lock takes url 2.5.9 and form_urlencoded 1.2.3, so cargo deny no longer reports `RUSTSEC-2026-0592`, a stack overflow in `Url::origin()` on nested `blob:` URLs.
+- The prompt hook's relevance test gives each lesson the same age at every hour it runs.
+  packsetd decays its fused scores by age on its own clock, and the fixture's stamps were fixed dates, so the cases' lessons changed as the days passed: the failure note's third lesson turned from a lookalike to pnpm on 23 November, and with the note now ordered by score, the prompt with an alias and the note would each turn early in December.
+  The fixture now names the instant its stamps are written as of, and the test moves every stamp by packsetd's clock less that instant before it posts them.
+  The reason each case gives now follows the order the hook prints, the pack's fused order for a prompt and the highest score first for a failed command, with the scores worked out.
+- The test of a failed first status read now requires the write to commit its seat line, so a regression to nothing to commit or to an error fails it.
+- The unreached hook path that wrote a second commit note on `PostToolUse`, with `commit` in place of the sha, is gone.
+  git's post-commit hook stays the one writer of the commit note, and a test checks that a runner's `PostToolUse` or `SessionEnd` call writes none.
+- The workspace denies Clippy's resolved disallowed-method and disallowed-type lints.
+  The configuration routes permission setters and libc, rustix, or nix mode-changing calls through the publication module.
+  The publication module has a local documented allowance for the filesystem mode type it must use.
+- `scripts/bookkeeping-e2e.sh` now proves that five harness sessions whose prompts never name ljos leave nothing on the tracker, as no hook files, claims, cites or finishes.
+- `scripts/identity-gate-test.sh` replays the main push that brought a two-parent GitHub merge, and checks that a merge bringing a foreign commit, an agent or bot author or committer, a GitHub author, and a squash with a trailer all still fail.
+
+
 ## 0.45.3 (2026-11-19)
 
 ### Fixes

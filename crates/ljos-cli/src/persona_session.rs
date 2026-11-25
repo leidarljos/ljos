@@ -85,14 +85,7 @@ fn declared_tools() -> Vec<Tool> {
 /// and keeps its session.
 #[must_use]
 pub fn home(name: &str) -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos")
-        .join("personas")
-        .join(name)
+    crate::state_base_dir().join("personas").join(name)
 }
 
 /// The script a persona's pane runs: the runner as the seat named after
@@ -152,8 +145,12 @@ fn read_record(home: &Path) -> Option<(String, String)> {
 }
 
 fn write_record(home: &Path, tool: &str, pane: &str) -> Result<()> {
-    std::fs::write(home.join(".pane"), format!("{tool}\n{pane}\n"))
-        .with_context(|| format!("{}", home.join(".pane").display()))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    return std::fs::write(home.join(".pane"), format!("{tool}\n{pane}\n"))
+        .with_context(|| format!("{}", home.join(".pane").display()));
 }
 
 /// Whether the pane script's runner is up: `.runner.pid` names a live
@@ -187,6 +184,10 @@ enum Pane {
 fn pane_state(name: &str, home: &Path, declared: &[Tool]) -> Pane {
     let Some((tool_name, pane)) = read_record(home) else {
         // A window opened before panes kept a record.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let legacy = std::process::Command::new("tmux")
             .args(["list-windows", "-t", PERSONA_SESSION, "-F", "#W"])
             .stderr(std::process::Stdio::null())
@@ -250,6 +251,10 @@ pub fn hand(name: &str, runner: &str, task: &str) -> Result<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
     let file = inbox.join(format!("{millis}-{}.md", std::process::id()));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&file, task)?;
     let line = format!(
         "Read {} and do what it asks, through ljos; it is your next task as {name}.",
@@ -274,6 +279,10 @@ pub fn hand(name: &str, runner: &str, task: &str) -> Result<String> {
         }
         Pane::Idle(tool, pane) if !tool.respawn.is_empty() => {
             let again = argv_for(true)?;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&script, pane_script(name, &again, &again, &home))?;
             let vars = vars_for(name, &home, &pane);
             tools::run(&tool.name, &tools::fill(&tool.respawn, &vars))?;
@@ -286,6 +295,10 @@ pub fn hand(name: &str, runner: &str, task: &str) -> Result<String> {
     }
     let argv = argv_for(started.exists())?;
     let again = argv_for(true)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&script, pane_script(name, &argv, &again, &home))?;
     let only = std::env::var("LJOS_PANE_TOOL")
         .ok()
@@ -305,6 +318,10 @@ pub fn hand(name: &str, runner: &str, task: &str) -> Result<String> {
             }
         };
         write_record(&home, &tool.name, &pane)?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let _ = std::fs::write(&started, crate::now_utc());
         let vars = vars_for(name, &home, &pane);
         tools::wait_ready(&tool, &vars);
@@ -323,13 +340,17 @@ pub fn hand(name: &str, runner: &str, task: &str) -> Result<String> {
 /// needs the socket, so it fails when no server is running.
 #[must_use]
 pub fn herdr_up() -> bool {
-    which::which("herdr").is_ok()
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return which::which("herdr").is_ok()
         && std::process::Command::new("herdr")
             .args(["workspace", "list"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .is_ok_and(|st| st.success())
+            .is_ok_and(|st| st.success());
 }
 
 /// The herdr agent name for persona `name`.
@@ -345,6 +366,10 @@ pub fn herdr_agent_status(name: &str) -> Option<String> {
     if !herdr_up() {
         return None;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new("herdr")
         .args(["agent", "get", &herdr_name(name)])
         .stderr(std::process::Stdio::null())
@@ -503,6 +528,10 @@ mod tests {
         let script = pane_script("p", &fail, &fail, dir.path())
             .replace("exec \"${SHELL:-/bin/sh}\" -i\n", "");
         let script = script.replace("sleep 1\n", "");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = std::process::Command::new("sh")
             .arg("-c")
             .arg(&script)
@@ -520,6 +549,10 @@ mod tests {
         ];
         let script =
             pane_script("p", &ok, &fail, dir.path()).replace("exec \"${SHELL:-/bin/sh}\" -i\n", "");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         std::process::Command::new("sh")
             .arg("-c")
             .arg(&script)
@@ -544,6 +577,10 @@ mod tests {
         assert_eq!(describe("herdr", "w1:p2", "rev"), "herdr pane w1:p2");
         assert_eq!(describe("tmux", "", "rev"), "tmux ljos-personas:rev");
         assert!(!runner_up(dir.path()), "no pid file, no runner");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.path().join(".runner.pid"),
             std::process::id().to_string(),

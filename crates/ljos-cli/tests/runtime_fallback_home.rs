@@ -18,11 +18,9 @@ use std::process::{Command, Output, Stdio};
 const CONVERSATION: &str = "bc-872164c1-e14f-56d0-a32e-fc0bd5afad41";
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn vissue_dir() -> PathBuf {
@@ -53,7 +51,7 @@ impl World {
         script(
             &bin,
             "claimdag",
-            "#!/bin/sh\ncase \"$1\" in\n  get) exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\n  list) echo '[]' ;;\n  *) echo 'gen=1' ;;\nesac\n",
         );
         script(&bin, "deedar", "#!/bin/sh\necho head\n");
         std::fs::create_dir_all(dir.path().join("tmp")).unwrap();
@@ -63,6 +61,10 @@ impl World {
     fn home(&self, name: &str) -> PathBuf {
         let home = self.dir.path().join(name);
         std::fs::create_dir_all(home.join("tracker/Software")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             home.join(".gitconfig"),
             "[user]\n\tname = Your Name\n\temail = you@example.com\n",
@@ -79,7 +81,11 @@ impl World {
             self.dir.path().join("bin").display(),
             vissue_dir().display()
         );
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(home)
             .env_clear()
@@ -101,7 +107,7 @@ impl World {
             .env("PACKSET_URL", "off")
             .stdin(Stdio::null())
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     /// Every hold record under the shared temporary directory.

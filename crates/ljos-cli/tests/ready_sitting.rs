@@ -6,23 +6,30 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/pty.rs"]
+mod pty;
+
 use std::process::{Command, Stdio};
 
 const ISSUE: &str = "anneal-1mr1";
 const TITLE: &str = "Hold the melt";
 
-const ORG: &str = "\
+fn org(title: &str) -> String {
+    format!(
+        "\
 #+TITLE: anneal
 #+VISSUE: 1
 #+CATEGORY: anneal
 #+TODO: TODO STARTED | DONE CANCELLED
 
-* STARTED [#C] Hold the melt
+* STARTED [#C] {title}
 :PROPERTIES:
-:ID:         anneal-1mr1
+:ID:         {ISSUE}
 :CLAIMED_BY: saddle
 :END:
-";
+"
+    )
+}
 
 struct Seat {
     dir: tempfile::TempDir,
@@ -30,22 +37,42 @@ struct Seat {
 
 impl Seat {
     fn new() -> Self {
+        Self::titled(TITLE)
+    }
+
+    fn titled(title: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         for name in ["home", "run", "tmp", "tracker/Software/anneal"] {
             std::fs::create_dir_all(dir.path().join(name)).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.path().join("tracker/vissue.toml"),
             "prefix = \"Software\"\n",
         )
         .unwrap();
-        std::fs::write(dir.path().join("tracker/Software/anneal/issues.org"), ORG).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(
+            dir.path().join("tracker/Software/anneal/issues.org"),
+            org(title),
+        )
+        .unwrap();
         Self { dir }
     }
 
     fn hold(&self, issue: &str) {
         let run = self.dir.path().join("run/ljos");
         std::fs::create_dir_all(&run).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             run.join("hold-sitting"),
             format!("saddle\nsaddle\n1\nljos\n2026-01-01T00:00:00Z\n{issue}\n-\n"),
@@ -54,11 +81,50 @@ impl Seat {
     }
 
     fn ready_mine(&self, extra: &[&str]) -> (bool, String, String) {
-        let home = self.dir.path().join("home");
         let mut args = vec!["ready", "--mine"];
         args.extend_from_slice(extra);
-        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
-            .args(&args)
+        let out = self
+            .command(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    /// `ljos ready --mine` with stdout on a terminal `cols` columns wide.
+    fn ready_mine_on_terminal(&self, cols: usize) -> String {
+        let term = pty::Pty::open();
+        let mut cmd = self.command(&["ready", "--mine"]);
+        cmd.env("COLUMNS", cols.to_string())
+            .stdin(Stdio::null())
+            .stderr(Stdio::piped());
+        term.attach_stdout(&mut cmd);
+        let child = term.spawn(&mut cmd);
+        let out = term.wait_output(child, 20);
+        term.finish_reading();
+        let shown = term.shown().replace("\r\n", "\n");
+        assert!(
+            out.status.success(),
+            "{shown}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        shown
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let home = self.dir.path().join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        cmd.args(args)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", &home)
@@ -73,17 +139,8 @@ impl Seat {
             .env("LJOS_HOOKD", "off")
             .env("PACKSET_URL", "off")
             .env("PACKSET_AUTH", "off")
-            .current_dir(self.dir.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .unwrap();
-        (
-            out.status.success(),
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-        )
+            .current_dir(self.dir.path());
+        cmd
     }
 }
 
@@ -118,4 +175,24 @@ fn an_open_sitting_names_its_claimed_ticket() {
         other, "no unfinished item\n",
         "another project should not name this ticket:\n{stderr}"
     );
+}
+
+#[test]
+fn the_sitting_ticket_line_follows_the_terminal_width() {
+    let long = "Hold the melt at the strain point until the thermocouple on the lehr reads steady for an hour";
+    let seat = Seat::titled(long);
+    seat.hold(ISSUE);
+    let lead = format!("{ISSUE}  ");
+    let cont = " ".repeat(lead.len());
+    for cols in [30usize, 200] {
+        let shown = seat.ready_mine_on_terminal(cols);
+        let title = ljos_cli::output_wrap::wrap_hanging_prose(long, cols, &lead, &cont);
+        assert!(shown.contains(&format!("{title}\n")), "{cols}\n{shown}");
+        for line in shown.lines() {
+            assert!(
+                ljos_cli::output_wrap::prose_display_width(line) <= cols,
+                "{cols}: {line:?}\n{shown}"
+            );
+        }
+    }
 }

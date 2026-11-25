@@ -138,6 +138,10 @@ fn a_normal_search_without_an_answering_field_does_not_say_it_is_warming() {
 fn search(seat: &Seat, args: &[&str], env: &[(&str, &str)]) -> (Output, Duration) {
     let home = seat.home.path();
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .current_dir(home)
@@ -339,7 +343,15 @@ fn the_warmup_wait_stops_inside_the_call_deadline() {
 fn write_ticket(seat: &Seat) -> String {
     let tracker = seat.home.path().join("tracker");
     std::fs::create_dir_all(tracker.join("Software/Software")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         tracker.join("Software/Software/issues.org"),
         format!(

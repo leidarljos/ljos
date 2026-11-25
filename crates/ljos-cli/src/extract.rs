@@ -186,12 +186,7 @@ pub fn facts(transcript: &str, kept: &BTreeSet<String>) -> Vec<String> {
 }
 
 fn ledger() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state"))
-        })?;
-    Some(base.join("ljos").join("extracted"))
+    Some(crate::absolute_state_base()?.join("ljos").join("extracted"))
 }
 
 /// The normalized forms already kept on this machine.
@@ -256,8 +251,12 @@ pub fn schedule_finish(input: &str, session: Option<&str>) {
         "session": session,
         "input": input,
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     if std::fs::write(&payload, body.to_string()).is_err() {
-        eprintln!("ljos extract: the session finish could not be queued");
+        say!("ljos extract: the session finish could not be queued");
         return;
     }
     let bin = std::env::current_exe()
@@ -271,7 +270,7 @@ pub fn schedule_finish(input: &str, session: Option<&str>) {
     let log = dir.join("session-finish.log");
     if crate::detach(&bin, &args, &log).is_err() {
         let _ = std::fs::remove_file(&payload);
-        eprintln!("ljos extract: the session finish could not be started");
+        say!("ljos extract: the session finish could not be started");
     }
 }
 
@@ -304,6 +303,10 @@ fn mark_done(lines: &[String]) {
     } else {
         format!("{}\n", lines.join("\n"))
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let _ = std::fs::write(path, body);
 }
 
@@ -331,7 +334,7 @@ fn write_notes(input: &str, session: Option<&str>) -> Vec<String> {
     };
     let mut lines = Vec::new();
     let say = |lines: &mut Vec<String>, line: String| {
-        eprintln!("{line}");
+        say!("{line}");
         lines.push(line);
     };
     let found = facts(&text, &kept());
@@ -391,6 +394,10 @@ fn write_notes(input: &str, session: Option<&str>) -> Vec<String> {
         all.extend(keys);
         // Bounded: the newest 5000 forms.
         let skip = all.len().saturating_sub(5000);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let _ = std::fs::write(&p, all[skip..].join("\n") + "\n");
     }
     lines
@@ -457,6 +464,10 @@ mod tests {
             body.push_str(&pad);
         }
         body.push_str("Never push to main without a green CI run on the branch.\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, &body).unwrap();
         let got = read_tail(&path, 800).unwrap();
         assert!(got.contains("Never push"), "{got}");

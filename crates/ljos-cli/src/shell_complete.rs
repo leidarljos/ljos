@@ -42,7 +42,7 @@ pub enum Candidates {
 pub fn emit(shell: Option<ShellName>, which: Option<Candidates>, cmd: &mut Command) -> Result<()> {
     if let Some(which) = which {
         for line in candidates(which) {
-            println!("{line}");
+            ljos_cli::emit!("{line}");
         }
         return Ok(());
     }
@@ -61,6 +61,10 @@ pub fn emit(shell: Option<ShellName>, which: Option<Candidates>, cmd: &mut Comma
     let mut text = String::from_utf8(buf)
         .map_err(|_| anyhow::anyhow!("completions: the script was not text"))?;
     text = attach_dynamic(shell, text);
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "writes the completion script bytes to stdout as they are"
+    )]
     let mut out = std::io::stdout().lock();
     out.write_all(text.as_bytes())?;
     Ok(())

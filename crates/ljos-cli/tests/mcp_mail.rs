@@ -2,6 +2,11 @@
 //! the `[mail]` table names. A cloud seat prints `cloud-seat-mail` and
 //! still reads the mailbox this machine holds.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 #[path = "common/maildir.rs"]
 mod maildir;
@@ -51,6 +56,10 @@ impl Session {
 
 /// One server run: initialize, then `calls` as ids 2, 3 and so on.
 fn session(home: &Path, tools: Option<&str>, calls: &[Value]) -> Session {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -70,6 +79,10 @@ fn session(home: &Path, tools: Option<&str>, calls: &[Value]) -> Session {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(60));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut lines = vec![
@@ -111,6 +124,10 @@ fn list() -> Value {
 fn configure(home: &Path, mailbox: &maildir::Mailbox) {
     let dir = home.join("config/ljos");
     std::fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         dir.join("mail.toml"),
         format!(
@@ -119,6 +136,10 @@ fn configure(home: &Path, mailbox: &maildir::Mailbox) {
         ),
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "sets the mode of a path that is not a git hook"
+    )]
     std::fs::set_permissions(
         dir.join("mail.toml"),
         std::os::unix::fs::PermissionsExt::from_mode(0o600),
@@ -207,6 +228,10 @@ fn an_empty_mail_table_does_not_open_the_default_database() {
     }
     let home = tempfile::tempdir().unwrap();
     let mailbox = maildir::mailbox();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.path().join(".notmuch-config"),
         std::fs::read(&mailbox.config).unwrap(),
@@ -214,6 +239,10 @@ fn an_empty_mail_table_does_not_open_the_default_database() {
     .unwrap();
     let dir = home.path().join("config/ljos");
     std::fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.join("mail.toml"), "[mail]\n").unwrap();
     let ran = session(
         home.path(),
@@ -234,6 +263,10 @@ fn a_workspace_ljos_toml_cannot_set_the_mail_table() {
     let home = tempfile::tempdir().unwrap();
     let mailbox = maildir::mailbox();
     configure(home.path(), &mailbox);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.path().join("ljos.toml"),
         "[mail]\nidentity = \"seat@example.test\"\ndeny_file = \"/dev/null\"\n",
@@ -259,6 +292,10 @@ fn a_cloud_seat_is_refused_even_with_a_mailbox() {
     let mailbox = maildir::mailbox();
     configure(home.path(), &mailbox);
     std::fs::create_dir_all(home.path().join("config/ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(home.path().join("config/ljos/push-allow"), "").unwrap();
     let thread = mailbox.thread_of("plain-1@example.test");
     let ran = session(
@@ -290,6 +327,10 @@ fn any_cloud_marker_refuses_the_mail_tools() {
     let mailbox = maildir::mailbox();
     let home = tempfile::tempdir().unwrap();
     configure(home.path(), &mailbox);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(home.path().join("config/ljos/push-allow"), "").unwrap();
     let ran = session(
         home.path(),

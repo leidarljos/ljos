@@ -32,6 +32,10 @@ fn wait_for(child: &mut std::process::Child, limit: Duration) -> std::process::E
 fn statusline_on_a_tty_prints_a_hint_and_exits() {
     let root = tempfile::tempdir().unwrap();
     let term = pty::Pty::open();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("statusline")
         .env_clear()
@@ -44,6 +48,7 @@ fn statusline_on_a_tty_prints_a_hint_and_exits() {
     term.attach_output(&mut cmd);
     let mut child = term.spawn(&mut cmd);
     let status = wait_for(&mut child, Duration::from_secs(5));
+    term.finish_reading();
     let shown = term.shown();
     assert_eq!(status.code(), Some(2), "{shown}");
     assert!(
@@ -57,6 +62,10 @@ fn statusline_on_a_tty_prints_a_hint_and_exits() {
 #[test]
 fn statusline_on_a_closed_stdin_prints_the_line() {
     let root = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("statusline")
         .env_clear()

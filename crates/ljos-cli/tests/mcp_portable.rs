@@ -17,9 +17,7 @@ fn install_pair(dir: &Path) {
     fs::create_dir_all(dir).unwrap();
     for name in ["ljos", "ljos-mcp"] {
         let dest = dir.join(name);
-        fs::copy(exe(name), &dest).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::copy_executable(&exe(name), &dest).unwrap();
     }
 }
 
@@ -27,9 +25,7 @@ fn stub(path: &Path) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
-    fs::write(path, "#!/bin/sh\nprintf ran > \"$1\"\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, "#!/bin/sh\nprintf ran > \"$1\"\n").unwrap();
 }
 
 fn onboard_with_path(ljos: &Path, home: &Path, path: &str, args: &[&str]) -> std::process::Output {
@@ -37,7 +33,11 @@ fn onboard_with_path(ljos: &Path, home: &Path, path: &str, args: &[&str]) -> std
     fs::create_dir_all(tracker.join("Software")).unwrap();
     fs::create_dir_all(home.join(".local/share")).unwrap();
     fs::create_dir_all(home.join("run")).unwrap();
-    Command::new(ljos)
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(ljos)
         .args(args)
         .env_clear()
         .env("HOME", home)
@@ -59,7 +59,7 @@ fn onboard_with_path(ljos: &Path, home: &Path, path: &str, args: &[&str]) -> std
         .env("GIT_CONFIG_SYSTEM", home.join("gitconfig"))
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 fn onboard(ljos: &Path, home: &Path, args: &[&str]) -> std::process::Output {
@@ -114,13 +114,17 @@ fn toml_command(text: &str) -> String {
 /// Run `command` as a harness would, under `home`, with only `bin` on PATH
 /// ahead of the system directories. The config bytes are not rewritten.
 fn launch(command: &str, args: &[String], home: &Path, bin: &Path) -> std::process::Output {
-    Command::new(command)
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(command)
         .args(args)
         .env_clear()
         .env("HOME", home)
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 #[test]
@@ -173,6 +177,10 @@ fn a_config_written_under_one_home_runs_under_another() {
     let marker = home_b.join("ran");
     stub(&bin_b.join("ljos-mcp"));
     fs::create_dir_all(home_b.join(".cursor")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(home_b.join(".cursor/mcp.json"), &written).unwrap();
     assert_eq!(fs::read(home_b.join(".cursor/mcp.json")).unwrap(), written);
 
@@ -190,7 +198,7 @@ fn onboard_replaces_an_absolute_server_path() {
     let bin = home.join(".cargo/bin");
     install_pair(&bin);
     fs::create_dir_all(home.join(".cursor")).unwrap();
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         home.join(".cursor/mcp.json"),
         "{\n  \"mcpServers\": {\n    \"ljos\": {\n      \"command\": \"/home/box/.cargo/bin/ljos-mcp\",\n      \"args\": []\n    }\n  }\n}\n",
     )
@@ -218,6 +226,10 @@ fn onboard_replaces_an_absolute_server_path_from_another_install() {
     stub(&old);
     fs::create_dir_all(home.join(".cursor")).unwrap();
     let doc = serde_json::json!({ "mcpServers": { "ljos": { "command": old, "args": [] } } });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(home.join(".cursor/mcp.json"), doc.to_string()).unwrap();
     let out = onboard(
         &bin.join("ljos"),
@@ -237,6 +249,10 @@ fn onboard_keeps_an_absolute_server_path_that_exists_here() {
     install_pair(&bin);
     fs::create_dir_all(home.join(".codex")).unwrap();
     let installed = bin.join("ljos-mcp");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(
         home.join(".codex/config.toml"),
         format!(
@@ -346,6 +362,10 @@ fn onboard_replaces_a_bare_command_that_runs_another_binary() {
     let config = home.join(".codex/config.toml");
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     let bare = "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\nargs = []\n";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&config, bare).unwrap();
     let path = format!("{}:{}:/usr/bin:/bin", stale.display(), bin.display());
     let out = onboard_with_path(
@@ -363,6 +383,10 @@ fn onboard_replaces_a_bare_command_that_runs_another_binary() {
         said(&out)
     );
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(&config, bare).unwrap();
     let out = onboard(&bin.join("ljos"), &home, &["onboard", "--harness", "codex"]);
     assert!(out.status.success(), "{}", said(&out));
@@ -377,7 +401,7 @@ fn onboard_rewrites_only_the_ljos_entry_in_toml() {
     let bin = home.join(".cargo/bin");
     install_pair(&bin);
     fs::create_dir_all(home.join(".codex")).unwrap();
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         home.join(".codex/config.toml"),
         "[mcp_servers.ljos]\ncommand = \"/home/box/.cargo/bin/ljos-mcp\"\nargs = []\n\n[mcp_servers.ljos-dev]\ncommand = \"/opt/pinned/ljos-mcp\"\nargs = []\n# keep /home/box/.cargo/bin/ljos-mcp in this comment\n",
     )
@@ -406,7 +430,7 @@ fn onboard_does_not_rewrite_a_sibling_hermes_command() {
     let bin = home.join(".cargo/bin");
     install_pair(&bin);
     fs::create_dir_all(home.join(".hermes")).unwrap();
-    fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] fs::write(
         home.join(".hermes/config.yaml"),
         "mcp_servers:\n  ljos-dev:\n    command: /opt/pinned/ljos-mcp\n  ljos:\n    command: /home/box/.cargo/bin/ljos-mcp\n",
     )
@@ -435,6 +459,10 @@ fn onboard_does_not_rewrite_a_sibling_goose_command() {
     install_pair(&bin);
     fs::create_dir_all(home.join(".config/goose")).unwrap();
     let config = "extensions:\n  ljos:\n    enabled: true\n    type: stdio\n  developer:\n    enabled: true\n    cmd: /home/otherbox/.cargo/bin/ljos-mcp\n";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(home.join(".config/goose/config.yaml"), config).unwrap();
     let out = onboard(&bin.join("ljos"), &home, &["onboard", "--harness", "goose"]);
     assert!(out.status.success(), "{}", said(&out));
@@ -445,6 +473,10 @@ fn onboard_does_not_rewrite_a_sibling_goose_command() {
         "    type: stdio\n",
         "    type: stdio\n    cmd: /home/otherbox/.cargo/bin/ljos-mcp\n",
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     fs::write(home.join(".config/goose/config.yaml"), &stale).unwrap();
     let out = onboard(&bin.join("ljos"), &home, &["onboard", "--harness", "goose"]);
     assert!(out.status.success(), "{}", said(&out));

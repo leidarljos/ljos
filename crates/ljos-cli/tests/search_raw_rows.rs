@@ -38,6 +38,29 @@ fn tool_dir(name: &str) -> Option<PathBuf> {
 }
 
 fn world() -> Option<World> {
+    world_with(false)
+}
+
+fn write_embed_stub(path: &Path) {
+    let body = "#!/usr/bin/env python3\n\
+import json, sys\n\
+for line in sys.stdin:\n\
+\tline = line.strip()\n\
+\tif not line:\n\
+\t\tcontinue\n\
+\ttry:\n\
+\t\tasked = json.loads(line)\n\
+\texcept json.JSONDecodeError:\n\
+\t\tcontinue\n\
+\tif 'candidates' in asked or 'q' in asked:\n\
+\t\tn = len(asked.get('candidates') or asked.get('d') or [])\n\
+\t\tprint(json.dumps({'scores': [0.8] * max(n, 1)}), flush=True)\n\
+\telse:\n\
+\t\tprint(json.dumps({'v': [0.2, 0.4, 0.1]}), flush=True)\n";
+    ljos_cli::install_executable(path, body).unwrap();
+}
+
+fn world_with(encoder: bool) -> Option<World> {
     if tools::halt(tools::Tool::Packsetd) || tools::halt(tools::Tool::Vissue) {
         return None;
     }
@@ -72,6 +95,10 @@ fn world() -> Option<World> {
     ] {
         std::fs::create_dir_all(root.join(sub)).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
     let pack_home = root.join("home/.local/share/packset");
     let mut started = ljos_test_boot::Packsetd::build();
@@ -83,6 +110,12 @@ fn world() -> Option<World> {
         .env("HOME", root.join("home"))
         .env("PATH", &path)
         .env("TMPDIR", root.join("tmp"));
+    // The harness turns off an encoder this command does not name.
+    if encoder {
+        let stub = root.join("packset-embed");
+        write_embed_stub(&stub);
+        started.command().env("PACKSET_EMBED", &stub);
+    }
     let daemon = started.spawn();
     let world = World {
         port: daemon.port(),
@@ -92,6 +125,29 @@ fn world() -> Option<World> {
     };
     assert_ne!(world.port, 8761, "the shared writer took the default port");
     Some(world)
+}
+
+fn warm_encoder(world: &World) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let _ = ureq::get(&format!(
+        "http://127.0.0.1:{}/v1/search?workspace=seat&q=warmup&limit=1",
+        world.port
+    ))
+    .call();
+    loop {
+        if let Ok(resp) = ureq::get(&format!("http://127.0.0.1:{}/v1/status", world.port)).call() {
+            if let Ok(body) = resp.into_json::<serde_json::Value>() {
+                if body["embedder"]["answering"] == serde_json::Value::Bool(true) {
+                    return;
+                }
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "encoder did not answer"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 impl World {
@@ -105,6 +161,10 @@ impl World {
 
     fn command(&self, seat: &str, args: &[&str]) -> Command {
         let home = self.root.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(self.root.join("work"))
@@ -305,6 +365,10 @@ fn mcp_search(world: &World) -> (String, String) {
 
 fn mcp_search_query(world: &World, query: &str) -> (String, String) {
     let home = world.root.join("home");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
     cmd.env_clear()
         .env("PATH", &world.path)
@@ -400,17 +464,55 @@ fn backend_receipt_rows_stay_off_page_and_mcp_but_json_keeps_them() {
 
 #[test]
 fn search_on_a_terminal_prints_the_page_and_no_raw_rows() {
-    let Some(world) = world() else { return };
+    let Some(world) = world_with(false) else {
+        return;
+    };
     seed(&world);
     let term = pty::Pty::open();
     let mut cmd = world.command("anneal-paper", &["search", QUERY]);
     cmd.stdin(Stdio::null());
     term.attach_output(&mut cmd);
     let child = term.spawn(&mut cmd);
-    let out = pty::wait_output(child, 30);
+    let out = term.wait_output(child, 30);
+    term.finish_reading();
     let shown = term.shown();
     assert!(out.status.success(), "{shown}\n{}", text(&out));
     assert_clean("terminal", &shown, "");
+    assert!(
+        shown.contains("matched by words (encoder not installed)"),
+        "expected words-fallback notice without an encoder:\n{shown}"
+    );
+    assert!(
+        shown.contains("shown ") && shown.contains("silently passes"),
+        "the terminal page lost the lesson:\n{shown}"
+    );
+    assert!(
+        !shown.contains("read msg-anneal"),
+        "a receipt reached the terminal:\n{shown}"
+    );
+}
+
+#[test]
+fn search_on_a_terminal_with_encoder_prints_the_page_and_no_raw_rows() {
+    let Some(world) = world_with(true) else {
+        return;
+    };
+    seed(&world);
+    warm_encoder(&world);
+    let term = pty::Pty::open();
+    let mut cmd = world.command("anneal-paper", &["search", QUERY]);
+    cmd.stdin(Stdio::null());
+    term.attach_output(&mut cmd);
+    let child = term.spawn(&mut cmd);
+    let out = term.wait_output(child, 30);
+    term.finish_reading();
+    let shown = term.shown();
+    assert!(out.status.success(), "{shown}\n{}", text(&out));
+    assert_clean("terminal with encoder", &shown, "");
+    assert!(
+        !shown.contains("encoder not installed"),
+        "encoder-present terminal search fell back to missing-encoder notice:\n{shown}"
+    );
     assert!(
         shown.contains("shown ") && shown.contains("silently passes"),
         "the terminal page lost the lesson:\n{shown}"

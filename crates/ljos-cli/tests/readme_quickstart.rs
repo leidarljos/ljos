@@ -7,6 +7,11 @@
 //! skip line names it. A line the README quotes has to stay in the marked
 //! block, and the command has to print it.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 
 #[path = "common/pty.rs"]
@@ -238,7 +243,15 @@ impl Seat {
         ] {
             std::fs::create_dir_all(&dir).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ljos"), bin.join("ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ljos-mcp"), bin.join("ljos-mcp")).unwrap();
         let inherited = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
         let mut env = BTreeMap::new();
@@ -310,6 +323,10 @@ impl Seat {
             return self.run_tty(line);
         }
         let script = format!("{line}\nprintf '%s' \"${{{name}}}\"");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("sh")
             .arg("-c")
             .arg(&script)
@@ -329,6 +346,10 @@ impl Seat {
 
     fn run_tty(&self, line: &str) -> (i32, String) {
         let term = pty::Pty::open();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(line);
         cmd.current_dir(&self.work);
@@ -348,6 +369,10 @@ impl Seat {
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new("kill")
                 .args(["-s", "KILL", "--", &format!("-{pid}")])
                 .status();
@@ -450,12 +475,10 @@ fn expect_output(cmd: &str, output: &str) {
         }
         Some("search") if cmd.contains("lexical default") => {
             assert!(output.contains(LESSON), "{cmd}\n{output}");
-            if !ljos_cli::tool_installed("packset-embed") {
-                assert!(
-                    output.contains("matched by words (encoder not installed)"),
-                    "{cmd}\n{output}"
-                );
-            }
+            assert!(
+                output.contains("matched by words (encoder not installed)"),
+                "{cmd}\n{output}"
+            );
         }
         Some("file") => {
             for key in ["project:", "Pick a codec"] {
@@ -477,6 +500,10 @@ fn expect_output(cmd: &str, output: &str) {
 }
 
 fn git_value(seat: &Seat, key: &str) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .args(["config", "--global", "--get", key])
         .env_clear()
@@ -578,9 +605,7 @@ fn the_readme_quickstart_runs() {
             let extra = "ljos search \"which fusion\"";
             let (code, output) = seat.run_tty(extra);
             assert_eq!(code, 0, "{extra}\n{output}");
-            if !ljos_cli::tool_installed("packset-embed") {
-                assert!(output.contains(NO_HITS), "{extra}\n{output}");
-            }
+            assert!(output.contains(NO_HITS), "{extra}\n{output}");
         }
         ran += 1;
     }

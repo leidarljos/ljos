@@ -29,7 +29,6 @@
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::IsTerminal;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -851,13 +850,13 @@ fn pull_body(
     let mut marks = read_marks(store, share)?;
     let paths = export_paths(from, source, share)?;
     let total = paths.len();
-    let tty = std::io::stderr().is_terminal();
+    let tty = crate::output::stderr_is_terminal();
     let mut seen = BTreeSet::new();
     let mut committed = 0usize;
     let mut finish = |done: &mut usize, name: &str, action: &str| -> Result<()> {
         *done += 1;
         if let Some(line) = export_progress(tty, *done, total, name, action) {
-            eprintln!("{line}");
+            say!("{line}");
         }
         halt(*done)
     };
@@ -1045,10 +1044,10 @@ fn quiet_pull(store: &SeatStore, from: &Path) -> Result<Option<Summary>> {
         return Ok(None);
     }
     let total = names.len();
-    let tty = std::io::stderr().is_terminal();
+    let tty = crate::output::stderr_is_terminal();
     for (index, name) in names.iter().enumerate() {
         if let Some(line) = export_progress(tty, index + 1, total, name, "skipped") {
-            eprintln!("{line}");
+            say!("{line}");
         }
     }
     Ok(Some(summary))
@@ -1224,6 +1223,10 @@ mod tests {
     }
 
     fn write_lane(dir: &Path, lane: &str, texts: &[&str]) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join(format!("{lane}.jsonl")), lane_body(lane, texts)).unwrap();
     }
 
@@ -1342,6 +1345,10 @@ mod tests {
                     "atom_id": "row-7",
                 })
             );
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(from.join("brine.jsonl"), body).unwrap();
         };
         write("alpha kiln");

@@ -98,7 +98,7 @@ fn wait_done(run: &std::path::Path) -> String {
 fn posted_notes(extract: Option<&str>) -> Vec<serde_json::Value> {
     let home = tempfile::tempdir().unwrap();
     let transcript = home.path().join("transcript.jsonl");
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         &transcript,
         concat!(
             r#"{"type":"user","message":{"role":"user","content":"Fix the build."}}"#,
@@ -114,6 +114,10 @@ fn posted_notes(extract: Option<&str>) -> Vec<serde_json::Value> {
     std::fs::create_dir_all(run.join("ljos")).unwrap();
     let pid = std::process::id();
     let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         run.join("ljos/hold-probe-sitting"),
         format!(
@@ -131,6 +135,10 @@ fn posted_notes(extract: Option<&str>) -> Vec<serde_json::Value> {
     })
     .to_string();
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"));
     child
         .args(["hook"])

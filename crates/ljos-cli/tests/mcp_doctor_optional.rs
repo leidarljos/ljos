@@ -10,6 +10,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use ljos_cli::RELEASE_INSTALL_COMMAND;
 use serde_json::Value;
 
 /// The rows `ljos_doctor` returns for a seat with nothing set up, with
@@ -18,14 +19,17 @@ fn rows(home: &Path, cwd: &Path) -> Vec<Value> {
     let stub = home.join("stub");
     std::fs::create_dir_all(&stub).unwrap();
     let curl = stub.join("curl");
-    std::fs::write(&curl, "#!/bin/sh\nexit 0\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    ljos_cli::install_executable(&curl, "#!/bin/sh\nexit 0\n").unwrap();
     let gitconfig = home.join("gitconfig");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&gitconfig, "").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("mcp")
         .env_clear()
@@ -46,6 +50,10 @@ fn rows(home: &Path, cwd: &Path) -> Vec<Value> {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(90));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let lines = [
@@ -75,6 +83,22 @@ fn rows(home: &Path, cwd: &Path) -> Vec<Value> {
         .unwrap_or_else(|| panic!("no rows in {answer}"))
         .clone()
 }
+
+/// The rows for a sibling `install.sh` installs, and the habitats that run
+/// one, with the program the habitat row names. Only these name the
+/// release installer, and only as that whole command.
+const RELEASE_INSTALLER_ROWS: &[(&str, &str)] = &[
+    ("vissue", ""),
+    ("vissue-mcp", ""),
+    ("claimdag", ""),
+    ("deedar", ""),
+    ("packset", ""),
+    ("packsetd", ""),
+    ("packset-mcp", ""),
+    ("tracker", "vissue "),
+    ("claim graph", "claimdag "),
+    ("deed store", "deedar "),
+];
 
 fn row<'a>(rows: &'a [Value], name: &str) -> &'a Value {
     rows.iter()
@@ -115,7 +139,15 @@ fn the_encoder_hint_is_the_same_in_a_checkout_and_out_of_one() {
     let home = tempfile::tempdir().unwrap();
     let checkout = home.path().join("checkout");
     std::fs::create_dir_all(checkout.join("scripts")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(checkout.join("scripts/install.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(checkout.join("install.sh"), "#!/bin/sh\nexit 0\n").unwrap();
     let bare = home.path().join("bare");
     std::fs::create_dir_all(&bare).unwrap();
@@ -123,11 +155,25 @@ fn the_encoder_hint_is_the_same_in_a_checkout_and_out_of_one() {
     let inside = rows(home.path(), &checkout);
     let outside = rows(home.path(), &bare);
     for rows in [&inside, &outside] {
+        for (name, missing) in RELEASE_INSTALLER_ROWS {
+            let found = row(rows, name);
+            assert_eq!(
+                found["state"],
+                format!("{missing}not on PATH, so run `{RELEASE_INSTALL_COMMAND}`."),
+                "{name}: {found}"
+            );
+            assert_eq!(found["ok"], false, "{name}: {found}");
+        }
         for found in rows {
+            let name = found["name"].as_str().unwrap();
+            if RELEASE_INSTALLER_ROWS.iter().any(|(row, _)| *row == name) {
+                continue;
+            }
             let text = found["state"].as_str().unwrap();
             assert!(
                 !text.contains("curl") && !text.contains("wget") && !text.contains("install.sh"),
-                "{text}"
+                "{}: {text}",
+                found["name"]
             );
         }
         let text = row(rows, "packset-embed")["state"].as_str().unwrap();

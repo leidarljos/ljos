@@ -7,10 +7,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 #[test]
@@ -35,6 +33,10 @@ fn a_sleeping_consensus_is_killed_and_named() {
         std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
     );
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["consensus", "demo-q", "--no-file"])
         .current_dir(dir.path())
@@ -72,6 +74,10 @@ fn a_sleeping_consensus_is_killed_and_named() {
     );
     let pid = std::fs::read_to_string(&pidfile).unwrap_or_default();
     assert!(!pid.trim().is_empty(), "the sleeper did not start\n{said}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let alive = Command::new("kill")
         .args(["-0", pid.trim()])
         .stdout(Stdio::null())

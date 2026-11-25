@@ -7,10 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 struct Tracker {
@@ -33,12 +31,16 @@ impl Tracker {
             .iter()
             .map(|(agent, choice)| serde_json::json!({"agent": agent, "choice": choice}))
             .collect();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             state.join("ballots.json"),
             serde_json::json!({ id: rows }).to_string(),
         )
         .unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             state.join("issues.json"),
             serde_json::json!({ id: {"id": id, "title": title, "state": "TODO", "project": "proj"} })
                 .to_string(),
@@ -130,7 +132,11 @@ else:
             self.bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .arg("consensus")
             .args(args)
             .current_dir(&self.bin)
@@ -150,7 +156,7 @@ else:
             // have their own suite.
             .env("LJOS_UNSIGNED_BALLOTS", "allow")
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn notes(&self, id: &str) -> Vec<String> {

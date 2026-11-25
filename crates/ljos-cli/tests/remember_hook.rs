@@ -4,6 +4,11 @@
 //! on a free port: `ljos remember`, then a matching prompt through the
 //! `UserPromptSubmit` command onboard put in `settings.json`.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 #[path = "common/runner.rs"]
 mod runner;
@@ -36,6 +41,10 @@ impl Home {
     /// One `ljos` run with only this home's environment.
     fn ljos(&self, args: &[&str], stdin: Option<&str>) -> Output {
         let home = self.dir.path();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args);
         self.env(&mut cmd, home);
@@ -45,6 +54,10 @@ impl Home {
     /// [`Home::ljos`] typed at a terminal of the person's own.
     fn on_a_terminal(&self, args: &[&str]) -> Output {
         let home = self.dir.path();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(terminal::PYTHON);
         cmd.args(terminal::shape(
             "terminal",
@@ -179,6 +192,10 @@ fn prompt_through(home: &Home, hook: &str, session: &str, prompt: &str) -> Strin
     let installed = runner::install_dir();
     let runner = installed.path().join("claude");
     runner::runner_at(&runner);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(&runner);
     cmd.args(["-c", "\"$@\"; exit $?", "claude", "/bin/sh", "-c", hook]);
     home.env(&mut cmd, home.dir.path());

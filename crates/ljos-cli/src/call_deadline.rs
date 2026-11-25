@@ -150,13 +150,13 @@ pub fn note_waiting(part: &str, started: Instant, noted: &mut bool) {
     if *noted || started.elapsed() < NOTICE {
         return;
     }
-    eprintln!("waiting on {part}...");
+    say!("waiting on {part}...");
     *noted = true;
 }
 
 /// Print `line` and exit 1. The child is already dead.
 pub fn stop(line: &str) -> ! {
-    eprintln!("{line}");
+    say!("{line}");
     std::process::exit(1);
 }
 

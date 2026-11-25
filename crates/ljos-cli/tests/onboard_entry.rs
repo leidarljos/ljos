@@ -1,20 +1,18 @@
 //! `ljos onboard` with no runner prints the MCP entry to paste, and that
 //! output has to parse as JSON as it stands.
 //!
-//! A pipe sets up the tracker, the memory writer and the deed store.
+//! A pipe under a temporary home sets up the tracker and deed store.
 //! The setup lines go to stderr. `ljos file` then files a ticket.
 
 ljos_test_boot::harness!();
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 fn script(dir: &Path, name: &str, body: &str) {
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn said(out: &Output) -> String {
@@ -39,7 +37,6 @@ impl Seat {
             ".local/state",
             ".cache",
             "run",
-            "tmp",
             "bin",
         ] {
             std::fs::create_dir_all(root.path().join(sub)).unwrap();
@@ -68,21 +65,22 @@ impl Seat {
         paths.push(PathBuf::from("/usr/bin"));
         paths.push(PathBuf::from("/bin"));
         let path = std::env::join_paths(paths).unwrap();
-        // A writer another test left on 8761 answers 401 for this home.
-        // A free port makes the step run the stub `packset ensure`.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        // No pack address or port: naming one keeps memory on in this
+        // temporary home, and the onboard lines here are the memory-off ones.
+        // TMPDIR is the temp dir the home was made in, so the home is a
+        // temporary one wherever the process TMPDIR is.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(home)
             .env_clear()
             .env("HOME", home)
             .env("PATH", path)
             .env("LANG", "C.UTF-8")
-            .env("TMPDIR", home.join("tmp"))
+            .env("TMPDIR", home.parent().unwrap())
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("XDG_DATA_HOME", home.join(".local/share"))
             .env("XDG_STATE_HOME", home.join(".local/state"))
@@ -90,12 +88,11 @@ impl Seat {
             .env("XDG_RUNTIME_DIR", home.join("run"))
             .env("LJOS_TRACKER_GIT", "off")
             .env("LJOS_SEAT", "ada")
-            .env("PACKSET_PORT", port.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 
@@ -114,7 +111,7 @@ fn the_bare_onboard_prints_json_alone() {
     assert!(command.ends_with("ljos-mcp"), "{text}");
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("The tracker, the memory writer and the deed store are set up."),
+        stderr.contains("The tracker and the deed store are set up."),
         "{text}"
     );
     assert!(

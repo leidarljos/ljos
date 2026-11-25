@@ -96,16 +96,15 @@ fn dead_encoder() -> String {
 }
 
 fn executable(path: &Path, text: &str) {
-    std::fs::write(path, text).expect("script");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    }
+    ljos_cli::install_executable(path, text).expect("script");
 }
 
 fn run(home: &Path, path: &str, port: &str, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
         .env("HOME", home)
@@ -119,7 +118,7 @@ fn run(home: &Path, path: &str, port: &str, args: &[&str]) -> std::process::Outp
         .env("PACKSET_TIMEOUT_MS", "2000")
         .env("LJOS_NO_AUTOSTART", "1")
         .output()
-        .expect("ljos")
+        .expect("ljos");
 }
 
 #[test]

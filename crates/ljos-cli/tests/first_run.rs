@@ -9,6 +9,11 @@
 //! onboard` when no coding tool is installed. That command runs in the
 //! skipped line's place. Every other command is the one the page prints.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 
 #[path = "common/pty.rs"]
@@ -17,7 +22,6 @@ mod pty;
 mod tools;
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -102,7 +106,7 @@ impl Seat {
             std::fs::create_dir_all(dir)
                 .unwrap_or_else(|err| panic!("create {}: {err}", dir.display()));
         }
-        std::fs::set_permissions(root.join("run"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        ljos_cli::change_mode(root.join("run"), 0o700).unwrap();
         link_programs(&bin);
         let port = free_port();
         let mut env = BTreeMap::new();
@@ -134,6 +138,9 @@ impl Seat {
         env.insert("TERM".into(), "xterm".into());
         env.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
         env.insert("GIT_CONFIG_NOSYSTEM".into(), "1".into());
+        // The writer this seat starts finds an encoder installed beside the
+        // packsetd it links. The pages below are the no-encoder ones.
+        env.insert("INSIDE_EMBED".into(), "off".into());
         env.insert("LANG".into(), "C.UTF-8".into());
         for name in SESSION_VARS {
             assert!(
@@ -155,6 +162,10 @@ impl Seat {
         }
         let started = Instant::now();
         let term = pty::Pty::open();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new("bash");
         cmd.arg("-c").arg(line);
         cmd.current_dir(cwd);
@@ -174,6 +185,10 @@ impl Seat {
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let _ = Command::new("kill")
                 .args(["-s", "KILL", "--", &format!("-{pid}")])
                 .status();
@@ -195,6 +210,10 @@ impl Seat {
             return (2, format!("could not read `{line}`"), started.elapsed());
         }
         let script = format!("{line}\nprintf '%s' \"${{{name}}}\"");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("bash")
             .arg("-c")
             .arg(&script)
@@ -229,6 +248,10 @@ impl Drop for Seat {
         {
             ljos_test_boot::reap_listener(port);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("packset")
             .arg("stop")
             .env_clear()
@@ -249,8 +272,8 @@ fn link_programs(bin: &Path) {
         ("ljos", env!("CARGO_BIN_EXE_ljos")),
         ("ljos-mcp", env!("CARGO_BIN_EXE_ljos-mcp")),
     ] {
-        std::fs::copy(src, bin.join(name)).unwrap_or_else(|err| panic!("copy {name}: {err}"));
-        std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::copy_executable(Path::new(src), &bin.join(name))
+            .unwrap_or_else(|err| panic!("copy {name}: {err}"));
     }
     for name in [
         "vissue",
@@ -264,6 +287,10 @@ fn link_programs(bin: &Path) {
         "age-keygen",
     ] {
         if let Some(path) = which(name) {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             let _ = symlink(&path, bin.join(name));
         }
     }
@@ -883,27 +910,26 @@ fn expect_documented(command: &str, output: &str) {
         for key in keys {
             assert!(output.contains(key), "{command}\nmissing {key:?}\n{output}");
         }
-        if !ljos_cli::tool_installed("packset-embed") {
-            let seat = output.find("seat source").expect("seat source");
-            let encoder = output
-                .find("encoder")
-                .unwrap_or_else(|| panic!("{command}\nno encoder row:\n{output}"));
-            let gate = output.find("sitting gate").expect("sitting gate");
-            assert!(
-                seat < encoder && encoder < gate,
-                "{command}\nencoder row is not between the seat and the gate:\n{output}"
-            );
-            assert!(
-                output.contains(
-                    "not installed. Search matches words, so run `curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh`."
-                ),
-                "{command}\n{output}"
-            );
-            assert!(
-                !output.contains("cargo binstall"),
-                "{command}\ncargo-binstall is not on this PATH:\n{output}"
-            );
-        }
+        let seat = output.find("seat source").expect("seat source");
+        let encoder = output
+            .find("encoder")
+            .unwrap_or_else(|| panic!("{command}\nno encoder row:\n{output}"));
+        let gate = output.find("sitting gate").expect("sitting gate");
+        assert!(
+            seat < encoder && encoder < gate,
+            "{command}\nencoder row is not between the seat and the gate:\n{output}"
+        );
+        assert!(
+            output.contains(&format!(
+                "not installed. Search matches words, so run `{}`.",
+                ljos_cli::RELEASE_INSTALL_COMMAND
+            )),
+            "{command}\n{output}"
+        );
+        assert!(
+            !output.contains("cargo binstall"),
+            "{command}\ncargo-binstall is not on this PATH:\n{output}"
+        );
     }
     if command.contains("ljos remember") && command.contains("lexical default") {
         assert!(
@@ -917,17 +943,12 @@ fn expect_documented(command: &str, output: &str) {
     }
     if command.contains("ljos search") && command.contains("lexical default") {
         assert!(output.contains(LESSON), "{command}\n{output}");
-        if !ljos_cli::tool_installed("packset-embed") {
-            assert!(
-                output.contains("matched by words (encoder not installed)"),
-                "{command}\n{output}"
-            );
-        }
+        assert!(
+            output.contains("matched by words (encoder not installed)"),
+            "{command}\n{output}"
+        );
     }
-    if command.contains("ljos search")
-        && command.contains("which fusion")
-        && !ljos_cli::tool_installed("packset-embed")
-    {
+    if command.contains("ljos search") && command.contains("which fusion") {
         assert!(output.contains(NO_HITS), "{command}\n{output}");
     }
     if command.contains("ljos file") && command.contains("Pick a codec") {
@@ -946,12 +967,10 @@ fn expect_documented(command: &str, output: &str) {
             1,
             "{command}\nprinted next more than once:\n{output}"
         );
-        if !ljos_cli::tool_installed("packset-embed") {
-            assert!(
-                output.contains("matched by words (encoder not installed)"),
-                "{command}\n{output}"
-            );
-        }
+        assert!(
+            output.contains("matched by words (encoder not installed)"),
+            "{command}\n{output}"
+        );
     }
     if command.contains("ljos finish") {
         assert!(output.contains("ticked"), "{command}\n{output}");
@@ -1157,6 +1176,24 @@ fn the_getting_started_plan_sample_prints_next_once() {
             block.matches("next: day-cd34  measure the files").count(),
             1,
             "{rel} printed the plan's next line more than once:\n{block}"
+        );
+    }
+}
+
+#[test]
+fn the_getting_started_page_names_both_empty_memory_outcomes() {
+    for rel in [
+        "../../docs/source/getting-started.rst",
+        "../../docs/orgmode/getting-started.org",
+    ] {
+        let text = repo_file(rel);
+        assert!(
+            text.contains(ljos_cli::NO_MATCHING_MEMORIES_LINE.trim_end()),
+            "{rel} does not name an answering search with no matches"
+        );
+        assert!(
+            text.contains("matched by words (encoder not installed)"),
+            "{rel} does not name the no-encoder path"
         );
     }
 }

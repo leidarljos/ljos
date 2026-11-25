@@ -10,9 +10,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn exec_daemon(dir: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let src = dir.join("exec-daemon.c");
     let bin = dir.join("exec-daemon");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         &src,
         "#include <unistd.h>\n\
@@ -23,6 +26,10 @@ fn exec_daemon(dir: &Path) -> PathBuf {
          }\n",
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("/usr/bin/cc")
         .args(["-O2", "-o"])
         .arg(&bin)
@@ -35,11 +42,15 @@ fn exec_daemon(dir: &Path) -> PathBuf {
         "cc: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let _ = std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755));
+    let _ = ljos_cli::change_mode(&bin, 0o755);
     bin
 }
 
 fn seat_out(daemon: &Path, config: &Path, extra: &[(&str, &str)]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(daemon);
     cmd.arg(env!("CARGO_BIN_EXE_ljos"))
         .arg("seat")
@@ -72,6 +83,10 @@ fn only_a_named_seat_or_a_call_argument_names_the_seat() {
     let config = dir.path().join("config");
     std::fs::create_dir_all(config.join("ljos")).unwrap();
     let id = "bc-1234abcd-rest";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         config.join("ljos/seats.toml"),
         format!("{id:?} = \"rgoswami\"\n"),

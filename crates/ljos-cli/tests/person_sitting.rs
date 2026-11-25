@@ -9,7 +9,6 @@ ljos_test_boot::harness!();
 #[path = "common/terminal.rs"]
 mod terminal;
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -17,8 +16,7 @@ fn script(path: &Path, body: &str) {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).unwrap();
     }
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 fn text_of(out: &std::process::Output) -> String {
@@ -39,6 +37,10 @@ fn sit(shape: &str) -> std::process::Output {
     for d in [&home, &tracker.join("Software"), &bin, &run] {
         std::fs::create_dir_all(d).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.join(".gitconfig"),
         "[user]\n\tname = Your Name\n\temail = you@example.com\n",
@@ -46,7 +48,7 @@ fn sit(shape: &str) -> std::process::Output {
     .unwrap();
     script(
         &bin.join("claimdag"),
-        "#!/bin/sh\ncase \"$1\" in\n  claim|upsert) echo gen=2 ;;\n  list) echo '[]' ;;\n  get) exit 1 ;;\nesac\nexit 0\n",
+        "#!/bin/sh\ncase \"$1\" in\n  claim|upsert) echo gen=2 ;;\n  list) echo '[]' ;;\n  get) echo 'not found' >&2; exit 1 ;;\nesac\nexit 0\n",
     );
     script(&bin.join("deedar"), "#!/bin/sh\necho head\nexit 0\n");
     script(
@@ -65,6 +67,10 @@ fn sit(shape: &str) -> std::process::Output {
         "write the note",
     ];
     let shaped = terminal::shape(shape, env!("CARGO_BIN_EXE_ljos"), &args);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(if shape == "terminal" {
         terminal::PYTHON
     } else {

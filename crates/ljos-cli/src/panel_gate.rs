@@ -694,7 +694,15 @@ fn edit_rows<R>(path: &Path, edit: impl FnOnce(&mut Vec<TreeRow>) -> Result<R>) 
     let out = edit(&mut rows)?;
     let body: String = rows.iter().map(|r| r.line() + "\n").collect();
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&tmp, body)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     std::fs::rename(&tmp, path)?;
     Ok(out)
 }
@@ -805,7 +813,7 @@ impl SessionBallot {
                 .is_some_and(|name| name.starts_with("ljos-mcp"))
         });
         if !mcp {
-            println!("{}", authorship_warning(&self.issue, &self.authored));
+            tell!("{}", authorship_warning(&self.issue, &self.authored));
         }
     }
 }
@@ -1490,6 +1498,10 @@ pub fn note_tracker_read(issue: &str) {
         let _ = std::fs::create_dir_all(dir);
     }
     use std::io::Write;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -1762,6 +1774,10 @@ fn run_job(job: &Job) -> Result<String> {
     if job.argv.is_empty() {
         anyhow::bail!("{} did not start: no argv", job.role);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(&job.argv[0]);
     cmd.args(&job.argv[1..])
         .env("LJOS_HARNESS_SESSION", &job.session)

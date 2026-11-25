@@ -954,7 +954,7 @@ pub fn inbox_sync(all: bool, until: Option<&str>) -> Result<String> {
         let named = commit_named(until);
         let note = super::sync::fetch_for_inbox(named.as_deref())?;
         if !note.trim().is_empty() {
-            eprint!("{note}");
+            say_raw!("{note}");
         }
     }
     // The fetch above is the tracker's. The pack budget starts after it,
@@ -1238,12 +1238,7 @@ pub fn group(name: &str, add: &[String], remove: &[String]) -> Result<String> {
 }
 
 fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos")
-        .join("mail")
+    crate::state_base_dir().join("mail")
 }
 
 fn receipt_seen_path() -> PathBuf {
@@ -1278,6 +1273,10 @@ fn remember_receipts(keys: &[String]) {
         text.push_str(key);
         text.push('\n');
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     let _ = std::fs::write(path, text);
 }
 

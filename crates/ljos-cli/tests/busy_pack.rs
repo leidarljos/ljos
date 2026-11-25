@@ -12,10 +12,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn silent_pack() -> String {
@@ -46,7 +44,15 @@ impl Seat {
         std::fs::create_dir_all(root.path().join("state")).unwrap();
         std::fs::create_dir_all(root.path().join("run")).unwrap();
         std::fs::create_dir_all(&project).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             project.join("issues.org"),
             "\
@@ -87,6 +93,10 @@ impl Seat {
             std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
         );
         let started = Instant::now();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .current_dir(self.root.path())

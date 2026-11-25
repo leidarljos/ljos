@@ -262,6 +262,10 @@ mod tests {
         let mut text = serde_json::to_string(&row.value()).unwrap();
         text.push('\n');
         text.push_str("{not json}\n");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, text).unwrap();
         assert_eq!(rows_in(&path), vec![row]);
     }
@@ -276,10 +280,8 @@ mod tests {
     }
 
     fn fake_policyd(dir: &Path, verdict: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
         let path = dir.join("policyd");
-        std::fs::write(&path, format!("#!/bin/sh\nprintf '{verdict}\\n'\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::install_executable(&path, format!("#!/bin/sh\nprintf '{verdict}\\n'\n")).unwrap();
         path
     }
 
@@ -332,6 +334,10 @@ mod tests {
         assert!(kept[0].applied, "{kept:?}");
         assert_eq!(kept[0].seat.as_deref(), Some("claude"));
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(repo.join("ljos.toml"), "rewrite = false\n").unwrap();
         assert!(
             crate::tcb_verdict_in("pytest -q", Some(&repo)).is_none(),

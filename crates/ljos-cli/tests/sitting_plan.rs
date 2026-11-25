@@ -15,10 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 /// Every request is 503, with no Retry-After, so a caller that retries
@@ -80,7 +78,7 @@ fn a_busy_pack_costs_one_read_and_the_sitting_stays_quiet() {
         dir.path(),
         "claimdag",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{log_s}'\ncase \"$1\" in\n  list) echo '[]' ;;\n  get) exit 1 ;;\n  upsert|claim) echo gen=2 ;;\nesac\nexit 0\n"
+            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{log_s}'\ncase \"$1\" in\n  list) echo '[]' ;;\n  get) echo 'not found' >&2; exit 1 ;;\n  upsert|claim) echo gen=2 ;;\nesac\nexit 0\n"
         ),
     );
     script(dir.path(), "deedar", "#!/bin/sh\necho head\nexit 0\n");
@@ -95,6 +93,10 @@ fn a_busy_pack_costs_one_read_and_the_sitting_stays_quiet() {
     let pack = busy_pack(Arc::clone(&paths));
     let path = format!("{}:/usr/bin:/bin", dir.path().display());
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["sitting", &issue])
         .current_dir(dir.path())
@@ -129,7 +131,7 @@ fn a_busy_pack_costs_one_read_and_the_sitting_stays_quiet() {
     );
     assert!(out.status.success(), "{said}");
     assert!(
-        said.contains("These are word matches; the pack did not answer."),
+        said.contains("Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`."),
         "a 503 is one skipped line, and the sitting goes on:\n{said}"
     );
     assert!(!said.contains("GET /v1/atoms failed"), "{said}");
@@ -161,6 +163,10 @@ fn finishing_the_last_plan_item_names_the_parent_finish_command() {
     let home = dir.path().join("home");
     std::fs::create_dir_all(tracker.join("Software/day")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
     let layout = vissue_core::Layout::new(&tracker, "Software");
     let parent = vissue_core::ops::create(
@@ -202,6 +208,10 @@ fn finishing_the_last_plan_item_names_the_parent_finish_command() {
     );
     script(dir.path(), "deedar", "#!/bin/sh\necho head\nexit 0\n");
     let path = format!("{}:/usr/bin:/bin", dir.path().display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["finish", &child])
         .current_dir(dir.path())

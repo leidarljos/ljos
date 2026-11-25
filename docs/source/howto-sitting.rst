@@ -22,7 +22,6 @@ Set ``LJOS_SEAT`` to the seat that files it. Once ``vissue.toml`` lists seats, t
      day-ef56  pick a default
    next: day-cd34  measure the files
    tracker: day-ab12 STARTED under ada
-   These are word matches; the pack did not answer.
    warn    crates.io   did not answer, so the version check was skipped
    matched by words (encoder not installed)
    day-ab12 is yours. `ljos finish day-ab12 --lesson "..."` closes the sitting; `ljos sitting day-ab12 --verbose` prints every section.
@@ -83,6 +82,8 @@ Start a sitting, and end one
      created
    ...
 
+The due section, the timeline and the recall list share one subject rule on this issue's text and history. Weak words such as review and order do not count. The project name is not a subject word, in the title or on its own line, and the older word list does not put that name back. A lesson that shares only that name stays out. The name comes out before weak words are judged, so ``Review the kiln`` on project ``kiln`` has review as its subject. An identifier in the title, such as review_order, keeps a lesson that contains that name. A title word is the project name when its pieces, split at a hyphen, an underscore or a change of case and taken in lower case, are the project's pieces, so ``oak-tree``, ``OAK_TREE`` and ``OakTree`` on project ``oak-tree``, and ``a-b`` on project ``a-b``, are neither subject words nor identifiers. A word with any other piece still counts, such as ``sha-2`` on project ``sha-1`` or ``oak_2`` on project ``oak``. The same rule applies to the issue's body. A word is a run of letters and digits in any script, or such runs joined by a hyphen or an underscore, and every other character ends it, so ``sha-2`` in ``sha-2.txt``, ``sha-2:8080``, ``sha-2@example.com`` or ``https://example.com/sha-2/issues`` still counts, and ``école-2`` is kept as written. When the issue's text and history together have no strong word, the older word list is the subject. A weak title with a strong body still uses those strong words, so a lesson that only shares the weak title stays out. The score is that share times the memory's weight, and it has to reach 0.34. This seat's own lesson weighs 1.15, so a share of about 30 percent clears it. A lesson of weight 1 needs 34 percent. A lesson filed on this issue is kept. A lesson filed on another issue, including one in the same project, has to clear the rule. A memory that names another ticket of this project and not this issue stays out, such as ``On café-1-wxyz the damper needs oil.`` on ``café-1-lk1e``. That ticket id is read as the same word, so ``école-2`` is not a ticket of project ``cole``. The weak list is the English list lesson search uses. A ``playbook:`` note is not part of that history. The due count covers those related memories only. When nothing relevant is due, the verbose due section says ``nothing relevant is due``. The short form leaves that line, and the count, for ``--verbose``. A pack that has remembered nothing yet still says so. A sitting's timeline lists the related memories with the tracker's events. The short form's line of what the seat remembers is that recall list. A pack read that does not answer still applies the same rule to the slot's word matches.
+
 One verb, in the protocol's order; it stops at the first store that does
 not answer and claims nothing. ``--playbook NAME`` copies a recipe
 (``sit``, ``arena``, ``land``, ``company-panel``, ``overnight``, ``feature``) into the
@@ -90,7 +91,7 @@ playbook section before recall; absent a name, a closed-set token in the
 title else ``sit``. The name is a tracker ``playbook:`` note until finish or
 release. ``ljos panel`` refuses until one is bound. The ``start_a_sitting`` prompt
 gives the same order to a runner that prefers single tools. A claim
-refused as busy names the issue you still hold; ``ljos complete`` finishes it
+refused as busy names the issue you still hold; ``ljos complete`` completes it
 and ``ljos release`` hands it back.
 
 .. code:: console

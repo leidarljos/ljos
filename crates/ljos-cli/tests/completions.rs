@@ -1,5 +1,10 @@
 //! `ljos completions` and `ljos` with no arguments.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 
 use std::collections::BTreeSet;
@@ -7,7 +12,11 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn run(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -21,7 +30,7 @@ fn run(root: &Path, args: &[&str]) -> Output {
         .env("LJOS_HOOKD", "off")
         .stdin(Stdio::null())
         .output()
-        .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")))
+        .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")));
 }
 
 fn text(out: &Output) -> String {
@@ -129,7 +138,7 @@ fn bare_ljos_prints_the_first_commands() {
     for line in [
         "Memory, a work tracker and a command guard for coding runners.",
         "No seat is set. Reads use every seat, so run `export LJOS_SEAT=NAME`.",
-        "sh install.sh --no-embed",
+        ljos_cli::RELEASE_INSTALL_COMMAND,
         "ljos doctor",
         "ljos remember TEXT",
         "ljos search QUERY",
@@ -197,7 +206,15 @@ fn each_completion_script_parses() {
         assert!(out.status.success(), "{shell}: {}", text(&out));
         assert!(!out.stdout.is_empty(), "{shell} printed no script");
         let path = dir.path().join(format!("ljos-{shell}"));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, &out.stdout).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let parsed = Command::new(shell)
             .args(flags)
             .arg(&path)
@@ -225,7 +242,15 @@ fn seat_and_ticket_completion_reads_a_small_tracker() {
     let tracker = dir.path().join("tracker");
     let project = tracker.join("Software/demo");
     std::fs::create_dir_all(&project).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), "[seats.alice]\n[seats.bob]\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         project.join("issues.org"),
         "\
@@ -270,10 +295,18 @@ fn a_large_tracker_completes_no_seats_or_tickets() {
     std::fs::create_dir_all(&tracker).unwrap();
     let mut roster = String::from("[seats.alice]\n");
     roster.push_str(&"# .\n".repeat(100_000));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(tracker.join("vissue.toml"), roster).unwrap();
     for n in 0..50 {
         let project = tracker.join(format!("Software/p{n:02}"));
         std::fs::create_dir_all(&project).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             project.join("issues.org"),
             format!("* TODO [#C] Item\n:PROPERTIES:\n:ID:         p{n:02}-aa\n:END:\n"),

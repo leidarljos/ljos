@@ -38,6 +38,10 @@ fn mcp_search_appends_one_recall_line_for_the_call_seat() {
     let home = tempfile::tempdir().unwrap();
     let tracker = home.path().join("tracker");
     std::fs::create_dir_all(&tracker).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         tracker.join("vissue.toml"),
         "seats = [\"saddle\", \"other\"]\n",
@@ -45,6 +49,10 @@ fn mcp_search_appends_one_recall_line_for_the_call_seat() {
     .unwrap();
     let state = home.path().join("state");
     let url = pack();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -69,6 +77,10 @@ fn mcp_search_appends_one_recall_line_for_the_call_seat() {
     let pid = child.id();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(30));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let mut stdin = child.stdin.take().unwrap();

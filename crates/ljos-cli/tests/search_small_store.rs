@@ -81,6 +81,10 @@ fn search(url: &str, query: &str) -> (bool, String, String) {
     std::fs::create_dir_all(home.join("state")).unwrap();
     std::fs::create_dir_all(root.path().join("run")).unwrap();
     std::fs::create_dir_all(root.path().join("tracker")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["search", query])
         .current_dir(root.path())
@@ -148,4 +152,22 @@ fn four_lessons_drop_a_word_in_every_row() {
         !stdout.contains("jar number"),
         "the single-word rows should not be printed:\n{stdout}"
     );
+}
+
+#[test]
+fn no_close_matches_page_keeps_base_non_tty_wrap() {
+    let texts: Vec<String> = (0..4)
+        .map(|i| format!("A wax seal keeps jar number {i} shut."))
+        .collect();
+    let url = pack(lessons(&texts));
+    let query = "seal hinge latch gasket thermocouple calibration";
+    let (ok, stdout, stderr) = search(&url, query);
+    assert!(ok, "{stdout}{stderr}");
+    let line = stdout.trim_end_matches('\n');
+    let mut expected = ljos_cli::scan::wrap_for(line, ljos_cli::scan::Width::FIXED);
+    if !expected.ends_with('\n') {
+        expected.push('\n');
+    }
+    assert!(stdout.contains("No close matches for"), "{stdout}{stderr}");
+    assert_eq!(stdout, expected, "{stdout}{stderr}");
 }

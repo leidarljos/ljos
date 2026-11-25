@@ -2,6 +2,11 @@
 //! stampeding it. Each call answers from its own process within a small,
 //! fixed budget; the book, the claim it files and the tracker commit are
 //! applied after the answer by one drainer.
+
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
@@ -14,6 +19,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[path = "common/pty.rs"]
+mod pty;
 #[path = "common/seat_root.rs"]
 mod seat_root;
 
@@ -89,6 +96,10 @@ impl Drop for Hab {
 }
 
 fn git(dir: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("/usr/bin/git")
         .arg("-C")
         .arg(dir)
@@ -129,9 +140,8 @@ fn hab(name: &str) -> Hab {
         std::fs::create_dir_all(dir).unwrap();
     }
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hab.root, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::set_permissions(&hab.run, std::fs::Permissions::from_mode(0o700)).unwrap();
+        ljos_cli::change_mode(&hab.root, 0o755).unwrap();
+        ljos_cli::change_mode(&hab.run, 0o700).unwrap();
     }
     for dir in [&hab.tracker, &hab.repo] {
         git(dir, &["init", "-q", "-b", "main"]);
@@ -140,17 +150,23 @@ fn hab(name: &str) -> Hab {
         git(dir, &["config", "commit.gpgsign", "false"]);
         git(dir, &["config", "core.hooksPath", "/dev/null"]);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(hab.repo.join("README.md"), "seed\n").unwrap();
     git(&hab.repo, &["add", "README.md"]);
     git(&hab.repo, &["commit", "-q", "-m", "seed"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(hab.tracker.join(".keep"), "").unwrap();
     git(&hab.tracker, &["add", ".keep"]);
     git(&hab.tracker, &["commit", "-q", "-m", "seed"]);
     {
-        use std::os::unix::fs::PermissionsExt;
         let shim = hab.bin.join("vissue");
-        std::fs::write(&shim, VISSUE).unwrap();
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::install_executable(&shim, VISSUE).unwrap();
     }
     hab
 }
@@ -163,10 +179,18 @@ fn ljos(hab: &Hab, args: &[&str]) -> Command {
 fn ljos_under(hab: &Hab, wrapper: Option<&[&str]>, args: &[&str]) -> Command {
     let mut cmd = match wrapper {
         Some([program, rest @ ..]) => {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let mut cmd = Command::new(program);
             cmd.args(rest).arg(env!("CARGO_BIN_EXE_ljos"));
             cmd
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         _ => Command::new(env!("CARGO_BIN_EXE_ljos")),
     };
     cmd.args(args)
@@ -301,6 +325,10 @@ fn creates(hab: &Hab) -> usize {
 
 fn lock_file(path: &Path) -> std::fs::File {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -443,6 +471,10 @@ fn a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_warn() {
     });
     let rules = hab.home.join(".local/share/ljos/rules-probe.json");
     std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         &rules,
         r#"[["curl*","deny","the person said no curl from this seat"]]"#,
@@ -560,6 +592,7 @@ fn a_hung_pack_still_allows_mcp_and_read_with_the_queue_off() {
 
 /// The server's queue is full: the gate is refused in the runner's JSON
 /// with the reason, and exits 2, rather than run another hook or allow.
+/// The queue fallback is one machine-output line on a narrow terminal.
 #[test]
 fn a_full_queue_refuses_the_gate_with_its_reason() {
     let hab = hab("full");
@@ -582,17 +615,27 @@ fn a_full_queue_refuses_the_gate_with_its_reason() {
     assert_eq!(&said, b"go ");
     let _waiting = ask(5000);
     std::thread::sleep(Duration::from_millis(100));
-    let out = within(
-        feed(ljos(&hab, &["hook"]), &cursor_shell(&hab, "full", "ls")),
-        Duration::from_secs(5),
-        "a call to a full queue",
-    );
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("COLUMNS", "20");
+    let term = pty::Pty::open();
+    term.set_winsize(20, 40);
+    term.attach_stderr(&mut cmd);
+    let mut child = term.spawn(&mut cmd);
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(cursor_shell(&hab, "full", "ls").as_bytes())
+        .unwrap();
+    let out = term.wait_output(child, 5);
+    term.finish_reading();
+    let shown = term.shown().replace("\r\n", "\n");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    assert_eq!(out.status.code(), Some(0), "{stdout}\n{shown}");
     assert!(stdout.contains("\"permission\":\"allow\""), "{stdout}");
-    assert!(stderr.contains("already waiting for a slot"), "{stderr}");
-    assert!(stderr.contains("judged in this process"), "{stderr}");
+    let line = "ljos hook: hook queue: 1 hook calls are already waiting for a slot; the call is judged in this process";
+    assert!(line.len() > 20);
+    assert!(shown.lines().any(|shown| shown == line), "{shown}");
     let _ = server.kill();
     let _ = server.wait();
 }
@@ -658,6 +701,10 @@ fn different_and_same_seat_calls_get_through_a_wake_burst() {
     writeln!(shared, "{}", std::process::id()).unwrap();
     let mut stuck = lock_file(&hab.run.join("ljos/hookd.flight-stuck"));
     writeln!(stuck, "{}", std::process::id()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut finished = std::process::Command::new("sleep")
         .arg("30")
         .spawn()
@@ -666,6 +713,10 @@ fn different_and_same_seat_calls_get_through_a_wake_burst() {
     finished.kill().unwrap();
     let _ = finished.wait();
     let gone = hab.run.join("ljos/hookd.flight-gone");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&gone, format!("{dead}\n")).unwrap();
     let leaked = lock_file(&gone);
     let mut seats = vec![
@@ -736,6 +787,10 @@ with open(sys.argv[1], "a+") as lock:
     print(os.getpid(), flush=True)
     time.sleep(30)
 "#;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut holder = Command::new("python3")
         .args(["-c", script])
         .arg(&path)
@@ -810,6 +865,10 @@ fn a_spoofed_mcp_seat_tool_name_from_github_is_not_auto_allowed() {
     let hab = hab("spoof");
     let cfg = hab.home.join(".config/ljos");
     std::fs::create_dir_all(&cfg).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(cfg.join("user-rules.json"), "{bad json").unwrap();
     let payload = serde_json::json!({
         "cursor_version": "2.4.0",
@@ -849,6 +908,10 @@ fn a_large_cursor_read_does_not_break_the_writer_pipe() {
         ),
         bin = env!("CARGO_BIN_EXE_ljos")
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("bash")
         .arg("-lc")
         .arg(shell)
@@ -927,7 +990,7 @@ fn github_comment_payload() -> String {
 fn write_mention_rule(hab: &Hab) {
     let path = hab.home.join(".config/ljos/user-rules.json");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         &path,
         r#"{"rules":[{"id":"ur-ocaisa","text":"never post or reply to Alan (ocaisa)","author":"rohit","reason":"he asked not to be pinged","deny_mention":{"handles":["ocaisa"],"names":["Alan"]},"deny_reply_to":{"handles":["ocaisa"],"names":["Alan"]},"written_at":"2026-10-25T00:00:00Z","updated_at":"2026-10-25T00:00:00Z","basis":"person"}]}"#,
     )
@@ -1094,6 +1157,10 @@ fn a_bad_rules_file_warns_on_the_github_write_from_the_hook() {
     let hab = hab("badrules");
     let path = hab.home.join(".config/ljos/user-rules.json");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, "{\"rules\":[").unwrap();
     let mut cmd = ljos(&hab, &["hook"]);
     cmd.env("LJOS_HOOKD", "off");
@@ -1130,11 +1197,16 @@ fn a_bad_rules_file_warns_on_the_github_write_from_the_hook() {
     assert!(took < Duration::from_millis(1500));
 
     std::fs::remove_file(&path).unwrap();
-    assert!(std::process::Command::new("mkfifo")
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let made = std::process::Command::new("mkfifo")
         .arg(&path)
         .status()
         .unwrap()
-        .success());
+        .success();
+    assert!(made);
     let mut cmd = ljos(&hab, &["hook"]);
     cmd.env("LJOS_HOOKD", "off");
     let (took, out) = finished(
@@ -1211,6 +1283,10 @@ fn mcp_and_read_answers_are_traced_when_the_marker_is_present() {
     assert!(!log.exists(), "a trace row was written with no marker");
     let dir = hab.run.join("ljos");
     std::fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(dir.join("hook-trace"), "").unwrap();
     for hookd in ["off", "on"] {
         for (what, payload) in [
@@ -1249,12 +1325,20 @@ fn mcp_and_read_answers_are_traced_when_the_marker_is_present() {
 fn bad_rules(hab: &Hab) {
     let cfg = hab.home.join(".config/ljos");
     std::fs::create_dir_all(&cfg).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(cfg.join("user-rules.json"), "{bad json").unwrap();
 }
 
 fn write_cursor_mcp(hab: &Hab, body: &str) {
     let path = hab.home.join(".cursor/mcp.json");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(path, body).unwrap();
 }
 
@@ -1439,8 +1523,16 @@ fn a_rules_rewrite_window_does_not_deny_github_writes() {
     std::fs::create_dir_all(&cfg).unwrap();
     let path = cfg.join("user-rules.json");
     let rules = "{\"rules\":[]}\n";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, rules).unwrap();
     let watch = watch_rules_read(&path);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, "").unwrap();
 
     let payload = github_comment_payload();
@@ -1453,6 +1545,10 @@ fn a_rules_rewrite_window_does_not_deny_github_writes() {
         b"",
         "the hook did not read the empty rules file"
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, rules).unwrap();
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1469,7 +1565,7 @@ fn a_pretooluse_mcp_tool_name_reaches_user_rules() {
     let hab = hab("mcp-name-rule");
     let cfg = hab.home.join(".config/ljos");
     std::fs::create_dir_all(&cfg).unwrap();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         cfg.join("user-rules.json"),
         r#"{"rules":[{"id":"ur-1","text":"deny mcp tool","author":"t","reason":"r","pattern":"MCP:add_issue_comment*","verdict":"deny","deny_mention":{"handles":[],"names":[]},"deny_reply_to":{"handles":[],"names":[]},"written_at":"2026-10-26T00:00:00Z","updated_at":"2026-10-26T00:00:00Z"}]}"#,
     )
@@ -1498,7 +1594,7 @@ fn a_command_in_tool_input_does_not_replace_the_mcp_tool_name() {
     let hab = hab("mcp-command");
     let cfg = hab.home.join(".config/ljos");
     std::fs::create_dir_all(&cfg).unwrap();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         cfg.join("user-rules.json"),
         r#"{"rules":[{"id":"ur-1","text":"deny mcp tool","author":"t","reason":"r","pattern":"MCP:add_issue_comment*","verdict":"deny","deny_mention":{"handles":[],"names":[]},"deny_reply_to":{"handles":[],"names":[]},"written_at":"2026-10-26T00:00:00Z","updated_at":"2026-10-26T00:00:00Z"}]}"#,
     )

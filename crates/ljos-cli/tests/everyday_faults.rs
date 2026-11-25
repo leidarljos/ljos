@@ -31,12 +31,20 @@ impl Home {
         ] {
             std::fs::create_dir_all(root.join(sub)).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
         Self { root }
     }
 
     fn run(&self, args: &[&str], extra: &[(&str, &str)]) -> Output {
         let home = self.root.join("home");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
             .current_dir(self.root.join("work"))
@@ -84,6 +92,10 @@ fn one_line(bytes: &[u8]) -> String {
 }
 
 fn issues(home: &Home, body: &str) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(home.root.join("tracker/Software/demo/issues.org"), body).unwrap();
 }
 
@@ -251,11 +263,19 @@ fn a_ticket_in_two_trackers_names_ready_and_exits_1() {
     issues(&home, ORG);
     let other = home.root.join("other");
     std::fs::create_dir_all(other.join("Software/demo")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(other.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(other.join("Software/demo/issues.org"), ORG).unwrap();
     let config = home.root.join("home/.config/vissue");
     std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         config.join("config.toml"),
         format!(
             "[layouts.other]\nroot = \"{}\"\nprefix = \"Software\"\n\n[routes.demo]\nlayout = \"other\"\nproject_dir = \"demo\"\n",
@@ -353,7 +373,7 @@ fn a_search_with_no_hits_names_the_next_command() {
     assert_eq!(out.status.code(), Some(0), "{said}");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        ljos_cli::scan::empty_store_page("which fusion method"),
+        ljos_cli::scan::empty_store_page("which fusion method", ljos_cli::scan::Width::FIXED),
         "{said}"
     );
 }
@@ -364,17 +384,11 @@ fn a_recall_of_an_empty_pack_names_remember() {
     issues(&home, ORG);
     let bin = home.root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    std::fs::write(
-        bin.join("vissue"),
+    ljos_cli::install_executable(
+        &bin.join("vissue"),
         "#!/bin/sh\nif [ \"$1\" = recall ]; then echo tracker; fi\nexit 0\n",
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(bin.join("vissue"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-    }
     let url = empty_pack();
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let out = home.run(
@@ -450,6 +464,10 @@ fn a_write_with_no_seat_names_the_export() {
 #[test]
 fn a_missing_seat_name_names_seat_add_and_exits_2() {
     let home = Home::new();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.root.join("tracker/vissue.toml"),
         "prefix = \"Software\"\nseats = [\"alice\"]\n",
@@ -531,6 +549,10 @@ fn two_seats_on_one_ticket_name_send() {
 #[test]
 fn a_half_written_user_rules_file_names_prefer() {
     let home = Home::new();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.root.join("home/.config/ljos/user-rules.json"),
         "{\"rules\":[{\"id\":\"r1\",\"text\":",
@@ -556,6 +578,10 @@ fn a_half_written_user_rules_file_names_prefer() {
 #[test]
 fn a_half_written_note_queue_names_finish() {
     let home = Home::new();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.root.join("home/.local/state/ljos/note-queue.jsonl"),
         "{\"issue\":\"demo-kiln\",\"te\n",
@@ -618,20 +644,17 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
         log.display()
     );
     let packset = home.join("bin/packset");
-    std::fs::write(&packset, &script).unwrap();
+    ljos_cli::install_executable(&packset, script).unwrap();
     let curl = home.join("bin/curl");
-    std::fs::write(
+    ljos_cli::install_executable(
         &curl,
         "#!/bin/sh\necho 'curl: network is unreachable' >&2\nexit 6\n",
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for path in [&packset, &curl] {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
@@ -655,6 +678,17 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
             .output()
             .unwrap()
     };
+    let expected_tmp = if root.path().starts_with("/tmp") {
+        "/tmp".to_string()
+    } else {
+        std::fs::canonicalize(root.path())
+            .unwrap_or_else(|_| root.path().to_path_buf())
+            .display()
+            .to_string()
+    };
+    let off_msg =
+        format!("memory and the command guard are off because the home is under {expected_tmp}");
+    let outside_msg = format!("set HOME to a directory outside {expected_tmp}");
     let remembered = run(&["remember", "A lesson typed in a sandbox."]);
     let said = text(&remembered);
     let joined = format!(
@@ -662,25 +696,24 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
         String::from_utf8_lossy(&remembered.stdout),
         String::from_utf8_lossy(&remembered.stderr)
     );
-    assert!(
-        joined.contains("memory and the command guard are off because the home is under /tmp"),
-        "{said}"
-    );
-    assert!(
-        joined.contains("set HOME to a directory outside /tmp"),
-        "{said}"
-    );
+    assert!(joined.contains(&off_msg), "{said}");
+    assert!(joined.contains(&outside_msg), "{said}");
     let reasons: Vec<_> = joined
         .lines()
-        .filter(|line| {
-            line.contains("memory and the command guard are off because the home is under /tmp")
-        })
+        .filter(|line| line.contains(&off_msg))
         .collect();
     assert_eq!(reasons.len(), 1, "{said}");
     assert!(joined.contains("command guard"), "{said}");
     assert!(!joined.contains("packset ensure"), "{said}");
     assert!(!joined.contains("queued"), "{said}");
     assert_eq!(remembered.status.code(), Some(1), "{said}");
+    assert!(remembered.stdout.is_empty(), "{said}");
+    assert_eq!(
+        String::from_utf8_lossy(&remembered.stderr).lines().count(),
+        1,
+        "{said}"
+    );
+    assert!(!joined.contains("no seat was named"), "{said}");
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
         !calls.contains("ensure"),
@@ -695,10 +728,7 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
         String::from_utf8_lossy(&searched.stderr)
     );
     assert_eq!(searched.status.code(), Some(1), "{said}");
-    assert!(
-        joined.contains("memory and the command guard are off because the home is under /tmp"),
-        "{said}"
-    );
+    assert!(joined.contains(&off_msg), "{said}");
     assert!(!joined.contains("Nothing matched"), "{said}");
 
     let settled = run(&["consensus", "demo-kiln"]);
@@ -709,10 +739,7 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
         String::from_utf8_lossy(&settled.stderr)
     );
     assert_eq!(settled.status.code(), Some(1), "{said}");
-    assert!(
-        joined.contains("memory and the command guard are off because the home is under /tmp"),
-        "{said}"
-    );
+    assert!(joined.contains(&off_msg), "{said}");
     assert!(
         !joined.contains("no option") && !joined.contains("no ballots"),
         "{said}"
@@ -725,31 +752,21 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
         String::from_utf8_lossy(&doctor.stdout),
         String::from_utf8_lossy(&doctor.stderr)
     );
-    assert!(
-        joined.contains("memory and the command guard are off because the home is under /tmp"),
-        "{said}"
-    );
-    assert!(
-        joined.contains("set HOME to a directory outside /tmp"),
-        "{said}"
-    );
+    assert!(joined.contains(&off_msg), "{said}");
+    assert!(joined.contains(&outside_msg), "{said}");
     let memory = joined
         .lines()
         .find(|line| line.split('\t').nth(1) == Some("memory"))
         .unwrap_or_else(|| panic!("no memory row:\n{said}"));
     assert!(
-        memory.contains("memory and the command guard are off because the home is under /tmp")
-            && !memory.contains("does not answer"),
+        memory.contains(&off_msg) && !memory.contains("does not answer"),
         "{memory}"
     );
     let guard = joined
         .lines()
         .find(|line| line.split('\t').nth(1) == Some("guard"))
         .unwrap_or_else(|| panic!("no guard row:\n{said}"));
-    assert!(
-        guard.contains("memory and the command guard are off because the home is under /tmp"),
-        "{guard}"
-    );
+    assert!(guard.contains(&off_msg), "{guard}");
     assert_eq!(doctor.status.code(), Some(1), "{said}");
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
@@ -764,10 +781,7 @@ fn a_home_under_tmp_says_memory_is_off_and_starts_no_writer() {
         String::from_utf8_lossy(&fixed.stdout),
         String::from_utf8_lossy(&fixed.stderr)
     );
-    assert!(
-        joined.contains("memory and the command guard are off because the home is under /tmp"),
-        "{said}"
-    );
+    assert!(joined.contains(&off_msg), "{said}");
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
         !calls.contains("ensure"),

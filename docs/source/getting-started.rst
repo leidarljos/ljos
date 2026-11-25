@@ -1,9 +1,9 @@
 .. [[[cog import ljos_version as v; v.lines("", ":description: A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos {version}.", ":cover: https://leidarljos.github.io/ljos/_static/og.png", "", "A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos {version}.", "")]]]
 
-:description: A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos 0.45.3.
+:description: A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos 0.45.4.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos 0.45.3.
+A plan is how a seat opens a day's work: one parent, an ordered checklist, and the next unfinished item. This page installs ljos, stores a lesson, opens that plan, and puts a second seat on a ticket. It describes ljos 0.45.4.
 
 .. [[[end]]]
 
@@ -53,15 +53,34 @@ The script names the cause and the command that fixes it.
 - The OS or CPU is not Linux or macOS on x86_64 or aarch64. The script prints one line naming those systems and ``cargo install --locked`` for the seat programs. On Windows, run the script inside WSL.
 - ``curl`` or ``wget``, ``tar``, or ``sha256sum`` is missing. On macOS the checksum tool is ``shasum``. The script names the missing tool. Install it and run ``sh install.sh`` again. Programs already unpacked are ``sh install.sh --from-dir DIR``.
 - A checksum does not match, or the download stops early. The script stops, deletes the partial file, and says to run ``sh install.sh`` again.
-- The install directory is not writable. The script names it and ``sh install.sh --bin-dir DIR``.
-- The install directory is not on ``PATH``. The script prints the line for bash (``~/.bashrc``), zsh (``~/.zshrc``) and fish (``~/.config/fish/config.fish``). It does not edit those files. ``--modify-path`` writes the bash and zsh lines. The Next line puts that directory on PATH and names the following command. With ``--no-onboard`` that command is ``ljos onboard``. An install that already ran ``ljos onboard`` names ``ljos doctor``.
+- The install directory is not writable.
+  The script names it and ``sh install.sh --bin-dir DIR``.
+  An empty or blank ``--bin-dir`` is refused before a program is installed.
+  A colon or newline is refused because that directory becomes one ``PATH`` entry.
+  A relative directory is normalized before the script checks ``PATH``.
+- The install directory is not on ``PATH``.
+  The script prints the line for bash (``~/.bashrc``), zsh (``~/.zshrc``), dash (``~/.profile``) and fish (``~/.config/fish/config.fish``).
+  Each line uses the absolute install path and quotes it for that shell.
+  The script does not edit those files.
+  ``--modify-path`` writes ``~/.profile`` and ``~/.bashrc``, and writes ``~/.zshrc`` only when that file already exists.
+  The Next line puts that directory on PATH and names the following command.
+  With ``--no-onboard`` that command is ``ljos onboard``.
+  An install that already ran ``ljos onboard`` names ``ljos doctor``.
+  The command guard and shell completion hints print one POSIX line, plus a fish line when fish needs different quoting.
 - An older ``ljos`` is earlier on ``PATH``. The script names both binaries and prints the ``export PATH`` line that puts the new one first.
 - Running the script again over the same version says it reinstalled that version. An older install says it updated, and names both versions.
 - ``--version VER`` or ``--pin REPO=VER`` for a release that does not exist says so, names the releases page, and the command ``sh install.sh --version VER`` or ``sh install.sh --pin REPO=VER``. A version the script itself names, when that release is not published and Rust is not installed, installs the latest release of that program and says so. With Rust installed, it builds that version from source.
 - A running ``ljos-mcp`` keeps the previous binary. Restart the assistant, or ``kill`` the pid the script prints, then run ``ljos doctor``.
 
-``ljos onboard`` with no coding tool installed says so. It still sets up the ticket tracker, the memory writer, and the deed store, and the line names those three and ``ljos doctor`` as the next command. The deed row names its directory and says it is for signed records of finished work. Install an agent, then run ``ljos onboard``. ``ljos onboard --example`` lists the tools.
-A pipe sets up the same three, with the Model Context Protocol (MCP) entry as the only text on stdout and the setup lines on stderr.
+``ljos onboard`` with no coding tool installed says so.
+It still sets up the ticket tracker and deed store.
+Outside a temporary home, it also sets up the memory writer.
+Under a temporary home, memory is off unless ``PACKSET_URL`` names a pack or a writer port is set.
+The line names that setup and ``ljos doctor`` as the next command.
+The deed row names its directory and says it is for signed records of finished work.
+Install an agent, then run ``ljos onboard``.
+``ljos onboard --example`` lists the tools.
+A pipe follows the same temporary-home rule, with the Model Context Protocol (MCP) entry as the only text on stdout and the setup lines on stderr.
 
 ``ljos offboard`` after a hand edit that it cannot undo names the file and leaves the ljos entry. Edit that file, delete the ljos entry, and run ``ljos offboard`` again.
 
@@ -77,8 +96,10 @@ It builds from source with ``cargo`` where a platform has no release.
 ``--no-embed`` leaves out the encoder. Search then matches words, and a search prints ``matched by words (encoder not installed)`` and names the install command ``ljos doctor`` names when that command is a cargo one. When it would be a download run through a shell, the line points at the install page, https://leidarljos.github.io/ljos/getting-started.html#install, and at ``ljos doctor`` instead. An MCP server names that install step on its first such search and leaves it off later searches.
 
 Read the script before you run it. It is ``scripts/install.sh`` in this repository.
-It runs ``ljos onboard`` for each coding runner it finds. With none found, it still sets up
-the ticket tracker, the memory writer and the deed store.
+It runs ``ljos onboard`` for each coding runner it finds.
+With none found, it still sets up the ticket tracker and deed store.
+Outside a temporary home, it also sets up the memory writer.
+Under a temporary home, memory is off unless ``PACKSET_URL`` names a pack or a writer port is set.
 
 The tracker commits each change, so git needs an identity:
 
@@ -122,8 +143,10 @@ Its ticket row names the new tracker directory and the configuration file it wro
 Its memory row says the writer started without printing its local address.
 ``ljos onboard --example`` lists the runners ljos knows.
 
-Nothing else needs a variable set. ``ljos onboard`` makes a deed store, a tracker and a
-config file for ``vissue``, and it starts the memory writer.
+Nothing else needs a variable set.
+``ljos onboard`` makes a deed store, a tracker and a config file for ``vissue``.
+Outside a temporary home, it also starts the memory writer.
+Under a temporary home, memory is off unless ``PACKSET_URL`` names a pack or a writer port is set.
 
 The runner runs a hook only after you trust it. Trust each ljos hook in the runner.
 Trust it again after an upgrade rewrites one.
@@ -137,11 +160,14 @@ A lesson and a search
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
    ljos: no seat was named and this write uses ada, so run `export LJOS_SEAT=NAME`.
-   remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
+   remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on
+   turns.
      id a6ae2751, next review 2026-11-12 21:40 +00:00
    saved as a standing lesson; run `ljos search "QUERY"` to read it
    $ ljos search "lexical default"
-   matched by words (encoder not installed), so read https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`.
+   matched by words (encoder not installed), so read
+   https://leidarljos.github.io/ljos/getting-started.html#install or run
+   `ljos doctor`.
    shown 1 of 1.
    The first row is the closest match.
 
@@ -163,12 +189,16 @@ A container, a CI runner, ``setsid``, or a parent process that carries a runner'
 
    $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
    ljos: no seat was named and this write uses ada, so run `export LJOS_SEAT=NAME`.
-   remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
+   remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on
+   turns.
      id a6ae2751, next review 2026-11-12 21:40 +00:00
    saved as a standing lesson; run `ljos search "QUERY"` to read it
-   stored from an agent because no terminal was found or a runner was detected; from your own login terminal, so run `ljos remember`.
+   stored from an agent because no terminal was found or a runner was detected;
+   from your own login terminal, so run `ljos remember`.
    $ ljos search "lexical default"
-   matched by words (encoder not installed), so read https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`.
+   matched by words (encoder not installed), so read
+   https://leidarljos.github.io/ljos/getting-started.html#install or run
+   `ljos doctor`.
    shown 1 of 1.
    The first row is the closest match.
 
@@ -186,7 +216,7 @@ When the encoder ranked the page, this seat's hits come first. A word ranking gi
 The default line says whether the printed rows matched by meaning, words, or both. ``--explain`` names CombMNZ, MMR and FSRS.
 That floor is the one the prompt hook uses for a hit the encoder lists at the top.
 A weaker cross-seat hit does not fill a short list. When those were the only rows, the line is ``Nothing relevant was found.`` A match-mode line is not printed on that empty page.
-A busy pack is asked again for ``LJOS_SEARCH_BUSY_WAIT`` seconds (2 when unset, ``0`` does not wait), following ``Retry-After`` or a JSON ``retry_ms``, and a writer that becomes free still ranks by meaning. When that wait runs out, search ranks by words, keeps a hit that names the subject, and the one line is ``The memory pack was busy, so these rows are word matches; run the search again for ranked results.`` When no words match, the line is ``The memory pack was busy and no words matched.`` and the command exits 1. A writer that is not running names ``packset ensure``.
+A busy pack is asked again for ``LJOS_SEARCH_BUSY_WAIT`` seconds (2 when unset, ``0`` does not wait), following ``Retry-After`` or a JSON ``retry_ms``, and a writer that becomes free still ranks by meaning. When that wait runs out, search ranks by words, keeps a hit that names the subject, and prints one line on stderr, ``Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`.`` A writer that has not opened, or is not running, gets the same line with ``starting`` or ``not running``. The words come from the listing a hook last kept on this machine and this seat's memory slot. That listing is the one kept for this seat, and a listing kept under a token is read only by a command that carries that token now. A row of another seat, or one whose source carries a credential, is left out. The files are kept with mode 0600 in a directory of mode 0700. A kept file is read only when it is a plain file of this user, with one name, that no other user can write, in a directory of this user that no other user can write, and a link is not followed. Each directory above that one, up to ``$HOME`` or from ``/`` when it is outside ``$HOME``, must be owned by this user or root and not writable by a group or another user unless it is sticky as ``/tmp`` is. A link on that way, a linked ``XDG_DATA_HOME`` among them, is followed only when this user or root owns it and the directories it leads through pass the same rule; otherwise the listing is neither read nor kept. A hook that finds that directory writable by a group or another user takes those bits off, and one that finds a link or another user's directory keeps nothing there. A hook reads its kept listing only when the file names this seat. A workspace name with a dot or a slash has a file of its own. The tracker's kept and attempt rows of another seat are not found, and a file there is read only when it is a plain file that not every user can write. A search, ``ljos show``, ``ljos forget`` and ``ljos memory integrate`` read the slot's index and kept rows, and forget and integrate its receipts and watermark, only when the file has one name and no directory from the slot down to it is a link, so a pipe or a link there is passed over at once. ``ljos recall`` and ``ljos sitting`` print the line once as well. When no words match on a busy writer, the command exits 1.
 
 .. BEGIN ljos-sample tutorial-prefer
 
@@ -196,7 +226,9 @@ A busy pack is asked again for ``LJOS_SEARCH_BUSY_WAIT`` seconds (2 when unset, 
    remembered (preference): CombMNZ over RRF for fusing two ballots.
      id f8b725a9, next review 2026-11-12 21:40 +00:00
    $ ljos search fusing
-   matched by words (encoder not installed), so read https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`.
+   matched by words (encoder not installed), so read
+   https://leidarljos.github.io/ljos/getting-started.html#install or run
+   `ljos doctor`.
    shown 1 of 1.
    The first row is the closest match.
 
@@ -255,11 +287,27 @@ A plan files one parent and its checklist in a single tracker commit, claims the
    $ LJOS_SEAT=alice ljos ready --mine
    next: day-ef56  pick a default
 
-``ljos ready`` without ``--mine`` prints the first 20 open tickets, headed ``ready  shown X of Y``, and ends a short page with a hint naming ``--limit``, ``--all``, ``-p`` and ``--mine``. This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last. ``--all`` prints every ticket, and ``--limit N`` prints N.
+``ljos ready`` without ``--mine`` prints the first 20 open tickets, headed ``ready  shown X of Y``, and ends a truncated page with a hint naming ``--limit``, ``--all``, ``-p`` and ``--mine``. It omits the hint when every ticket fits.
+This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last.
+``ljos claim`` with no id claims the first ready ticket in ``ljos ready`` order that no other seat holds, and the first claim creates the claim graph. After ``ljos file "Pick a codec" -p demo``, that claim takes the ticket just filed. A seat that already holds a ready ticket is refused, and the refusal names how to finish or release it. When no ticket is left, the line is ``claim: no ticket is ready on this seat, so file one with `ljos file "TITLE" -p PROJECT` ``.
+``--all`` prints every ticket, and ``--limit N`` prints N.
 
 ``ljos list`` and ``ljos ls`` are the same command. They take the same flags, including ``-p PROJECT``, and print the same page.
 
-To work one ticket with no plan, run ``ljos sitting ID``. It claims the ticket and prints what the seat remembers about it. ``ljos note "TEXT"`` writes on that ticket, and ``ljos finish`` with no id ends the sitting and leaves the ticket open. ``ljos finish --close`` closes it, once the work is accepted. From a container, a CI runner, ``setsid``, or a parent that carries a runner's variables, that close is refused. The refusal is one sentence: no terminal was found or a runner was detected, so a person closes the ticket from their own login terminal, or with ``ljos seat grant``. Nothing was written. An agent is not that person. A plain ``ljos finish`` has ended the sitting, so close that ticket by its id with ``ljos finish ID --close``. ``ljos finish --close`` with no id and no open sitting says so and names that form. While a sitting is open, ``ljos file`` files the new ticket under it, and ``--top`` files it at the top of the project. With no plan, ``ljos ready --mine`` prints ``no unfinished item``, because it names the next item of a plan.
+To work one ticket with no plan, run ``ljos sitting ID``.
+It claims the ticket and prints what the seat remembers about it.
+When the pack answers but nothing matches, it prints ``No matching memories for this task.`` instead of leaving that part blank.
+``ljos note "TEXT"`` writes on that ticket, and ``ljos finish`` with no id ends the sitting and leaves the ticket open.
+``ljos finish --close`` closes it, once the work is accepted.
+From a container, a CI runner, ``setsid``, or a parent that carries a runner's variables, that close is refused unless a standing grant covers this seat and this ticket.
+The refusal is one sentence: no terminal was found or a runner was detected, so a person closes the ticket from their own login terminal, or with ``ljos seat grant``.
+Nothing was written.
+An agent is not that person.
+A plain ``ljos finish`` has ended the sitting, so close that ticket by its id with ``ljos finish ID --close``.
+``ljos finish --close`` with no id and no open sitting says so and names that form.
+While a sitting is open, ``ljos file`` files the new ticket under it, and ``--top`` files it at the top of the project.
+While a non-plan sitting is open, ``ljos ready --mine`` names its ticket and says it ``has no plan items``.
+After plain ``ljos finish`` ends that sitting, ``ljos ready --mine`` prints ``no unfinished item``.
 
 The ids are the ones that run printed. The parent is claimed. Each item stays open until ``ljos finish`` ticks it. A sitting with no ``--verbose`` prints the claim, one line for claims still held, what the seat remembers, and the close. With ``--no-embed`` the pack has no encoder, so the sitting prints ``matched by words (encoder not installed)``. Quiet claims are ``N quiet claims are still yours (ljos release --stale)``. Claims untouched for longer than ``LJOS_STALE_DAYS`` (7) are one line, ``ljos claims --stale``. ``ljos sitting ISSUE --verbose`` prints every section.
 Under a runner the holder on the ``STARTED`` line can be ``alice`` plus ``@`` and a session tag. The claim command below prints the seat name.
@@ -365,7 +413,11 @@ Both seats can vote. From one shell the two ballots are one voice, and ``ljos co
 
 The first line is the verdict: which option the ballots pick, and whether that clears a push onto ``develop`` or ``main``. ``push cite`` and ``protected push`` are the same checks in full.
 From one shell the two ballots are one voice, so they fold and the protected-branch check still wants a second seat. A vote in its own shell is its own voice, and those two clear the push.
-The lines under ``advice`` are the weighted settle. They do not clear that push. ``social power`` names each seat's weight in that one voice. ``holds`` names the option and its share of the group's weight.
+The lines under ``advice`` are the weighted settle.
+They count every recorded ballot, including ballots the verdict folds together and ballots labelled ``authored:``.
+The verdict counts one ballot per voice and leaves authored ballots out.
+The advice does not clear that push.
+``social power`` names each seat's weight in that one voice. ``holds`` names the option and its share of the group's weight.
 A signature line and ``tracker git:`` follow each vote. A ballot is its own voice when the cast has no shell, no agent runner and no earlier row that shares a session, a parent or the root session of one runner.
 The how-to :doc:`Vote and settle a decision <howto-vote>` is that case, and ``ljos learn``.
 The docs of beads, Mem0, Letta, Zep, Basic Memory and git-bug, read on 2026-11-10, describe no vote. The comparison is :doc:`How ljos compares <compare>`.

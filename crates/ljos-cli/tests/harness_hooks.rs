@@ -1,6 +1,11 @@
 //! The five real-harness fixes, each driven through `ljos hook` (the ballot
 //! case through `ljos vote`, which is the process that casts and tallies).
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -10,13 +15,15 @@ use std::process::{Command, Stdio};
 mod seat_root;
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn git(dir: &Path, args: &[&str]) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("/usr/bin/git")
         .arg("-C")
         .arg(dir)
@@ -33,10 +40,18 @@ fn git(dir: &Path, args: &[&str]) {
 
 fn record_evidence(repo: &Path) {
     std::fs::create_dir_all(repo.join(".ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(repo.join(".ljos/gates.toml"), "test = \"true\"\n").unwrap();
     let sha = head(repo);
     let dir = repo.join(".git/ljos-evidence");
     std::fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         dir.join(format!("{sha}.json")),
         format!(r#"{{"command":"true","exit":0,"sha":"{sha}","ts":"2026-01-01T00:00:00Z"}}"#),
@@ -45,6 +60,10 @@ fn record_evidence(repo: &Path) {
 }
 
 fn head(dir: &Path) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("/usr/bin/git")
         .arg("-C")
         .arg(dir)
@@ -82,8 +101,7 @@ fn habitat() -> (Scratch, Habitat) {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ljos_cli::change_mode(&dir, 0o755).unwrap();
     }
     let dir = Scratch(dir);
     let tracker = dir.0.join("tracker");
@@ -113,6 +131,10 @@ fn habitat() -> (Scratch, Habitat) {
         ],
     );
     git(&repo, &["branch", "-M", "main"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(repo.join("README.md"), "seed\n").unwrap();
     git(&repo, &["add", "README.md"]);
     git(&repo, &["commit", "-q", "-m", "seed"]);
@@ -235,7 +257,7 @@ fn ljos(hab: &Habitat, payload: &str, extra: &[(&str, &str)]) -> std::process::O
 fn sit(hab: &Habitat) {
     let project = hab.tracker.join("Software/probe");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::OpenOptions::new()
+    #[expect(clippy::disallowed_methods, reason = "opens a path that is not a git hook")] std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(project.join("issues.org"))
@@ -246,6 +268,10 @@ fn sit(hab: &Habitat) {
         .unwrap();
     let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
     std::fs::create_dir_all(hab.run.join("ljos")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         hab.run.join("ljos/hold-probe-sitting"),
         format!(
@@ -259,7 +285,7 @@ fn sit(hab: &Habitat) {
 
 /// A second sitting, on `probe-0002`, held by `holder`.
 fn sit_as(hab: &Habitat, holder: &str) {
-    std::fs::OpenOptions::new()
+    #[expect(clippy::disallowed_methods, reason = "opens a path that is not a git hook")] std::fs::OpenOptions::new()
         .append(true)
         .open(hab.tracker.join("Software/probe/issues.org"))
         .unwrap()
@@ -271,6 +297,10 @@ fn sit_as(hab: &Habitat, holder: &str) {
         )
         .unwrap();
     let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         hab.run.join("ljos/hold-probe-sitting-2"),
         format!(
@@ -316,6 +346,10 @@ fn run_ljos(
     extra: &[(&str, &str)],
 ) -> std::process::Output {
     let path = format!("{}:/usr/bin:/bin", hab.bin.display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
@@ -371,6 +405,10 @@ fn claude(event: &str, session: &str, cwd: &Path, extra: serde_json::Value) -> S
 }
 
 fn commit_file(repo: &Path, name: &str) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(repo.join(name), "x\n").unwrap();
     git(repo, &["add", name]);
     git(repo, &["commit", "-q", "-m", name]);
@@ -649,6 +687,10 @@ else:
             consensus_log.display()
         ),
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(state.join("hide-notes"), "1").unwrap();
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let vote = |args: &[&str]| {
@@ -656,6 +698,10 @@ else:
             .iter()
             .position(|a| *a == "--as")
             .map_or("sess-1", |i| args[i + 1]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
@@ -740,6 +786,10 @@ fn child_repo(parent: &Path) -> PathBuf {
     git(&child, &["config", "commit.gpgsign", "false"]);
     git(&child, &["config", "core.hooksPath", "/dev/null"]);
     git(&child, &["branch", "-M", "main"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(child.join("README.md"), "child\n").unwrap();
     git(&child, &["add", "README.md"]);
     git(&child, &["commit", "-q", "-m", "seed"]);
@@ -808,17 +858,25 @@ fn short_sha(sha: &str) -> String {
 /// `LJOS_GUARD_FAIL_OPEN=1` the answer is the ordinary one.
 #[test]
 fn a_workdir_that_does_not_resolve_still_allows_the_command() {
-    use std::os::unix::fs::PermissionsExt;
     let (_dir, hab) = habitat();
     sit(&hab);
     let session = hab.repo.to_str().unwrap();
     let missing = hab.root.join("gone");
     let looped = hab.root.join("loop-a");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink(hab.root.join("loop-b"), &looped).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink(&looped, hab.root.join("loop-b")).unwrap();
     let locked = hab.root.join("locked");
     std::fs::create_dir(&locked).unwrap();
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let locked_fd = std::fs::File::open(&locked).unwrap();
+    ljos_cli::change_mode(&locked, 0o000).unwrap();
     let on = [("LJOS_GUARD", "on"), ("LJOS_OFF", "0")];
     let payloads = [
         pretool(session, Some("/path/to/git/repo"), NORMAL_GIT),
@@ -843,7 +901,7 @@ fn a_workdir_that_does_not_resolve_still_allows_the_command() {
         serde_json::json!({"prompt": "Fix the build"}),
     );
     let asked = hook_in(&hab, &prompt, &hab.repo, &on);
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::change_mode_of(&locked_fd, 0o755).unwrap();
     for (payload, out) in payloads.iter().zip(&denied) {
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1009,6 +1067,10 @@ fn a_rewritten_lesson_closes_the_one_that_cited_an_amended_commit() {
 fn user_rules(hab: &Habitat, rules: &str) {
     let path = hab.home.join(".config/ljos/user-rules.json");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&path, rules).unwrap();
 }
 

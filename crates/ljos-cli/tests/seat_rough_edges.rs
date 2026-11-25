@@ -2,7 +2,6 @@
 
 ljos_test_boot::harness!();
 
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 use packset_client::Hit;
@@ -11,6 +10,10 @@ fn write_hold(home: &std::path::Path, issue: &str) {
     let runtime = home.join("run/ljos");
     std::fs::create_dir_all(&runtime).unwrap();
     let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         runtime.join("hold-ada"),
         format!(
@@ -62,7 +65,7 @@ impl Seat {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("calls.log");
         let stub = dir.path().join("vissue");
-        std::fs::write(
+        ljos_cli::install_executable(
             &stub,
             format!(
                 "#!/bin/sh\necho \"vissue $*\" >> '{log}'\ncase \"$1\" in\n  identity) printf '%s\\n' {identity} ;;\n  create) echo kiln-ab12 ;;\nesac\nexit 0\n",
@@ -71,7 +74,6 @@ impl Seat {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
         let home = dir.path().join("home");
         std::fs::create_dir_all(home.join("run")).unwrap();
         Self { dir }
@@ -84,7 +86,11 @@ impl Seat {
             self.dir.path().display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
             .env("PATH", &path)
@@ -97,7 +103,7 @@ impl Seat {
             .env("PACKSET_URL", "off")
             .current_dir(self.dir.path())
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 
@@ -126,6 +132,10 @@ fn file_top_without_a_seat_project_names_p() {
 
 #[test]
 fn sitting_plan_accepts_top() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["sitting", "--help"])
         .env_clear()

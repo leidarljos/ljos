@@ -1,5 +1,10 @@
 //! `scripts/install.sh` on a fresh home, from a directory of programs.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -18,15 +23,12 @@ const PROGRAMS: [&str; 11] = [
     "ljos-consensus",
 ];
 
-const PATH_LINE: &str = "export PATH=\"$HOME/.local/bin:$PATH\"";
 const MARK: &str = "# Added by the ljos installer: its programs on PATH.";
 const SOURCE_CMD: &str = "cargo install --locked ljos packset vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus";
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn install_sh() -> PathBuf {
@@ -53,10 +55,22 @@ fn said(out: &Output) -> String {
     )
 }
 
+fn posix_word(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+fn path_line(home: &Path) -> String {
+    format!("export PATH={}:$PATH", posix_word(&home.join(".local/bin")))
+}
+
 /// Install the stand-ins in `progs` into `home`'s `~/.local/bin`, with
 /// `path` as the caller's PATH.
 fn install(home: &Path, progs: &Path, path: &str, extra: &[&str]) -> String {
     std::fs::create_dir_all(home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(install_sh())
         .arg("--from-dir")
@@ -99,6 +113,10 @@ fn print_assets_uses_the_release_pin_unless_latest() {
         pinned.push((name.to_string(), ver.to_string()));
     }
     assert!(!pinned.is_empty());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(install_sh())
         .args([
@@ -125,6 +143,10 @@ fn print_assets_uses_the_release_pin_unless_latest() {
             "{text}\nmissing {asset}"
         );
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let latest = Command::new("sh")
         .arg(install_sh())
         .args([
@@ -174,26 +196,31 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
 
     let home = dir.path().join("zsh-user");
     std::fs::create_dir_all(&home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(home.join(".zshrc"), "# mine\n").unwrap();
     let first = install(&home, &progs, "/usr/bin:/bin", &["--modify-path"]);
+    let expected_path = path_line(&home);
     assert!(
         first.contains("to PATH in ~/.profile ~/.bashrc ~/.zshrc"),
         "{first}"
     );
-    assert!(first.contains(PATH_LINE), "{first}");
+    assert!(first.contains(&expected_path), "{first}");
     let again = install(&home, &progs, "/usr/bin:/bin", &["--modify-path"]);
     assert!(again.contains("already add"), "{again}");
     for rc in [".profile", ".bashrc", ".zshrc"] {
         let text = read(&home.join(rc));
         assert_eq!(text.matches(MARK).count(), 1, "{rc}:\n{text}");
-        assert_eq!(text.matches(PATH_LINE).count(), 1, "{rc}:\n{text}");
+        assert_eq!(text.matches(&expected_path).count(), 1, "{rc}:\n{text}");
     }
     assert!(read(&home.join(".zshrc")).starts_with("# mine\n\n"));
     let bin = home.join(".local/bin");
     assert!(
         first.contains(&format!(
-            "Shell completion: run `{}/ljos completions --help`.",
-            bin.display()
+            "Shell completion:\n  bash, zsh, dash: {} completions --help",
+            posix_word(&bin.join("ljos"))
         )),
         "{first}"
     );
@@ -207,6 +234,10 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
         "install wrote a completion line into ~/.bashrc:\n{}",
         read(&home.join(".bashrc"))
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let found = Command::new("sh")
         .args(["-c", ". \"$HOME/.profile\"; command -v ljos"])
         .env_clear()
@@ -223,7 +254,7 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
 
     let bash_only = dir.path().join("bash-user");
     install(&bash_only, &progs, "/usr/bin:/bin", &["--modify-path"]);
-    assert!(read(&bash_only.join(".bashrc")).contains(PATH_LINE));
+    assert!(read(&bash_only.join(".bashrc")).contains(&path_line(&bash_only)));
     assert!(
         !bash_only.join(".zshrc").exists(),
         "a home without ~/.zshrc got one"
@@ -232,9 +263,12 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
     let opted_out = dir.path().join("opted-out");
     let note = install(&opted_out, &progs, "/usr/bin:/bin", &["--no-modify-path"]);
     assert!(note.contains("not on PATH"), "{note}");
-    assert!(note.contains(PATH_LINE), "{note}");
+    let opted_out_path = path_line(&opted_out);
+    assert!(note.contains(&opted_out_path), "{note}");
     assert!(
-        note.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
+        note.contains(&format!(
+            "Next:\n  bash, zsh, dash: {opted_out_path} && ljos onboard"
+        )),
         "{note}"
     );
     assert!(!note.contains("&& ljos doctor"), "{note}");
@@ -245,7 +279,7 @@ fn install_puts_the_bin_dir_on_path_in_each_profile_once() {
     let on_path = dir.path().join("on-path");
     let path = format!("{}:/usr/bin:/bin", on_path.join(".local/bin").display());
     let quiet = install(&on_path, &progs, &path, &[]);
-    assert!(!quiet.contains(PATH_LINE), "{quiet}");
+    assert!(!quiet.contains(&path_line(&on_path)), "{quiet}");
     for rc in [".profile", ".bashrc"] {
         assert!(!on_path.join(rc).exists(), "a bin dir on PATH wrote {rc}");
     }
@@ -289,6 +323,10 @@ fn vissue_shim() {
         ["claim", id] => vissue_core::ops::claim(&layout(), id, false).unwrap(),
         _ => panic!("the stand-in does not run vissue {args:?}"),
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(out, said).unwrap();
 }
 
@@ -309,6 +347,17 @@ fn on_path(name: &str) -> Option<PathBuf> {
             .map(|dir| dir.join(name))
             .find(|p| p.is_file())
     })
+}
+
+fn installer_shell(name: &str) -> Option<PathBuf> {
+    let found = on_path(name);
+    if found.is_none() && std::env::var("LJOS_TEST_REQUIRE_TOOLS").as_deref() == Ok("1") {
+        panic!("{name} is required for installer shell tests");
+    }
+    if found.is_none() {
+        eprintln!("skipped installer shell test: {name} is absent");
+    }
+    found
 }
 
 /// A fresh machine: a home with no coding tool in it, a PATH of system
@@ -336,6 +385,10 @@ impl Machine {
         // git does not stop at a ceiling spelled with `..`, and above this
         // one is the ljos checkout.
         let root = std::fs::canonicalize(&root).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join("home/.gitconfig"),
             "[user]\n\tname = demo\n\temail = demo@example.invalid\n[commit]\n\tgpgsign = false\n",
@@ -347,6 +400,10 @@ impl Machine {
                 .map(|dir| Path::new(dir).join(name))
                 .find(|p| p.is_file());
             if let Some(found) = found {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "links a path that is not a git hook"
+                )]
                 std::os::unix::fs::symlink(found, root.join("sys").join(name)).unwrap();
             }
         }
@@ -373,6 +430,10 @@ impl Machine {
             Some(bin) => format!("{}:{}", bin.display(), sys.display()),
             None => sys.display().to_string(),
         };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(program);
         cmd.current_dir(self.home())
             .env_clear()
@@ -423,6 +484,10 @@ fn no_embed_leaves_the_encoder_out_and_the_default_still_installs_it() {
 
     let full = dir.path().join("full");
     std::fs::create_dir_all(&full).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(install_sh())
         .arg("--from-dir")
@@ -443,6 +508,966 @@ fn no_embed_leaves_the_encoder_out_and_the_default_still_installs_it() {
     );
     assert!(!said.contains("The encoder is not installed."), "{said}");
     assert!(said.contains("Encoder model ready."), "{said}");
+}
+
+#[test]
+fn command_paths_with_spaces_are_shell_quoted() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("home with a space");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .args(["--no-embed", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("TMPDIR", dir.path())
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains(
+            "Setting up the ticket tracker and deed store; memory is off in this temporary home."
+        ),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Setting up the ticket tracker, memory writer, and deed store."),
+        "{text}"
+    );
+    let binary = home.join(".local/bin/ljos");
+    assert!(
+        text.contains(&format!(
+            "Command guard:\n  bash, zsh, dash: '{}' policy --help",
+            binary.display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "Shell completion:\n  bash, zsh, dash: '{}' completions --help",
+            binary.display()
+        )),
+        "{text}"
+    );
+    for (shell, args, prefix) in [
+        (
+            "bash",
+            &["--noprofile", "--norc", "-c"][..],
+            "  bash (~/.bashrc): ",
+        ),
+        ("zsh", &["-f", "-c"][..], "  zsh (~/.zshrc): "),
+        (
+            "fish",
+            &["--no-config", "-c"][..],
+            "  fish (~/.config/fish/config.fish): ",
+        ),
+    ] {
+        let Some(shell_path) = installer_shell(shell) else {
+            continue;
+        };
+        let line = text
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .unwrap_or_else(|| panic!("{prefix} missing:\n{text}"));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        let ran = Command::new(&shell_path)
+            .args(args)
+            .arg(format!("{line}\nljos --version"))
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert!(
+            ran.status.success(),
+            "{} refused {line:?}\nstdout:\n{}\nstderr:\n{}",
+            shell_path.display(),
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+
+    let absolute = dir.path().join("absolute bin");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(&absolute)
+        .args(["--no-embed", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains(&format!("fish_add_path --path '{}'", absolute.display())),
+        "{text}"
+    );
+}
+
+#[test]
+fn printed_path_lines_preserve_shell_metacharacters() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    let plain_home = dir.path().join("home");
+    let cases = [
+        (
+            "space",
+            plain_home.clone(),
+            Some(dir.path().join("bin dir")),
+            true,
+        ),
+        (
+            "double quote",
+            plain_home.clone(),
+            Some(dir.path().join("bin\"quote")),
+            true,
+        ),
+        (
+            "command substitution",
+            plain_home.clone(),
+            Some(dir.path().join("bin$(printf bad)")),
+            true,
+        ),
+        (
+            "backticks",
+            plain_home.clone(),
+            Some(dir.path().join("bin`printf bad`")),
+            true,
+        ),
+        (
+            "unicode",
+            plain_home.clone(),
+            Some(dir.path().join("bin-λ")),
+            true,
+        ),
+        (
+            "leading dash",
+            plain_home.clone(),
+            Some(dir.path().join("-bin")),
+            true,
+        ),
+        (
+            "glob characters",
+            plain_home.clone(),
+            Some(dir.path().join("bin[*?]")),
+            true,
+        ),
+        (
+            "backslash",
+            plain_home.clone(),
+            Some(dir.path().join("bin\\back\\")),
+            true,
+        ),
+        (
+            "apostrophe",
+            plain_home.clone(),
+            Some(dir.path().join("bin'quote")),
+            true,
+        ),
+        (
+            "default dir",
+            dir.path().join("home with a ' quote"),
+            None,
+            true,
+        ),
+        (
+            "colon",
+            plain_home.clone(),
+            Some(dir.path().join("bin:split")),
+            false,
+        ),
+    ];
+
+    for (case, home, named_bin, allowed) in cases {
+        let bin = named_bin.clone().unwrap_or_else(|| home.join(".local/bin"));
+        std::fs::create_dir_all(&home).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        let mut install = Command::new("sh");
+        install
+            .arg(install_sh())
+            .arg("--from-dir")
+            .arg(&progs)
+            .args(["--no-embed", "--no-modify-path"]);
+        if let Some(path) = &named_bin {
+            install.arg("--bin-dir").arg(path);
+        }
+        let out = install
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        let text = said(&out);
+        if !allowed {
+            assert!(!out.status.success(), "{case}:\n{text}");
+            assert_eq!(
+                text, "install.sh: bin directory contains ':'\n",
+                "{case}:\n{text}"
+            );
+            continue;
+        }
+        assert!(out.status.success(), "{case}:\n{text}");
+
+        for (shell, args, profile_prefix, family_prefix) in [
+            (
+                "bash",
+                &["--noprofile", "--norc", "-c"][..],
+                "  bash (~/.bashrc): ",
+                "  bash, zsh, dash: ",
+            ),
+            (
+                "zsh",
+                &["-f", "-c"][..],
+                "  zsh (~/.zshrc): ",
+                "  bash, zsh, dash: ",
+            ),
+            (
+                "fish",
+                &["--no-config", "-c"][..],
+                "  fish (~/.config/fish/config.fish): ",
+                "  fish: ",
+            ),
+            (
+                "dash",
+                &["-c"][..],
+                "  dash (~/.profile): ",
+                "  bash, zsh, dash: ",
+            ),
+        ] {
+            let Some(shell_path) = installer_shell(shell) else {
+                continue;
+            };
+            let profile = text
+                .lines()
+                .find_map(|line| line.strip_prefix(profile_prefix))
+                .unwrap_or_else(|| panic!("{case}: {profile_prefix} missing:\n{text}"));
+            let commands = std::iter::once(profile)
+                .chain(
+                    text.lines()
+                        .filter_map(|line| line.strip_prefix(family_prefix)),
+                )
+                .collect::<Vec<_>>();
+            for line in commands {
+                let sets_path = line.contains("export PATH=") || line.contains("fish_add_path");
+                let command = if sets_path {
+                    format!("{line}\ncommand -v ljos")
+                } else {
+                    line.to_string()
+                };
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "starts a program outside git hook code"
+                )]
+                let ran = Command::new(&shell_path)
+                    .args(args)
+                    .arg(command)
+                    .env_clear()
+                    .env("HOME", &home)
+                    .env("PATH", "/usr/bin:/bin")
+                    .output()
+                    .unwrap();
+                assert!(
+                    ran.status.success(),
+                    "{case}: {shell} refused {line:?}\n{}",
+                    said(&ran)
+                );
+                if sets_path {
+                    assert_eq!(
+                        String::from_utf8_lossy(&ran.stdout).trim(),
+                        bin.join("ljos").display().to_string(),
+                        "{case}: {shell} ran {line:?}\n{}",
+                        said(&ran)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fish_command_hints_preserve_quotes_and_backslashes() {
+    let Some(fish) = installer_shell("fish") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    for (case, bin) in [
+        ("apostrophe", dir.path().join("bin'quote")),
+        ("backslash", dir.path().join("bin\\back\\")),
+    ] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        let out = Command::new("sh")
+            .arg(install_sh())
+            .arg("--from-dir")
+            .arg(&progs)
+            .arg("--bin-dir")
+            .arg(&bin)
+            .args(["--no-embed", "--no-modify-path"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        let text = said(&out);
+        assert!(out.status.success(), "{case}:\n{text}");
+
+        for heading in ["Command guard:", "Shell completion:"] {
+            let line = text
+                .lines()
+                .skip_while(|line| *line != heading)
+                .skip(1)
+                .find_map(|line| line.strip_prefix("  fish: "))
+                .unwrap_or_else(|| panic!("{case}: {heading} fish line missing:\n{text}"));
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
+            let ran = Command::new(&fish)
+                .args(["--no-config", "-c", line])
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", "/usr/bin:/bin")
+                .output()
+                .unwrap();
+            assert!(
+                ran.status.success(),
+                "{case}: fish refused {line:?}\n{}",
+                said(&ran)
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_command_hints_do_not_repeat_a_fish_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("home");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(&bin)
+        .args(["--no-embed", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    for heading in ["Command guard:", "Shell completion:"] {
+        let rows = text
+            .lines()
+            .skip_while(|line| *line != heading)
+            .skip(1)
+            .take_while(|line| line.starts_with("  "))
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1, "{heading}\n{text}");
+        assert!(rows[0].starts_with("  bash, zsh, dash:"), "{text}");
+    }
+}
+
+#[test]
+fn required_installer_shells_are_not_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for shell in ["sh", "bash"] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
+        std::os::unix::fs::symlink(
+            on_path(shell).unwrap_or_else(|| panic!("{shell} is not on PATH")),
+            bin.join(shell),
+        )
+        .unwrap();
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let out = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("printed_path_lines_preserve_shell_metacharacters")
+        .arg("--nocapture")
+        .env("LJOS_TEST_REQUIRE_TOOLS", "1")
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(
+        text.contains("zsh is required for installer shell tests"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_newline_in_bin_dir_is_refused_before_installing() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let bin = dir.path().join("line\nbreak");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(&bin)
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", dir.path().join("home"))
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert_eq!(
+        text, "install.sh: bin directory contains a newline\n",
+        "{text}"
+    );
+    assert!(!bin.exists(), "{text}");
+}
+
+#[test]
+fn a_missing_home_is_created_before_it_is_resolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("missing-home");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(&bin)
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(home.join(".local/state/ljos").is_dir(), "{text}");
+    assert!(bin.join("ljos").is_file(), "{text}");
+}
+
+#[test]
+fn a_bad_home_is_refused_before_programs_are_copied() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home_parent = dir.path().join("not-a-directory");
+    let home = home_parent.join("home");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&progs).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(&home_parent, "file").unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(&bin)
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert_eq!(
+        text,
+        format!(
+            "install.sh: could not create HOME {}. Check that its parent is writable and run `sh install.sh` again.\n",
+            home.display()
+        ),
+        "{text}"
+    );
+    for name in PROGRAMS {
+        assert!(!bin.join(name).exists(), "{name} was copied:\n{text}");
+    }
+}
+
+#[test]
+fn a_symlinked_tmpdir_keeps_temporary_home_memory_off() {
+    let target_parent = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
+    std::fs::create_dir_all(&target_parent).unwrap();
+    let target = tempfile::tempdir_in(target_parent).unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let tmp_link = links.path().join("tmp-link");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
+    std::os::unix::fs::symlink(target.path(), &tmp_link).unwrap();
+    let home = tmp_link.join("home");
+    let progs = target.path().join("progs");
+    let bin = target.path().join("bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(&bin)
+        .args(["--no-embed", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("TMPDIR", &tmp_link)
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains(
+            "Setting up the ticket tracker and deed store; memory is off in this temporary home."
+        ),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Setting up the ticket tracker, memory writer, and deed store."),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_colon_in_a_path_entry_is_refused_before_installing() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    std::fs::create_dir_all(&progs).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    for (case, home, bin) in [
+        (
+            "bin directory",
+            dir.path().join("home"),
+            Some(dir.path().join("bin:split")),
+        ),
+        ("HOME", dir.path().join("home:split"), None),
+    ] {
+        std::fs::create_dir_all(&home).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        let mut install = Command::new("sh");
+        install
+            .arg(install_sh())
+            .arg("--from-dir")
+            .arg(&progs)
+            .args(["--no-embed", "--no-onboard", "--no-modify-path"]);
+        if let Some(path) = &bin {
+            install.arg("--bin-dir").arg(path);
+        }
+        let out = install
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        let text = said(&out);
+        assert!(!out.status.success(), "{case}:\n{text}");
+        let extra = if case == "HOME" {
+            ". Pass --bin-dir DIR to install outside HOME."
+        } else {
+            ""
+        };
+        assert_eq!(
+            text,
+            format!("install.sh: {case} contains ':'{extra}\n"),
+            "{case}:\n{text}"
+        );
+        let path = bin.unwrap_or_else(|| home.join(".local/bin"));
+        assert!(!path.exists(), "{case} was installed:\n{text}");
+    }
+}
+
+#[test]
+fn a_resolved_bin_dir_is_validated_before_installing() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    for (case, target_name, expected) in [
+        (
+            "colon",
+            "bin:split-target",
+            "install.sh: bin directory contains ':'\n",
+        ),
+        (
+            "newline",
+            "bin\nsplit-target",
+            "install.sh: bin directory contains a newline\n",
+        ),
+    ] {
+        let target = dir.path().join(target_name);
+        let link = dir.path().join(format!("safe-{case}"));
+        std::fs::create_dir_all(&target).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        let out = Command::new("sh")
+            .arg(install_sh())
+            .arg("--from-dir")
+            .arg(&progs)
+            .arg("--bin-dir")
+            .arg(&link)
+            .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        let text = said(&out);
+        assert!(!out.status.success(), "{case}:\n{text}");
+        assert_eq!(text, expected, "{case}:\n{text}");
+        for name in PROGRAMS {
+            assert!(
+                !target.join(name).exists(),
+                "{case}: {name} was installed:\n{text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_named_pack_in_a_temporary_home_keeps_its_own_memory_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    for packset_url in ["off", "http://127.0.0.1:9876"] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        let out = Command::new("sh")
+            .arg(install_sh())
+            .arg("--from-dir")
+            .arg(&progs)
+            .args(["--no-embed", "--no-modify-path"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("TMPDIR", dir.path())
+            .env("PACKSET_URL", packset_url)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        let text = said(&out);
+        assert!(out.status.success(), "{packset_url}:\n{text}");
+        if packset_url == "off" {
+            assert!(
+                text.contains(
+                    "Setting up the ticket tracker and deed store; memory is off because \
+                     PACKSET_URL is off."
+                ),
+                "{text}"
+            );
+        }
+        assert!(
+            text.contains("the command guard is off because the home is under"),
+            "{packset_url}:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn a_writer_port_in_a_temporary_home_keeps_memory_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    for port_var in ["PACKSET_PORT", "LJOS_MEM_PORT"] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        let out = Command::new("sh")
+            .arg(install_sh())
+            .arg("--from-dir")
+            .arg(&progs)
+            .args(["--no-embed", "--no-modify-path"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("TMPDIR", dir.path())
+            .env(port_var, "9876")
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        let text = said(&out);
+        assert!(out.status.success(), "{port_var}:\n{text}");
+        assert!(
+            !text.contains("memory and the command guard are off"),
+            "{port_var}:\n{text}"
+        );
+        assert!(
+            text.contains("the command guard is off because the home is under"),
+            "{port_var}:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn a_blank_packset_port_hides_ljos_mem_port_under_a_temporary_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .args(["--no-embed", "--no-modify-path"])
+        .env_clear()
+        .env("HOME", &home)
+        .env("TMPDIR", dir.path())
+        .env("PACKSET_PORT", " ")
+        .env("LJOS_MEM_PORT", "9876")
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("memory and the command guard are off"),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_empty_bin_dir_is_refused_before_installing() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg("")
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .current_dir(&work)
+        .env_clear()
+        .env("HOME", dir.path().join("home"))
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert_eq!(text, "install.sh: bin directory is empty\n", "{text}");
+    for name in PROGRAMS {
+        assert!(!work.join(name).exists(), "{name} was installed:\n{text}");
+    }
+}
+
+#[test]
+fn a_blank_bin_dir_is_refused_before_installing() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg(" ")
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .current_dir(&work)
+        .env_clear()
+        .env("HOME", dir.path().join("home"))
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert_eq!(text, "install.sh: bin directory is blank\n", "{text}");
+    assert!(!work.join(" ").exists(), "{text}");
+}
+
+#[test]
+fn a_relative_bin_dir_is_normalized_before_the_path_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let work = dir.path().join("work");
+    let bin = dir.path().join("onp");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in PROGRAMS {
+        script(&progs, name, "#!/bin/sh\nexit 0\n");
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let out = Command::new("sh")
+        .arg(install_sh())
+        .arg("--from-dir")
+        .arg(&progs)
+        .arg("--bin-dir")
+        .arg("../onp")
+        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+        .current_dir(&work)
+        .env_clear()
+        .env("HOME", dir.path().join("home"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(!text.contains("is not on PATH"), "{text}");
+    assert!(!text.contains("../onp"), "{text}");
+    assert!(bin.join("ljos").is_file(), "{text}");
 }
 
 /// With no coding tool on the machine, install.sh still runs `ljos onboard`
@@ -468,6 +1493,10 @@ fn install_with_no_coding_tool_leaves_a_seat_a_sitting_opens_on() {
         ("packset", packset),
         ("packsetd", packsetd),
     ] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(real, progs.join(name)).unwrap();
     }
     let calls = machine.root.join("calls.log");
@@ -535,15 +1564,15 @@ fn install_with_no_coding_tool_leaves_a_seat_a_sitting_opens_on() {
     let bin = machine.bin();
     assert!(
         installed.contains(&format!(
-            "Command guard: run `{}/ljos policy --help`.",
-            bin.display()
+            "Command guard:\n  bash, zsh, dash: {} policy --help",
+            posix_word(&bin.join("ljos"))
         )),
         "{installed}"
     );
     assert!(
         installed.contains(&format!(
-            "Shell completion: run `{}/ljos completions --help`.",
-            bin.display()
+            "Shell completion:\n  bash, zsh, dash: {} completions --help",
+            posix_word(&bin.join("ljos"))
         )),
         "{installed}"
     );
@@ -570,6 +1599,10 @@ fn install_with_no_coding_tool_leaves_a_seat_a_sitting_opens_on() {
 
     let board = tracker.join("Software/demo/issues.org");
     std::fs::create_dir_all(board.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         &board,
         "#+TITLE: demo issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
@@ -619,14 +1652,18 @@ fn install_with_no_coding_tool_leaves_a_seat_a_sitting_opens_on() {
 
 fn run_install(home: &Path, path: &str, extra: &[&str]) -> Output {
     std::fs::create_dir_all(home).unwrap();
-    Command::new("sh")
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new("sh")
         .arg(install_sh())
         .args(extra)
         .env_clear()
         .env("HOME", home)
         .env("PATH", path)
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 /// curl exits before any byte arrives. The script names that and the retry.
@@ -713,6 +1750,10 @@ fn an_unsupported_os_names_the_machine_and_wsl() {
     let home = dir.path().join("home");
     let path = format!("{}:/usr/bin:/bin", bin.display());
     std::fs::create_dir_all(&home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("dash")
         .arg(install_sh())
         .args(["--no-embed", "--no-onboard"])
@@ -774,6 +1815,10 @@ fn a_missing_tar_names_the_install_command() {
         for root in ["/usr/bin", "/bin"] {
             let found = Path::new(root).join(name);
             if found.is_file() {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "links a path that is not a git hook"
+                )]
                 std::os::unix::fs::symlink(&found, sys.join(name)).unwrap();
                 break;
             }
@@ -807,6 +1852,10 @@ fn a_missing_curl_names_how_to_install_one() {
         for root in ["/usr/bin", "/bin"] {
             let found = Path::new(root).join(name);
             if found.is_file() {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "links a path that is not a git hook"
+                )]
                 std::os::unix::fs::symlink(&found, sys.join(name)).unwrap();
                 break;
             }
@@ -877,6 +1926,10 @@ fn the_final_screen_keeps_optional_help_short() {
     );
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(install_sh())
         .arg("--from-dir")
@@ -898,15 +1951,15 @@ fn the_final_screen_keeps_optional_help_short() {
     let bin = home.join(".local/bin");
     assert!(
         text.contains(&format!(
-            "Command guard: run `{}/ljos policy --help`.",
-            bin.display()
+            "Command guard:\n  bash, zsh, dash: {} policy --help",
+            posix_word(&bin.join("ljos"))
         )),
         "{text}"
     );
     assert!(
         text.contains(&format!(
-            "Shell completion: run `{}/ljos completions --help`.",
-            bin.display()
+            "Shell completion:\n  bash, zsh, dash: {} completions --help",
+            posix_word(&bin.join("ljos"))
         )),
         "{text}"
     );
@@ -919,6 +1972,10 @@ fn the_final_screen_keeps_optional_help_short() {
     assert!(!text.contains("powershell:"), "{text}");
 
     let skipped = dir.path().join("skipped");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let quiet = Command::new("sh")
         .arg(install_sh())
         .arg("--from-dir")
@@ -934,8 +1991,11 @@ fn the_final_screen_keeps_optional_help_short() {
     let quiet_text = said(&quiet);
     assert!(quiet.status.success(), "{quiet_text}");
     assert!(!quiet_text.contains("Command guard:"), "{quiet_text}");
+    let skipped_path = path_line(&skipped);
     assert!(
-        quiet_text.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
+        quiet_text.contains(&format!(
+            "Next:\n  bash, zsh, dash: {skipped_path} && ljos onboard"
+        )),
         "{quiet_text}"
     );
 }
@@ -963,6 +2023,10 @@ fn an_older_ljos_earlier_on_path_is_named() {
     let home = dir.path().join("home");
     let bin = home.join(".local/bin");
     let path = format!("{}:{}:/usr/bin:/bin", old.display(), bin.display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(install_sh())
         .arg("--from-dir")
@@ -981,9 +2045,12 @@ fn an_older_ljos_earlier_on_path_is_named() {
         "{text}"
     );
     assert!(text.contains("Put the new install first"), "{text}");
-    assert!(text.contains(PATH_LINE), "{text}");
+    let expected_path = path_line(&home);
+    assert!(text.contains(&expected_path), "{text}");
     assert!(
-        text.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
+        text.contains(&format!(
+            "Next:\n  bash, zsh, dash: {expected_path} && ljos onboard"
+        )),
         "{text}"
     );
     assert!(!text.contains("&& ljos doctor"), "{text}");
@@ -1047,8 +2114,11 @@ fn the_next_line_names_onboard_until_a_coding_tool_is_installed() {
     }
     let home = dir.path().join("home");
     let bare = install(&home, &progs, "/usr/bin:/bin", &["--no-modify-path"]);
+    let expected_path = path_line(&home);
     assert!(
-        bare.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
+        bare.contains(&format!(
+            "Next:\n  bash, zsh, dash: {expected_path} && ljos onboard"
+        )),
         "{bare}"
     );
     assert!(!bare.contains("&& ljos doctor"), "{bare}");
@@ -1071,6 +2141,10 @@ fn the_next_line_names_onboard_until_a_coding_tool_is_installed() {
 
     let with = dir.path().join("with-onboard");
     let with_bin = with.join(".local/bin");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(install_sh())
         .arg("--from-dir")
@@ -1108,6 +2182,10 @@ fn upgrading_over_a_running_mcp_server_names_the_pid() {
     let home = dir.path().join("home");
     let bin = home.join(".local/bin");
     let path = format!("{}:/usr/bin:/bin", bin.display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let first = Command::new("sh")
         .arg(install_sh())
         .arg("--from-dir")
@@ -1124,13 +2202,21 @@ fn upgrading_over_a_running_mcp_server_names_the_pid() {
         .map(PathBuf::from)
         .find(|p| p.is_file())
         .unwrap();
-    std::fs::copy(&sleep, bin.join("ljos-mcp")).unwrap();
+    ljos_cli::copy_executable(&sleep, &bin.join("ljos-mcp")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(bin.join("ljos-mcp"))
         .arg("60")
         .stdin(std::process::Stdio::null())
         .spawn()
         .unwrap();
     let pid = child.id();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let second = Command::new("sh")
         .arg(install_sh())
         .arg("--from-dir")
@@ -1159,6 +2245,10 @@ fn link_tools(dir: &Path, names: &[&str]) {
         for root in ["/usr/bin", "/bin"] {
             let found = Path::new(root).join(name);
             if found.is_file() {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "links a path that is not a git hook"
+                )]
                 std::os::unix::fs::symlink(&found, dir.join(name)).unwrap();
                 break;
             }
@@ -1169,7 +2259,15 @@ fn link_tools(dir: &Path, names: &[&str]) {
 fn sha256_file(bytes: &[u8]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("body");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&file, bytes).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sha256sum").arg(&file).output().unwrap();
     assert!(out.status.success(), "{}", said(&out));
     String::from_utf8_lossy(&out.stdout)
@@ -1216,10 +2314,7 @@ fn a_bin_dir_that_is_not_writable_names_bin_dir() {
     let home = dir.path().join("home");
     let locked = dir.path().join("locked");
     std::fs::create_dir_all(&locked).unwrap();
-    let mut perms = std::fs::metadata(&locked).unwrap().permissions();
-    use std::os::unix::fs::PermissionsExt;
-    perms.set_mode(0o555);
-    std::fs::set_permissions(&locked, perms).unwrap();
+    ljos_cli::change_mode(&locked, 0o555).unwrap();
     let out = run_install(
         &home,
         "/usr/bin:/bin",
@@ -1252,12 +2347,19 @@ fn bin_dir_off_path_names_each_shell_and_does_not_edit_profiles() {
     let text = install(&home, &progs, "/usr/bin:/bin", &[]);
     assert!(text.contains("bash (~/.bashrc):"), "{text}");
     assert!(text.contains("zsh (~/.zshrc):"), "{text}");
+    assert!(text.contains("dash (~/.profile):"), "{text}");
     assert!(
         text.contains("fish (~/.config/fish/config.fish):"),
         "{text}"
     );
-    assert!(text.contains(PATH_LINE), "{text}");
-    assert!(text.contains("fish_add_path $HOME/.local/bin"), "{text}");
+    assert!(text.contains(&path_line(&home)), "{text}");
+    assert!(
+        text.contains(&format!(
+            "fish_add_path --path '{}'",
+            home.join(".local/bin").display()
+        )),
+        "{text}"
+    );
     assert!(text.contains("does not edit that file"), "{text}");
     for rc in [".profile", ".bashrc", ".zshrc", ".config/fish/config.fish"] {
         assert!(!home.join(rc).exists(), "{rc} was written");
@@ -1289,6 +2391,10 @@ fn an_older_install_names_both_versions() {
             "#!/bin/sh\nif [ \"$1\" = --version ]; then echo ljos 0.2.0; fi\nexit 0\n",
         );
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let first = Command::new("sh")
         .arg(install_sh())
         .arg("--from-dir")
@@ -1300,6 +2406,10 @@ fn an_older_install_names_both_versions() {
         .output()
         .unwrap();
     assert!(first.status.success(), "{}", said(&first));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let second = Command::new("sh")
         .arg(install_sh())
         .arg("--from-dir")
@@ -1390,6 +2500,10 @@ fn a_checksum_mismatch_removes_the_partial_file_and_says_to_rerun() {
     let home = dir.path().join("home");
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let asset = "ljos-v0.0.1-x86_64-unknown-linux-gnu.tar.gz";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(install_sh())
         .args([
@@ -1437,6 +2551,10 @@ fn a_truncated_download_removes_the_partial_file_and_says_to_rerun() {
     let home = dir.path().join("home");
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let asset = "ljos-v0.0.1-x86_64-unknown-linux-gnu.tar.gz";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(install_sh())
         .args([
@@ -1486,6 +2604,10 @@ fn a_source_build_is_announced_on_one_line_per_crate() {
     let cargo_log = dir.path().join("cargo.log");
     let home = dir.path().join("home");
     let path = format!("{}:/usr/bin:/bin", bin.display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(install_sh())
         .args([
@@ -1539,6 +2661,10 @@ fn a_pinned_version_with_no_release_says_how_to_list_versions() {
     let cargo_log = dir.path().join("cargo.log");
     let home = dir.path().join("home");
     let path = format!("{}:/usr/bin:/bin", bin.display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(install_sh())
         .args([
@@ -1591,6 +2717,10 @@ fn a_bare_tag_without_a_release_does_not_start_a_source_build() {
     let curl_log = dir.path().join("curl.log");
     let home = dir.path().join("home");
     let path = format!("{}:/usr/bin:/bin", bin.display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(install_sh())
         .args([
@@ -1661,6 +2791,10 @@ fn a_default_pin_installs_its_release_archive() {
             script(&top, bin, body);
         }
         let archive = assets.join(format!("{stem}-{target}.tar.gz"));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let packed = Command::new("tar")
             .arg("-czf")
             .arg(&archive)
@@ -1671,6 +2805,10 @@ fn a_default_pin_installs_its_release_archive() {
             .unwrap();
         assert!(packed.success(), "tar {stem}");
         let sum = format!("{}.sha256", archive.display());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&sum, sha256_of(&archive)).unwrap();
     }
     let bin = dir.path().join("bin");
@@ -1749,6 +2887,10 @@ exit 0
     let cargo_log = dir.path().join("cargo.log");
     let home = dir.path().join("home");
     let path = format!("{}:/usr/bin:/bin", bin.display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(install_sh())
         .args([
@@ -1790,6 +2932,10 @@ exit 0
     );
     let installed = home.join(".local/bin/vissue");
     assert!(installed.is_file(), "{text}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let ran = Command::new(&installed).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&ran.stdout).trim(), "from-latest");
 }
@@ -1804,6 +2950,10 @@ fn sha256_of(path: &Path) -> String {
             .next()
             .map(|word| format!("{word}\n"))
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     if let Some(line) = Command::new("sha256sum")
         .arg(path)
         .output()
@@ -1812,13 +2962,17 @@ fn sha256_of(path: &Path) -> String {
     {
         return line;
     }
-    Command::new("shasum")
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new("shasum")
         .args(["-a", "256"])
         .arg(path)
         .output()
         .ok()
         .and_then(hex)
-        .expect("sha256sum or shasum")
+        .expect("sha256sum or shasum");
 }
 
 /// The archive name is on stdout before curl is asked for the body, and
@@ -1852,6 +3006,10 @@ fn the_archive_name_is_printed_before_the_download() {
             script(&top, name, "#!/bin/sh\nexit 0\n");
         }
         let archive = assets.join(format!("{stem}-{target}.tar.gz"));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let packed = Command::new("tar")
             .arg("-czf")
             .arg(&archive)
@@ -1861,6 +3019,10 @@ fn the_archive_name_is_printed_before_the_download() {
             .status()
             .unwrap();
         assert!(packed.success(), "tar {stem}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(format!("{}.sha256", archive.display()), sha256_of(&archive)).unwrap();
     }
     let bin = dir.path().join("bin");
@@ -1947,7 +3109,15 @@ exit 0
     );
     let home = dir.path().join("home");
     let err = dir.path().join("stderr.txt");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new("sh");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     cmd.arg(install_sh())
         .args([
             "--no-embed",
@@ -2046,6 +3216,10 @@ fn from_checkout_installs_ljos_and_the_sibling_tools() {
             script(&top, name, "#!/bin/sh\nexit 0\n");
         }
         let archive = assets.join(format!("{stem}-{target}.tar.gz"));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let packed = Command::new("tar")
             .arg("-czf")
             .arg(&archive)
@@ -2055,6 +3229,10 @@ fn from_checkout_installs_ljos_and_the_sibling_tools() {
             .status()
             .unwrap();
         assert!(packed.success(), "tar {stem}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(format!("{}.sha256", archive.display()), sha256_of(&archive)).unwrap();
     }
     let bin = dir.path().join("bin");
@@ -2117,6 +3295,10 @@ exit 0
 "#,
     );
     let home = dir.path().join("home");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(install_sh())
         .args([
@@ -2166,15 +3348,22 @@ exit 0
             "{name} was not installed:\n{text}"
         );
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let ran = Command::new(home.join(".local/bin/ljos")).output().unwrap();
     assert_eq!(
         String::from_utf8_lossy(&ran.stdout).trim(),
         "from-checkout",
         "{text}"
     );
-    assert!(text.contains(PATH_LINE), "{text}");
+    let expected_path = path_line(&home);
+    assert!(text.contains(&expected_path), "{text}");
     assert!(
-        text.contains("Next: export PATH=\"$HOME/.local/bin:$PATH\" && ljos onboard"),
+        text.contains(&format!(
+            "Next:\n  bash, zsh, dash: {expected_path} && ljos onboard"
+        )),
         "{text}"
     );
     assert!(!text.contains("&& ljos doctor"), "{text}");
@@ -2207,6 +3396,10 @@ fn a_missing_attestation_is_not_a_failed_check() {
             script(&top, bin, "#!/bin/sh\nexit 0\n");
         }
         let archive = assets.join(format!("{stem}-{target}.tar.gz"));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let packed = Command::new("tar")
             .arg("-czf")
             .arg(&archive)
@@ -2216,6 +3409,10 @@ fn a_missing_attestation_is_not_a_failed_check() {
             .status()
             .unwrap();
         assert!(packed.success(), "tar {stem}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(format!("{}.sha256", archive.display()), sha256_of(&archive)).unwrap();
     }
     let bin = dir.path().join("bin");
@@ -2295,6 +3492,10 @@ exit 1
     );
     let home = dir.path().join("home");
     let path = format!("{}:/usr/bin:/bin", bin.display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("sh")
         .arg(install_sh())
         .args([
@@ -2335,6 +3536,10 @@ exit 1
 
 #[test]
 fn install_sh_passes_shellcheck() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("shellcheck")
         .args(["-s", "sh"])
         .arg(install_sh())

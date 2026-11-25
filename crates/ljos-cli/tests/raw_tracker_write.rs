@@ -13,6 +13,10 @@ use std::process::{Command, Output, Stdio};
 /// `ljos ARGS` the way an agent runner's tool call runs it: a runner
 /// variable set and no controlling terminal, so no person is at it.
 fn as_agent(home: &Path, args: &[&str]) -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env("HOME", home)
@@ -64,7 +68,7 @@ fn a_raw_tracker_write_under_a_runner_warns_with_the_ljos_verb() {
         ),
         (
             "vissue cancel ljos-ab12",
-            "ljos finish ljos-ab12 --status cancelled",
+            "ljos finish ljos-ab12 --status cancelled --close",
         ),
         ("vissue claim ljos-ab12", "ljos sitting ljos-ab12"),
         ("vissue release ljos-ab12", "ljos release ljos-ab12"),
@@ -78,6 +82,10 @@ fn a_raw_tracker_write_under_a_runner_warns_with_the_ljos_verb() {
         (
             "VISSUE_AGENT=saddle vissue update ljos-ab12 -s done",
             "ljos finish ljos-ab12 --lesson \"...\"",
+        ),
+        (
+            "vissue update ljos-ab12 -s cancelled",
+            "ljos finish ljos-ab12 --status cancelled --close",
         ),
         (
             "vissue update ljos-ab12 -s STARTED",
@@ -96,9 +104,11 @@ fn a_raw_tracker_write_under_a_runner_warns_with_the_ljos_verb() {
         if instead.starts_with("ljos finish") {
             assert!(
                 said.contains(&format!("so run `{instead}`.")),
-                "{line} still offers a close:\n{said}"
+                "{line} named more than the finish:\n{said}"
             );
-            assert!(!said.contains("--close"), "{line}:\n{said}");
+            if !instead.contains("--close") {
+                assert!(!said.contains("--close"), "{line}:\n{said}");
+            }
         }
     }
 }
@@ -239,18 +249,16 @@ fn an_ordinary_interpreter_under_a_runner_stays_allowed() {
 /// so a runner that may not run `vissue note` still notes through ljos.
 #[test]
 fn the_vissue_children_ljos_runs_are_not_refused() {
-    use std::os::unix::fs::PermissionsExt;
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let log = home.path().join("vissue.log");
     let stub = bin.join("vissue");
-    std::fs::write(
+    ljos_cli::install_executable(
         &stub,
         format!("#!/bin/sh\necho \"vissue $*\" >> '{}'\n", log.display()),
     )
     .unwrap();
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!(
         "{}:{}",
         bin.display(),
@@ -332,7 +340,7 @@ fn a_vissue_mcp_write_under_a_runner_warns() {
         (
             serde_json::json!({"id": "ljos-ab12"}),
             "mcp__vissue__vissue_cancel",
-            "ljos finish ljos-ab12 --status cancelled",
+            "ljos finish ljos-ab12 --status cancelled --close",
         ),
         (
             serde_json::json!({"id": "ljos-ab12"}),
@@ -376,7 +384,7 @@ fn a_vissue_mcp_write_under_a_runner_warns() {
             said.contains(instead),
             "{tool} did not name {instead}:\n{said}"
         );
-        if instead.starts_with("ljos finish") {
+        if instead.starts_with("ljos finish") && !instead.contains("--close") {
             assert!(!said.contains("--close"), "{tool}:\n{said}");
         }
     }

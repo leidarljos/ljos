@@ -14,12 +14,7 @@ fn write_exe(path: &Path, body: &str) {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).unwrap();
     }
-    std::fs::write(path, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 /// Habitat stubs. `vissue identity` prints `VISSUE_ROOT` when it is set.
@@ -59,6 +54,10 @@ esac\n",
     ] {
         let link = bin.join(name);
         let _ = std::fs::remove_file(&link);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink("habitat", &link).unwrap();
     }
 }
@@ -68,6 +67,10 @@ fn doctor(home: &Path, path: &str) -> (i32, String) {
 }
 
 fn doctor_args(home: &Path, path: &str, args: &[&str]) -> (i32, String) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(args)
         .env_clear()
@@ -143,6 +146,10 @@ fn doctor_all_names_landscape_and_its_source() {
 #[test]
 fn doctor_names_a_seat_someone_exported() {
     let (home, bin) = layout("named-seat");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("doctor")
         .env_clear()
@@ -180,6 +187,10 @@ fn doctor_names_an_unknown_host_left_by_the_last_write() {
     let seat = format!("unknown-{host}");
     let dir = home.join(".local/state/ljos");
     std::fs::create_dir_all(&dir).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         dir.join("seat-writes.log"),
         format!("2026-11-13T00:00:00Z\t{seat}\t{host}\n"),
@@ -200,9 +211,12 @@ fn doctor_fails_an_unwritable_tracker_and_names_chmod() {
     std::fs::create_dir_all(tracker.join("Software")).unwrap();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tracker, std::fs::Permissions::from_mode(0o555)).unwrap();
+        ljos_cli::change_mode(&tracker, 0o555).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("doctor")
         .env_clear()
@@ -240,8 +254,7 @@ fn doctor_fails_an_unwritable_tracker_and_names_chmod() {
     );
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tracker, std::fs::Permissions::from_mode(0o755));
+        let _ = ljos_cli::change_mode(&tracker, 0o755);
     }
 }
 
@@ -251,6 +264,10 @@ fn doctor_names_a_stale_tracker_config_and_mkdir() {
     let root = home.join("old-tracker");
     let cfg = home.join(".config/vissue");
     std::fs::create_dir_all(&cfg).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         cfg.join("config.toml"),
         format!("root = \"{}\"\n", root.display()),
@@ -273,6 +290,10 @@ fn doctor_names_the_install_when_a_habitat_binary_is_missing() {
     let _ = std::fs::remove_file(bin.join("deedar"));
     let tracker = home.join("tracker");
     std::fs::create_dir_all(tracker.join("Software")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["doctor", "--all"])
         .env_clear()
@@ -298,16 +319,112 @@ fn doctor_names_the_install_when_a_habitat_binary_is_missing() {
     );
     assert_eq!(out.status.code(), Some(1), "{text}");
     assert!(
-        text.contains("no\tdeedar\t")
-            && text.contains("so run `cargo install --locked deedar-cli`."),
+        text.contains(&format!(
+            "no\tdeedar\tnot on PATH, so run `{}`.\n",
+            ljos_cli::RELEASE_INSTALL_COMMAND
+        )),
         "{text}"
     );
     assert!(
-        text.contains(
-            "info\tdeeds\tdeedar not on PATH, so run `cargo install --locked deedar-cli`.\n"
+        text.contains(&format!(
+            "info\tdeeds\tdeedar not on PATH, so run `{}`.\n",
+            ljos_cli::RELEASE_INSTALL_COMMAND
+        )),
+        "{text}"
+    );
+}
+
+/// The troubleshooting page copies the missing-sibling rows doctor prints,
+/// so each names the release install. The memory row keeps its own line.
+#[test]
+fn the_troubleshooting_page_names_the_release_install_for_a_missing_sibling() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let install = format!("so run `{}`.", ljos_cli::RELEASE_INSTALL_COMMAND);
+    for rel in [
+        "docs/orgmode/howto-troubleshoot.org",
+        "docs/source/howto-troubleshoot.rst",
+    ] {
+        let body = std::fs::read_to_string(root.join(rel)).unwrap();
+        let rows: Vec<String> = body
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|line| line.contains(" not on PATH, "))
+            .filter(|line| {
+                [
+                    "packset",
+                    "packsetd",
+                    "deedar",
+                    "tickets",
+                    "claim graph",
+                    "deeds",
+                ]
+                .iter()
+                .any(|name| {
+                    line.starts_with(&format!("no {name} "))
+                        || line.starts_with(&format!("info {name} "))
+                })
+            })
+            .collect();
+        assert_eq!(rows.len(), 6, "{rel}: {rows:#?}");
+        for row in rows {
+            assert!(row.ends_with(&install), "{rel}: {row}");
+        }
+        for crate_name in ["deedar-cli", "vissue-cli", "claimdag-cli"] {
+            assert!(
+                !body.contains(&format!("cargo install --locked {crate_name}")),
+                "{rel} still names {crate_name}"
+            );
+        }
+        assert!(
+            body.contains("packset is not on PATH, so run `cargo install --locked packset`."),
+            "{rel}: the memory row"
+        );
+    }
+}
+
+/// The registry section names the install doctor prints for a missing
+/// packset while crates.io does not answer, not a crate install of it.
+#[test]
+fn the_troubleshooting_registry_section_names_the_release_install() {
+    let (home, bin) = layout("registry-packset");
+    let _ = std::fs::remove_file(bin.join("packset"));
+    let (_, text) = doctor(&home, &format!("{}:/usr/bin:/bin", bin.display()));
+    assert!(
+        text.contains("warn\tcrates.io\tdid not answer, so the version check was skipped\n"),
+        "{text}"
+    );
+    let printed = text
+        .lines()
+        .find_map(|line| line.strip_prefix("no\tpackset\t"))
+        .unwrap_or_else(|| panic!("no packset row:\n{text}"));
+    assert_eq!(
+        printed,
+        format!(
+            "not on PATH, so run `{}`.",
+            ljos_cli::RELEASE_INSTALL_COMMAND
         ),
         "{text}"
     );
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (rel, quote) in [
+        ("docs/orgmode/howto-troubleshoot.org", "="),
+        ("docs/source/howto-troubleshoot.rst", "``"),
+    ] {
+        let body = std::fs::read_to_string(root.join(rel)).unwrap();
+        let row = body
+            .lines()
+            .find(|line| line.starts_with("A missing binary then has no version in parentheses"))
+            .unwrap_or_else(|| panic!("{rel}: no registry row"));
+        assert_eq!(
+            row,
+            format!(
+                "A missing binary then has no version in parentheses: not on PATH, so run \
+                 {quote}{}{quote}.",
+                ljos_cli::RELEASE_INSTALL_COMMAND
+            ),
+            "{rel}"
+        );
+    }
 }
 
 #[test]
@@ -315,6 +432,10 @@ fn doctor_warns_when_crates_io_does_not_answer() {
     let (home, bin) = layout("net");
     let tracker = home.join("tracker");
     std::fs::create_dir_all(tracker.join("Software")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("doctor")
         .env_clear()
@@ -351,6 +472,10 @@ fn doctor_names_onboard_when_no_tracker_exists() {
     // vissue is gone, so the row is the missing binary, which already
     // names the install. Put vissue back and leave the root unset so
     // identity says the seat is not inside a tracker.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink("habitat", bin.join("vissue")).unwrap();
     let (code, text) = doctor(&home, &format!("{}:/usr/bin:/bin", bin.display()));
     assert_eq!(code, 1, "{text}");
@@ -375,6 +500,10 @@ fn doctor_names_onboard_when_no_tracker_exists() {
 fn doctor_says_no_tracker_yet_without_vissues_refusal() {
     let (home, bin) = layout("none-yet");
     let _ = std::fs::remove_file(bin.join("vissue"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a path that is not a git hook"
+    )]
     std::os::unix::fs::symlink("habitat", bin.join("vissue")).unwrap();
     let (_, text) = doctor(&home, &format!("{}:/usr/bin:/bin", bin.display()));
     let row = text

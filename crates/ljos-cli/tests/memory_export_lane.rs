@@ -12,6 +12,10 @@ fn run(
     sync_host: Option<&str>,
     args: &[&str],
 ) -> std::process::Output {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .current_dir(root)
@@ -58,6 +62,10 @@ fn seat_home() -> (tempfile::TempDir, std::path::PathBuf) {
         "machine": "cursor",
         "seat": "lane-seat",
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         kept.join("lane.json"),
         serde_json::to_vec_pretty(&row).unwrap(),
@@ -159,6 +167,10 @@ fn sync_host_names_the_export_and_as_machine_names_the_import() {
         said.starts_with("imported 1, unchanged 0, skipped 0\n"),
         "{said}"
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let digest = Command::new("sha256sum").arg(&out).output().unwrap();
     let digest = String::from_utf8(digest.stdout).unwrap();
     let import_id = digest.split_whitespace().next().unwrap().to_string();
@@ -195,13 +207,17 @@ fn an_onboarded_tracker_keeps_the_import() {
     std::fs::create_dir_all(home.path().join(".config/vissue")).unwrap();
     std::fs::create_dir_all(home.path().join(".local/state")).unwrap();
     std::fs::create_dir_all(home.path().join("tmp")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.path().join(".config/vissue/config.toml"),
         format!("root = \"{}\"\n", root.display()),
     )
     .unwrap();
     let file = home.path().join("lesson.jsonl");
-    std::fs::write(
+    #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
         &file,
         concat!(
             "{\"format\":\"ljos-memory-1\",\"record\":\"export\",\"machine\":\"desk\",\"seat\":\"alice\",\"exported_at\":\"2026-11-13T00:00:00Z\",\"exporter_revision\":\"0.41.11\"}\n",
@@ -209,6 +225,10 @@ fn an_onboarded_tracker_keeps_the_import() {
         ),
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let imported = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["memory", "import", file.to_str().unwrap()])
         .current_dir(home.path())
@@ -250,6 +270,10 @@ fn a_missing_import_names_export() {
     let home = tempfile::tempdir().expect("home");
     std::fs::create_dir_all(home.path().join("tmp")).unwrap();
     let missing = home.path().join("no-such.jsonl");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let imported = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["memory", "import", missing.to_str().unwrap()])
         .current_dir(home.path())
@@ -443,6 +467,10 @@ fn a_dead_share_stops_export_and_import_without_a_count() {
     let share = root.join("share");
     std::fs::create_dir(&share).unwrap();
     let out_path = share.join("lane.jsonl");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let exported = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["memory", "export", "--out", out_path.to_str().unwrap()])
         .current_dir(&root)
@@ -477,7 +505,15 @@ fn a_dead_share_stops_export_and_import_without_a_count() {
     assert!(!said.contains("exported "), "{said}");
     assert!(!out_path.exists());
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&out_path, "{}\n").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let imported = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["memory", "import", out_path.to_str().unwrap()])
         .current_dir(&root)

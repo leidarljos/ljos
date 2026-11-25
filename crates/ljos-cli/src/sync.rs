@@ -198,11 +198,7 @@ fn config_dir() -> PathBuf {
 /// This machine's ljos state. Paths below it are walked with
 /// [`open_dir_beneath`]; the directory itself may be a symlink.
 fn state_base() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos")
+    crate::state_base_dir()
 }
 
 #[cfg(test)]
@@ -543,10 +539,6 @@ const CHUNK_DROP: &str = "ljos_drop";
 /// into a snapshot instead of growing another segment.
 const MAX_CHUNKS: u32 = 64;
 
-/// Segments kept beside one snapshot. The next change past this folds them
-/// into a new snapshot. A normal sync does not fold before then.
-const SEGMENT_LIMIT: usize = 64;
-
 /// The key of a segment's first line. A segment holds the atoms added,
 /// changed or dropped since the snapshot, and the line names the host,
 /// the scope, the segment's number and the snapshot it applies over.
@@ -555,7 +547,7 @@ const SEG_HEADER: &str = "ljos_seg";
 
 thread_local! {
     /// Set for the `ljos sync --compact` call. A normal sync leaves it false,
-    /// so segments are not folded early.
+    /// so segments are never folded by a sync on its own.
     static SYNC_COMPACT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -651,8 +643,6 @@ struct LogView {
     body: String,
     /// Chunks applied, when the log is still a legacy base plus chunks.
     chunks_read: u32,
-    /// Segments applied after the snapshot.
-    segments_read: u32,
     /// Why the piece after the last one read was left unread, when one is
     /// there.
     stopped: Option<String>,
@@ -683,8 +673,9 @@ impl LogView {
 /// A chunk counts whole or not at all. One that does not open, names
 /// another host, scope, base or number, or holds a line that is neither
 /// an atom nor a drop ends the read, and the view is the base with the
-/// chunks before it. Export diffs against the same view, so its next
-/// chunk carries what the unread one held. With no chunk applied the body
+/// chunks before it. Export does not diff against a view that ended
+/// early, as what is new since the unread piece cannot be told. With no
+/// chunk applied the body
 /// is `base_body` as sealed, byte for byte.
 fn read_chunks(
     base_body: &str,
@@ -756,7 +747,6 @@ fn read_chunks(
     LogView {
         body,
         chunks_read,
-        segments_read: 0,
         stopped,
     }
 }
@@ -862,7 +852,15 @@ pub(crate) fn seal_to(plain: &str, recipients: &[String], out: &Path) -> Result<
         .map_or(0, |d| d.as_nanos());
     // Two seals into one directory each write their own temp file.
     let tmp = out.with_file_name(format!(".{name}.tmp-{}-{stamp}", std::process::id()));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     let wrote = (|| -> Result<()> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -932,10 +930,28 @@ pub(crate) fn open_dir_beneath(
     rel: &str,
     create: bool,
 ) -> Result<Option<std::fs::File>> {
+    open_dir_beneath_mode(root, rel, create, 0o777)
+}
+
+/// [`open_dir_beneath`], making a missing component with `mode`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "owns a descriptor this function opened, never stdout or stderr"
+)]
+fn open_dir_beneath_mode(
+    root: &Path,
+    rel: &str,
+    create: bool,
+    mode: libc::mode_t,
+) -> Result<Option<std::fs::File>> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::OpenOptionsExt;
     let flags =
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut dir = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
@@ -950,12 +966,16 @@ pub(crate) fn open_dir_beneath(
         walked.push(name);
         let cname = c_name(name)?;
         // SAFETY: dir is an open directory fd and cname is NUL-terminated.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let open =
             |dir: &std::fs::File| unsafe { libc::openat(dir.as_raw_fd(), cname.as_ptr(), flags) };
         let mut fd = open(&dir);
         if fd < 0 && create && last_errno() == Some(libc::ENOENT) {
             // SAFETY: as above; mkdirat makes one directory entry.
-            if unsafe { libc::mkdirat(dir.as_raw_fd(), cname.as_ptr(), 0o777) } < 0
+            if unsafe { libc::mkdirat(dir.as_raw_fd(), cname.as_ptr(), mode) } < 0
                 && last_errno() != Some(libc::EEXIST)
             {
                 return Err(std::io::Error::last_os_error())
@@ -1053,13 +1073,32 @@ thread_local! {
 /// with no symlink at any component. The directory is fsynced once the
 /// new name is in place.
 pub(crate) fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
+    write_beneath_mode(root, rel, bytes, false)
+}
+
+/// [`write_beneath`] for a file only this user may read: the file is
+/// 0600, and its directory is made or left 0700, as `age.key` is.
+fn write_private_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
+    write_beneath_mode(root, rel, bytes, true)
+}
+
+fn write_beneath_mode(root: &Path, rel: &str, bytes: &[u8], private: bool) -> Result<()> {
     use std::io::Write;
     use std::os::fd::AsRawFd;
     let _durable = crate::bookkeep::durable_write();
     let (parent, name) = split_rel(rel);
     std::fs::create_dir_all(root).with_context(|| format!("sync: {}", root.display()))?;
-    let dir = open_dir_beneath(root, parent, true)?
+    let (dir_mode, file_mode) = if private {
+        (0o700, 0o600)
+    } else {
+        (0o777, 0o666)
+    };
+    let dir = open_dir_beneath_mode(root, parent, true, dir_mode)?
         .with_context(|| format!("sync: {} was not made", root.join(parent).display()))?;
+    if private {
+        crate::change_mode_of(&dir, 0o700)
+            .with_context(|| format!("sync: {}", root.join(parent).display()))?;
+    }
     // The directory fd is what the write uses. A symlink swapped in for a
     // parent after this open is not followed.
     before_dir_write();
@@ -1080,12 +1119,16 @@ pub(crate) fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> 
         &ctmp,
         &shown,
         libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-        0o666,
+        file_mode,
     )
     .with_context(|| format!("sync: {}", shown.display()))?;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
     // SAFETY: as above. renameat replaces the entry and follows no link.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     let renamed = written.is_ok()
         && unsafe {
             libc::renameat(
@@ -1335,11 +1378,19 @@ fn age_compatible<'a>(age_name: &'a str, rage_name: &'a str) -> &'a str {
 }
 
 fn age_cmd() -> Command {
-    c_locale(Command::new(age_compatible("age", "rage")))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return c_locale(Command::new(age_compatible("age", "rage")));
 }
 
 fn keygen_cmd() -> Command {
-    c_locale(Command::new(age_compatible("age-keygen", "rage-keygen")))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return c_locale(Command::new(age_compatible("age-keygen", "rage-keygen")));
 }
 
 /// Hide `age` on this thread until the guard drops. `PATH` stays as it is.
@@ -1456,6 +1507,8 @@ fn export_named_scope(
         StoreOut::Migrated { rel } => {
             format!("sync: migrated {count} {scope_name} atoms into {rel}\n")
         }
+        StoreOut::Unread { why } => unread_line(scope_name, &why),
+        StoreOut::Resealed { rel, why } => resealed_line(scope_name, &why, &rel, &recipients_said),
         StoreOut::Wrote { rel, changes } => {
             if changes == 0 {
                 format!("sync: exported {count} {scope_name} atoms to {rel}, {recipients_said}\n")
@@ -1479,6 +1532,31 @@ enum StoreOut {
         rel: String,
         changes: usize,
     },
+    /// A piece of this machine's log did not open here, and this machine
+    /// is not a recipient, so what is new since it cannot be told and a
+    /// new seal would not open either. Nothing was written or removed.
+    Unread {
+        why: String,
+    },
+    /// A piece of this machine's log did not open here, so the atoms were
+    /// sealed whole into the new snapshot `rel`, which does. The pieces
+    /// before it are left in place.
+    Resealed {
+        rel: String,
+        why: String,
+    },
+}
+
+fn unread_line(scope_name: &str, why: &str) -> String {
+    format!(
+        "sync: warning: {why}, and this machine's key is not a recipient of the {scope_name} log, so its new atoms wait; add the key `ljos sync --key` prints to .ljos/sync.toml\n"
+    )
+}
+
+fn resealed_line(scope_name: &str, why: &str, rel: &str, recipients_said: &str) -> String {
+    format!(
+        "sync: warning: {why}, so this machine's {scope_name} atoms were sealed whole into {rel}, {recipients_said}\n"
+    )
 }
 
 /// The directory a host's snapshot and segments live in.
@@ -1517,35 +1595,61 @@ struct SealedPiece {
 }
 
 fn sealed_pieces(root: &Path, stem: &str) -> Vec<SealedPiece> {
-    let mut out = Vec::new();
-    for name in list_beneath(root, stem).unwrap_or_default() {
-        let rel = format!("{stem}/{name}");
-        if let Some(rest) = name
-            .strip_prefix("snap-")
-            .and_then(|rest| rest.strip_suffix(".jsonl.age"))
-        {
-            if let Ok(seq) = rest.parse::<u32>() {
-                out.push(SealedPiece {
-                    seq,
-                    snap: true,
-                    rel,
-                });
-            }
-        } else if let Some(rest) = name.strip_prefix("seg-") {
-            let rest = rest.strip_suffix(".jsonl.age").unwrap_or(rest);
-            if let Some((seq, _)) = rest.split_once('-') {
-                if let Ok(seq) = seq.parse::<u32>() {
-                    out.push(SealedPiece {
-                        seq,
-                        snap: false,
-                        rel,
-                    });
-                }
-            }
-        }
-    }
+    let mut out: Vec<SealedPiece> = list_beneath(root, stem)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|name| sealed_piece(stem, name))
+        .collect();
     out.sort_by_key(|piece| (piece.seq, !piece.snap));
     out
+}
+
+/// The snapshot or segment `name` below `stem`, by its file name.
+fn sealed_piece(stem: &str, name: &str) -> Option<SealedPiece> {
+    let rel = format!("{stem}/{name}");
+    if let Some(rest) = name
+        .strip_prefix("snap-")
+        .and_then(|rest| rest.strip_suffix(".jsonl.age"))
+    {
+        let seq = rest.parse::<u32>().ok()?;
+        return Some(SealedPiece {
+            seq,
+            snap: true,
+            rel,
+        });
+    }
+    let rest = name.strip_prefix("seg-")?;
+    let rest = rest.strip_suffix(".jsonl.age").unwrap_or(rest);
+    let (seq, _) = rest.split_once('-')?;
+    Some(SealedPiece {
+        seq: seq.parse::<u32>().ok()?,
+        snap: false,
+        rel,
+    })
+}
+
+/// The seq a new snapshot or segment below `stem` takes: one past every
+/// piece here and every piece `HEAD` has, so no new path is one `HEAD`
+/// already names. 0 when there are none.
+fn next_seq(root: &Path, stem: &str, pieces: &[SealedPiece]) -> u32 {
+    let listed = git(
+        root,
+        &["ls-tree", "--name-only", "-z", "HEAD", &format!("{stem}/")],
+    )
+    .ok()
+    .filter(|out| out.status.success())
+    .map(|out| out.stdout)
+    .unwrap_or_default();
+    let in_head = listed
+        .split(|b| *b == 0)
+        .filter_map(|rel| std::str::from_utf8(rel).ok())
+        .filter_map(|rel| sealed_piece(stem, rel.rsplit('/').next()?));
+    pieces
+        .iter()
+        .map(|piece| piece.seq)
+        .chain(in_head.map(|piece| piece.seq))
+        .max()
+        .map_or(0, |n| n + 1)
 }
 
 fn seg_header(host: &str, scope_name: &str, seq: u32, over: u32) -> String {
@@ -1587,23 +1691,143 @@ fn migrate_legacy(root: &Path, log_rel: &str) -> Result<Option<String>> {
     Ok(Some(snap))
 }
 
-fn plaintext_matches(root: &Path, stem: &str, plain: &str) -> bool {
-    let want = format!("{}\n", blob_digest(plain.as_bytes()));
-    read_beneath(root, &plain_hash_rel(stem))
-        .ok()
-        .flatten()
-        .is_some_and(|have| have == want.as_bytes())
-}
-
+/// Write the plaintext hash beside the log when it does not say `plain`
+/// already. Peers and the wake read that it exists; no sync reads what it
+/// says, since a checkout can carry any hash there.
 fn write_plain_hash(root: &Path, stem: &str, plain: &str) -> Result<()> {
     let line = format!("{}\n", blob_digest(plain.as_bytes()));
-    write_beneath(root, &plain_hash_rel(stem), line.as_bytes())
+    let rel = plain_hash_rel(stem);
+    if read_beneath(root, &rel).ok().flatten().as_deref() == Some(line.as_bytes()) {
+        return Ok(());
+    }
+    write_beneath(root, &rel, line.as_bytes())
+}
+
+/// The key that signs what this home keeps of sealed logs: 32 random
+/// bytes in `sync/kept.key` below the state root, mode 0600. A kept file
+/// is taken only when this key signed it, so one written by hand or copied
+/// from another home is not. None when there is no key; then nothing kept
+/// is used. A read never makes one: see [`make_kept_key`].
+fn kept_key() -> Option<[u8; 32]> {
+    let kept = read_beneath(&state_base(), KEPT_KEY_REL).ok().flatten()?;
+    <[u8; 32]>::try_from(kept.as_slice()).ok()
+}
+
+/// [`kept_key`], made on first use by a write of the sync state.
+fn make_kept_key() -> Option<[u8; 32]> {
+    if let Some(key) = kept_key() {
+        return Some(key);
+    }
+    let base = state_base();
+    let mut key = [0u8; 32];
+    getrandom::fill(&mut key).ok()?;
+    write_private_beneath(&base, KEPT_KEY_REL, &key).ok()?;
+    Some(key)
+}
+
+const KEPT_KEY_REL: &str = "sync/kept.key";
+
+/// HMAC-SHA256 of `parts`, each with its length before it, under `key`.
+fn kept_tag(key: &[u8; 32], parts: &[&[u8]]) -> String {
+    use sha2::Digest as _;
+    let mut inner_pad = [0x36u8; 64];
+    let mut outer_pad = [0x5cu8; 64];
+    for (n, byte) in key.iter().enumerate() {
+        inner_pad[n] ^= byte;
+        outer_pad[n] ^= byte;
+    }
+    let mut inner = sha2::Sha256::new();
+    inner.update(inner_pad);
+    for part in parts {
+        inner.update((part.len() as u64).to_le_bytes());
+        inner.update(part);
+    }
+    let mut outer = sha2::Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner.finalize());
+    hex::encode(outer.finalize())
+}
+
+fn tags_equal(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
+/// Digest of the names and bytes of every snapshot and segment of the log
+/// at `stem`, as they are in the checkout. None when one cannot be read.
+fn pieces_digest(root: &Path, stem: &str) -> Option<String> {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    for piece in sealed_pieces(root, stem) {
+        let bytes = read_beneath(root, &piece.rel).ok().flatten()?;
+        hasher.update((piece.rel.len() as u64).to_le_bytes());
+        hasher.update(piece.rel.as_bytes());
+        hasher.update(sha2::Sha256::digest(&bytes));
+    }
+    Some(hex::encode(hasher.finalize()))
+}
+
+/// Where below the state root this home notes what the log at `stem` in
+/// the checkout at `root` opens to: `sync/logs/<digest>`.
+fn log_note_rel(root: &Path, stem: &str) -> String {
+    use sha2::Digest as _;
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(root.as_os_str().as_encoded_bytes());
+    hasher.update([0]);
+    hasher.update(stem.as_bytes());
+    format!("sync/logs/{}", hex::encode(hasher.finalize()))
+}
+
+/// Note that the pieces of the log at `stem`, as they are now, open to
+/// `plain`. Written after this sync sealed them or read them whole.
+fn note_log(root: &Path, stem: &str, plain: &str) {
+    let Some(key) = make_kept_key() else {
+        return;
+    };
+    let Some(pieces) = pieces_digest(root, stem) else {
+        return;
+    };
+    let plain = blob_digest(plain.as_bytes());
+    let tag = kept_tag(&key, &[b"log", pieces.as_bytes(), plain.as_bytes()]);
+    let line = format!("{tag} {pieces} {plain}\n");
+    let rel = log_note_rel(root, stem);
+    if read_beneath(&state_base(), &rel).ok().flatten().as_deref() != Some(line.as_bytes()) {
+        let _ = write_private_beneath(&state_base(), &rel, line.as_bytes());
+    }
+}
+
+/// Whether this home noted that the log at `stem`, with the bytes its
+/// pieces have now, opens to `plain`. The note is keyed to those bytes
+/// and signed with [`kept_key`], so a piece that changed, a note from
+/// elsewhere, or a hash in the checkout never makes a sync skip its log.
+fn log_noted(root: &Path, stem: &str, plain: &str) -> bool {
+    let Some(key) = kept_key() else {
+        return false;
+    };
+    let Ok(Some(kept)) = read_beneath(&state_base(), &log_note_rel(root, stem)) else {
+        return false;
+    };
+    let Ok(kept) = String::from_utf8(kept) else {
+        return false;
+    };
+    let mut words = kept.split_whitespace();
+    let (Some(tag), Some(pieces), Some(noted)) = (words.next(), words.next(), words.next()) else {
+        return false;
+    };
+    let want = kept_tag(&key, &[b"log", pieces.as_bytes(), noted.as_bytes()]);
+    tags_equal(tag, &want)
+        && noted == blob_digest(plain.as_bytes())
+        && pieces_digest(root, stem).as_deref() == Some(pieces)
 }
 
 /// The atom lines of `host`'s `scope_name` log: the legacy file and its
 /// chunks when no snapshot has been written, otherwise the newest snapshot
-/// and the segments after it, in sequence order. A segment that does not
-/// open ends the read. The same last-line-wins rule as [`read_chunks`].
+/// and the segments after it, in sequence order. A snapshot or segment
+/// that does not open, as when age cannot authenticate it, ends the read. The same last-line-wins rule as [`read_chunks`].
 fn read_log_view(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Result<LogView> {
     let stem = log_stem_dir(log_rel);
     let pieces = sealed_pieces(root, &stem);
@@ -1617,25 +1841,33 @@ fn read_log_view(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Re
             return Ok(LogView {
                 body: String::new(),
                 chunks_read: 0,
-                segments_read: 0,
                 stopped: Some(format!("{} could not be read", snap.rel)),
             });
         };
-        let body = match open_log(root, &bytes, host, scope_name, &snap.rel)? {
-            Opened::Atoms(body) => body,
-            Opened::Miss => {
+        let body = match open_log(root, &bytes, host, scope_name, &snap.rel) {
+            Ok(Opened::Atoms(body)) => body,
+            Err(err) => {
                 return Ok(LogView {
                     body: String::new(),
                     chunks_read: 0,
-                    segments_read: 0,
+                    stopped: Some(format!(
+                        "{} did not open ({})",
+                        snap.rel,
+                        err.to_string().replace('\n', " ")
+                    )),
+                });
+            }
+            Ok(Opened::Miss) => {
+                return Ok(LogView {
+                    body: String::new(),
+                    chunks_read: 0,
                     stopped: Some(format!("{} is not sealed to this machine", snap.rel)),
                 });
             }
-            Opened::Refused(line) | Opened::Hidden { line, .. } => {
+            Ok(Opened::Refused(line) | Opened::Hidden { line, .. }) => {
                 return Ok(LogView {
                     body: String::new(),
                     chunks_read: 0,
-                    segments_read: 0,
                     stopped: Some(line.trim().to_string()),
                 });
             }
@@ -1655,7 +1887,6 @@ fn read_log_view(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Re
         return Ok(LogView {
             body: String::new(),
             chunks_read: 0,
-            segments_read: 0,
             stopped: None,
         });
     };
@@ -1671,13 +1902,11 @@ fn read_log_view(root: &Path, log_rel: &str, host: &str, scope_name: &str) -> Re
         Opened::Miss => Ok(LogView {
             body: String::new(),
             chunks_read: 0,
-            segments_read: 0,
             stopped: Some(format!("{log_rel} is not sealed to this machine")),
         }),
         Opened::Refused(line) | Opened::Hidden { line, .. } => Ok(LogView {
             body: String::new(),
             chunks_read: 0,
-            segments_read: 0,
             stopped: Some(line.trim().to_string()),
         }),
     }
@@ -1693,7 +1922,6 @@ fn apply_segments<'a>(
 ) -> Result<LogView> {
     let mut lines = lines_by_id(body);
     let mut stopped = None;
-    let mut applied = 0u32;
     for piece in pieces {
         let sealed = match fetch(&piece.rel) {
             Ok(Some(sealed)) => sealed,
@@ -1756,7 +1984,6 @@ fn apply_segments<'a>(
                 }
             }
         }
-        applied += 1;
     }
     let body = match lines {
         Some(map) => map.values().map(|line| format!("{line}\n")).collect(),
@@ -1765,7 +1992,6 @@ fn apply_segments<'a>(
     Ok(LogView {
         body,
         chunks_read: 0,
-        segments_read: applied,
         stopped,
     })
 }
@@ -1802,6 +2028,32 @@ fn atom_changes(
     changes
 }
 
+/// Keep `plain` as what `sealed` opens to here, the way an import keeps
+/// what age gave, so this machine's next export reads its own log without
+/// running `age -d` on every piece. Only when one of this machine's
+/// identities is a recipient: a file it could not open stays unopened.
+fn keep_sealed(sealed: &[u8], plain: &str, scope_name: &str, recipients: &[String]) {
+    let identities = identities_for_open(scope_name);
+    if !opens_here(&identities, recipients) {
+        return;
+    }
+    if let Some(key) = make_kept_key() {
+        let _ = write_private_beneath(
+            &state_base(),
+            &opened_mark_rel(sealed, &identities),
+            &mark_bytes(&key, sealed, Some(plain)),
+        );
+    }
+}
+
+/// Whether one of `identities` is among `recipients`, so a file sealed
+/// to them opens on this machine.
+fn opens_here(identities: &[PathBuf], recipients: &[String]) -> bool {
+    identities.iter().any(|identity| {
+        identity_recipient(identity).is_ok_and(|key| recipients.iter().any(|r| r.trim() == key))
+    })
+}
+
 fn seal_or_missing(plain: &str, recipients: &[String]) -> Result<Option<Vec<u8>>> {
     match seal_bytes(plain, recipients) {
         Ok(sealed) => Ok(Some(sealed)),
@@ -1818,11 +2070,16 @@ fn remove_pieces(root: &Path, pieces: &[SealedPiece]) -> Result<()> {
 }
 
 /// Write `body`, this host's atoms of `scope_name`, without sealing a blob
-/// again. The plaintext hash beside the log decides. A match writes
-/// nothing. A legacy `<stem>.jsonl.age` is copied once into `snap-0` and
-/// removed. Later atoms go into one new segment. At [`SEGMENT_LIMIT`]
-/// segments, or when [`compact_for_this_call`] is held, the segments fold
-/// into one new snapshot and the folded files are removed in the same write.
+/// again. A log whose pieces this home noted opening to `body`
+/// ([`log_noted`]) writes nothing; otherwise the pieces are read and only
+/// what differs is sealed. A legacy `<stem>.jsonl.age` is copied once into `snap-0` and
+/// removed. Later atoms go into one new segment. A sealed piece is not
+/// removed or sealed again by a sync. When one does not open here, the
+/// atoms are sealed whole into a new snapshot once, and the pieces before
+/// it stay; when this machine is not a recipient, nothing is written.
+/// Only while
+/// [`compact_for_this_call`] is held do the segments fold into one new
+/// snapshot, and the folded files are removed in the same write.
 fn store_log(
     root: &Path,
     primary_scope: &str,
@@ -1835,10 +2092,11 @@ fn store_log(
     let stem = log_stem_dir(&log_rel);
     let plain = log_header(&host, scope_name) + body;
     let compact = compact_requested();
-    if plaintext_matches(root, &stem, &plain) && read_beneath(root, &log_rel)?.is_none() {
+    if read_beneath(root, &log_rel)?.is_none() && log_noted(root, &stem, &plain) {
         let pieces = sealed_pieces(root, &stem);
         let segs = pieces.iter().filter(|piece| !piece.snap).count();
         if !compact || segs == 0 {
+            write_plain_hash(root, &stem, &plain)?;
             return Ok(StoreOut::Unchanged);
         }
     }
@@ -1846,29 +2104,36 @@ fn store_log(
         return Ok(StoreOut::MissingAge);
     }
     let migrated = migrate_legacy(root, &log_rel)?;
-    if plaintext_matches(root, &stem, &plain) {
-        if migrated.is_some() {
-            write_plain_hash(root, &stem, &plain)?;
-            remember_digest(root, &log_rel, &plain, recipients)?;
-            return Ok(StoreOut::Migrated {
-                rel: migrated.unwrap_or_else(|| snap_file_rel(&stem, 0)),
-            });
+    let view = read_log_view(root, &log_rel, &host, scope_name)?;
+    // The view is the newest snapshot and every segment after it, and
+    // that snapshot covers every older piece. A compaction folds from it
+    // and removes them all, so it needs the view whole and nothing else.
+    if let (true, Some(why)) = (compact, &view.stopped) {
+        bail!("{}", compact_refused_line(scope_name, why));
+    }
+    if let Some(why) = &view.stopped {
+        if !opens_here(&identities_for_open(scope_name), recipients) {
+            return Ok(StoreOut::Unread { why: why.clone() });
         }
         let pieces = sealed_pieces(root, &stem);
-        let segs = pieces.iter().filter(|piece| !piece.snap).count();
-        if !compact || segs == 0 {
-            return Ok(StoreOut::Unchanged);
-        }
+        let out = seal_snapshot(root, &stem, scope_name, &plain, recipients, &pieces, false)?;
+        return Ok(match out {
+            StoreOut::Wrote { rel, .. } => StoreOut::Resealed {
+                rel,
+                why: why.clone(),
+            },
+            other => other,
+        });
     }
-    let view = read_log_view(root, &log_rel, &host, scope_name)?;
     let (Some(had), Some(has)) = (lines_by_id(&view.body), lines_by_id(body)) else {
         return seal_snapshot(
             root,
             &stem,
+            scope_name,
             &plain,
             recipients,
             &sealed_pieces(root, &stem),
-            0,
+            true,
         );
     };
     let changes = atom_changes(&had, &has);
@@ -1879,26 +2144,28 @@ fn store_log(
         .map(|piece| piece.seq)
         .max();
     let segs = pieces.iter().filter(|piece| !piece.snap).count();
-    if changes.is_empty() && view.stopped.is_none() && !(compact && segs > 0) {
+    if changes.is_empty() && !(compact && segs > 0) {
         write_plain_hash(root, &stem, &plain)?;
+        note_log(root, &stem, &plain);
+        if migrated.is_some() {
+            remember_digest(root, &log_rel, &plain, recipients)?;
+        }
         return Ok(match migrated {
             Some(rel) => StoreOut::Migrated { rel },
             None => StoreOut::Unchanged,
         });
     }
-    if snap_seq.is_none() || compact || segs >= SEGMENT_LIMIT {
-        return seal_snapshot(root, &stem, &plain, recipients, &pieces, changes.len());
+    if snap_seq.is_none() || compact {
+        let out = seal_snapshot(root, &stem, scope_name, &plain, recipients, &pieces, true)?;
+        return Ok(match out {
+            StoreOut::Wrote { rel, .. } => StoreOut::Wrote {
+                rel,
+                changes: changes.len(),
+            },
+            other => other,
+        });
     }
-    if view.stopped.is_some() {
-        let good = last_good_seq(snap_seq.unwrap_or(0), &pieces, view.segments_read);
-        let stale: Vec<SealedPiece> = pieces
-            .iter()
-            .filter(|piece| !piece.snap && piece.seq > good)
-            .cloned()
-            .collect();
-        remove_pieces(root, &stale)?;
-    }
-    let seq = pieces.iter().map(|piece| piece.seq).max().unwrap_or(0) + 1;
+    let seq = next_seq(root, &stem, &pieces);
     let over = snap_seq.unwrap_or(0);
     let mut segment = seg_header(&host, scope_name, seq, over);
     for (id, line) in &changes {
@@ -1913,12 +2180,21 @@ fn store_log(
     };
     let rel = seg_file_rel(&stem, seq, &hash8_of(segment.as_bytes()));
     write_beneath(root, &rel, &sealed)?;
+    keep_sealed(&sealed, &segment, scope_name, recipients);
     write_plain_hash(root, &stem, &plain)?;
+    note_log(root, &stem, &plain);
     remember_digest(root, &log_rel, &plain, recipients)?;
     Ok(StoreOut::Wrote {
         rel,
         changes: changes.len(),
     })
+}
+
+/// Why `ljos sync --compact` removed nothing from `scope_name`'s log.
+fn compact_refused_line(scope_name: &str, why: &str) -> String {
+    format!(
+        "sync: --compact refused: {why}, and no newer snapshot of the {scope_name} log that opens on this machine covers it, so no snapshot or segment was removed; when this machine's key is not a recipient, add the key `ljos sync --key` prints to .ljos/sync.toml"
+    )
 }
 
 fn remember_digest(root: &Path, log_rel: &str, plain: &str, recipients: &[String]) -> Result<()> {
@@ -1929,42 +2205,87 @@ fn remember_digest(root: &Path, log_rel: &str, plain: &str, recipients: &[String
     write_beneath(root, &format!("{stem}.digest"), digest.as_bytes())
 }
 
-/// The sequence of the last segment [`read_log_view`] applied, or `snap`
-/// when none was.
-fn last_good_seq(snap: u32, pieces: &[SealedPiece], applied: u32) -> u32 {
-    pieces
-        .iter()
-        .filter(|piece| !piece.snap && piece.seq > snap)
-        .take(usize::try_from(applied).unwrap_or(usize::MAX))
-        .map(|piece| piece.seq)
-        .last()
-        .unwrap_or(snap)
-}
-
 fn seal_snapshot(
     root: &Path,
     stem: &str,
+    scope_name: &str,
     plain: &str,
     recipients: &[String],
     pieces: &[SealedPiece],
-    changes: usize,
+    remove: bool,
 ) -> Result<StoreOut> {
-    let seq = pieces
-        .iter()
-        .map(|piece| piece.seq)
-        .max()
-        .map_or(0, |n| n + 1);
-    // A first snapshot is seq 0 when nothing is stored yet.
-    let seq = if pieces.is_empty() { 0 } else { seq };
+    let seq = next_seq(root, stem, pieces);
     let Some(sealed) = seal_or_missing(plain, recipients)? else {
         return Ok(StoreOut::MissingAge);
     };
     let rel = snap_file_rel(stem, seq);
     write_beneath(root, &rel, &sealed)?;
-    remove_pieces(root, pieces)?;
+    if remove && !pieces.is_empty() {
+        if let Some(why) = unfit_replacement(root, &rel, plain, scope_name) {
+            remove_beneath(root, &rel)?;
+            bail!("sync: --compact refused: {why}, so no snapshot or segment was removed");
+        }
+    }
+    keep_sealed(&sealed, plain, scope_name, recipients);
+    if remove {
+        remove_pieces(root, pieces)?;
+    }
     write_plain_hash(root, stem, plain)?;
+    note_log(root, stem, plain);
     remember_digest(root, &format!("{stem}.jsonl.age"), plain, recipients)?;
-    Ok(StoreOut::Wrote { rel, changes })
+    Ok(StoreOut::Wrote { rel, changes: 0 })
+}
+
+/// Why the snapshot a compaction wrote at `rel` cannot take the place of
+/// the pieces it removes. It must be a path `HEAD` does not have, so the
+/// commit adds it beside those removals, and read again from disk with
+/// `age -d` it must give `plain`: every atom the pack lists.
+fn unfit_replacement(root: &Path, rel: &str, plain: &str, scope_name: &str) -> Option<String> {
+    if in_head(root, rel) {
+        return Some(format!("{rel} is already in HEAD"));
+    }
+    let opened = match read_beneath(root, rel) {
+        Ok(Some(bytes)) => open_sealed_bytes_with_age(&bytes, &identities_for_open(scope_name)),
+        _ => return Some(format!("{rel} could not be read again")),
+    };
+    let opened = match opened {
+        Ok(Some(opened)) => opened,
+        Ok(None) => return Some(format!("{rel} is not sealed to this machine")),
+        Err(err) => {
+            return Some(format!(
+                "{rel} did not open again ({})",
+                err.to_string().replace('\n', " ")
+            ));
+        }
+    };
+    if opened == plain {
+        return None;
+    }
+    let count = |text: &str| {
+        split_header(text)
+            .map_or(text, |(_, _, body)| body)
+            .lines()
+            .count()
+    };
+    let (read, want) = (count(&opened), count(plain));
+    Some(if read == want {
+        format!("{rel} read again does not give the {want} atoms the pack lists")
+    } else {
+        format!("{rel} read again gives {read} atoms, not the {want} the pack lists")
+    })
+}
+
+/// A snapshot or segment of this machine's logs that differs from `HEAD`
+/// in the checkout and is still there. A commit does not stage it, so a
+/// compaction that would commit removals beside it stops.
+fn unstaged_piece(root: &Path, scope: &Scope) -> Option<String> {
+    let me = host();
+    scope.all_scopes().into_iter().find_map(|named| {
+        let [log_rel, _] = host_log_rels_for_scope(&me, &scope.name, named.name);
+        sealed_changed_from_head(root, &log_stem_dir(&log_rel))
+            .into_iter()
+            .find(|rel| root.join(rel).exists())
+    })
 }
 
 /// Snapshot sequence, segment count and sealed bytes of this machine's log,
@@ -2150,6 +2471,14 @@ fn seal_ticket_scope(
         if recipients.len() == 1 { "" } else { "s" }
     );
     let view = read_log_view(root, &log_rel, &host, scope_name)?;
+    if let Some(why) = &view.stopped {
+        return Ok((
+            format!(
+                "sync: {issue}: warning: {why}; the atoms stay in the pack, and `ljos sync` seals the {scope_name} log\n"
+            ),
+            false,
+        ));
+    }
     let desired = if view.body.is_empty() {
         ticket
     } else {
@@ -2187,6 +2516,11 @@ fn seal_ticket_scope(
                 has.len()
             ),
             matches!(stored, StoreOut::Migrated { .. }),
+        ),
+        StoreOut::Unread { why } => (unread_line(scope_name, &why), false),
+        StoreOut::Resealed { rel, why } => (
+            resealed_line(scope_name, &why, &rel, &recipients_said),
+            true,
         ),
         StoreOut::Wrote { rel, changes } => {
             let n = if changes == 0 { has.len() } else { changes };
@@ -3313,12 +3647,20 @@ fn kind_at(dir: &std::fs::File, name: &str) -> Result<WorktreeKind> {
 
 /// The bytes of `name` in `dir`. None when it is missing. A symlink or any
 /// other non-regular file is an error, and the read uses this fd.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "owns a descriptor this function opened, never stdout or stderr"
+)]
 fn read_at(dir: &std::fs::File, name: &str, label: &Path) -> Result<Option<Vec<u8>>> {
     use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::MetadataExt;
     let cname = c_name(name)?;
     // SAFETY: dir is an open directory fd and cname is NUL-terminated.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let fd = unsafe {
         libc::openat(
             dir.as_raw_fd(),
@@ -3433,25 +3775,57 @@ fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<Stri
     // with nothing new. The taken records already hold this plaintext at
     // rest in the same state tree, and the mark is read and written the
     // way they are, below the state root with no symlink followed. A miss
-    // is kept as an empty mark; an error is not kept. Only an import
+    // is kept as a `miss` mark; an error is not kept. Only an import
     // keeps one: the doctor's other reads leave the state as they found
     // it, and a mark that cannot be read is opened again.
+    // A mark is taken only when it is signed with [`kept_key`] over this
+    // ciphertext and what it says. One that is not is opened with age, and
+    // an import writes it again.
     let rel = opened_mark_rel(bytes, identities);
-    match read_beneath(&state_base(), &rel) {
-        Ok(Some(kept)) if kept.is_empty() => return Ok(None),
-        Ok(Some(kept)) => {
-            if let Ok(text) = String::from_utf8(kept) {
-                return Ok(Some(text));
+    if let Some(key) = kept_key() {
+        if let Ok(Some(kept)) = read_beneath(&state_base(), &rel) {
+            if let Some(opened) = read_mark(&key, bytes, &kept) {
+                return Ok(opened);
             }
         }
-        Ok(None) | Err(_) => {}
     }
     let opened = open_sealed_bytes_with_age(bytes, identities)?;
     if KEEP_OPENED.with(std::cell::Cell::get) {
-        let body: &[u8] = opened.as_deref().map_or(&[], str::as_bytes);
-        let _ = write_beneath(&state_base(), &rel, body);
+        if let Some(key) = make_kept_key() {
+            let mark = mark_bytes(&key, bytes, opened.as_deref());
+            let _ = write_private_beneath(&state_base(), &rel, &mark);
+        }
     }
     Ok(opened)
+}
+
+/// A mark: the tag, a space, `open` or `miss`, a newline, and what age
+/// gave.
+fn mark_bytes(key: &[u8; 32], sealed: &[u8], opened: Option<&str>) -> Vec<u8> {
+    use sha2::Digest as _;
+    let kind = if opened.is_some() { "open" } else { "miss" };
+    let plain = opened.unwrap_or("");
+    let sum = sha2::Sha256::digest(sealed);
+    let tag = kept_tag(key, &[b"mark", &sum, kind.as_bytes(), plain.as_bytes()]);
+    format!("{tag} {kind}\n{plain}").into_bytes()
+}
+
+/// What a mark says `sealed` opens to, when its tag is right.
+fn read_mark(key: &[u8; 32], sealed: &[u8], kept: &[u8]) -> Option<Option<String>> {
+    use sha2::Digest as _;
+    let kept = std::str::from_utf8(kept).ok()?;
+    let (first, plain) = kept.split_once('\n')?;
+    let (tag, kind) = first.split_once(' ')?;
+    let sum = sha2::Sha256::digest(sealed);
+    let want = kept_tag(key, &[b"mark", &sum, kind.as_bytes(), plain.as_bytes()]);
+    if !tags_equal(tag, &want) {
+        return None;
+    }
+    match kind {
+        "open" => Some(Some(plain.to_string())),
+        "miss" if plain.is_empty() => Some(None),
+        _ => None,
+    }
 }
 
 thread_local! {
@@ -3793,6 +4167,10 @@ fn history_of_log_is_headed(
         (None, None) => String::new(),
     };
     if !row.is_empty() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let _ = std::fs::write(&mark, row);
     }
     Ok(answer.is_some())
@@ -4599,7 +4977,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
         let mine: Vec<String> = scope
             .all_scopes()
             .into_iter()
-            .flat_map(|named| host_log_paths(&me, &scope.name, named.name))
+            .flat_map(|named| host_log_paths(root, &me, &scope.name, named.name))
             .collect();
         for rel in mine {
             if stageable_path(root, &rel) {
@@ -4779,7 +5157,7 @@ fn commits_to_push(root: &Path) -> bool {
 /// not even a commit already waiting.
 fn commit_log(root: &Path, scope: &str, push: bool) -> String {
     let host = host();
-    let files = host_log_paths(&host, scope, scope);
+    let files = host_log_paths(root, &host, scope, scope);
     let files: Vec<&str> = files
         .iter()
         .filter(|rel| stageable_path(root, rel))
@@ -4791,12 +5169,78 @@ fn commit_log(root: &Path, scope: &str, push: bool) -> String {
 
 /// The paths a commit of `host`'s log of `scope_name` stages: the legacy
 /// file (so a migration's deletion is committed), its digest, its old
-/// chunk directory, and the snapshot directory.
-fn host_log_paths(host: &str, primary_scope: &str, scope_name: &str) -> Vec<String> {
+/// chunk directory, and each snapshot, segment and plaintext hash in the
+/// snapshot directory, on disk or tracked. The temp file of a write that
+/// was cut off is in that directory too, and is not staged. A snapshot or
+/// segment in `HEAD` is sealed once: one that differs from `HEAD` here is
+/// not staged, and one that is gone only by `ljos sync --compact`.
+fn host_log_paths(root: &Path, host: &str, primary_scope: &str, scope_name: &str) -> Vec<String> {
     let [log, digest] = host_log_rels_for_scope(host, primary_scope, scope_name);
     let chunks = chunk_dir_rel(&log);
     let stem = log_stem_dir(&log);
-    vec![log, digest, chunks, stem]
+    let mut paths = vec![log, digest, chunks];
+    for name in list_beneath(root, &stem).unwrap_or_default() {
+        if log_piece_name(&name) {
+            paths.push(format!("{stem}/{name}"));
+        }
+    }
+    let tracked = git(root, &["ls-files", "-z", "--", &stem]).ok();
+    for rel in tracked
+        .iter()
+        .filter(|out| out.status.success())
+        .flat_map(|out| out.stdout.split(|b| *b == 0))
+        .filter_map(|rel| std::str::from_utf8(rel).ok())
+        .filter(|rel| !rel.is_empty())
+    {
+        if !paths.iter().any(|path| path == rel) {
+            paths.push(rel.to_string());
+        }
+    }
+    let changed = sealed_changed_from_head(root, &stem);
+    let compact = compact_requested();
+    paths.retain(|rel| !changed.contains(rel) || (compact && !root.join(rel).exists()));
+    paths
+}
+
+/// The snapshots and segments below `stem` whose file here is not what
+/// `HEAD` has: changed, or gone.
+fn sealed_changed_from_head(root: &Path, stem: &str) -> BTreeSet<String> {
+    let Ok(out) = git(
+        root,
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--diff-filter=MDT",
+            "--relative",
+            "HEAD",
+            "--",
+            stem,
+        ],
+    ) else {
+        return BTreeSet::new();
+    };
+    if !out.status.success() {
+        return BTreeSet::new();
+    }
+    out.stdout
+        .split(|b| *b == 0)
+        .filter_map(|rel| std::str::from_utf8(rel).ok())
+        .filter(|rel| {
+            rel.rsplit('/')
+                .next()
+                .is_some_and(|name| name != "plain.sha256" && log_piece_name(name))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// A file the snapshot directory keeps: a snapshot, a segment, or the
+/// plaintext hash.
+fn log_piece_name(name: &str) -> bool {
+    name == "plain.sha256"
+        || ((name.starts_with("snap-") || name.starts_with("seg-")) && name.ends_with(".jsonl.age"))
 }
 
 fn commit_logs(root: &Path, scope: &Scope, push: bool) -> String {
@@ -4805,7 +5249,7 @@ fn commit_logs(root: &Path, scope: &Scope, push: bool) -> String {
     let mut refs: Vec<String> = scope
         .all_scopes()
         .into_iter()
-        .flat_map(|named_scope| host_log_paths(&me, &scope.name, named_scope.name))
+        .flat_map(|named_scope| host_log_paths(root, &me, &scope.name, named_scope.name))
         .filter(|rel| stageable_path(root, rel))
         .collect();
     for rel in stale_scope_rels(root, scope) {
@@ -5097,9 +5541,15 @@ pub(crate) fn fetch_for_inbox(commit: Option<&str>) -> Result<String> {
     Ok(out)
 }
 
+/// The tracker checkouts a sync reads. With none listed and nothing naming
+/// a tracker, the working directory is only vissue's guess, and no checkout
+/// is one: `prepare_tracker` would write `.gitattributes` into it.
 fn sync_roots() -> Result<Vec<PathBuf>> {
     let listed = local().repos;
     Ok(if listed.is_empty() {
+        if crate::tracker_place::no_tracker_to_write() {
+            return Ok(Vec::new());
+        }
         vec![tracker_root()?]
     } else {
         listed.iter().map(|r| expand(r)).collect()
@@ -5333,8 +5783,12 @@ fn adopt_legacy_in_repo(root: &Path, scope: &Scope, host: &str) -> Result<String
 }
 
 fn sync_repos(pull_import: bool, export_log: bool, asked: bool) -> Result<String> {
+    let roots = sync_roots()?;
+    if roots.is_empty() && asked {
+        bail!("{}", crate::tracker_place::MISSING_TRACKER);
+    }
     let mut out = String::new();
-    for root in sync_roots()? {
+    for root in roots {
         out.push_str(&sync_one(&root, pull_import, export_log, asked)?);
     }
     Ok(out)
@@ -5430,8 +5884,17 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
     if export_log {
         let client = crate::pack()?;
         let atoms = crate::atoms_lean(&client, &client.workspace())?;
+        let said = if scope.scopes.is_empty() {
+            export(&root, &scope, &atoms)?
+        } else {
+            export_all(&root, &scope, &atoms)?
+        };
+        if let Some(rel) = unstaged_piece(&root, &scope).filter(|_| compact_requested()) {
+            bail!(
+                "{said}sync: --compact refused: {rel} differs from HEAD and a commit does not stage it, so nothing was committed"
+            );
+        }
         if scope.scopes.is_empty() {
-            let said = export(&root, &scope, &atoms)?;
             out.push_str(&said);
             out.push_str(&commit_if_sealed(
                 &root,
@@ -5440,7 +5903,6 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
                 mode == TrackerGit::Push,
             ));
         } else {
-            let said = export_all(&root, &scope, &atoms)?;
             out.push_str(&said);
             out.push_str(&commit_if_sealed_scopes(
                 &root,
@@ -6183,6 +6645,10 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut child = Command::new("age")
             .args(["-r", public, "-o"])
             .arg(path)
@@ -6210,6 +6676,10 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let made = Command::new("age-keygen")
             .arg("-o")
             .arg(path)
@@ -6220,6 +6690,10 @@ mod tests {
             "age-keygen must be installed: {}",
             String::from_utf8_lossy(&made.stderr)
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let public = Command::new("age-keygen")
             .arg("-y")
             .arg(path)
@@ -6247,14 +6721,12 @@ mod tests {
 
     /// `age` that writes its stdin to `-o`. The caller holds [`crate::test_env_lock`].
     fn with_fake_age<T>(dir: &Path, body: impl FnOnce() -> T) -> T {
-        use std::os::unix::fs::PermissionsExt as _;
         let fake_age = dir.join("age");
-        std::fs::write(
+        crate::install_executable(
             &fake_age,
             "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    -r) shift 2 ;;\n    *) shift ;;\n  esac\ndone\nif [ -n \"$out\" ]; then cat > \"$out\"; else cat; fi\n",
         )
         .unwrap();
-        std::fs::set_permissions(&fake_age, std::fs::Permissions::from_mode(0o755)).unwrap();
         with_path_dir(dir, body)
     }
 
@@ -6303,11 +6775,19 @@ mod tests {
         git(&["init", "-q"]);
         git(&["config", "user.email", "seat@example.invalid"]);
         git(&["config", "user.name", "seat"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("seed"), "seed\n").unwrap();
         git(&["add", "seed"]);
         git(&["commit", "-q", "-m", "seed"]);
         let rel = sealed_rules_rel("probe-host");
         std::fs::create_dir_all(root.join(".ljos/user-rules")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(&rel), "sealed\n").unwrap();
         rel
     }
@@ -6318,7 +6798,6 @@ mod tests {
     /// index lock and drops it on SIGTERM, as git does.
     #[test]
     fn a_commit_past_its_budget_leaves_no_index_lock() {
-        use std::os::unix::fs::PermissionsExt as _;
         // git comes from PATH. A parallel test points PATH at a directory
         // with no git while this one is running.
         let _env = crate::test_env_lock();
@@ -6332,8 +6811,8 @@ mod tests {
             .expect("git on PATH");
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            bin.join("git"),
+        crate::install_executable(
+            &bin.join("git"),
             format!(
                 "#!/bin/sh\ncase \" $* \" in\n  *' commit '*)\n    lock='{}'\n    : > \"$lock\"\n    trap 'rm -f \"$lock\"; exit 1' TERM\n    sleep 30 &\n    wait\n    ;;\nesac\nexec '{}' \"$@\"\n",
                 root.join(".git/index.lock").display(),
@@ -6341,7 +6820,6 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let started = std::time::Instant::now();
         let deadline = started + std::time::Duration::from_millis(1500);
         let cut =
@@ -6426,7 +6904,15 @@ mod tests {
         let atoms = root.join(".ljos/atoms");
         std::fs::create_dir_all(&atoms).unwrap();
         let name = host();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(atoms.join(format!("{name}.jsonl.age")), "sealed\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(atoms.join(format!("{name}.digest")), "digest\n").unwrap();
         let said = commit_log(root, "surf", true);
         assert!(said.contains("no remote is configured"), "{said}");
@@ -6467,8 +6953,20 @@ mod tests {
         let atoms = root.join(".ljos/atoms");
         std::fs::create_dir_all(&atoms).unwrap();
         let name = host();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(atoms.join(format!("{name}.jsonl.age")), "sealed\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(atoms.join(format!("{name}.digest")), "digest\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("README"), "seed\n").unwrap();
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "seed"]);
@@ -6477,6 +6975,10 @@ mod tests {
             &["remote", "add", "origin", remote.to_str().unwrap()],
         );
         git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".gitattributes"), "*.org merge=union\n").unwrap();
         git(&root, &["add", ".gitattributes"]);
         git(
@@ -6547,6 +7049,10 @@ mod tests {
         git(&root, &["config", "user.email", "seat@example.invalid"]);
         git(&root, &["config", "user.name", "seat"]);
         git(&root, &["config", "core.hooksPath", "/dev/null"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("README"), "seed\n").unwrap();
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "seed"]);
@@ -6555,13 +7061,25 @@ mod tests {
             &["remote", "add", "origin", remote.to_str().unwrap()],
         );
         git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("issues.org"), "* TODO kept local\n").unwrap();
         git(&root, &["add", "issues.org"]);
         git(&root, &["commit", "-q", "-m", "chore(issues): kept local"]);
         let atoms = root.join(".ljos/atoms");
         std::fs::create_dir_all(&atoms).unwrap();
         let name = host();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(atoms.join(format!("{name}.jsonl.age")), "sealed\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(atoms.join(format!("{name}.digest")), "digest\n").unwrap();
         let said = commit_log(&root, "surf", false);
         assert!(
@@ -6590,6 +7108,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(config.join("ljos/age.key"), "not a key\n").unwrap();
         std::env::set_var("XDG_CONFIG_HOME", &config);
         let remote = dir.path().join("remote.git");
@@ -6616,6 +7138,10 @@ mod tests {
         git(&root, &["config", "user.email", "seat@example.invalid"]);
         git(&root, &["config", "user.name", "seat"]);
         git(&root, &["config", "core.hooksPath", "/dev/null"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("README"), "seed\n").unwrap();
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "seed"]);
@@ -6629,16 +7155,28 @@ mod tests {
         git(&other, &["config", "user.email", "seat@example.invalid"]);
         git(&other, &["config", "user.name", "seat"]);
         git(&other, &["config", "core.hooksPath", "/dev/null"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(other.join("README"), "theirs\n").unwrap();
         git(&other, &["add", "README"]);
         git(&other, &["commit", "-q", "-m", "from the other machine"]);
         git(&other, &["push", "-q", "origin", "HEAD"]);
         std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join(".ljos/sync.toml"),
             "name = \"surf\"\nrecipients = [\"age1test\"]\n",
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/atoms/otherhost.jsonl.age"), "sealed\n").unwrap();
         let said = sync_one(&root, true, false, false).unwrap();
         let local = git(&root, &["log", "--format=%s"]);
@@ -6682,6 +7220,10 @@ mod tests {
         assert!(init.status.success());
         let quiet = sync_one(root, true, true, false).unwrap();
         std::fs::create_dir_all(root.join(".ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join(".ljos/sync.toml"),
             "name = \"surf\"\nrecipients = []\n",
@@ -6818,14 +7360,12 @@ mod tests {
     fn a_example_host_atom_never_lands_in_the_cloud_file() {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
         let fake_age = dir.path().join("age");
-        std::fs::write(
+        crate::install_executable(
             &fake_age,
             "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    -r) shift 2 ;;\n    *) shift ;;\n  esac\ndone\nif [ -n \"$out\" ]; then cat > \"$out\"; else cat; fi\n",
         )
         .unwrap();
-        std::fs::set_permissions(&fake_age, std::fs::Permissions::from_mode(0o755)).unwrap();
         struct PathGuard(Option<std::ffi::OsString>);
         impl Drop for PathGuard {
             fn drop(&mut self) {
@@ -7134,6 +7674,10 @@ mod tests {
         if let Some(parent) = root.join(rel).parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(rel), body).unwrap();
         let out = git(root, &["add", "--", rel]).unwrap();
         assert!(
@@ -7171,12 +7715,20 @@ mod tests {
             force: true,
             dry_run: true,
         };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(rel), "not committed\n").unwrap();
         let err = adopt_in_repo(&root, &cloud(), "gone", opts).unwrap_err();
         assert!(err.to_string().contains("not committed"), "{err}");
         assert!(root.join(rel).is_file(), "an untracked log was deleted");
 
         commit_rel(&root, rel, "sealed\n", "log");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(rel), "dirty\n").unwrap();
         let err = adopt_in_repo(&root, &cloud(), "gone", opts).unwrap_err();
         assert!(err.to_string().contains("differs"), "{err}");
@@ -7229,11 +7781,19 @@ mod tests {
         let digest = ".ljos/atoms/gone.digest";
         commit_rel(&root, age, "sealed\n", "log");
         commit_rel(&root, digest, "digest\n", "digest");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("other.txt"), "keep\n").unwrap();
         let out = git(&root, &["add", "other.txt"]).unwrap();
         assert!(out.status.success());
         let out = git(&root, &["commit", "-q", "-m", "other"]).unwrap();
         assert!(out.status.success());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("other.txt"), "staged\n").unwrap();
         let out = git(&root, &["add", "other.txt"]).unwrap();
         assert!(out.status.success());
@@ -7259,6 +7819,10 @@ mod tests {
 
         let taken = taken_path(&root, "cloud", "gone");
         std::fs::create_dir_all(taken.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&taken, "abc\n").unwrap();
         let said = adopt_in_repo(
             &root,
@@ -7297,6 +7861,10 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         let kept = taken_path(&root, "cloud", "otherhost");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&kept, "abc\n").unwrap();
         let said = adopt_in_repo(
             &root,
@@ -7346,6 +7914,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _env = hold_env(dir.path());
         let root = tracker(dir.path());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join(".ljos/sync.toml"),
             "name = \"box\"\nrecipients = [\"age1test\"]\n",
@@ -7364,6 +7936,10 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         let listed = root.display().to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.path().join("config/ljos/sync.toml"),
             format!("repos = [\"{listed}\"]\n"),
@@ -7390,6 +7966,10 @@ mod tests {
             !listed.contains('"'),
             "the temporary path is not a toml string"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             config.join("ljos/sync.toml"),
             format!("repos = [\"{listed}\"]\n"),
@@ -7446,12 +8026,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = |name: &str| {
             let path = dir.path().join(name);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let made = Command::new("age-keygen")
                 .arg("-o")
                 .arg(&path)
                 .output()
                 .unwrap();
             assert!(made.status.success(), "age-keygen must be installed");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let public = Command::new("age-keygen")
                 .arg("-y")
                 .arg(&path)
@@ -7484,6 +8072,10 @@ mod tests {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("mine.key");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let made = Command::new("age-keygen")
             .arg("-o")
             .arg(&key)
@@ -7493,6 +8085,10 @@ mod tests {
         let public = identity_recipient(&key).unwrap();
         let out = dir.path().join("cloud.jsonl.age");
         let shared = dir.path().join("cloud.jsonl.age.tmp");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&shared, "another run is writing this\n").unwrap();
         seal_to("{\"text\":\"x\"}\n", std::slice::from_ref(&public), &out).unwrap();
         assert_eq!(
@@ -7526,16 +8122,22 @@ mod tests {
         let script = "#!/bin/sh\nif [ \"$LC_ALL\" = C ]; then echo 'no matching keys found' >&2; exit 1; fi\necho 'Aucune clef correspondante' >&2; exit 1\n";
         for name in ["age", "rage"] {
             let path = bin.join(name);
-            std::fs::write(&path, script).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::install_executable(&path, script).unwrap();
         }
         let old_path = std::env::var("PATH").unwrap_or_default();
         // Only the fakes. A real age later on PATH would hide rage.
         std::env::set_var("PATH", &bin);
         let log = dir.path().join("peer.jsonl.age");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&log, b"sealed").unwrap();
         let id = dir.path().join("age.key");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&id, b"key").unwrap();
         let opened = open(&log, &id);
         std::fs::remove_file(bin.join("age")).unwrap();
@@ -7558,9 +8160,7 @@ mod tests {
         let script = "#!/bin/sh\nif [ \"$LC_ALL\" = C ] && [ \"$LANG\" = C ] && [ \"$LANGUAGE\" = C ] && [ \"$LC_MESSAGES\" = C ]; then echo 'no matching keys found' >&2; exit 1; fi\necho 'Aucune clef correspondante' >&2; exit 1\n";
         for name in ["age", "rage"] {
             let path = bin.join(name);
-            std::fs::write(&path, script).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::install_executable(&path, script).unwrap();
         }
         let old_path = std::env::var("PATH").unwrap_or_default();
         let old_language = std::env::var("LANGUAGE").ok();
@@ -7569,8 +8169,16 @@ mod tests {
         std::env::set_var("LC_MESSAGES", "fr");
         std::env::set_var("PATH", &bin);
         let log = dir.path().join("peer.jsonl.age");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&log, b"sealed").unwrap();
         let id = dir.path().join("age.key");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&id, b"key").unwrap();
         let opened = open(&log, &id);
         std::fs::remove_file(bin.join("age")).unwrap();
@@ -7604,17 +8212,19 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let age = bin.join("age");
-        std::fs::write(
+        crate::install_executable(
             &age,
             "#!/bin/sh\necho 'no matching keys found' >&2\nexit 1\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&age, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("PATH", &bin);
         std::env::set_var("PACKSET_URL", "off");
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             config.join("ljos/age.key"),
             "# public key: age1ownedkey\nAGE-SECRET-KEY-1TEST\n",
@@ -7623,6 +8233,10 @@ mod tests {
         std::env::set_var("XDG_CONFIG_HOME", &config);
         let root = dir.path().join("repo");
         std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/atoms/peerbox.jsonl.age"), b"sealed").unwrap();
         let scope: Scope =
             toml::from_str("name = \"surf\"\nrecipients = [\"age1ownedkey\"]\n").unwrap();
@@ -7645,29 +8259,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            bin.join("age"),
+        crate::install_executable(
+            &bin.join("age"),
             "#!/bin/sh\necho 'no matching keys found' >&2\nexit 1\n",
         )
         .unwrap();
-        std::fs::write(
-            bin.join("age-keygen"),
+        crate::install_executable(
+            &bin.join("age-keygen"),
             "#!/bin/sh\nif [ \"$1\" = -y ]; then echo age1fromkeygen; exit 0; fi\nexit 1\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        for name in ["age", "age-keygen"] {
-            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
-        }
         std::env::set_var("PATH", &bin);
         std::env::set_var("PACKSET_URL", "off");
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(config.join("ljos/age.key"), "AGE-SECRET-KEY-1TEST\n").unwrap();
         std::env::set_var("XDG_CONFIG_HOME", &config);
         let root = dir.path().join("repo");
         std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/atoms/peerbox.jsonl.age"), b"sealed").unwrap();
         let scope: Scope =
             toml::from_str("name = \"surf\"\nrecipients = [\"age1fromkeygen\"]\n").unwrap();
@@ -7689,23 +8306,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            bin.join("age"),
+        crate::install_executable(
+            &bin.join("age"),
             "#!/bin/sh\necho 'no matching keys found' >&2\nexit 1\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(bin.join("age"), std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("PATH", &bin);
         std::env::set_var("PACKSET_URL", "off");
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
         let secret = format!("AGE-SECRET-KEY-1{}\n", "Q".repeat(58));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             config.join("ljos/age.key"),
             format!("# public key: age1machine\n{secret}"),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             config.join("ljos/cloud.age"),
             format!("# public key: age1cloud\n{secret}"),
@@ -7715,6 +8338,10 @@ mod tests {
         let root = dir.path().join("repo");
         std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
         let cloud_log = root.join(".ljos/atoms/peerbox+cloud.jsonl.age");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&cloud_log, b"sealed").unwrap();
         let scope: Scope = toml::from_str(
             "name = \"surf\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
@@ -7731,6 +8358,10 @@ mod tests {
         assert!(!msg.contains("PACKSET_URL"), "{msg}");
 
         std::fs::remove_file(&cloud_log).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/atoms/peerbox.jsonl.age"), b"sealed").unwrap();
         let scope: Scope =
             toml::from_str("name = \"surf\"\nrecipients = [\"age1cloud\"]\n").unwrap();
@@ -7751,18 +8382,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            bin.join("age"),
+        crate::install_executable(
+            &bin.join("age"),
             "#!/bin/sh\necho 'no matching keys found' >&2\nexit 1\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(bin.join("age"), std::fs::Permissions::from_mode(0o755)).unwrap();
         std::env::set_var("PATH", &bin);
         std::env::set_var("PACKSET_URL", "off");
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
         let secret = format!("AGE-SECRET-KEY-1{}\n", "Q".repeat(58));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             config.join("ljos/age.key"),
             format!("# public key: age1cloud\n{secret}"),
@@ -7775,6 +8408,10 @@ mod tests {
         .unwrap();
         let root = dir.path().join("repo");
         std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/atoms/peerbox+cloud.jsonl.age"), b"sealed").unwrap();
         let msg = import(&root, &scope).unwrap_err().to_string();
         assert!(
@@ -7784,6 +8421,10 @@ mod tests {
         assert!(!msg.contains("PACKSET_URL"), "{msg}");
 
         std::fs::remove_file(root.join(".ljos/atoms/peerbox+cloud.jsonl.age")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/atoms/peerbox.jsonl.age"), b"sealed").unwrap();
         let msg = import(&root, &scope).unwrap();
         assert!(
@@ -7805,21 +8446,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            bin.join("age"),
+        crate::install_executable(
+            &bin.join("age"),
             "#!/bin/sh\necho 'no matching keys found' >&2\nexit 1\n",
         )
         .unwrap();
-        std::fs::write(
-            bin.join("age-keygen"),
+        crate::install_executable(
+            &bin.join("age-keygen"),
             "#!/bin/sh\necho 'age-keygen: refusing' >&2\nexit 1\n",
         )
         .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        for name in ["age", "age-keygen"] {
-            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
-        }
         let old_path = std::env::var("PATH").unwrap_or_default();
         let old_pack = std::env::var("PACKSET_URL").ok();
         let old_xdg = std::env::var("XDG_CONFIG_HOME").ok();
@@ -7829,6 +8465,10 @@ mod tests {
         std::env::set_var("LJOS_TEST_HOSTNAME", "thisbox");
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             config.join("ljos/age.key"),
             format!("AGE-SECRET-KEY-1{}\n", "Q".repeat(58)),
@@ -7837,7 +8477,15 @@ mod tests {
         std::env::set_var("XDG_CONFIG_HOME", &config);
         let root = dir.path().join("repo");
         std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/atoms/peerbox.jsonl.age"), b"sealed").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/atoms/otherbox.jsonl.age"), b"sealed").unwrap();
         let scope: Scope =
             toml::from_str("name = \"surf\"\nrecipients = [\"age1someoneelse\"]\n").unwrap();
@@ -7933,6 +8581,10 @@ mod tests {
         git(&root, &["config", "user.email", "seat@example.invalid"]);
         git(&root, &["config", "user.name", "seat"]);
         git(&root, &["config", "core.hooksPath", "/dev/null"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("README"), "seed\n").unwrap();
         git(&root, &["add", "README"]);
         git(&root, &["commit", "-q", "-m", "seed"]);
@@ -7996,6 +8648,10 @@ mod tests {
             cloud.display()
         );
         std::fs::create_dir_all(cloud.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let made = Command::new("age-keygen")
             .arg("-o")
             .arg(&cloud)
@@ -8006,6 +8662,10 @@ mod tests {
             "age-keygen must be installed: {}",
             String::from_utf8_lossy(&made.stderr)
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let public = Command::new("age-keygen")
             .arg("-y")
             .arg(&cloud)
@@ -8024,12 +8684,20 @@ mod tests {
         );
 
         let other = dir.path().join("other.key");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let made = Command::new("age-keygen")
             .arg("-o")
             .arg(&other)
             .output()
             .unwrap();
         assert!(made.status.success());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let other_public = Command::new("age-keygen")
             .arg("-y")
             .arg(&other)
@@ -8046,6 +8714,10 @@ mod tests {
         );
 
         let own = identity_path();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let made = Command::new("age-keygen")
             .arg("-o")
             .arg(&own)
@@ -8071,12 +8743,20 @@ mod tests {
         std::env::set_var("XDG_CONFIG_HOME", dir.path());
         let own = identity_path();
         std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let made = Command::new("age-keygen")
             .arg("-o")
             .arg(&own)
             .output()
             .unwrap();
         assert!(made.status.success(), "age-keygen must be installed");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(cloud_identity_path(), "not a key\n").unwrap();
         assert_eq!(identities_for_open(CLOUD_SCOPE), vec![own]);
     }
@@ -8141,12 +8821,20 @@ mod tests {
         std::env::set_var("PACKSET_TIMEOUT_MS", "5000");
         let cloud = cloud_identity_path();
         std::fs::create_dir_all(cloud.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let made = Command::new("age-keygen")
             .arg("-o")
             .arg(&cloud)
             .output()
             .unwrap();
         assert!(made.status.success(), "age-keygen must be installed");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let public = Command::new("age-keygen")
             .arg("-y")
             .arg(&cloud)
@@ -8224,7 +8912,7 @@ mod tests {
         let root = dir.path().join("tracker");
         let atoms = log_dir(&root);
         std::fs::create_dir_all(&atoms).unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             root.join(".ljos/sync.toml"),
             format!(
                 "name = \"example-host\"\nrecipients = [\"{box_public}\"]\n[scopes]\ncloud = [\"{public}\"]\n"
@@ -8242,6 +8930,10 @@ mod tests {
             &atoms.join("gonehost.jsonl.age"),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(atoms.join("gonehost.digest"), "digest\n").unwrap();
         let plain = format!("{}\n", atom("a", "from the gone host", &["scope:cloud"]));
         seal(
@@ -8250,6 +8942,10 @@ mod tests {
             &atoms.join("gonehost+cloud.jsonl.age"),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(atoms.join("gonehost+cloud.digest"), "digest\n").unwrap();
         let git = |args: &[&str]| {
             let out = crate::git_cmd()
@@ -8322,6 +9018,10 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).into_owned()
         };
         let gitconfig = dir.path().join("gitconfig");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &gitconfig,
             "[user]\n\temail = seat@example.invalid\n\tname = seat\n[commit]\n\tgpgsign = false\n",
@@ -8356,7 +9056,7 @@ mod tests {
             ],
         );
         std::fs::create_dir_all(seed.join(".ljos")).unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             seed.join(".ljos/sync.toml"),
             format!(
                 "name = \"example-host\"\nrecipients = [\"{box_public}\"]\n[scopes]\ncloud = [\"{public}\"]\n"
@@ -8404,6 +9104,10 @@ mod tests {
         std::env::set_var("XDG_CONFIG_HOME", b.join("config"));
         std::env::set_var("XDG_STATE_HOME", b.join("state"));
         std::fs::create_dir_all(cloud_identity_path().parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(cloud_identity_path(), &secret).unwrap();
         std::env::set_var(SYNC_HOST_KEY, "cursor-seat-b");
         std::env::set_var("ISSUE_ROOT", &tracker_b);
@@ -8420,6 +9124,10 @@ mod tests {
         assert_eq!(host(), "cursor", "without the seat both VMs are one host");
         std::env::remove_var("LJOS_TEST_HOSTNAME");
         std::fs::create_dir_all(b.join("home/.config/ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             b.join("home/.config/ljos/env"),
             "LJOS_SYNC_HOST=cursor-seat-b\n",
@@ -8441,7 +9149,7 @@ mod tests {
         let machine = make_key();
         let cloud_public = age_keygen(&dir.path().join("cloud.key"));
         let root = tracker(dir.path());
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             root.join(".ljos/sync.toml"),
             format!(
                 "name = \"example-host\"\nrecipients = [\"{machine}\"]\n[scopes]\ncloud = [\"{cloud_public}\"]\n"
@@ -8459,6 +9167,10 @@ mod tests {
         .unwrap();
         let local_bytes = std::fs::read(&local).unwrap();
         let link = root.join(".ljos/atoms/gonehost+cloud.jsonl.age");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&local, &link).unwrap();
         let git = |args: &[&str]| {
             let out = crate::git_cmd()
@@ -8534,7 +9246,7 @@ mod tests {
         let root = dir.path().join("tracker");
         let atoms = log_dir(&root);
         std::fs::create_dir_all(&atoms).unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             root.join(".ljos/sync.toml"),
             format!(
                 "name = \"example-host\"\nrecipients = [\"{box_public}\"]\n[scopes]\ncloud = [\"{cloud_public}\"]\n"
@@ -8552,6 +9264,10 @@ mod tests {
             &atoms.join("gonehost.jsonl.age"),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(atoms.join("gonehost.digest"), "digest\n").unwrap();
         let cloud_plain = format!("{}\n", atom("b", "from the cloud log", &["scope:cloud"]));
         seal(
@@ -8560,6 +9276,10 @@ mod tests {
             &atoms.join("gonehost+cloud.jsonl.age"),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(atoms.join("gonehost+cloud.digest"), "digest\n").unwrap();
         let git = |args: &[&str]| {
             let out = crate::git_cmd()
@@ -8630,7 +9350,7 @@ mod tests {
         let machine = make_key();
         let cloud_public = age_keygen(&cloud_identity_path());
         let root = tracker(dir);
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             root.join(".ljos/sync.toml"),
             format!(
                 "name = \"example-host\"\nrecipients = [\"{machine}\"]\n[scopes]\ncloud = [\"{cloud_public}\"]\n"
@@ -8785,7 +9505,15 @@ mod tests {
                     if let Some(parent) = saved.parent() {
                         std::fs::create_dir_all(parent).unwrap();
                     }
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "renames a path that is not a git hook"
+                    )]
                     std::fs::rename(&path, &saved).unwrap();
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "links a path that is not a git hook"
+                    )]
                     std::os::unix::fs::symlink(&hook_outside, &path).unwrap();
                 }));
             });
@@ -8830,6 +9558,10 @@ mod tests {
             std::fs::create_dir_all(&atoms).unwrap();
             let scope = scope_of(&machine);
             let toml = format!("name = \"notes\"\nrecipients = [\"{machine}\"]\n");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(atoms.parent().unwrap().join("sync.toml"), &toml).unwrap();
             let body = format!("{}\n", atom("a", "from outside", &[]));
             seal(
@@ -8841,6 +9573,10 @@ mod tests {
             if linked == ".ljos" {
                 std::fs::remove_dir(root.join(".ljos")).unwrap();
             }
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             std::os::unix::fs::symlink(&outside, root.join(linked)).unwrap();
             let posted = std::sync::Arc::default();
             point_pack(&serve_pack(std::sync::Arc::clone(&posted)));
@@ -8880,6 +9616,10 @@ mod tests {
             std::fs::create_dir_all(&outside).unwrap();
             let link = state_dir().parent().unwrap().join(&rel);
             std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "links a path that is not a git hook"
+            )]
             std::os::unix::fs::symlink(&outside, &link).unwrap();
             let (url, _store) = crate::serve_sync_pack(crate::SyncPack::Keep);
             point_pack(&url);
@@ -8915,32 +9655,64 @@ mod tests {
             let machine = make_key();
             let root = tracker(dir.path());
             let local = dir.path().join("config/ljos/user-rules.json");
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&local, rules("local", "stays here")).unwrap();
             let toml = format!("name = \"notes\"\nrecipients = [\"{machine}\"]\n");
             let outside = dir.path().join("outside");
             let watched = match linked {
                 ".ljos" => {
                     std::fs::create_dir_all(outside.join("user-rules")).unwrap();
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "writes a file that is not a git hook"
+                    )]
                     std::fs::write(outside.join("sync.toml"), &toml).unwrap();
                     std::fs::remove_dir_all(root.join(".ljos")).unwrap();
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "links a path that is not a git hook"
+                    )]
                     std::os::unix::fs::symlink(&outside, root.join(".ljos")).unwrap();
                     outside.join("user-rules")
                 }
                 ".ljos/user-rules" => {
                     std::fs::create_dir_all(&outside).unwrap();
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "writes a file that is not a git hook"
+                    )]
                     std::fs::write(root.join(".ljos/sync.toml"), &toml).unwrap();
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "links a path that is not a git hook"
+                    )]
                     std::os::unix::fs::symlink(&outside, root.join(linked)).unwrap();
                     outside.clone()
                 }
                 _ => {
                     std::fs::create_dir_all(&outside).unwrap();
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "writes a file that is not a git hook"
+                    )]
                     std::fs::write(root.join(".ljos/sync.toml"), &toml).unwrap();
                     let link = state_dir().parent().unwrap().join(linked);
                     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "links a path that is not a git hook"
+                    )]
                     std::os::unix::fs::symlink(&outside, &link).unwrap();
                     outside.clone()
                 }
             };
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(watched.join("peer.json"), rules("peer", "from outside")).unwrap();
             let before = std::fs::read_dir(&watched).unwrap().count();
             let err = exchange_user_rules(
@@ -8978,6 +9750,10 @@ mod tests {
     fn make_key() -> String {
         let path = identity_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let made = Command::new("age-keygen")
             .arg("-o")
             .arg(&path)
@@ -8988,6 +9764,10 @@ mod tests {
             "age-keygen: {}",
             String::from_utf8_lossy(&made.stderr)
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let public = Command::new("age-keygen")
             .arg("-y")
             .arg(&path)
@@ -9062,11 +9842,19 @@ mod tests {
         assert_ne!(host(), "gone", "the fixture host would be this machine");
         let public = make_key();
         let root = tracker(dir);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join(".ljos/sync.toml"),
             format!("name = \"cloud\"\nrecipients = [\"{public}\"]\n"),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.join("config/ljos/sync.toml"),
             "default_scope = \"private\"\n",
@@ -9079,6 +9867,10 @@ mod tests {
             &root.join(age),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/atoms/gone.digest"), "digest\n").unwrap();
         commit_dated(
             &root,
@@ -9088,6 +9880,10 @@ mod tests {
         );
         let taken = taken_path(&root, "cloud", "gone");
         std::fs::create_dir_all(taken.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&taken, format!("{}\n", crate::work_id("old"))).unwrap();
         Fixture { root, public }
     }
@@ -9290,6 +10086,10 @@ mod tests {
         let _env = begin(dir.path());
         let public = make_key();
         let root = tracker(dir.path());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join(".ljos/sync.toml"),
             format!("name = \"cloud\"\nrecipients = [\"{public}\"]\n"),
@@ -9312,6 +10112,10 @@ mod tests {
         let plain = format!("{header}\n{}\n", line("g2", "from a chunk"));
         std::fs::create_dir_all(root.join(chunks)).unwrap();
         seal(&plain, std::slice::from_ref(&public), &root.join(chunk)).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(digest), "digest\n").unwrap();
         commit_dated(
             &root,
@@ -9377,6 +10181,10 @@ mod tests {
         point_pack(&url);
         *store.lock().unwrap() = vec![atom("a1", "kept in the pack", &[])];
         let root = tracker(dir.path());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             root.join(".ljos/sync.toml"),
             format!("name = \"example-host\"\nrecipients = [\"{public}\"]\n"),
@@ -9384,11 +10192,23 @@ mod tests {
         .unwrap();
         let [log_rel, digest_rel] =
             host_log_rels_for_scope(&host(), "example-host", "example-host");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(&log_rel), "ours\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(&digest_rel), "ours\n").unwrap();
         let current = root.join(".merge_file_probe");
         let mut merged = Vec::new();
         for rel in [&log_rel, &digest_rel] {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&current, "ours\n").unwrap();
             crate::tracker_push::merge_atoms_driver(&current, rel).unwrap();
             merged.push(std::fs::read(&current).unwrap());
@@ -9692,10 +10512,10 @@ mod tests {
 
     /// A chunk cut short after it was written, as by a torn write or a
     /// checkout that stopped, never reaches the view: a peer reads the base
-    /// and the chunks before it. The next export finds the files changed
-    /// under its digest and seals that chunk again.
+    /// and the chunks before it. The next export leaves the cut file in
+    /// place and seals the log whole into a new snapshot, once.
     #[test]
-    fn a_cut_chunk_is_left_unread_and_sealed_again() {
+    fn a_cut_chunk_is_left_unread_and_sealed_over() {
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9715,6 +10535,10 @@ mod tests {
         let cut = fix.chunk(2);
         assert!(cut.is_file(), "no chunk was written");
         let bytes = std::fs::read(&cut).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&cut, &bytes[..bytes.len() / 2]).unwrap();
         let (view, out) = fix.peer_view();
         assert_eq!(
@@ -9725,13 +10549,19 @@ mod tests {
         assert!(out.contains("did not open"), "{out}");
 
         let said = fix.sync(&atoms);
-        assert!(
-            said.contains("unchanged since the last export"),
-            "an unchanged plaintext rewrote the cut segment: {said}"
-        );
+        assert!(said.contains("sealed whole into"), "{said}");
+        assert!(said.contains("/snap-"), "{said}");
+        let again = fix.sync(&atoms);
+        assert!(again.contains("unchanged since the last export"), "{again}");
         atoms.push(note(204));
         let said = fix.sync(&atoms);
-        assert!(said.contains("seg-"), "{said}");
+        assert!(said.contains("1 changed"), "{said}");
+        assert_eq!(
+            std::fs::read(&cut).unwrap(),
+            &bytes[..bytes.len() / 2],
+            "{said}"
+        );
+        assert_ne!(fix.base_blob(), base, "{said}");
         let (view, out) = fix.peer_view();
         assert_eq!(
             view,
@@ -9739,15 +10569,13 @@ mod tests {
             "{out}"
         );
         assert_eq!(out, "");
-        assert_eq!(fix.base_blob(), base);
     }
 
-    /// Sixty-five syncs that each add a note leave the base blob as it
-    /// was. The chunks fold as they go, so the log never holds more than
-    /// log2 of its base over one chunk header, and after each sync a peer
-    /// reads every atom.
+    /// Seventy syncs that each add a note leave the base blob as it was
+    /// and add one segment each, with no fold past 64. After each sync a
+    /// peer reads every atom. `--compact` folds them into one snapshot.
     #[test]
-    fn sixty_five_syncs_fold_chunks_over_one_base() {
+    fn seventy_syncs_add_seventy_segments_over_one_base() {
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9758,7 +10586,7 @@ mod tests {
         let mut atoms: Vec<Value> = (0..300).map(note).collect();
         fix.sync(&atoms);
         let base = fix.base_blob();
-        for n in 1..=SEGMENT_LIMIT {
+        for n in 1..=70 {
             atoms.push(note(300 + n));
             let said = fix.sync(&atoms);
             assert_eq!(
@@ -9773,23 +10601,21 @@ mod tests {
             let (view, out) = fix.peer_view();
             assert_eq!(view, lines(&atoms), "sync {n}: {out}");
         }
-        atoms.push(note(300 + SEGMENT_LIMIT + 1));
-        let said = fix.sync(&atoms);
-        assert_ne!(
-            fix.base_blob(),
-            base,
-            "the sync past {SEGMENT_LIMIT} segments did not fold: {said}"
-        );
+        let said = {
+            let _compact = compact_for_this_call();
+            fix.sync(&atoms)
+        };
+        assert_ne!(fix.base_blob(), base, "--compact did not fold: {said}");
         assert!(!fix.chunk(1).is_file(), "the fold left a segment: {said}");
         let (view, out) = fix.peer_view();
         assert_eq!(view, lines(&atoms), "{out}");
     }
 
-    /// A log an older ljos left at 64 one-note chunks, the most a reader
-    /// opens, takes the next note by folding its chunks rather than by a
-    /// whole seal, and a peer reads every atom.
+    /// A log left at 64 one-note segments takes the next note as a 65th
+    /// segment, with the snapshot and the 64 left as they are, and a peer
+    /// reads every atom.
     #[test]
-    fn a_log_at_sixty_four_chunks_folds_instead_of_sealing_whole() {
+    fn a_log_at_sixty_four_segments_takes_a_sixty_fifth() {
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9817,14 +10643,16 @@ mod tests {
         let (view, out) = fix.peer_view();
         assert_eq!(view, lines(&atoms), "{out}");
 
+        let first = std::fs::read(fix.chunk(1)).unwrap();
         atoms.push(note(400));
         let said = fix.sync(&atoms);
-        assert_ne!(
+        assert_eq!(
             fix.base_blob(),
             base,
-            "64 segments and one more note did not fold: {said}"
+            "64 segments and one more note folded: {said}"
         );
-        assert!(!fix.chunk(1).exists(), "the fold left a segment: {said}");
+        assert_eq!(std::fs::read(fix.chunk(1)).unwrap(), first, "{said}");
+        assert!(fix.chunk(MAX_CHUNKS + 1).is_file(), "{said}");
         let (view, out) = fix.peer_view();
         assert_eq!(view, lines(&atoms), "{out}");
     }
@@ -10330,6 +11158,10 @@ mod tests {
             crate::work_id("kept"),
             crate::work_id("dropped")
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&old, texts).unwrap();
         let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
         point_pack(&url);
@@ -10384,6 +11216,10 @@ mod tests {
         let own = taken_path(&root, "cloud", "peer");
         let shared = shared_taken_path("cloud", "peer");
         std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         std::fs::rename(&own, &shared).unwrap();
         let log = root.join(".ljos/atoms/peer.jsonl.age");
         seal(&framed("peer", "cloud", ""), &scope.recipients, &log).unwrap();
@@ -10420,9 +11256,17 @@ mod tests {
         let (root, scope) = peer_log(dir.path(), &[same_words("proj-a")]);
         let shared = shared_taken_path("cloud", "peer");
         std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&shared, format!("{}\n", crate::work_id("same words"))).unwrap();
         let blocked = taken_path(&root, "cloud", "peer");
         std::fs::create_dir_all(blocked.parent().unwrap().parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(blocked.parent().unwrap(), "").unwrap();
         let (url, _store) = crate::serve_sync_pack(crate::SyncPack::Keep);
         point_pack(&url);
@@ -10487,7 +11331,15 @@ mod tests {
             "name = \"box\"\nrecipients = [\"{public}\"]\n\n[scopes]\ncloud = [\"{public}\"]\n"
         );
         let scope: Scope = toml::from_str(&text).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/sync.toml"), &text).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             dir.join("config/ljos/sync.toml"),
             "default_scope = \"private\"\n",
@@ -10513,7 +11365,15 @@ mod tests {
             &root.join(".ljos/atoms/gone+cloud.jsonl.age"),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/atoms/gone.digest"), "d\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/atoms/gone+cloud.digest"), "d\n").unwrap();
         commit_dated(
             &root,
@@ -10529,6 +11389,10 @@ mod tests {
         );
         let taken = taken_path(&root, "cloud", "gone");
         std::fs::create_dir_all(taken.parent().unwrap()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&taken, format!("{}\n", crate::work_id("cloud-old"))).unwrap();
         (root, scope)
     }
@@ -10654,6 +11518,10 @@ mod tests {
         let _env = begin(dir.path());
         let (root, scope) = two_scope_logs(dir.path());
         let cloud = root.join(".ljos/atoms/gone+cloud.jsonl.age");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&cloud, b"not-age\n").unwrap();
         commit_dated(
             &root,
@@ -10727,6 +11595,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _env = begin(dir.path());
         let (root, scope) = two_scope_logs(dir.path());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let public = Command::new("age-keygen")
             .arg("-y")
             .arg(identity_path())
@@ -10744,6 +11616,10 @@ mod tests {
             &root.join(".ljos/atoms/gone+cloud.jsonl.age"),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/atoms/gone+cloud.digest"), "newer\n").unwrap();
         commit_dated(
             &root,
@@ -10784,12 +11660,20 @@ mod tests {
         let root = dir.path();
         std::fs::create_dir_all(root.join(".ljos")).unwrap();
         let path = root.join(".ljos/sync.toml");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&path, "name = \"cloud\"\nrecipients = [\"age1cloud\"]\n").unwrap();
         let alone = scope_of_repo(root).unwrap_err().to_string();
         assert!(
             alone.contains("primary") && alone.contains("cloud"),
             "{alone}"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &path,
             "name = \"cloud\"\nrecipients = [\"age1cloud\"]\n[scopes]\nnotes = [\"age1notes\"]\n",
@@ -10800,7 +11684,7 @@ mod tests {
             beside.contains("primary") && beside.contains("[scopes]"),
             "{beside}"
         );
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             &path,
             "name = \"example-host\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
         )
@@ -10854,6 +11738,10 @@ mod tests {
                 .any(|tag| { tag.as_str().is_some_and(|text| text.starts_with("scope:")) }),
             "box memory was scoped: {box_memory}"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(home.join(".config/ljos/env"), "LJOS_WRITE_SCOPE=cloud\n").unwrap();
         assert_eq!(machine_write_scope().as_deref(), Some(CLOUD_SCOPE));
 
@@ -10899,6 +11787,10 @@ mod tests {
             "name = \"example-host\"\nrecipients = []\n[projects]\ntools = \"Shared\"\n",
         ];
         for text in refused {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&path, text).unwrap();
             let err = scope_of_repo(root).unwrap_err().to_string();
             assert!(
@@ -10906,6 +11798,10 @@ mod tests {
                 "expected a name refusal for {text:?}, got {err}"
             );
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &path,
             "name = \"example-host\"\nrecipients = []\n[scopes]\ncloud = []\nnotes-2 = []\n",
@@ -10956,11 +11852,12 @@ mod tests {
         assert!(!primary.contains("cloud only"), "{primary}");
     }
 
-    /// The plaintext hash, not the ciphertext, decides a repeat. Replacing
-    /// the sealed bytes under the same atoms writes nothing, and an older
-    /// two-field digest does not seal the log again once that hash is stored.
+    /// The sealed bytes this home noted, not the plaintext hash beside the
+    /// log, decide a repeat. An older two-field digest does not seal the log
+    /// again. Sealed bytes replaced under the same atoms are read again, and
+    /// a machine that is not a recipient writes nothing and says why.
     #[test]
-    fn a_log_replaced_under_the_same_atoms_is_sealed_again() {
+    fn a_log_replaced_under_the_same_atoms_is_read_again() {
         let dir = tempfile::tempdir().unwrap();
         let _env = hold_env(dir.path());
         let scope: Scope =
@@ -10979,29 +11876,36 @@ mod tests {
         let sealed = snap_text(&root, &log_rel);
         let said = run();
         assert!(said.contains("unchanged since the last export"), "{said}");
-        let stem = log_stem_dir(&log_rel);
-        let snap = sealed_pieces(&root, &stem)
-            .into_iter()
-            .find(|piece| piece.snap)
-            .unwrap();
-        std::fs::write(root.join(&snap.rel), "another seal\n").unwrap();
-        let said = run();
-        assert!(
-            said.contains("unchanged since the last export"),
-            "a replaced ciphertext of the same atoms was sealed again: {said}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(root.join(&snap.rel)).unwrap(),
-            "another seal\n"
-        );
         let older = format!(
             "{} {}\n",
             crate::work_id(&sealed),
             crate::work_id("age1box")
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(&digest_rel), older).unwrap();
         let said = run();
         assert!(said.contains("unchanged since the last export"), "{said}");
+        let stem = log_stem_dir(&log_rel);
+        let snap = sealed_pieces(&root, &stem)
+            .into_iter()
+            .find(|piece| piece.snap)
+            .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(root.join(&snap.rel), "another seal\n").unwrap();
+        let said = run();
+        assert!(said.contains("warning"), "{said}");
+        assert!(!said.contains("unchanged since the last export"), "{said}");
+        assert_eq!(
+            std::fs::read_to_string(root.join(&snap.rel)).unwrap(),
+            "another seal\n"
+        );
+        assert_eq!(sealed_pieces(&root, &stem).len(), 1, "{said}");
     }
 
     #[test]
@@ -11010,6 +11914,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config");
         std::fs::create_dir_all(config.join("ljos")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(config.join("ljos/sync.toml"), "default_scope = \"cloud\"\n").unwrap();
         // SAFETY: this test holds the process env lock.
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &config) };
@@ -11066,9 +11974,21 @@ mod tests {
         std::fs::create_dir_all(&atoms).unwrap();
         let stale = atoms.join(format!("{me}+notes.jsonl.age"));
         let stale_digest = atoms.join(format!("{me}+notes.digest"));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&stale, "old\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&stale_digest, "old\n").unwrap();
         let theirs = atoms.join("peer+notes.jsonl.age");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&theirs, "keep\n").unwrap();
         let said = with_fake_age(dir.path(), || export_all(&root, &scope, &[])).unwrap();
         assert!(!stale.exists(), "own stale log remains\n{said}");
@@ -11106,6 +12026,10 @@ mod tests {
         git(&["config", "user.email", "seat@example.invalid"]);
         git(&["config", "user.name", "seat"]);
         git(&["config", "core.hooksPath", "/dev/null"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("README"), "seed\n").unwrap();
         git(&["add", "README"]);
         git(&["commit", "-q", "-m", "seed"]);
@@ -11186,6 +12110,10 @@ mod tests {
         git(&["config", "user.email", "seat@example.invalid"]);
         git(&["config", "user.name", "seat"]);
         git(&["config", "core.hooksPath", "/dev/null"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("README"), "seed\n").unwrap();
         git(&["add", "README"]);
         git(&["commit", "-q", "-m", "seed"]);
@@ -11194,7 +12122,15 @@ mod tests {
         std::fs::create_dir_all(&atoms).unwrap();
         let notes = format!(".ljos/atoms/{me}+notes.jsonl.age");
         let notes_digest = format!(".ljos/atoms/{me}+notes.digest");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(&notes), "old\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(&notes_digest), "old\n").unwrap();
         git(&["add", &notes, &notes_digest]);
         git(&["commit", "-q", "-m", "notes"]);
@@ -11204,6 +12140,10 @@ mod tests {
             format!(".ljos/atoms/{me}+cloud.jsonl.age"),
             format!(".ljos/atoms/{me}+cloud.digest"),
         ] {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(root.join(&rel), "sealed\n").unwrap();
         }
         let scope: Scope = toml::from_str(
@@ -11239,11 +12179,19 @@ mod tests {
         ];
         std::fs::create_dir_all(root.join(&chunks)).unwrap();
         for rel in &notes {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(root.join(rel), "old\n").unwrap();
         }
         let rels: Vec<&str> = notes.iter().map(String::as_str).collect();
         commit_dated(&root, &rels, "notes", None);
         for rel in host_log_rels(&me) {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(root.join(&rel), "sealed\n").unwrap();
         }
         let scope: Scope =
@@ -11261,8 +12209,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/atoms/peer+notes.jsonl.age"), "not-age\n").unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             root.join(".ljos/sync.toml"),
             "name = \"example-host\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
         )
@@ -11285,7 +12237,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let _g = crate::test_env_lock();
@@ -11316,6 +12268,10 @@ mod tests {
             std::env::remove_var(WRITE_SCOPE_KEY);
         }
         let key = identity_path();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let made = Command::new("age-keygen")
             .arg("-o")
             .arg(&key)
@@ -11324,11 +12280,15 @@ mod tests {
         assert!(made.status.success(), "age-keygen must be installed");
         let root = dir.path().join("tracker");
         std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             root.join(".ljos/sync.toml"),
             "name = \"example-host\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join(".ljos/atoms/peer+notes.jsonl.age"), "not-age\n").unwrap();
         let client = crate::pack().unwrap();
         let text = "Old notes should retire.";
@@ -11392,7 +12352,7 @@ mod tests {
         std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
         let public = age_keygen(&identity_path());
         std::fs::create_dir_all(root.join(".ljos")).unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             root.join(".ljos/sync.toml"),
             format!(
                 "name = \"example-host\"\nrecipients = [\"{public}\"]\n[scopes]\ncloud = [\"{public}\"]\n"
@@ -11441,7 +12401,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let _g = crate::test_env_lock();
@@ -11475,7 +12435,7 @@ mod tests {
         ] {
             let root = dir.path().join(format!("{from_scope}-to-{to_scope}"));
             std::fs::create_dir_all(root.join(".ljos")).unwrap();
-            std::fs::write(
+            #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
                 root.join(".ljos/sync.toml"),
                 format!(
                     "name = \"example-host\"\nrecipients = [\"{public}\"]\n[scopes]\ncloud = [\"{public}\"]\n"
@@ -11557,7 +12517,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let _g = crate::test_env_lock();
@@ -11582,7 +12542,7 @@ mod tests {
         let public = age_keygen(&identity_path());
         let root = dir.path().join("tracker");
         std::fs::create_dir_all(root.join(".ljos")).unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             root.join(".ljos/sync.toml"),
             format!(
                 "name = \"example-host\"\nrecipients = [\"{public}\"]\n[scopes]\ncloud = [\"{public}\"]\n"
@@ -11625,7 +12585,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let _g = crate::test_env_lock();
@@ -11652,7 +12612,7 @@ mod tests {
         let other_public = age_keygen(&dir.path().join("other.key"));
         let root = dir.path().join("tracker");
         std::fs::create_dir_all(root.join(".ljos")).unwrap();
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             root.join(".ljos/sync.toml"),
             format!(
                 "name = \"example-host\"\nrecipients = [\"{other_public}\"]\n[scopes]\ncloud = [\"{cloud_public}\"]\n"
@@ -11700,7 +12660,7 @@ mod tests {
     #[test]
     fn the_merge_driver_reexports_an_extra_scope_without_primary_atoms() {
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let _g = crate::test_env_lock();
@@ -11734,7 +12694,7 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&git.stderr)
         );
-        std::fs::write(
+        #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
             root.join(".ljos/sync.toml"),
             "name = \"example-host\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
         )
@@ -11763,6 +12723,10 @@ mod tests {
         with_fake_age(dir.path(), || {
             let cloud = root.join(&cloud_rel);
             std::fs::create_dir_all(cloud.parent().unwrap()).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&cloud, "stale\n").unwrap();
             crate::tracker_push::merge_atoms_driver(&cloud, &cloud_rel).unwrap();
             let cloud_text = std::fs::read_to_string(&cloud).unwrap();
@@ -11779,6 +12743,10 @@ mod tests {
                 "{cloud_text}"
             );
             let primary = root.join(&primary_rel);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&primary, "stale\n").unwrap();
             crate::tracker_push::merge_atoms_driver(&primary, &primary_rel).unwrap();
             let primary_text = std::fs::read_to_string(&primary).unwrap();
@@ -11868,7 +12836,7 @@ mod tests {
             };
             clone(&peer);
             std::fs::create_dir_all(peer.join(".ljos/atoms")).unwrap();
-            std::fs::write(
+            #[expect(clippy::disallowed_methods, reason = "writes a file that is not a git hook")] std::fs::write(
                 peer.join(".ljos/sync.toml"),
                 format!(
                     "name = \"example-host\"\nrecipients = [\"{machine}\"]\n[scopes]\ncloud = [\"{cloud}\"]\n"
@@ -11908,6 +12876,10 @@ mod tests {
         /// Commit `files` under `.ljos/atoms` in the peer's clone and push.
         fn push(&self, files: &[(&str, &[u8])]) {
             for (name, bytes) in files {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "writes a file that is not a git hook"
+                )]
                 std::fs::write(self.peer.join(".ljos/atoms").join(name), bytes).unwrap();
             }
             git_ok(&self.peer, &["add", "-A", ".ljos/atoms"]);
@@ -11949,7 +12921,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12011,7 +12983,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12025,7 +12997,15 @@ mod tests {
         ]);
         fix.pull();
         let atoms = fix.root.join(".ljos/atoms");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(atoms.join("alice+example-host.jsonl.age"), &alice).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(atoms.join("mallory+retired.jsonl.age"), &alice).unwrap();
         for name in [
             "x;touch${IFS}PWNED+cloud.jsonl.age",
@@ -12033,6 +13013,10 @@ mod tests {
             "bad host+cloud.jsonl.age",
             "bad\nhost+cloud.jsonl.age",
         ] {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(atoms.join(name), b"not a log").unwrap();
         }
         let said = import(&fix.root, &fix.scope()).unwrap();
@@ -12071,7 +13055,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12114,7 +13098,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12155,7 +13139,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12182,6 +13166,10 @@ mod tests {
         git_ok(&fix.root, &["commit", "-q", "-m", "this host's log"]);
         git_ok(&fix.root, &["push", "-q"]);
         let canary = fix.dir.join("canary");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&canary, "CANARY outside the tracker\n").unwrap();
         git_ok(&fix.peer, &["pull", "-q", "--ff-only"]);
         let trap = fix.peer.join(&rel);
@@ -12191,6 +13179,10 @@ mod tests {
         if let Some(parent) = trap.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&canary, &trap).unwrap();
         fix.push(&[]);
         fix.pull();
@@ -12199,6 +13191,10 @@ mod tests {
             .file_type()
             .is_symlink());
         let current = fix.root.join(".merge_file_ours");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&current, "ours\n").unwrap();
         crate::tracker_push::merge_atoms_driver(&current, &rel).unwrap();
         let merged = std::fs::read(&current).unwrap();
@@ -12222,7 +13218,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12299,7 +13295,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12367,7 +13363,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12378,6 +13374,10 @@ mod tests {
             &lesson_line("Alice wrote this.", "cloud"),
             &cloud,
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(fix.peer.join(".ljos/atoms/alice+cloud.jsonl.age"), &headed).unwrap();
         git_ok(&fix.peer, &["add", "-A", ".ljos/atoms"]);
         let dated = crate::git_cmd()
@@ -12411,6 +13411,10 @@ mod tests {
             .args(["rev-parse", "HEAD"])
             .output()
             .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(grafted.join(".git/info/grafts"), &head.stdout).unwrap();
 
         let hints = legacy_hints(&full).unwrap();
@@ -12478,7 +13482,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         fn git_text(cwd: &Path, args: &[&str]) -> String {
@@ -12537,6 +13541,10 @@ mod tests {
             &lesson_line("Alice wrote this.", "cloud"),
             &cloud,
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(fix.peer.join(".ljos/atoms/alice+cloud.jsonl.age"), &headed).unwrap();
         git_ok(&fix.peer, &["add", "-A", ".ljos/atoms"]);
         git_ok(&fix.peer, &["commit", "-q", "-m", "alice's headed log"]);
@@ -12629,7 +13637,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12637,6 +13645,10 @@ mod tests {
         let cloud = [fix.cloud.as_str()];
         let forged = fix.sealed(None, &lesson_line("Forged as Alice.", "cloud"), &cloud);
         git_ok(&fix.peer, &["checkout", "-q", "-b", "forged"]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(fix.peer.join(".ljos/atoms/alice+cloud.jsonl.age"), &forged).unwrap();
         git_ok(&fix.peer, &["add", "-A", ".ljos/atoms"]);
         git_ok(&fix.peer, &["commit", "-q", "-m", "forged"]);
@@ -12672,7 +13684,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12691,7 +13703,15 @@ mod tests {
         );
         let atoms = fix.root.join(".ljos/atoms");
         std::fs::create_dir_all(&atoms).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(atoms.join("alice+cloud.jsonl.age"), &headed).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(atoms.join("mallory+retired.jsonl.age"), &gone).unwrap();
         let files = || -> Vec<String> {
             let mut out = Vec::new();
@@ -12729,7 +13749,7 @@ mod tests {
             return;
         }
         if !crate::tool_installed("packsetd") {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -12756,8 +13776,16 @@ mod tests {
             &["worktree", "add", "-q", worktree.to_str().unwrap(), "HEAD"],
         );
         let parent = fix.dir.join("parent-link");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&fix.dir, &parent).unwrap();
         let home = fix.dir.join("home-link");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(fix.dir.join("home"), &home).unwrap();
         // SAFETY: the fixture holds the process env lock.
         unsafe {

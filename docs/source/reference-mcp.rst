@@ -8,10 +8,10 @@ MCP tools
 
 The seat serves these over the Model Context Protocol (MCP).
 
-Writers: ``ljos_start``, ``ljos_file``, ``ljos_options``, ``ljos_note``, ``ljos_sitting``, ``ljos_finish``, ``ljos_calibrate``, ``ljos_persona``, ``ljos_playbook``, ``ljos_remember``, ``ljos_prefer``, ``ljos_forget``, ``ljos_trust``,
-``ljos_learn``, ``ljos_graded``, ``ljos_island``, ``ljos_deed``, ``ljos_vote``, ``ljos_predict``, ``ljos_rule``, ``ljos_claim``,
+Writers: ``ljos_start``, ``ljos_file``, ``ljos_file_from``, ``ljos_options``, ``ljos_note``, ``ljos_sitting``, ``ljos_finish``, ``ljos_calibrate``, ``ljos_persona``, ``ljos_playbook``, ``ljos_remember``, ``ljos_prefer``, ``ljos_forget``, ``ljos_trust``,
+``ljos_learn``, ``ljos_graded``, ``ljos_island``, ``ljos_deed``, ``ljos_table``, ``ljos_vote``, ``ljos_predict``, ``ljos_rule``, ``ljos_claim``,
 ``ljos_release``, ``ljos_complete``, ``ljos_consolidate``, ``ljos_findings``, ``ljos_bump_plan``, ``ljos_handover``, ``ljos_receive``, ``ljos_send``, ``ljos_inbox``, ``ljos_read``, ``ljos_reply``, ``ljos_group``. Readers: ``ljos_search`` (with ``query`` and optional ``as_of``), ``ljos_guard_check``, ``ljos_conflicts``, ``ljos_show``,
-``ljos_timeline``, ``ljos_digest``, ``ljos_due``, ``ljos_habit`` (a writer with a value), ``ljos_evidence``, ``ljos_current``, ``ljos_recall``, ``ljos_ready``,
+``ljos_timeline``, ``ljos_digest``, ``ljos_due``, ``ljos_habit`` (a writer with a value), ``ljos_evidence``, ``ljos_current``, ``ljos_deed_show``, ``ljos_recall``, ``ljos_ready``,
 ``ljos_consensus``, ``ljos_brief``, ``ljos_personas``, ``ljos_playbooks``, ``ljos_cards``, ``ljos_policy``, ``ljos_doctor``, ``ljos_mail_search``, ``ljos_mail_show``. Resources:
 ``ljos://protocol``, ``ljos://cards/USER.md``, ``ljos://cards/MEMORY.md``. Prompts:
 ``start_a_sitting``, ``run_a_panel``, ``check_a_handover``. Most tool descriptions open with
@@ -19,7 +19,7 @@ when to call it. The resources are Markdown: the listing and a read both say ``t
 
 A tool's result is a JSON object, and the tool's ``outputSchema`` lists its fields. ``ljos_rule``, ``ljos_prefer``, ``ljos_forget``, ``ljos_habit``, ``ljos_predict``, ``ljos_trust`` and ``ljos_persona`` return what the pack stored, or the rule the seat keeps, and each lists the fields it returns, such as ``id`` and ``text``, instead of an open object. A field the schema marks required is always there; the others appear only when they have a value. A test calls each of the seven against a real pack writer and checks the result against the schema it listed.
 
-A writer needs a seat, and a reader runs with none. Seven writers read until a call asks them to write: ``ljos_deed`` without ``add``, ``ljos_vote`` with no ballot, ``ljos_bump_plan`` with ``dry_run``, ``ljos_habit`` with no ``value``, ``ljos_findings`` with neither ``remember`` nor ``issue``, ``ljos_group`` that only lists, and ``ljos_island`` without ``fire``. Each tool's ``seat`` argument says which kind it is: optional on a reader, needed on a shared server for a writer, and needed when the call writes for these seven.
+A writer needs a seat, and a reader runs with none. Eight writers read until a call asks them to write: ``ljos_deed`` without ``add``, ``ljos_table`` without ``add`` or ``csv``, ``ljos_vote`` with no ballot, ``ljos_bump_plan`` with ``dry_run``, ``ljos_habit`` with no ``value``, ``ljos_findings`` with neither ``remember`` nor ``issue``, ``ljos_group`` that only lists, and ``ljos_island`` without ``fire``. Each tool's ``seat`` argument says which kind it is: optional on a reader, needed on a shared server for a writer, and needed when the call writes for these eight.
 
 ``ljos_mail_search`` and ``ljos_mail_show`` read the owner's mailbox through notmuch. They are not in the core set, so ask for them with ``LJOS_MCP_TOOLS=core,mail_search,mail_show``. Both refuse until a ``[mail]`` table in the user's own ``ljos.toml`` names ``notmuch_config``, and a cloud seat refuses them. The `mail design <https://github.com/leidarljos/ljos/blob/develop/docs/design/mail.md>`__ has the table and the content checks.
 
@@ -46,15 +46,30 @@ A failure is one line and names the command.
 A missing tracker names ``ljos onboard``.
 A busy pack names ``ljos search`` or ``ljos remember``.
 An unknown tool names ``tools/list`` and ``ljos help``.
-Arguments that do not parse name the field that failed and the ``ljos help`` page for the tool.
+A call that names an argument the schema does not list is refused in one line that names the unknown argument and the accepted ones; nothing runs and nothing is written. Arguments that do not parse name the field that failed and the ``ljos help`` page for the tool.
 A failed call ends with a ``next:`` line that names the tool to call again once the line above is fixed, and ``ljos_guard_check`` adds that the command is not to run.
 An unknown method, or a line that is not JSON, names ``ljos mcp --help``.
 Setting ``LJOS_SEAT`` applies to reads only; a write on a shared ljos mcp server with no ``seat`` argument and no stamped session is refused and names ``ljos seat``.
 
 A result whose text starts with ``label`` is a refusal that is not an ``isError`` result, such as ``seat-unlisted`` or ``claim-conflict``. The call did not do its work, and the ``next:`` line says to follow the step the label names and call the tool again.
-Every tool that takes an issue says the id is the tracker id ``ljos_ready`` prints, such as ``proj-1a2b``. ``ljos_vote`` takes any option from the issue's ``Options:`` line in ``choice``, such as ``keep``, ``drop``, ``accept``, or ``reject``, and ``ljos_options`` writes that line.
+Every tool that takes an issue says the id is the tracker id ``ljos_ready`` prints, such as ``proj-1a2b``. Agents often pass ``id`` instead of ``issue``; both are read on those tools. ``ljos_vote`` takes any option from the issue's ``Options:`` line in ``choice``, such as ``keep``, ``drop``, ``accept``, or ``reject``, and ``ljos_options`` writes that line.
 
-``ljos_claim`` takes ``takeover`` set to true to take a ticket over from another seat whose claim looks stale, the step ``ljos claim ID --takeover`` takes. A holder that is running, or whose claim moved inside the lease, is refused with the ``claim-conflict`` label and nothing changes. The old holder is named in a note on the ticket. ``ljos_start`` and ``ljos_sitting`` already claim, and the server claims on the first write, so call ``ljos_claim`` only to name the issue yourself. A named worker occupies one slot, and a ``busy`` refusal names the held node. ``ljos_finish`` or ``ljos_release`` frees it. ``ljos_deed`` is the same: a git commit is cited as a deed for you, so call it for the other deeds.
+``ljos_claim`` takes ``takeover`` set to true to take a ticket over from another seat whose claim looks stale, the step ``ljos claim ID --takeover`` takes.
+A holder that is running, or whose claim moved inside the lease, is refused with the ``claim-conflict`` label and nothing changes.
+The old holder is named in a note on the ticket.
+``ljos_start`` claims when you call it, as the bare seat or as ``SEAT@TAG`` from ``_meta.conversation_id``.
+``ljos_sitting`` claims when you call it the same way.
+``ljos_note`` and ``ljos_finish`` claim once more when a sitting left its claim pending.
+``ljos_finish`` then releases the claim and does not complete the node; a node a gone conversation of this seat has claimed is released under that conversation's name.
+``ljos_complete`` completes such a node under that conversation's name and takes no claim.
+Only when that conversation's hold record was written for another claim graph does ``ljos_complete`` claim the node first, then complete it.
+Call ``ljos_claim`` only to name the issue yourself without ``ljos_start`` or ``ljos_sitting``.
+A named worker occupies one slot, and a ``busy`` refusal names the held node.
+``ljos_finish`` or ``ljos_release`` frees it.
+Shutdown and an idle session leave the claim in place.
+A git commit is written as one ``note:`` line to the book log and is not cited as a deed, so call ``ljos_deed`` for every deed.
+``ljos_table`` keeps a CSV table on an issue as ``ljos table`` does: ``add`` names a CSV file and ``csv`` passes the text with ``name``, and either stores and cites it in one tracker commit; ``show`` prints one, ``version`` an older one, and with neither it lists them.
+``ljos_deed_show`` returns a stored deed's bytes as ``ljos deed --show`` prints them, and refuses a copy that is missing or altered; ``out`` writes them to a file, which bytes that are not UTF-8 need.
 
 ``ljos_start`` is the short opening: it recalls and claims. ``ljos_sitting`` is the full opening in the protocol's order, and stops at the first store that does not answer. Pass ``issue``, or ``plan`` with ``items`` to file the checklist in one tracker commit. ``playbook`` is one of ``sit``, ``arena``, ``land``, ``company-panel``, ``overnight`` or ``feature``, and stays bound until ``ljos_finish`` or ``ljos_release``. Leave ``assignee`` out unless the call runs as a named worker.
 
@@ -62,11 +77,11 @@ Every tool that takes an issue says the id is the tracker id ``ljos_ready`` prin
 
 ``ljos_show`` prints the full ticket page ``ljos show`` prints: the header with the wrapped title, the claim if any, parent and children, blockers, the full body, and the latest notes.
 
-``ljos_search`` ranks the seat's memory for a query. Its tool description is short on purpose, so the rules it leaves out are here. Each row carries a score from 0 to 100 that ranks the match and does not say the claim is true. This seat's rows come first. Another seat's row is kept when it names the subject, or when the encoder's cosine reaches 0.66, and a single generic word is not a subject. A short list is not padded with a weaker cross-seat row, and ``min_score`` (34 by default, ``0`` returns every row) drops a row under that score. A pack that is still starting, or stays busy, gives word matches and the reading says so, for example ``Used word search because memory is still starting``. A search with ``as_of`` has no word fallback and answers ``Memory is starting, so try again in a few seconds``. A failure means the pack writer is down, and ``ljos_doctor`` says why.
+``ljos_search`` ranks the seat's memory for a query. Its tool description is short on purpose, so the rules it leaves out are here. Each row carries a score from 0 to 100 that ranks the match and does not say the claim is true. This seat's rows come first. Another seat's row is kept when it names the subject, or when the encoder's cosine reaches 0.66, and a single generic word is not a subject. A short list is not padded with a weaker cross-seat row, and ``min_score`` (34 by default, ``0`` returns every row) drops a row under that score. A pack that is still starting, or stays busy, gives word matches and the reading says so, for example ``Memory is starting, so these results are ranked by words. If this persists, run `ljos doctor`.`` Each call gets its own start wait, so a server that has been up for a long time waits out a starting pack as a new one does. A search with ``as_of`` has no word fallback and answers ``Memory is starting, so try again in a few seconds. If this persists, run `ljos doctor`.`` A failure means the pack writer is down, and ``ljos_doctor`` says why.
 
 Most tools answer with ``text``, the answer as the command prints it, and ``aside``, the lines it printed apart from the answer or null. The aside leaves out the ``file:`` line that names the tracker file on disk.
 
-``ljos_file`` with no ``project``, no ``parent`` and no held issue is refused with a line that says to pass ``project`` or ``parent``. Its type is the ``issue_kind`` argument, and ``kind`` is read too. ``ljos_finish`` does not close the ticket; a person does.
+``ljos_file`` with no ``project``, no ``parent`` and no held issue is refused with a line that says to pass ``project`` or ``parent``. Its type is the ``issue_kind`` argument, and ``kind`` is read too. ``ljos_finish`` does not close the ticket; a person does. ``ljos_file_from`` files every entry of ``rows``, or every row of the JSONL or CSV file at ``path``, as ``ljos file --from`` does: one tracker commit, the new ids one per line, and none of them when a row is refused.
 
 ``ljos_ready`` prints the same first page as ``ljos ready``. The default is 20 tickets. ``limit`` changes that count and ``all`` prints every ticket. The last line of a short page names ``--limit`` and ``--all``. This seat's claims come first, then unclaimed work by priority and recent activity, then other seats' claims, with long-stale claims last. The id breaks the final tie.
 

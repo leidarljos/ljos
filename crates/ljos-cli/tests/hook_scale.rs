@@ -5,6 +5,11 @@
 //! A fresh home and its own packsetd. The hook shows the writer's owner
 //! token, as a seat does, so it reads the listing as trusted.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -79,6 +84,10 @@ impl Seat {
             "cwd": self.dir.path(),
         })
         .to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.arg("hook");
         self.env(&mut cmd);

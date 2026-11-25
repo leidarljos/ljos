@@ -4,6 +4,11 @@
 //! share one model family in the settle; labelled ones count one family
 //! each.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 
 use std::path::{Path, PathBuf};
@@ -39,6 +44,10 @@ impl Scratch {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("tracker")).unwrap();
         std::fs::create_dir_all(dir.path().join("home")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.path().join("gitconfig"), "").unwrap();
         let mut scratch = Self {
             dir,
@@ -60,6 +69,10 @@ impl Scratch {
 
     fn command(&self, bin: &Path) -> Command {
         let home = self.home();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(bin);
         cmd.current_dir(self.dir.path())
             .env_clear()
@@ -96,6 +109,10 @@ impl Scratch {
     fn consensus(&self, args: &[&str]) -> (bool, String, String) {
         let out = self.dir.path().join("out");
         let err = self.dir.path().join("err");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         let mut child = self
             .command(Path::new(env!("CARGO_BIN_EXE_ljos")))
             .arg("consensus")

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Two ljos-mcp connections, two seats. One process is one session: a seat
-# argument does not mint a second ballot, and the session that filed a
-# design candidate cannot vote on that panel.
+# Two ljos-mcp connections, two seats. One process is one session: a second
+# seat on that connection is recorded under it and counts as one voice. A
+# session that filed a design candidate still casts, and the count leaves
+# that ballot out. ljos_finish ends the sitting and leaves the ticket open.
 set -uo pipefail
 unset LJOS_SEAT VISSUE_AGENT LJOS_PANE_TOOL LJOS_HARNESS_SESSION LJOS_PROCESS_NONCE LJOS_PANEL_CHILD LJOS_MEMBER_BIN LJOS_PANEL_PERSONAS LJOS_OFF
 if [ "${PACKSET_URL:-}" = off ]; then unset PACKSET_URL; fi
@@ -47,7 +48,8 @@ if [ -z "${PACKSET_URL:-}" ]; then
   url=$(sed -n 's/^PACKSET_URL=//p' "$root/packset.url" | head -1)
   if [ -n "$url" ]; then export PACKSET_URL="$url"; fi
 fi
-export PACKSET_WORKSPACE="mcp-seats:$(basename "$root")"
+PACKSET_WORKSPACE="mcp-seats:$(basename "$root")"
+export PACKSET_WORKSPACE
 echo "pack ${PACKSET_URL:-unset} home $PACKSET_HOME"
 
 export MCP_ROOT="$root"
@@ -175,7 +177,14 @@ bad, text = alice.tool("ljos_finish", {
     "issue": task,
     "lesson": "The review line names the seat. The note is one sentence.",
 })
-check("alice finishes", (not bad) and "completed" in text, text)
+check(
+    "alice finishes",
+    (not bad)
+    and f"sitting ended; ticket {task} is still open" in text
+    and f"ticket {task} was not closed: ljos_finish does not close a ticket" in text
+    and "closed the ticket" not in text,
+    text,
+)
 
 bad, text = alice.tool("ljos_file", {
     "title": "Add the seat to the review line",
@@ -202,9 +211,15 @@ check("bob reviews", (not bad) and "noted" in text, text)
 bad, text = bob.tool("ljos_finish", {
     "issue": work,
     "lesson": "The review passed. The line names the seat.",
-    "close": True,
 })
-check("bob closes", (not bad) and "closed the ticket" in text, text)
+check(
+    "bob leaves the ticket open",
+    (not bad)
+    and f"sitting ended; ticket {work} is still open" in text
+    and f"ticket {work} was not closed: ljos_finish does not close a ticket" in text
+    and "closed the ticket" not in text,
+    text,
+)
 
 bad, text = alice.tool("ljos_file", {
     "title": "Ship the review line now or hold?",
@@ -225,12 +240,11 @@ bad, text = alice.tool("ljos_file", {
 cand = issue_of(text)
 check("alice files the design candidate", (not bad) and "bound to session" in text and bool(cand), text)
 
-bad, text = alice.tool("ljos_vote", {
+author_bad, author_text = alice.tool("ljos_vote", {
     "issue": panel,
     "choice": "ship",
     "used": "none",
 })
-check("the author's vote is refused", bad and "authored candidate" in text and "Nothing was cast" in text, text)
 
 bad, text = bob.tool("ljos_vote", {
     "issue": panel,
@@ -238,6 +252,25 @@ bad, text = bob.tool("ljos_vote", {
     "used": "none",
 })
 check("the other seat's vote is cast", (not bad) and "ship" in text, text)
+
+counted = subprocess.run(
+    ["ljos", "vote", panel],
+    check=False, text=True, capture_output=True, env=env_base,
+)
+count = counted.stdout
+check(
+    "the author's vote is labelled and left out of the count",
+    (not author_bad)
+    and f"authored candidate {cand}" in author_text
+    and "labelled authored:" in author_text
+    and "alice voted ship" in author_text
+    and "Nothing was cast" not in author_text
+    and "1 ballot counts" in count
+    and "ignored, the session filed a candidate:" in count
+    and f"alice  sess-alice-mcp  (authored a candidate)" in count
+    and "bob  ship" in count,
+    author_text + "\n" + count + counted.stderr,
+)
 
 bad, text = alice.tool("ljos_file", {
     "title": "Keep the line or drop it?",
@@ -263,7 +296,23 @@ bad, text = alice.tool("ljos_vote", {
     "choice": "drop",
     "used": "none",
 })
-check("one connection cannot cast as another seat", bad and "already cast" in text and "Nothing was cast" in text, text)
+folded = subprocess.run(
+    ["ljos", "vote", second],
+    check=False, text=True, capture_output=True, env=env_base,
+)
+fold = folded.stdout
+check(
+    "one connection does not mint a second voice",
+    (not bad)
+    and "carol voted drop" in text
+    and "session sess-alice-mcp" in text
+    and "parent sess-alice-mcp" in text
+    and "Nothing was cast" not in text
+    and "1 ballot counts" in fold
+    and "folded into one voice (same session sess-alice-mcp): alice, carol" in fold
+    and "shared parent sess-alice-mcp: alice, carol" in fold,
+    text + "\n" + fold + folded.stderr,
+)
 
 alice.close()
 bob.close()

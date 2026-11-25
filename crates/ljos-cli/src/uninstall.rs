@@ -40,7 +40,8 @@ pub const SEAT_PROGRAMS: &[&str] = &[
 
 /// The stub left where `ljos` was. `scripts/uninstall.sh` writes the same
 /// text; a test keeps the two equal.
-pub const STUB: &str = r#"#!/bin/sh
+pub const STUB: &str = concat!(
+    r#"#!/bin/sh
 # ljos was uninstalled. This stub stands where the program was, so a
 # runner that loaded its hook list while ljos was installed still gets
 # an answer: every hook call is allowed. Remove it with
@@ -55,9 +56,12 @@ case "$1" in
     ;;
   git-hook|hookd) exit 0 ;;
 esac
-printf '%s\n' "ljos is uninstalled; $0 is the stub that answers hooks. Reinstall: curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh" >&2
+printf '%s\n' "ljos is uninstalled; $0 is the stub that answers hooks. Reinstall: "#,
+    release_install_command!(),
+    r#"" >&2
 exit 1
-"#;
+"#
+);
 
 /// What `uninstall` does beyond offboarding.
 #[derive(Debug, Clone, Default)]
@@ -325,25 +329,23 @@ fn program_step(bin: &Path, name: &str, opts: &Options) -> Option<Step> {
 ///
 /// The directory cannot be written.
 pub fn write_stub(path: &Path) -> std::io::Result<()> {
-    let tmp = path.with_extension(format!("stub.{}", std::process::id()));
-    std::fs::write(&tmp, STUB)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
-    }
-    std::fs::rename(&tmp, path)
+    // Rename onto `path`, so a running `ljos` keeps the previous inode.
+    crate::install_executable(path, STUB)
 }
 
 fn xdg(var: &str, under_home: &str) -> Option<PathBuf> {
-    std::env::var_os(var)
-        .filter(|v| !v.is_empty())
+    let named = std::env::var_os(var)
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|v| !v.is_empty())
-                .map(|h| PathBuf::from(h).join(under_home))
-        })
+        .filter(|path| path.is_absolute());
+    if let Some(named) = named {
+        return Some(named);
+    }
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .map(|home| home.join(under_home))
 }
 
 /// The directories the seat and its guard write under the XDG homes.
@@ -401,7 +403,8 @@ mod tests {
         write_stub(&path).unwrap();
         let run = |args: &[&str], stdin: &str| {
             use std::io::Write as _;
-            let mut child = std::process::Command::new("sh")
+            let mut child = crate::program("sh")
+                .unwrap()
                 .arg(&path)
                 .args(args)
                 .stdin(std::process::Stdio::piped())
@@ -490,8 +493,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("ljos"), "x").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("ljos-mcp"), "x").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("packset"), "x").unwrap();
         let opts = Options {
             dry: true,
@@ -523,8 +538,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("packset"), "x").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("packsetd"), "x").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(bin.join("vissue"), "x").unwrap();
         let step = seat_programs_stay(&bin, false).unwrap();
         assert_eq!(step.what, "programs");

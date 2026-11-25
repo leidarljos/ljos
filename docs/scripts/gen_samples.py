@@ -403,6 +403,9 @@ def _agent_env(home: Path, ljos: Path, extra: dict[str, str] | None = None) -> d
             "GIT_TERMINAL_PROMPT": "0",
             "COLUMNS": "80",
             "TERM": "dumb",
+            # packsetd finds an encoder beside its own binary or on PATH.
+            # The samples are the pages of a seat without one.
+            "INSIDE_EMBED": "off",
             # A distinct runtime directory, so a parent process's session
             # id is not read as this process's.
             "XDG_RUNTIME_DIR": str(home / "run"),
@@ -453,8 +456,23 @@ def _canon_agents(text: str, home: Path) -> str:
     return text
 
 
+_WRAP_BREAK = re.compile(r"\n *")
+
+
+def unwrap_breaks(text: str) -> str:
+    """Join the lines an 80-column wrap broke.
+
+    A newline and the spaces of its hanging indent become one space. A tab,
+    a run of spaces inside a line, and every other character stay as they
+    are, so a tab that turned into spaces still differs.
+    """
+    return _WRAP_BREAK.sub(" ", text)
+
+
 def _assert_agents(parts: dict[str, str]) -> None:
     whole = "\n".join(parts.values())
+    # The pty is 80 columns wide, so a needle may span a wrapped line.
+    flat = unwrap_breaks(whole)
     for needle in (
         "CLAUDE_CODE_SESSION_ID in this process",
         "CODEX_THREAD_ID in this process",
@@ -467,7 +485,7 @@ def _assert_agents(parts: dict[str, str]) -> None:
         f"not by {AGENT_SEAT_2}@",
         "/home/ada/",
     ):
-        if needle not in whole:
+        if needle not in whole and needle not in flat:
             raise SystemExit(f"gen_samples: agent sample missing {needle!r}")
     memory = parts["memory"]
     # The other session of the same runner is one family: no from-line.
@@ -928,19 +946,24 @@ def as_terminal(text: str) -> str:
     text = text.replace("lesson, the person's words, today", "lesson, today")
     text = text.replace("preference, from an agent, not checked, today", "preference, today")
     # The binary also says why this run stored an agent's lesson. A
-    # person's terminal does not print that sentence.
-    kept = [
-        line
-        for line in text.splitlines(keepends=True)
-        if not line.startswith("stored from an agent because")
-    ]
+    # person's terminal does not print that sentence. The pty is 80
+    # columns wide, so the sentence wraps onto a second line.
+    kept = []
+    inside = False
+    for line in text.splitlines(keepends=True):
+        if line.startswith("stored from an agent because"):
+            inside = True
+        if not inside:
+            kept.append(line)
+        elif line.rstrip().endswith("so run `ljos remember`."):
+            inside = False
     return "".join(kept)
 
 
 def tutorial_search(ljos: Path) -> dict[str, str]:
     """Remember, search and prefer as a terminal would print them.
 
-    The encoder stays off PATH, so the ranking line is the lexical one.
+    The writer's encoder is off, so the ranking line is the lexical one.
     The writer listens on a free port and is stopped before return.
     """
     for name in ("packset", "packsetd"):
@@ -1211,7 +1234,8 @@ def calibrate_sample(ljos: Path) -> str:
         raise SystemExit(f"gen_samples: calibrate found ljos-consensus:\n{text}")
     line = text.strip()
     expect = "ljos-consensus is not on PATH. Install it with `cargo install --locked ljos-consensus`."
-    if line != expect:
+    # The terminal is 80 columns wide, so the line may wrap.
+    if unwrap_breaks(line) != expect:
         raise SystemExit(f"gen_samples: calibrate missing-tool line was:\n{line}")
     return (
         "$ ljos calibrate -p demo\n"
@@ -1296,7 +1320,6 @@ def sitting_plan_sample(ljos: Path) -> str:
         "day-cd34  measure the files",
         "day-ef56  pick a default",
         "next: day-cd34  measure the files",
-        "These are word matches; the pack did not answer.",
         "matched by words (encoder not installed)",
         'day-ab12 is yours. `ljos finish day-ab12 --lesson "..."`',
         "ticked day-cd34",
@@ -1449,6 +1472,13 @@ def rewritten(doctor: str, help_text: str, agents: dict[str, str], tutorials: di
     return out
 
 
+def _assert_doctor_command_tails(text: str) -> None:
+    if ". so run" in text:
+        raise SystemExit(
+            "gen_samples: doctor row uses '. so run'; use ', so run ...'."
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="fail when a committed sample differs")
@@ -1470,6 +1500,8 @@ def main() -> int:
         "receive-empty": receive_sample(ljos),
     }
     files = rewritten(doctor, help_text, agent_samples(ljos), tutorials, walks)
+    for text in files.values():
+        _assert_doctor_command_tails(text)
     changed = [path for path, text in files.items() if text != path.read_text(encoding="utf-8")]
     if args.check:
         if changed:

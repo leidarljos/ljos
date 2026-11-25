@@ -29,6 +29,17 @@ const CONFIG_TEXT: &str = "\
 /// The ending of a pack row whose one repair is `packset ensure`.
 const ENSURE_TAIL: &str = ", so run `packset ensure`.";
 
+/// How a pack `GET /stats` admission line appears in the doctor memory row.
+/// A shedding writer gets the same command tail as other doctor rows.
+#[must_use]
+pub(crate) fn pack_admission_in_doctor(admission: &str) -> String {
+    if admission.contains("busy, retrying") {
+        format!("{admission}, so run `ljos doctor`.")
+    } else {
+        admission.to_string()
+    }
+}
+
 /// Point a pack row at `ljos doctor --fix` when that command makes the
 /// repair. The row names one command: `--fix` runs `packset ensure` itself,
 /// so the row does not also name `packset ensure`. A row whose repair needs
@@ -86,7 +97,7 @@ pub(crate) fn rows() -> Vec<Habitat> {
 /// one command that would repair them.
 pub fn apply() {
     for line in repairs() {
-        eprintln!("ljos: {line}");
+        say!("ljos: {line}");
     }
 }
 
@@ -454,6 +465,10 @@ fn move_aside(path: &Path) -> std::io::Result<PathBuf> {
         if dest.exists() {
             continue;
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "renames a path that is not a git hook"
+        )]
         std::fs::rename(path, &dest)?;
         return Ok(dest);
     }
@@ -469,14 +484,18 @@ fn real_dir(path: &Path) -> bool {
 }
 
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
     }
-    builder.create(path)
+    #[cfg(not(unix))]
+    {
+        std::fs::DirBuilder::new().recursive(true).create(path)
+    }
 }
 
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
@@ -487,6 +506,10 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut file = options.open(path)?;
     file.write_all(text.as_bytes())?;
     file.sync_all()

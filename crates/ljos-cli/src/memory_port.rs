@@ -179,8 +179,9 @@ pub(crate) fn holds_a_copy() -> bool {
 /// not treated as the tracker.
 fn memory_home() -> PathBuf {
     if let Some(root) = std::env::var_os("VISSUE_ROOT") {
-        if !root.is_empty() {
-            return PathBuf::from(root).join(".ljos").join("memory");
+        let root = PathBuf::from(root);
+        if !root.as_os_str().is_empty() && !crate::tracker_place::pinned_and_missing(&root) {
+            return root.join(".ljos").join("memory");
         }
     }
     if let Ok(layout) = vissue_core::Layout::resolve(None, None) {
@@ -420,6 +421,10 @@ fn stdout_path(path: &Path) -> bool {
     path == Path::new("-")
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "writes the export body bytes to stdout as they are"
+)]
 fn write_export_body(out: &Path, bytes: &[u8]) -> Result<()> {
     if stdout_path(out) {
         let mut stdout = std::io::stdout().lock();
@@ -469,7 +474,11 @@ fn rename_into_place(from: &Path, to: &Path) -> std::io::Result<()> {
     if let Some(code) = RENAME_FAULT.with(|cell| cell.get()) {
         return Err(std::io::Error::from_raw_os_error(code));
     }
-    std::fs::rename(from, to)
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
+    return std::fs::rename(from, to);
 }
 
 /// Write `bytes` onto `path` without following a symlink, then read the
@@ -477,6 +486,10 @@ fn rename_into_place(from: &Path, to: &Path) -> std::io::Result<()> {
 fn write_in_place(path: &Path, bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     use std::os::unix::fs::OpenOptionsExt;
     {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -509,6 +522,10 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_file_name(tmp_name);
     {
         use std::os::unix::fs::OpenOptionsExt;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -771,6 +788,13 @@ fn owned_by_other(atom: &Value, seat: &str) -> bool {
         .filter_map(seat_entity)
         .collect();
     !seats.is_empty() && seats.iter().all(|item| *item != seat)
+}
+
+/// Whether `atom` may leave the listing a hook kept for this seat: the rule
+/// an export applies. Another seat's row and one whose source carries a
+/// credential are not read back from that file.
+pub(crate) fn kept_for_seat(atom: &Value, seat: &str) -> bool {
+    !owned_by_other(atom, seat) && !atom.get("source").is_some_and(secret_source)
 }
 
 /// Whether a stored row belongs in this seat's export.
@@ -1623,7 +1647,7 @@ fn adopt_row(place: &Place, row: &mut Row) {
 
 fn rewrite_integrated(place: &Place, import_id: &str) -> Result<()> {
     let index = slot_dir(place, import_id).join("index.jsonl");
-    let Ok(text) = std::fs::read_to_string(&index) else {
+    let Some(text) = crate::private_file::read_slot_text(&place.home, &index) else {
         return Ok(());
     };
     let mut out = String::new();
@@ -2390,7 +2414,7 @@ fn load_index(place: &Place) -> Vec<Row> {
     slots.sort_by_key(|entry| entry.file_name());
     for slot in slots {
         let index = slot.path().join("index.jsonl");
-        let Ok(text) = std::fs::read_to_string(&index) else {
+        let Some(text) = crate::private_file::read_slot_text(&place.home, &index) else {
             continue;
         };
         for line in text.lines() {
@@ -2409,9 +2433,9 @@ fn apply_integration(slot: &Path, rows: &mut [Row]) {
         return;
     };
     for event in events.filter_map(|entry| entry.ok()) {
-        let Ok(value) = std::fs::read(event.path()).and_then(|bytes| {
-            serde_json::from_slice::<Value>(&bytes).map_err(std::io::Error::other)
-        }) else {
+        let Some(value) = crate::private_file::read_shared_file(&event.path())
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        else {
             continue;
         };
         let Some(mappings) = value["mappings"].as_array() else {
@@ -2450,8 +2474,8 @@ fn load_export_rows(place: &Place) -> Vec<Row> {
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
         .filter_map(|entry| {
-            let bytes = std::fs::read(entry.path()).ok()?;
-            serde_json::from_slice::<Row>(&bytes).ok()
+            let text = crate::private_file::read_shared_file(&entry.path())?;
+            serde_json::from_str::<Row>(&text).ok()
         })
         .collect()
 }
@@ -2464,8 +2488,8 @@ fn load_kept(place: &Place) -> Vec<Row> {
     entries
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
-            let bytes = std::fs::read(entry.path()).ok()?;
-            serde_json::from_slice::<Row>(&bytes).ok()
+            let text = crate::private_file::read_slot_text(&place.home, &entry.path())?;
+            serde_json::from_str::<Row>(&text).ok()
         })
         .collect()
 }
@@ -2478,8 +2502,8 @@ fn load_attempts(place: &Place) -> Vec<Row> {
     entries
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
-            let bytes = std::fs::read(entry.path()).ok()?;
-            serde_json::from_slice::<Row>(&bytes).ok()
+            let text = crate::private_file::read_shared_file(&entry.path())?;
+            serde_json::from_str::<Row>(&text).ok()
         })
         .collect()
 }
@@ -2489,6 +2513,38 @@ fn load_rows(place: &Place, attempts: bool) -> Vec<Row> {
     rows.extend(load_kept(place));
     if attempts {
         rows.extend(load_attempts(place));
+    }
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+    rows
+}
+
+/// Whether a row in the tracker's `kept/` or `attempts/` directory is this
+/// seat's to search. Those directories are shared by every seat that uses
+/// the tracker, and a row in them is a draft the pack did not take. This is
+/// the rule an export applies: another seat's draft stays out, and so does
+/// a row that names no seat, in its `seat` field or its entity tags.
+fn kept_row_of_seat(row: &Row, seat: &str) -> bool {
+    if !row.seat.is_empty() && row.seat != seat {
+        return false;
+    }
+    export_local_row(row, seat, row.seat == seat)
+}
+
+/// [`load_rows`] for a search: the slot's imports, and the kept and attempt
+/// rows of this seat.
+fn load_search_rows(place: &Place, attempts: bool) -> Vec<Row> {
+    let mut rows = load_index(place);
+    rows.extend(
+        load_kept(place)
+            .into_iter()
+            .filter(|row| kept_row_of_seat(row, &place.seat)),
+    );
+    if attempts {
+        rows.extend(
+            load_attempts(place)
+                .into_iter()
+                .filter(|row| kept_row_of_seat(row, &place.seat)),
+        );
     }
     rows.sort_by(|a, b| a.id.cmp(&b.id));
     rows
@@ -2575,7 +2631,7 @@ fn row_retired(row: &Row) -> bool {
 }
 
 fn selected(place: &Place, query: &str, filter: &SourceFilter, attempts: bool) -> Vec<(Row, f64)> {
-    let mut rows: Vec<Row> = load_rows(place, attempts)
+    let mut rows: Vec<Row> = load_search_rows(place, attempts)
         .into_iter()
         .filter(|row| !row_retired(row))
         .filter(|row| !row.text.trim().is_empty())
@@ -2879,7 +2935,7 @@ fn import_rows(home: &Path) -> Vec<Row> {
         slots.sort_by_key(|entry| entry.file_name());
         for slot in slots {
             let index = slot.path().join("index.jsonl");
-            let Ok(text) = std::fs::read_to_string(&index) else {
+            let Some(text) = crate::private_file::read_slot_text(home, &index) else {
                 continue;
             };
             for line in text.lines() {
@@ -2899,10 +2955,10 @@ fn load_kept_rows(home: &Path, rows: &mut Vec<Row>) {
         let mut entries: Vec<_> = entries.filter_map(|entry| entry.ok()).collect();
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
-            let Ok(bytes) = std::fs::read(entry.path()) else {
+            let Some(text) = crate::private_file::read_slot_text(home, &entry.path()) else {
                 continue;
             };
-            if let Ok(row) = serde_json::from_slice::<Row>(&bytes) {
+            if let Ok(row) = serde_json::from_str::<Row>(&text) {
                 rows.push(row);
             }
         }
@@ -2924,7 +2980,7 @@ fn retire_indexes(home: &Path, id: &str, why: Option<&str>) -> Result<Option<Ret
         slots.sort_by_key(|entry| entry.file_name());
         for slot in slots {
             let index = slot.path().join("index.jsonl");
-            if let Some(found) = retire_index_file(&index, &slot.path(), id, why)? {
+            if let Some(found) = retire_index_file(home, &index, &slot.path(), id, why)? {
                 return Ok(Some(found));
             }
         }
@@ -2933,12 +2989,13 @@ fn retire_indexes(home: &Path, id: &str, why: Option<&str>) -> Result<Option<Ret
 }
 
 fn retire_index_file(
+    home: &Path,
     index: &Path,
     slot: &Path,
     id: &str,
     why: Option<&str>,
 ) -> Result<Option<RetiredImport>> {
-    let Ok(text) = std::fs::read_to_string(index) else {
+    let Some(text) = crate::private_file::read_slot_text(home, index) else {
         return Ok(None);
     };
     let mut matched: Option<Row> = None;
@@ -2976,7 +3033,7 @@ fn retire_index_file(
     }
     Ok(Some(retired_of(
         &row,
-        posted_pack_id(slot, &row.content_sha256),
+        posted_pack_id(home, slot, &row.content_sha256),
     )))
 }
 
@@ -2987,7 +3044,7 @@ fn retire_kept(home: &Path, id: &str, why: Option<&str>) -> Result<Option<Retire
     };
     for entry in entries.filter_map(|entry| entry.ok()) {
         let path = entry.path();
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Some(bytes) = crate::private_file::read_slot_file(home, &path) else {
             continue;
         };
         let Ok(mut row) = serde_json::from_slice::<Row>(&bytes) else {
@@ -3015,12 +3072,12 @@ fn mark_retired(row: &mut Row, why: Option<&str>) {
     }
 }
 
-fn posted_pack_id(slot: &Path, content: &str) -> Option<String> {
+fn posted_pack_id(home: &Path, slot: &Path, content: &str) -> Option<String> {
     if content.is_empty() {
         return None;
     }
     let path = slot.join("receipts").join(format!("posted-{content}.json"));
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = crate::private_file::read_slot_file(home, &path)?;
     let value: Value = serde_json::from_slice(&bytes).ok()?;
     value
         .get("pack_id")
@@ -3074,8 +3131,8 @@ fn watermark_path(slot: &Path) -> PathBuf {
     slot.join("integrated.json")
 }
 
-fn index_digest(slot: &Path) -> Option<(String, usize)> {
-    let bytes = std::fs::read(slot.join("index.jsonl")).ok()?;
+fn index_digest(home: &Path, slot: &Path) -> Option<(String, usize)> {
+    let bytes = crate::private_file::read_slot_file(home, &slot.join("index.jsonl"))?;
     let rows = bytes
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
@@ -3088,9 +3145,9 @@ fn index_digest(slot: &Path) -> Option<(String, usize)> {
 
 /// Rows this import already integrated, when the index still matches the
 /// watermark. `None` when integrate has work left.
-fn integrated_already(slot: &Path) -> Option<usize> {
-    let (digest, rows) = index_digest(slot)?;
-    let bytes = std::fs::read(watermark_path(slot)).ok()?;
+fn integrated_already(home: &Path, slot: &Path) -> Option<usize> {
+    let (digest, rows) = index_digest(home, slot)?;
+    let bytes = crate::private_file::read_slot_file(home, &watermark_path(slot))?;
     let mark: Value = serde_json::from_slice(&bytes).ok()?;
     if mark.get("index_sha256").and_then(Value::as_str)? != digest {
         return None;
@@ -3103,8 +3160,8 @@ fn integrated_already(slot: &Path) -> Option<usize> {
     )
 }
 
-fn write_watermark(slot: &Path) -> Result<()> {
-    let Some((digest, rows)) = index_digest(slot) else {
+fn write_watermark(home: &Path, slot: &Path) -> Result<()> {
+    let Some((digest, rows)) = index_digest(home, slot) else {
         return Ok(());
     };
     write_private(
@@ -3221,13 +3278,13 @@ fn resolve_import(place: &Place, prefix: &str) -> Result<String> {
 fn integrate_one(place: &Place, import_id: &str, dry_run: bool) -> Result<IntegratePiece> {
     let slot = slot_dir(place, import_id);
     if !dry_run {
-        if let Some(rows) = integrated_already(&slot) {
+        if let Some(rows) = integrated_already(&place.home, &slot) {
             return Ok(unchanged_piece(import_id, rows));
         }
     }
     let _held = lock_home(&place.home);
     if !dry_run {
-        if let Some(rows) = integrated_already(&slot) {
+        if let Some(rows) = integrated_already(&place.home, &slot) {
             return Ok(unchanged_piece(import_id, rows));
         }
     }
@@ -3384,7 +3441,7 @@ fn integrate_one(place: &Place, import_id: &str, dry_run: bool) -> Result<Integr
         for note in materialise(&slot_dir(place, import_id), &posting)? {
             out.push_str(&format!("  not posted: {note}\n"));
         }
-        write_watermark(&slot_dir(place, import_id))?;
+        write_watermark(&place.home, &slot_dir(place, import_id))?;
     }
     for mapping in &mappings {
         let text = rows
@@ -4430,6 +4487,10 @@ mod tests {
 
     fn write_stored(dir: &Path, name: &str, row: &Row) {
         std::fs::create_dir_all(dir).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(dir.join(name), serde_json::to_vec_pretty(row).unwrap()).unwrap();
     }
 
@@ -4490,6 +4551,10 @@ mod tests {
             .join("slot-bare");
         std::fs::create_dir_all(&imports).unwrap();
         let bare_import = stored_row("bare-import", "an import row with no seat", &[]);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             imports.join("index.jsonl"),
             format!("{}\n", serde_json::to_string(&bare_import).unwrap()),
@@ -4506,6 +4571,10 @@ mod tests {
             "an import that names another seat",
             &["seat:seat-other"],
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             foreign.join("index.jsonl"),
             format!("{}\n", serde_json::to_string(&foreign_row).unwrap()),
@@ -4702,6 +4771,10 @@ mod tests {
         let lane = dir.path().join("handoff");
         std::fs::create_dir(&lane).unwrap();
         let file = lane.join("brine.jsonl");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &file,
             header_with_id("host-a", "brine", text, "2026-11-12T07:30:00Z", "row-1"),
@@ -4710,6 +4783,10 @@ mod tests {
         let done = import_path(&target, &file, None, None, None).unwrap();
         assert_eq!(done.rows, 1);
         assert_eq!(done.unchanged, 0);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &file,
             header_with_id("host-a", "brine", text, "2026-11-12T08:00:00Z", "row-1"),
@@ -4751,6 +4828,10 @@ mod tests {
         for id in ["abc111", "abc222"] {
             let slot = root.join(id);
             std::fs::create_dir_all(&slot).unwrap();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(slot.join("manifest.json"), b"{}\n").unwrap();
         }
         let err = resolve_import(&place, "abc").unwrap_err();
@@ -4772,7 +4853,15 @@ mod tests {
             .join(path_segment(&place.seat))
             .join(id);
         std::fs::create_dir_all(&slot).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(slot.join("manifest.json"), b"{\"rows\":0}\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(slot.join("index.jsonl"), b"").unwrap();
         let err = integrate(&place, Some(id), false, false, false).unwrap_err();
         let line = err.to_string();
@@ -4828,6 +4917,10 @@ mod tests {
                 n += 1;
             }
             let path = handoff.join(format!("{lane}.jsonl"));
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&path, body).unwrap();
             files.push(path);
         }
@@ -4949,6 +5042,10 @@ mod tests {
                 n += 1;
             }
             let path = handoff.join(format!("{lane}.jsonl"));
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "writes a file that is not a git hook"
+            )]
             std::fs::write(&path, &body).unwrap();
             files.push((path, count));
         }
@@ -5015,6 +5112,10 @@ mod tests {
 
         let changed = handoff.join("hh.jsonl");
         let fresh = "A new kiln stands on the west bench.";
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             &changed,
             format!(
@@ -5056,7 +5157,7 @@ mod tests {
     #[test]
     fn a_listener_on_the_default_port_leaves_integrate_tests_green() {
         let Some(_held) = hold_default_port() else {
-            eprintln!("memory-port: skipped, test listener did not start");
+            say!("memory-port: skipped, test listener did not start");
             return;
         };
         let (_dir, target) = place("port-listener");

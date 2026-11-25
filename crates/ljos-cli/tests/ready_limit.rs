@@ -55,6 +55,10 @@ impl Board {
     }
 
     fn command(&self, program: &str) -> Command {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut command = Command::new(program);
         command
             .current_dir(self.dir.path())
@@ -174,11 +178,11 @@ fn json_counts(page: &str) -> (u64, u64, usize) {
 
 const HINT: &str = "See more with `--limit` or `--all`. Narrow with `-p` or `--mine`.";
 
-fn assert_short_page(page: &str, shown: usize, total: usize) {
+fn assert_short_page(page: &str, shown: usize, total: usize, hint: bool) {
     let mut lines = page.lines();
     let header = format!("ready  shown {shown} of {total}");
     assert_eq!(lines.next(), Some(header.as_str()), "{page}");
-    if shown < total {
+    if hint {
         let hint = lines.last().unwrap_or("");
         assert_eq!(hint, HINT, "{page}");
         assert!(hint.chars().count() <= 80, "{hint}");
@@ -193,7 +197,7 @@ fn assert_short_page(page: &str, shown: usize, total: usize) {
 fn the_default_page_is_short_and_names_how_to_see_more() {
     let board = Board::open(23);
     let page = board.ok(&["ready"]);
-    assert_short_page(&page, 20, 23);
+    assert_short_page(&page, 20, 23, true);
     let shown = ticket_ids(&page);
     assert_eq!(shown.len(), 20, "{page}");
     assert_eq!(
@@ -203,7 +207,7 @@ fn the_default_page_is_short_and_names_how_to_see_more() {
     );
 
     let all = board.ok(&["ready", "--all"]);
-    assert_short_page(&all, 23, 23);
+    assert_short_page(&all, 23, 23, false);
     let every = ticket_ids(&all);
     assert_eq!(every.len(), 23, "{all}");
     assert_eq!(shown, every[..20]);
@@ -215,17 +219,17 @@ fn the_default_page_is_short_and_names_how_to_see_more() {
     assert!(all.contains("by saddle"), "{all}");
 
     let five = board.ok(&["ready", "-n", "5"]);
-    assert_short_page(&five, 5, 23);
+    assert_short_page(&five, 5, 23, true);
     assert_eq!(ticket_ids(&five), every[..5]);
     let long = board.ok(&["ready", "--limit", "5"]);
-    assert_short_page(&long, 5, 23);
+    assert_short_page(&long, 5, 23, true);
     assert_eq!(ticket_ids(&long), ticket_ids(&five), "{long}");
 
     let exact = board.ok(&["ready", "-n", "23"]);
-    assert_short_page(&exact, 23, 23);
+    assert_short_page(&exact, 23, 23, false);
 
     let none = board.ok(&["ready", "-n", "0"]);
-    assert_short_page(&none, 0, 23);
+    assert_short_page(&none, 0, 23, true);
     assert!(ticket_ids(&none).is_empty(), "{none}");
 
     let json = board.ok(&["ready", "--json"]);
@@ -239,17 +243,17 @@ fn the_default_page_is_short_and_names_how_to_see_more() {
     assert_eq!(json_ids(&every_json), every);
 
     let mcp = board.mcp_ready(serde_json::json!({}));
-    assert_short_page(&mcp, 20, 23);
+    assert_short_page(&mcp, 20, 23, true);
     assert_eq!(ticket_ids(&mcp), every[..20], "{mcp}");
     let mcp_five = board.mcp_ready(serde_json::json!({"limit": 5}));
-    assert_short_page(&mcp_five, 5, 23);
+    assert_short_page(&mcp_five, 5, 23, true);
     assert_eq!(ticket_ids(&mcp_five), every[..5], "{mcp_five}");
     let mcp_all = board.mcp_ready(serde_json::json!({"all": true}));
-    assert_short_page(&mcp_all, 23, 23);
+    assert_short_page(&mcp_all, 23, 23, false);
     assert_eq!(ticket_ids(&mcp_all), every, "{mcp_all}");
 
     let narrowed = board.ok(&["ready", "-p", "probe"]);
-    assert_short_page(&narrowed, 20, 23);
+    assert_short_page(&narrowed, 20, 23, true);
     assert_eq!(ticket_ids(&narrowed), shown, "{narrowed}");
 
     let mine = board.ok(&["ready", "--mine"]);
@@ -260,9 +264,17 @@ fn the_default_page_is_short_and_names_how_to_see_more() {
 #[test]
 fn own_claims_come_first_then_priority_then_recent_activity() {
     let board = Board::open(0);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(board.root.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
     let org = board.root.join("Software/probe/issues.org");
     std::fs::create_dir_all(org.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         &org,
         "\
@@ -370,6 +382,10 @@ fn own_claims_come_first_then_priority_then_recent_activity() {
 ",
     )
     .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut org = std::fs::OpenOptions::new().append(true).open(&org).unwrap();
     for n in 0..10 {
         writeln!(
@@ -409,10 +425,10 @@ fn own_claims_come_first_then_priority_then_recent_activity() {
         "probe-t0",
     ];
     let page = board.ok(&["ready"]);
-    assert_short_page(&page, 20, want.len());
+    assert_short_page(&page, 20, want.len(), true);
     assert_eq!(ticket_ids(&page), want[..20], "{page}");
     let all = board.ok(&["ready", "--all"]);
-    assert_short_page(&all, want.len(), want.len());
+    assert_short_page(&all, want.len(), want.len(), false);
     assert_eq!(ticket_ids(&all), want, "{all}");
     assert!(
         !all.contains("probe-w1"),
@@ -433,7 +449,7 @@ fn own_claims_come_first_then_priority_then_recent_activity() {
     );
 
     let two = board.ok(&["ready", "-n", "2"]);
-    assert_short_page(&two, 2, want.len());
+    assert_short_page(&two, 2, want.len(), true);
     assert_eq!(ticket_ids(&two), want[..2]);
     let json = board.ok(&["ready", "--json", "-n", "3"]);
     assert_eq!(json_counts(&json), (3, want.len() as u64, 3), "{json}");
@@ -453,9 +469,10 @@ fn own_claims_come_first_then_priority_then_recent_activity() {
     );
     assert_eq!(json_ids(&every), want);
     let mcp_page = board.mcp_ready(serde_json::json!({}));
-    assert_short_page(&mcp_page, 20, want.len());
+    assert_short_page(&mcp_page, 20, want.len(), true);
     assert_eq!(ticket_ids(&mcp_page), want[..20], "{mcp_page}");
     let mcp = board.mcp_ready(serde_json::json!({"all": true}));
+    assert_short_page(&mcp, want.len(), want.len(), false);
     assert_eq!(ticket_ids(&mcp), want, "{mcp}");
 }
 

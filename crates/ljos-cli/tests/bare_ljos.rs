@@ -14,6 +14,10 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn run(root: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
@@ -37,19 +41,24 @@ fn run(root: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
 }
 
 fn screen(seat: &str) -> String {
+    let install = ljos_cli::RELEASE_INSTALL_COMMAND;
+    let width = install.len();
     format!(
         "\
 Memory, a work tracker and a command guard for coding runners.
 
 {seat}
 
-  sh install.sh --no-embed  install ljos
-  ljos doctor               check that ljos is ready
-  ljos remember TEXT        store one lesson
-  ljos search QUERY         find what is stored
+  {install:<width$}  install ljos
+  {doctor:<width$}  check that ljos is ready
+  {remember:<width$}  store one lesson
+  {search:<width$}  find what is stored
 
 The docs are at https://leidarljos.github.io/ljos/reference-commands.html.
-"
+",
+        doctor = "ljos doctor",
+        remember = "ljos remember TEXT",
+        search = "ljos search QUERY",
     )
 }
 
@@ -72,6 +81,31 @@ fn a_cargo_build_names_install_and_an_installed_copy_does_not() {
     )));
     assert!(!ljos_cli::exe_from_cargo_target(std::path::Path::new(
         "/home/ada/.local/bin/ljos"
+    )));
+}
+
+/// A `CARGO_TARGET_DIR` of another name is still a cargo build: cargo
+/// leaves `.cargo-lock` in the profile directory it builds into.
+#[test]
+fn a_cargo_build_in_another_target_dir_names_install() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join("build-out/debug");
+    std::fs::create_dir_all(profile.join("deps")).unwrap();
+    assert!(!ljos_cli::exe_from_cargo_build(&profile.join("ljos")));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(profile.join(".cargo-lock"), "").unwrap();
+    assert!(ljos_cli::exe_from_cargo_build(&profile.join("ljos")));
+    assert!(ljos_cli::exe_from_cargo_build(
+        &profile.join("deps/ljos-abc")
+    ));
+    let installed = dir.path().join("bin");
+    std::fs::create_dir_all(&installed).unwrap();
+    assert!(!ljos_cli::exe_from_cargo_build(&installed.join("ljos")));
+    assert!(ljos_cli::exe_from_cargo_build(std::path::Path::new(
+        "/work/ljos/target/debug/ljos"
     )));
 }
 

@@ -5,14 +5,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 fn git(dir: &Path, args: &[&str]) -> Output {
-    Command::new("git")
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -20,7 +22,7 @@ fn git(dir: &Path, args: &[&str]) -> Output {
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", dir)
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 fn git_ok(dir: &Path, args: &[&str]) -> String {
@@ -55,6 +57,10 @@ impl Split {
         let board = board_dir.join("issues.org");
         let state = dir.path().join("state");
         std::fs::create_dir_all(&state).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             state.join("issues.json"),
             serde_json::json!({
@@ -63,6 +69,10 @@ impl Split {
             .to_string(),
         )
         .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(state.join("notes.json"), "{}").unwrap();
         let org = format!(
             "\
@@ -74,6 +84,10 @@ impl Split {
 :ID:         {id}\n\
 :END:\n"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(&board, &org).unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["config", "user.email", "seat@example.invalid"]);
@@ -179,6 +193,10 @@ else:
             "ljos-consensus",
             "#!/bin/sh\ncase \"$1\" in\n  settle) echo '{\"settled\":true}' ;;\n  *) echo '{}' ;;\nesac\n",
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(
             state.join("ballots.json"),
             serde_json::json!([
@@ -201,7 +219,11 @@ else:
 
     fn consensus(&self) -> Output {
         let path = format!("{}:/usr/bin:/bin", self.bin.display());
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["consensus", &self.id, "--json"])
             .current_dir(&self.bin)
             .env_clear()
@@ -220,7 +242,7 @@ else:
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .output()
-            .unwrap()
+            .unwrap();
     }
 
     fn org(&self) -> String {

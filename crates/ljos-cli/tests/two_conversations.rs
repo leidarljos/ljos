@@ -7,7 +7,6 @@
 
 ljos_test_boot::harness!();
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -38,8 +37,7 @@ fn script(path: &Path, body: &str) {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).unwrap();
     }
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(path, body).unwrap();
 }
 
 fn text_of(out: &Output) -> String {
@@ -66,7 +64,15 @@ impl Seat {
         }
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&project).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("tracker/vissue.toml"), "prefix = \"Software\"\n").unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(project.join("issues.org"), ORG).unwrap();
         script(&bin.join("deedar"), "#!/bin/sh\necho head\nexit 0\n");
         script(
@@ -104,6 +110,7 @@ if cmd == "claim":
 if cmd == "get":
     row = data.get(args[1])
     if not row:
+        sys.stderr.write("not found\n")
         sys.exit(1)
     print(f"{{args[1]}} {{row.get('status','todo')}} gen={{row.get('gen',1)}} assignee={{row.get('assignee','')}}")
     sys.exit(0)
@@ -218,7 +225,11 @@ sys.exit(0)
         };
         let root = self.dir.path();
         let path = format!("{}:/usr/bin:/bin", root.join("bin").display());
-        Command::new("bash")
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        return Command::new("bash")
             .args(["--noprofile", "--norc", "-c", &script])
             .env_clear()
             .env("PATH", path)
@@ -242,7 +253,7 @@ sys.exit(0)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .unwrap()
+            .unwrap();
     }
 }
 

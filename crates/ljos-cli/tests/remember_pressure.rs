@@ -63,6 +63,10 @@ fn remember(port: u16, text: &str) -> std::process::Output {
     let state = root.path().join("state");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&state).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["remember", text])
         .env_clear()

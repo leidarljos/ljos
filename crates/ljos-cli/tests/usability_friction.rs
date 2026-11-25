@@ -14,6 +14,10 @@ fn run(args: &[&str], extra: &[(&str, &str)]) -> Output {
     for sub in [".config", ".local/state", ".local/share", "run", "tmp"] {
         std::fs::create_dir_all(home.path().join(sub)).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.args(args)
         .env_clear()
@@ -59,9 +63,7 @@ fn search_and_remember_say_one_line_when_the_pack_is_down() {
     let search_err = lines(&search.stderr);
     assert!(search.status.success(), "{search_err:?}");
     assert!(
-        search_err.iter().any(|line| {
-            line.contains("The memory writer is not running") && line.contains("packset ensure")
-        }),
+        search_err.iter().any(|line| line == "Memory is not running, so these results are ranked by words. If this persists, run `ljos doctor`."),
         "{search_err:?}"
     );
     let remember = run(
@@ -94,6 +96,10 @@ fn file_without_a_tracker_names_onboard() {
     let product = dir.path().join("greet");
     std::fs::create_dir_all(&product).unwrap();
     let git = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let out = Command::new("git")
             .args(args)
             .current_dir(&product)
@@ -104,11 +110,19 @@ fn file_without_a_tracker_names_onboard() {
         assert!(out.status.success(), "git {args:?}: {out:?}");
     };
     git(&["init", "-q"]);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(product.join("greet.sh"), "echo hello\n").unwrap();
     let home = dir.path().join("home");
     for sub in [".config", ".local/state", ".local/share", "run"] {
         std::fs::create_dir_all(home.join(sub)).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["file", "Print hello only when GREET is yes", "-p", "greet"])
         .env_clear()
@@ -185,6 +199,10 @@ fn file_and_finish_do_not_ask_and_name_a_missing_tool_in_one_line() {
 #[test]
 fn cards_name_the_directory_when_both_files_are_missing() {
     let home = tempfile::tempdir().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["cards"])
         .env_clear()
@@ -285,6 +303,10 @@ fn a_failed_wake_shows_the_command_output() {
     for sub in [".config/ljos", ".local/state", "run", "tmp"] {
         std::fs::create_dir_all(home.path().join(sub)).unwrap();
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut base = Command::new(env!("CARGO_BIN_EXE_ljos"));
     base.env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
@@ -312,6 +334,10 @@ fn a_failed_wake_shows_the_command_output() {
         "{}",
         String::from_utf8_lossy(&set.stderr)
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let fired = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["wake", "seat-a", "--fire"])
         .env_clear()
@@ -363,6 +389,10 @@ fn seat_grant_names_this_seat_when_via_does_not_match() {
 fn a_question_is_not_read_from_stdin() {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join("run")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["note", "left on the bench"])
         .env_clear()

@@ -110,7 +110,11 @@ fn pack(warm_after_search: bool, post_status: u16) -> Pack {
 }
 
 fn search(pack: &Pack, home: &Path, state: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["search", "Carrollton Nov 23 morning timing"])
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -125,7 +129,7 @@ fn search(pack: &Pack, home: &Path, state: &Path) -> std::process::Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 #[test]
@@ -201,6 +205,10 @@ fn a_missing_encoder_is_unavailable_not_still_loading() {
         }
     });
     let url = format!("http://127.0.0.1:{port}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["search", "lexical default"])
         .env_clear()
@@ -229,6 +237,10 @@ fn a_missing_encoder_is_unavailable_not_still_loading() {
         !stderr.contains("still loading") && !stderr.contains("still starting"),
         "a missing encoder was described as loading: {said}"
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let as_json = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["search", "--json", "lexical default"])
         .env_clear()
@@ -405,7 +417,11 @@ fn search_waited(
         args.push("--json");
     }
     args.push("Carrollton Nov 23 morning timing");
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(&args)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -424,7 +440,7 @@ fn search_waited(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 #[test]
@@ -526,6 +542,10 @@ fn search_says_when_a_queued_lesson_is_still_waiting() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&queue_dir).unwrap();
     let lesson = "The Oak Tree stop is the morning plan.";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         queue_dir.join("note-queue.jsonl"),
         format!(
@@ -604,7 +624,11 @@ fn serve_search(search_body: &'static str, search_status: u16, atoms: &'static s
 }
 
 fn search_as(url: &str, home: &Path, state: &Path, query: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_ljos"))
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    return Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["search", query])
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -619,7 +643,7 @@ fn search_as(url: &str, home: &Path, state: &Path, query: &str) -> std::process:
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .unwrap()
+        .unwrap();
 }
 
 const RINGS: &str = "related work watch rings-statistics-matter";
@@ -678,7 +702,7 @@ fn a_busy_pack_still_ranks_this_seats_lesson_by_words() {
     assert!(stdout.contains(OWN_RINGS), "{said}");
     assert!(!stdout.contains("disk fill"), "{said}");
     assert!(
-        stderr.contains("The memory pack was busy, so these rows are word matches; run the search again for ranked results."),
+        stderr.contains("Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`."),
         "the busy pack did not fall back to words: {said}"
     );
     assert!(!said.contains("pack busy, try again"), "{said}");
@@ -708,6 +732,10 @@ fn truncated_search_prints_a_runnable_limit_command() {
         200,
         r#"{"atoms":[]}"#,
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args([
             "search",

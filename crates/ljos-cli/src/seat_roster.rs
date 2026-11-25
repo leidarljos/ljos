@@ -49,6 +49,7 @@ pub(crate) fn seat_list() -> SeatList {
 pub fn add(name: &str) -> Result<String> {
     let slug = seat_slug_of(name).context("seat add")?;
     crate::tracker_place::aim_tracker().map_err(anyhow::Error::msg)?;
+    refuse_guessed_tracker()?;
     let caller = crate::resolve_seat();
     let caller_slug = crate::canonical_seat_name(&caller.seat);
     let path = config_path().context("seat add: no tracker; set VISSUE_ROOT")?;
@@ -142,6 +143,7 @@ pub fn grant(
     if caller_slug != via {
         bail!("seat grant: --via names {via}, and this seat is {caller_slug}. Nothing was written");
     }
+    refuse_guessed_tracker()?;
     let path = config_path().context("seat grant: no tracker; set VISSUE_ROOT")?;
     let mut doc = load_doc(&path).context("seat grant")?;
     if !seat_known(&doc, &target) {
@@ -480,6 +482,15 @@ fn seat_slug_of(name: &str) -> Result<String> {
     Ok(slug)
 }
 
+/// A roster write needs a tracker something named. The working directory
+/// alone is not one, and `vissue.toml` is not made there.
+fn refuse_guessed_tracker() -> Result<()> {
+    if crate::tracker_place::no_tracker_to_write() {
+        bail!("{}", crate::tracker_place::MISSING_TRACKER);
+    }
+    Ok(())
+}
+
 fn config_path() -> Option<PathBuf> {
     if let Ok(layout) = vissue_core::Layout::resolve(None, None) {
         return Some(layout.root().join("vissue.toml"));
@@ -577,7 +588,15 @@ fn write_doc(path: &Path, doc: &toml::Value) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("toml.new");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&tmp, &text).with_context(|| format!("write {}", tmp.display()))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     std::fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
     Ok(())
 }
@@ -769,6 +788,10 @@ via = \"bea\"
 
 [seats.bea]
 ";
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("vissue.toml"), listed).unwrap();
         git(root, &["add", "vissue.toml"]);
         git(root, &["commit", "-q", "-m", "roster"]);
@@ -777,6 +800,10 @@ via = \"bea\"
             "via = \"bea\"\n",
             &format!("via = \"bea\"\ncommit = \"{good}\"\n"),
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("vissue.toml"), &on_head).unwrap();
         git(root, &["add", "vissue.toml"]);
         git(root, &["commit", "-q", "-m", "record grant"]);
@@ -795,6 +822,10 @@ via = \"bea\"
             ],
         );
         let side = on_head.replace(&good, &orphan);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("vissue.toml"), side).unwrap();
         assert!(
             honored_grant("ada").is_none(),
@@ -802,6 +833,10 @@ via = \"bea\"
         );
 
         let ghost = on_head.replace("via = \"bea\"", "via = \"ghost\"");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
         std::fs::write(root.join("vissue.toml"), ghost).unwrap();
         assert!(
             honored_grant("ada").is_none(),

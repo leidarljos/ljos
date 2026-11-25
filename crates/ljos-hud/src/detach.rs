@@ -34,6 +34,10 @@ pub fn start_detached(cli: &HudCli) -> anyhow::Result<i32> {
             std::fs::create_dir_all(parent)?;
         }
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let mut log_file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -46,6 +50,10 @@ pub fn start_detached(cli: &HudCli) -> anyhow::Result<i32> {
     let exe = std::env::current_exe()?;
     let stdout = log_file.try_clone()?;
     let token = summon::peek_env_token();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut cmd = Command::new(&exe);
     cmd.args(child_args(cli))
         .stdin(Stdio::null())

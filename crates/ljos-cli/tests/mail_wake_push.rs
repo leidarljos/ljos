@@ -9,8 +9,12 @@
 //! lands after `inbox --sync` started is still read. A checkout with no
 //! remote only lists.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -71,6 +75,10 @@ fn start_packsetd(
 }
 
 fn git(cfg: &Path, dir: &Path, args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -91,6 +99,10 @@ fn git(cfg: &Path, dir: &Path, args: &[&str]) -> String {
 }
 
 fn git_at(cfg: &Path, args: &[&str]) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new("git")
         .args(args)
         .env("GIT_CONFIG_GLOBAL", cfg)
@@ -111,13 +123,14 @@ fn write_exe(path: &Path, body: &str) {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).expect("dir");
     }
-    std::fs::write(path, body).expect("write");
-    let mut perms = std::fs::metadata(path).expect("meta").permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms).expect("perms");
+    ljos_cli::install_executable(path, body).expect("write");
 }
 
 fn age_key(path: &Path) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let made = Command::new("age-keygen")
         .arg("-o")
         .arg(path)
@@ -128,6 +141,10 @@ fn age_key(path: &Path) -> String {
         "age-keygen: {}",
         String::from_utf8_lossy(&made.stderr)
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let public = Command::new("age-keygen")
         .args(["-y"])
         .arg(path)
@@ -168,7 +185,7 @@ fn home_dirs(home: &Path) {
 fn world(slow_push: bool, reject: bool) -> (World, ljos_test_boot::Packsetd) {
     let root = tempfile::tempdir().expect("root");
     let gitconfig = root.path().join("gitconfig");
-    std::fs::write(
+    ljos_cli::write_file(
         &gitconfig,
         "[user]\n\tname = seat\n\temail = seat@example.invalid\n[commit]\n\tgpgsign = false\n[safe]\n\tdirectory = *\n[init]\n\tdefaultBranch = main\n",
     )
@@ -207,17 +224,17 @@ fn world(slow_push: bool, reject: bool) -> (World, ljos_test_boot::Packsetd) {
     std::fs::create_dir_all(seed.join(".ljos")).expect("ljos");
     // `cloud` is reserved for the shared extra scope. These letters are
     // unscoped, so they stay on the primary log under another name.
-    std::fs::write(
+    ljos_cli::write_file(
         seed.join(".ljos/sync.toml"),
         format!("name = \"mail\"\nrecipients = [\"{public}\"]\n"),
     )
     .expect("sync.toml");
-    std::fs::write(
+    ljos_cli::write_file(
         seed.join(".gitattributes"),
         "*.org merge=ljos-org\n.ljos/atoms/* merge=ljos-atoms\n",
     )
     .expect("attributes");
-    std::fs::write(seed.join("README"), "tracker\n").expect("readme");
+    ljos_cli::write_file(seed.join("README"), "tracker\n").expect("readme");
     git(&gitconfig, &seed, &["add", "."]);
     git(&gitconfig, &seed, &["commit", "-q", "-m", "seed"]);
     git(&gitconfig, &seed, &["push", "-q", "-u", "origin", "HEAD"]);
@@ -259,8 +276,17 @@ fn world(slow_push: bool, reject: bool) -> (World, ljos_test_boot::Packsetd) {
         (&recipient_home, &recipient_repo),
     ] {
         home_dirs(home);
-        std::fs::copy(&key, home.join(".config/ljos/age.key")).expect("age key");
-        std::fs::write(
+        let copy = home.join(".config/ljos/age.key");
+        ljos_cli::write_file(&copy, std::fs::read(&key).expect("age key")).expect("age key");
+        std::fs::File::open(&copy)
+            .and_then(|file| {
+                let mode = std::os::unix::fs::PermissionsExt::mode(
+                    &std::fs::metadata(&key)?.permissions(),
+                );
+                ljos_cli::change_mode_of(&file, mode)
+            })
+            .expect("age key mode");
+        ljos_cli::write_file(
             home.join(".config/ljos/sync.toml"),
             format!("repos = [\"{}\"]\n", repo.display()),
         )
@@ -362,6 +388,10 @@ impl World {
         extra: &[(&str, &str)],
         args: &[&str],
     ) -> Output {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args);
         self.env(&mut cmd, home);
@@ -425,6 +455,10 @@ fn log_in_commit(host: &str) -> String {
 }
 
 fn open_log(world: &World, host: &str) -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let listed = Command::new("git")
         .arg("--git-dir")
         .arg(&world.origin)
@@ -445,6 +479,10 @@ fn open_log(world: &World, host: &str) -> String {
         .find(|line| line.contains("/snap-"))
         .unwrap_or_else(|| panic!("no snapshot for {host} in {listed}"));
     let spec = format!("HEAD:{snap}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let show = Command::new("git")
         .arg("--git-dir")
         .arg(&world.origin)
@@ -459,7 +497,15 @@ fn open_log(world: &World, host: &str) -> String {
         String::from_utf8_lossy(&show.stderr)
     );
     let sealed = world.root.path().join(format!("{host}.jsonl.age"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(&sealed, &show.stdout).expect("sealed");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let plain = Command::new("age")
         .args(["-d", "-i"])
         .arg(&world.key)
@@ -685,6 +731,10 @@ fn a_refused_push_still_wakes_and_is_logged() {
         log.contains("push refused"),
         "the wake log does not record the refusal: {log}"
     );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let remote = Command::new("git")
         .arg("--git-dir")
         .arg(&world.origin)
@@ -928,16 +978,24 @@ fn inbox_sync_with_no_remote_only_lists() {
         &local,
         &world.root.path().join("no-hooks"),
     );
-    std::fs::copy(
+    ljos_cli::copy_file(
         world.root.path().join("seed/.ljos/sync.toml"),
         local.join(".ljos/sync.toml"),
     )
     .expect("scope");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(local.join("README"), "local\n").expect("readme");
     git(&world.gitconfig, &local, &["add", "."]);
     git(&world.gitconfig, &local, &["commit", "-q", "-m", "local"]);
     let head = git(&world.gitconfig, &local, &["rev-parse", "HEAD"]);
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         world.recipient_home.join(".config/ljos/sync.toml"),
         format!("repos = [\"{}\"]\n", local.display()),

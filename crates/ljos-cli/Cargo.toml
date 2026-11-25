@@ -67,10 +67,15 @@ rmcp.workspace = true
 schemars.workspace = true
 tokio.workspace = true
 unicode-normalization = "0.1"
+unicode-segmentation = "1"
+unicode-width = "0.2"
+rustix = { version = "1", features = ["fs"] }
+tempfile = "3"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2", features = ["hazmat"] }
-tempfile = "3"
+# Lexes the sources for the mode check in src/exe_publish/mode_check.rs.
+proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }
 vissue-core.workspace = true
 # Not used by the binary. ureq 2 reaches webpki-roots 1 through the 0.26
 # shim, and this floor keeps the lock off a 1.0 release that still trusts
@@ -78,3 +83,6 @@ vissue-core.workspace = true
 webpki-roots = "1.0.10"
 ljos-test-boot = { path = "../ljos-test-boot" }
 ljos = { path = ".", features = ["test-hooks"] }
+
+[lints]
+workspace = true

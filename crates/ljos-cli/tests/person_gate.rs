@@ -8,6 +8,11 @@
 //! way `ljos git-hook NAME` does. The child sets the runner variable
 //! itself, since the test harness strips runner variables at load.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "a test writes its notes to the test harness, not to a person"
+)]
+
 ljos_test_boot::harness!();
 
 use std::io::Write as _;
@@ -72,6 +77,10 @@ impl Case {
         }
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let init = Command::new("git")
             .args(["init", "-q"])
             .current_dir(&repo)
@@ -84,6 +93,10 @@ impl Case {
             ("commit.gpgsign", "false"),
             ("core.hooksPath", "/dev/null"),
         ] {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             let out = Command::new("git")
                 .args(["config", key, value])
                 .current_dir(&repo)
@@ -91,6 +104,10 @@ impl Case {
                 .unwrap();
             assert!(out.status.success(), "{key}");
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let made = Command::new("git")
             .args(["commit", "-q", "--allow-empty", "-m", "seed"])
             .current_dir(&repo)
@@ -101,6 +118,10 @@ impl Case {
             "{}",
             String::from_utf8_lossy(&made.stderr)
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
         let head = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&repo)
@@ -123,10 +144,18 @@ impl Case {
         let exe = std::env::current_exe().unwrap();
         let mut cmd = match wrapper {
             Some(runner) => {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "starts a program outside git hook code"
+                )]
                 let mut cmd = Command::new(runner);
                 cmd.args(["-c", "\"$@\"; exit $?", "claude"]).arg(&exe);
                 cmd
             }
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
             None => Command::new(&exe),
         };
         cmd.args(["--exact", "gate_child", "--nocapture", "--test-threads=1"])
@@ -157,6 +186,7 @@ impl Case {
 /// prompt, so this does not wait for one.
 fn run_hook(cmd: &mut Command, stdin: &str) -> (Output, String) {
     let term = pty::Pty::open();
+    term.attach_output(cmd);
     let mut child = term.spawn(cmd.stdin(Stdio::piped()));
     child
         .stdin
@@ -164,22 +194,37 @@ fn run_hook(cmd: &mut Command, stdin: &str) -> (Output, String) {
         .unwrap()
         .write_all(stdin.as_bytes())
         .unwrap();
-    let out = pty::wait_output(child, 30);
+    let out = term.wait_output(child, 30);
+    term.finish_reading();
     (out, term.shown())
 }
 
-fn labelled(out: &Output) -> String {
+fn labelled(out: &Output, shown: &str) -> String {
     let said = String::from_utf8_lossy(&out.stdout);
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(out.status.success(), "held: {said}{err}");
-    assert!(said.contains("gate-child: allowed"), "{said}{err}");
-    assert!(err.contains("sitting-gate"), "{err}");
-    err
+    assert!(out.status.success(), "held: {said}{err}{shown}");
+    assert!(
+        said.contains("gate-child: allowed") || shown.contains("gate-child: allowed"),
+        "{said}{err}{shown}"
+    );
+    assert!(
+        err.contains("sitting-gate") || shown.contains("sitting-gate"),
+        "{err}{shown}"
+    );
+    if err.contains("sitting-gate") {
+        err
+    } else {
+        shown.to_string()
+    }
 }
 
 fn push_is_labelled(case: &Case, cmd: &mut Command) {
     let (out, shown) = run_hook(cmd, &case.push);
-    let err = labelled(&out);
+    let err = labelled(&out, &shown);
+    assert!(
+        shown.contains("gate-child: allowed"),
+        "pty must keep hook output: {shown}"
+    );
     assert!(!shown.contains(PROMPT), "the hook asked: {shown}");
     assert!(!shown.contains(YES_PROMPT), "the hook asked: {shown}");
     assert!(!err.contains("passphrase"), "{err}");
@@ -227,7 +272,11 @@ fn a_hard_runner_is_never_asked() {
         &mut case.command(Some(&claude), Some("CURSOR_AGENT")),
         &case.push,
     );
-    let err = labelled(&out);
+    let err = labelled(&out, &shown);
+    assert!(
+        shown.contains("gate-child: allowed"),
+        "pty must keep hook output: {shown}"
+    );
     assert!(
         !shown.contains("passphrase"),
         "a hard runner was asked: {shown}"
@@ -258,8 +307,23 @@ fn piped_stdin_without_a_terminal_cannot_answer() {
         .unwrap()
         .write_all(case.push.as_bytes())
         .unwrap();
-    let out = pty::wait_output(child, 60);
-    let err = labelled(&out);
+    let pid = child.id();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&done);
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // SAFETY: a signal to a child this test started.
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    });
+    let out = child.wait_with_output().unwrap();
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    let err = labelled(&out, "");
     assert!(!err.contains(PROMPT), "{err}");
 }
 
@@ -305,18 +369,23 @@ fn no_key_and_a_yes_at_the_terminal_lets_the_push_through() {
 fn an_interrupt_at_the_prompt_restores_echo() {
     let case = Case::new(true);
     let term = pty::Pty::open();
-    let mut child = term.spawn(
-        case.command(None, Some("CURSOR_AGENT"))
-            .stdin(Stdio::piped()),
-    );
+    let mut cmd = case.command(None, Some("CURSOR_AGENT"));
+    term.attach_output(&mut cmd);
+    let mut child = term.spawn(cmd.stdin(Stdio::piped()));
     child
         .stdin
         .take()
         .unwrap()
         .write_all(case.push.as_bytes())
         .unwrap();
-    let out = pty::wait_output(child, 30);
-    labelled(&out);
-    assert!(term.echo_on(), "echo was turned off: {}", term.shown());
+    let out = term.wait_output(child, 30);
+    term.finish_reading();
+    let shown = term.shown();
+    labelled(&out, &shown);
+    assert!(
+        shown.contains("gate-child: allowed"),
+        "pty must keep hook output: {shown}"
+    );
+    assert!(term.echo_on(), "echo was turned off: {shown}");
     assert!(!term.shown().contains(PROMPT), "{}", term.shown());
 }

@@ -2590,7 +2590,7 @@ mod tests {
     #[test]
     fn a_live_packsetd_listing_is_json() {
         if !ljos_test_boot::Packsetd::on_path() {
-            eprintln!("skipped: packsetd is not installed");
+            say!("skipped: packsetd is not installed");
             return;
         }
         let _g = crate::tests::env_guard();

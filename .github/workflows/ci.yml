@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: ['**']
+    # A tag push runs the identity job only.
+    tags: ['**']
   pull_request:
     branches: [develop, main]
   workflow_dispatch:
@@ -11,16 +13,17 @@ permissions:
   contents: read
 
 # A group holds one running and one pending run, and a newer pending run
-# cancels the older one even with cancel-in-progress off. So each develop
-# and main push has a group of its own, keyed by its sha, and runs to the
-# end. Any other branch keeps one group, where a new push cancels the last.
+# cancels the older one even with cancel-in-progress off. So each branch
+# and tag push has a group of its own, keyed by its sha, and runs to the
+# end. A pull request keeps one group, where a new push cancels the last.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') && github.sha || 'tip' }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' && github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'tip' || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   workflows:
     name: workflow files
+    if: github.ref_type != 'tag'
     # The resolute runner cannot resolve the Ubuntu archive.
     runs-on: ubuntu-24.04
     steps:
@@ -44,6 +47,7 @@ jobs:
   # and type. Draft writes nothing.
   changelog:
     name: changelog fragments
+    if: github.ref_type != 'tag'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -63,6 +67,7 @@ jobs:
   # for every target the release builds.
   release-install:
     name: release installer
+    if: github.ref_type != 'tag'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -70,9 +75,8 @@ jobs:
         run: scripts/release-install-check.sh
       - name: Pinned sibling releases have their archives
         run: scripts/release-pin-check.sh
-  # A push is before..sha. A new branch's before is all zeros, so the
-  # commits are the ones on no other remote branch. A pull request is
-  # base..head. Commits already on the base are outside the range.
+  # A tag push runs only this job. The job checks every commit reachable
+  # from the event commit and skips none. A git error fails the job.
   identity:
     name: commit identity
     if: github.event_name == 'push' || github.event_name == 'pull_request'
@@ -83,51 +87,13 @@ jobs:
           fetch-depth: 0
       - name: Test the identity gate
         run: scripts/identity-gate-test.sh
-      - name: Check commits new to this event
+      - name: Check commits reachable from this event
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          BEFORE: ${{ github.event.before }}
           SHA: ${{ github.sha }}
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          set -eu
-          EVENT_NAME=${EVENT_NAME-}
-          BEFORE=${BEFORE-}
-          SHA=${SHA-}
-          PR_BASE=${PR_BASE-}
-          PR_HEAD=${PR_HEAD-}
-          REF_NAME=${REF_NAME-}
-          zero=0000000000000000000000000000000000000000
-          if [ "$SHA" = "$zero" ]; then
-            echo "identity-gate: ref deletion has no commits to judge" >&2
-            exit 1
-          fi
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            if [ -z "$PR_BASE" ] || [ -z "$PR_HEAD" ]; then
-              echo "identity-gate: missing pull request range" >&2
-              exit 1
-            fi
-            scripts/identity-gate.sh "$PR_BASE..$PR_HEAD"
-          elif [ "$BEFORE" = "$zero" ]; then
-            if [ -z "$REF_NAME" ]; then
-              echo "identity-gate: missing ref name" >&2
-              exit 1
-            fi
-            git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
-            scripts/identity-gate.sh "$SHA" --not \
-              --exclude="origin/${REF_NAME}" \
-              --exclude="origin/HEAD" \
-              --remotes=origin
-          elif [ -n "$BEFORE" ]; then
-            scripts/identity-gate.sh "$BEFORE..$SHA"
-          else
-            echo "identity-gate: missing before" >&2
-            exit 1
-          fi
+        run: scripts/identity-history.sh "$SHA"
   test:
     name: cargo test
+    if: github.ref_type != 'tag'
     # CPU runner. The packset binary is built on its own; packset-embed is not.
     runs-on: ubuntu-24.04
     # Line tables keep file:line backtraces and drop the full DWARF that
@@ -156,10 +122,11 @@ jobs:
       # Mail reader tests build a notmuch database. Detach tests need tmux.
       # The identity gate tests start a one-shot runner under zsh -c.
       # The hook queue test reads each call's peak RSS from GNU time.
+      # Installer tests run the printed fish lines, including quotes and backslashes.
       - name: Use a reachable Ubuntu mirror
         run: sudo timeout -k 5 90 bash .github/scripts/apt-mirror.sh
       - name: Install age, tmux, notmuch and time
-        run: sudo apt-get install -y --no-install-recommends age tmux notmuch time zsh shellcheck
+        run: sudo apt-get install -y --no-install-recommends age tmux notmuch time zsh shellcheck fish
       # vissue, claimdag and deedar are named in .github/sibling-pin.
       # packset, phronesis and ljos-policyd are named in
       # scripts/sibling-tools.sh. The script builds each pin, checks the
@@ -235,7 +202,7 @@ jobs:
   linux-archive:
     name: linux archive
     needs: test
-    if: github.event_name == 'push' && (github.ref_name == 'develop' || github.ref_name == 'main')
+    if: github.event_name == 'push' && github.ref_type != 'tag' && (github.ref_name == 'develop' || github.ref_name == 'main')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -252,6 +219,7 @@ jobs:
 
   macos:
     name: cargo check and test on macOS
+    if: github.ref_type != 'tag'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -274,11 +242,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # The sync, rules and push tests seal with age, as on the Linux job.
+      # Installer tests run the printed fish lines, including quotes and backslashes.
       - name: age
         run: |
           set -eu
-          brew install age
+          brew install age fish
           command -v age-keygen
+          command -v fish
       - name: Unit tests
         run: cargo test --locked --workspace --lib --no-fail-fast
 
@@ -287,6 +257,7 @@ jobs:
   # Those tests use a fake pack and do not need packsetd.
   mcp-lifetime-macos:
     name: mcp lifetime on macOS
+    if: github.ref_type != 'tag'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -298,6 +269,7 @@ jobs:
 
   deny:
     name: cargo deny check
+    if: github.ref_type != 'tag'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

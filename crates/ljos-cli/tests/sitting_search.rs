@@ -4,6 +4,11 @@
 
 ljos_test_boot::harness!();
 
+const BUSY_LINE: &str =
+    "Memory is busy, so these results are ranked by words. If this persists, run `ljos doctor`.";
+const DOWN_LINE: &str =
+    "Memory is not running, so these results are ranked by words. If this persists, run `ljos doctor`.";
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
@@ -14,10 +19,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 fn script(dir: &Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ljos_cli::install_executable(&path, body).unwrap();
 }
 
 /// Answers health, status and atom reads. `/v1/search` and `/v1/activate`
@@ -78,6 +81,10 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
     let home = root.path().join("home");
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
     std::fs::create_dir_all(root.path().join("run")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.join(".cursor/mcp.json"),
         r#"{"mcpServers":{"ljos":{"command":"/no/such/ljos-mcp"}}}"#,
@@ -98,7 +105,7 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
         root.path(),
         "claimdag",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\nesac\necho '[]'\nexit 0\n",
             log.display()
         ),
     );
@@ -117,6 +124,10 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
     let issue = doc.headings[0].id.clone();
     let (port, searches) = stall_search();
     let path = format!("{}:/usr/bin:/bin", root.path().display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["sitting", &issue, "--verbose"])
         .current_dir(root.path())
@@ -195,13 +206,22 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
         1,
         "a sitting asks the search once and does not ask it again:\n{stdout}"
     );
-    assert!(
-        stdout.contains("ranked by words; the pack search did not answer in time"),
-        "a stalled search is the one read, and the sitting says so:\n{stdout}"
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    let said: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("ranked by words"))
+        .collect();
+    assert_eq!(
+        said,
+        [BUSY_LINE],
+        "a search that never answers is one line on stderr and the sitting goes on:\n{stderr}"
     );
     assert!(
-        stdout.contains("These are word matches; the pack did not answer."),
-        "a search that never answers is one line and the sitting goes on:\n{stdout}"
+        !stdout.contains("ranked by words") && !stdout.contains("word matches"),
+        "the sitting repeats the line on stdout:\n{stdout}"
     );
     assert!(
         started.elapsed() < Duration::from_secs(8),
@@ -261,6 +281,10 @@ fn a_sitting_reads_related_memories_with_one_bounded_search() {
     let home = root.path().join("home");
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
     std::fs::create_dir_all(root.path().join("run")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.join(".cursor/mcp.json"),
         r#"{"mcpServers":{"ljos":{"command":"/no/such/ljos-mcp"}}}"#,
@@ -281,7 +305,7 @@ fn a_sitting_reads_related_memories_with_one_bounded_search() {
         root.path(),
         "claimdag",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\nesac\necho '[]'\nexit 0\n",
             log.display()
         ),
     );
@@ -301,6 +325,10 @@ fn a_sitting_reads_related_memories_with_one_bounded_search() {
     let lines = Arc::new(Mutex::new(Vec::new()));
     let port = search_pack(Arc::clone(&lines));
     let path = format!("{}:/usr/bin:/bin", root.path().display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["sitting", &issue, "--verbose"])
         .current_dir(root.path())
@@ -360,15 +388,15 @@ fn a_sitting_reads_related_memories_with_one_bounded_search() {
         "{said}"
     );
     assert!(
-        stdout.contains("probe project keeps its rollout checklist"),
-        "a lesson on the ticket's project is missing:\n{said}"
+        !stdout.contains("probe project keeps its rollout checklist"),
+        "a lesson tagged to another issue in this project stayed:\n{said}"
     );
     assert!(
         stdout.contains("Oak Tree timing follows the maple calendar"),
         "a strong cross-seat match is missing:\n{said}"
     );
     assert!(
-        stdout.contains("from bob") && stdout.contains("from carol"),
+        stdout.contains("from carol") && !stdout.contains("from bob"),
         "cross-seat lessons are not labelled:\n{said}"
     );
     assert!(
@@ -377,9 +405,8 @@ fn a_sitting_reads_related_memories_with_one_bounded_search() {
     );
     let island = stdout.split("== island").nth(1).unwrap_or(&stdout);
     let own = island.find("Oak Tree on Nov 23").unwrap();
-    let project = island.find("probe project keeps").unwrap();
     let strong = island.find("Oak Tree timing follows").unwrap();
-    assert!(own < project && project < strong, "{said}");
+    assert!(own < strong, "{said}");
     assert!(!said.contains("memory degraded"), "{said}");
     assert!(!stdout.contains("the whole pack was listed"), "{said}");
 }
@@ -419,11 +446,65 @@ fn pressure_pack() -> u16 {
     port
 }
 
+/// A pack that answers every read with nothing. `search` false is a
+/// writer with no `/v1/search`, which the sitting asks for a listing.
+fn empty_pack(search: bool) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut sock) = stream else { break };
+            thread::spawn(move || {
+                let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 2048];
+                loop {
+                    match sock.read(&mut tmp) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let request = String::from_utf8_lossy(&buf);
+                let line = request.lines().next().unwrap_or("");
+                let (status, body) = if line.contains("/v1/search") {
+                    if search {
+                        ("200 OK", r#"{"hits":[]}"#)
+                    } else {
+                        ("404 Not Found", r#"{"error":"not found"}"#)
+                    }
+                } else if line.contains("/v1/atoms") {
+                    ("200 OK", r#"{"atoms":[]}"#)
+                } else {
+                    (
+                        "200 OK",
+                        r#"{"embedder":{"available":true,"answering":true}}"#,
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(response.as_bytes());
+            });
+        }
+    });
+    port
+}
+
 fn sitting_fixture(root: &Path) -> (String, std::path::PathBuf, std::path::PathBuf) {
     let log = root.join("calls.log");
     let home = root.join("home");
     std::fs::create_dir_all(home.join(".cursor")).unwrap();
     std::fs::create_dir_all(root.join("run")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
     std::fs::write(
         home.join(".cursor/mcp.json"),
         r#"{"mcpServers":{"ljos":{"command":"/no/such/ljos-mcp"}}}"#,
@@ -444,7 +525,7 @@ fn sitting_fixture(root: &Path) -> (String, std::path::PathBuf, std::path::PathB
         root,
         "claimdag",
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) exit 1 ;;\nesac\necho '[]'\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"claimdag $*\" >> '{}'\ncase \"$1\" in\n  get) echo 'not found' >&2; exit 1 ;;\nesac\necho '[]'\nexit 0\n",
             log.display()
         ),
     );
@@ -467,6 +548,10 @@ fn run_sitting(root: &Path, url: &str) -> (bool, String, Duration) {
     let (issue, home, tracker) = sitting_fixture(root);
     let path = format!("{}:/usr/bin:/bin", root.display());
     let started = Instant::now();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
     let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["sitting", &issue, "--verbose"])
         .current_dir(root)
@@ -501,10 +586,8 @@ fn a_sitting_skips_memory_when_packsetd_answers_503() {
         "a 503 with Retry-After 60 held the sitting for {took:?}:\n{said}"
     );
     assert!(ok, "{said}");
-    assert!(
-        said.contains("These are word matches; the pack did not answer."),
-        "{said}"
-    );
+    assert_eq!(said.matches(BUSY_LINE).count(), 1, "{said}");
+    assert_eq!(said.matches("ranked by words").count(), 1, "{said}");
     assert!(
         said.contains("== claim") || said.contains("claimed"),
         "{said}"
@@ -523,8 +606,45 @@ fn a_sitting_skips_memory_when_packsetd_never_answers() {
         "a closed pack port held the sitting for {took:?}:\n{said}"
     );
     assert!(ok, "{said}");
-    assert!(
-        said.contains("These are word matches; the pack did not answer."),
-        "{said}"
+    assert_eq!(said.matches(DOWN_LINE).count(), 1, "{said}");
+    assert_eq!(said.matches("ranked by words").count(), 1, "{said}");
+}
+
+/// The lines under the `== island` heading, up to the next heading.
+fn island_lines(said: &str) -> Vec<&str> {
+    said.lines()
+        .skip_while(|line| !line.starts_with("== island"))
+        .skip(1)
+        .take_while(|line| !line.starts_with("== "))
+        .collect()
+}
+
+#[test]
+fn an_empty_pack_read_prints_only_the_no_matching_memories_line() {
+    assert_eq!(
+        ljos_cli::NO_MATCHING_MEMORIES_LINE,
+        "No matching memories for this task.\n"
     );
+    for search in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        script(
+            root.path(),
+            "packset-embed",
+            "#!/bin/sh\necho 'packset-embed 0.18.2'\n",
+        );
+        let port = empty_pack(search);
+        let (ok, said, _) = run_sitting(root.path(), &format!("http://127.0.0.1:{port}"));
+        assert!(ok, "search {search}: {said}");
+        assert_eq!(
+            island_lines(&said),
+            ["No matching memories for this task."],
+            "search {search}: {said}"
+        );
+        assert_eq!(
+            said.matches("No matching memories for this task.").count(),
+            1,
+            "search {search}: {said}"
+        );
+        assert!(!said.contains("ranked by words"), "search {search}: {said}");
+    }
 }

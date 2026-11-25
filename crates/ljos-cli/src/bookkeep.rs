@@ -43,6 +43,7 @@ const MCP_WRITES: &[&str] = &[
     "ljos_prefer",
     "ljos_forget",
     "ljos_deed",
+    "ljos_table",
     "ljos_rule",
     "ljos_vote",
     "ljos_learn",
@@ -284,6 +285,10 @@ impl Drop for ShutdownFinish {
 pub fn log_line(line: &str) {
     let dir = super::runtime_dir();
     let _ = std::fs::create_dir_all(&dir);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a path that is not a git hook"
+    )]
     let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -411,14 +416,16 @@ pub fn guard_off_reason() -> Option<String> {
 /// Whether `path` is a temporary directory or sits inside one.
 #[must_use]
 pub fn path_is_temp(path: Option<&Path>) -> bool {
-    let Some(path) = path else {
-        return false;
-    };
+    path.is_some_and(|path| path_is_temp_in(path, &temp_roots()))
+}
+
+/// [`path_is_temp`] against the given temp roots.
+fn path_is_temp_in(path: &Path, roots: &[PathBuf]) -> bool {
     if path.as_os_str().is_empty() {
         return false;
     }
     let path = canonical_existing_prefix(path);
-    resolved_path_is_temp(&path)
+    roots.iter().any(|root| path.starts_with(root))
 }
 
 /// `path` with the longest existing prefix resolved, and the missing
@@ -431,14 +438,24 @@ fn canonical_existing_prefix(path: &Path) -> PathBuf {
     loop {
         if let Ok(mut real) = std::fs::canonicalize(&cur) {
             for name in missing.iter().rev() {
-                real.push(name);
+                if name == "." {
+                    continue;
+                }
+                if name == ".." {
+                    real.pop();
+                } else {
+                    real.push(name);
+                }
             }
             return real;
         }
-        let Some(name) = cur.file_name().map(|name| name.to_os_string()) else {
-            return path.to_path_buf();
+        let seg = match cur.components().next_back() {
+            Some(std::path::Component::Normal(name)) => name.to_os_string(),
+            Some(std::path::Component::ParentDir) => std::ffi::OsString::from(".."),
+            Some(std::path::Component::CurDir) => std::ffi::OsString::from("."),
+            _ => return path.to_path_buf(),
         };
-        missing.push(name);
+        missing.push(seg);
         if !cur.pop() {
             return path.to_path_buf();
         }
@@ -458,20 +475,50 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+fn per_session_tmpdir(raw: &std::ffi::OsStr, passwd_home: Option<&Path>) -> Option<PathBuf> {
+    if raw.is_empty() {
+        return None;
+    }
+    let candidate = Path::new(raw);
+    if !candidate.is_absolute() {
+        return None;
+    }
+    let resolved = canonical_existing_prefix(candidate);
+    if resolved.components().count() < 3 {
+        return None;
+    }
+    // Without a passwd home there is no telling a sandbox TMPDIR from one
+    // that holds the person's own home, so TMPDIR is not a temp root.
+    let pw = canonical_existing_prefix(passwd_home?);
+    if pw.starts_with(&resolved) {
+        return None;
+    }
+    Some(resolved)
+}
+
 pub(crate) fn temp_roots() -> Vec<PathBuf> {
     #[cfg(test)]
     if let Some(roots) = TEST_TEMP_ROOTS.with(|r| r.borrow().clone()) {
         return roots;
     }
+    temp_roots_for(
+        std::env::var_os("TMPDIR").as_deref(),
+        crate::proc_tree::own_home().as_deref(),
+    )
+}
+
+/// The temp roots for a `TMPDIR` value and a passwd home.
+fn temp_roots_for(tmpdir: Option<&std::ffi::OsStr>, passwd_home: Option<&Path>) -> Vec<PathBuf> {
     let mut roots = vec![
+        #[cfg(not(unix))]
         std::env::temp_dir(),
         PathBuf::from("/tmp"),
         PathBuf::from("/var/tmp"),
         PathBuf::from("/private/tmp"),
         PathBuf::from("/dev/shm"),
     ];
-    if let Some(tmp) = std::env::var_os("TMPDIR").filter(|t| !t.is_empty()) {
-        roots.push(PathBuf::from(tmp));
+    if let Some(tmp) = tmpdir.and_then(|t| per_session_tmpdir(t, passwd_home)) {
+        roots.push(tmp);
     }
     roots
         .into_iter()
@@ -483,24 +530,6 @@ pub(crate) fn temp_roots() -> Vec<PathBuf> {
 #[must_use]
 pub fn books(_event: &str) -> bool {
     false
-}
-
-/// A hook call writes a note only when it is a commit. Nothing else is booked.
-#[must_use]
-pub fn observe(raw: &str, call: &super::HookCall) -> (String, Vec<String>) {
-    if call.event == "PostToolUse" && call.cue.contains("git commit") {
-        let subject = call
-            .cue
-            .split_once("-m ")
-            .map(|(_, rest)| rest.trim().trim_matches('"').to_string())
-            .unwrap_or_default();
-        let repo = serde_json::from_str::<Value>(raw)
-            .ok()
-            .and_then(|v| v.get("cwd").and_then(Value::as_str).map(str::to_string))
-            .unwrap_or_default();
-        let _ = note_after_commit(&repo, "commit", &subject);
-    }
-    (String::new(), Vec::new())
 }
 
 /// Nothing to recall.
@@ -557,15 +586,22 @@ pub(crate) fn replace_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
         let mut out = options.open(&tmp)?;
         out.write_all(bytes)?;
         out.sync_all()?;
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+        crate::change_mode(&tmp, mode & 0o666)?;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "renames a path that is not a git hook"
+    )]
     if let Err(err) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(err);
@@ -604,6 +640,10 @@ mod temp_path_tests {
         let real = root.path().join("private/tmp");
         std::fs::create_dir_all(&real).unwrap();
         let link = root.path().join("tmp");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a path that is not a git hook"
+        )]
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let canon = std::fs::canonicalize(&link).unwrap();
         TEST_TEMP_ROOTS.with(|roots| roots.replace(Some(vec![canon.clone()])));
