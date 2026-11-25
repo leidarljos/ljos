@@ -2103,7 +2103,7 @@ fn euid() -> u32 {
 /// The temporary directory is resolved and must pass [`walk_trusted_dir`]
 /// for `uid`, the check the temporary state root gets. `ljos-UID` and the
 /// home's directory must each be a directory `uid` owns that passes
-/// [`trusted_dir_mode`], reached without following a symlink. When any of
+/// [`record_dir_mode`], reached without following a symlink. When any of
 /// that fails the seat keeps its records under `~/.cache/ljos/run`, or,
 /// with no absolute home, under `ljos-UID-own` in a trusted temporary
 /// directory. With neither, the path is under `/dev/null`, where nothing
@@ -2217,7 +2217,7 @@ fn runtime_dirs_at(
 }
 
 /// `name` under `dir`, opened without following a symlink: a directory
-/// `owner` owns that passes [`trusted_dir_mode`], and whether this call
+/// `owner` owns that passes [`record_dir_mode`], and whether this call
 /// made it. A missing `name` is made mode `0700` with `make`, and is `None`
 /// without it.
 fn runtime_dir_at(
@@ -2242,11 +2242,24 @@ fn runtime_dir_at(
         Err(err) => return Err(err.to_string()),
     };
     let (uid, mode) = dir_owner_mode(&opened).map_err(|err| err.to_string())?;
-    if uid != owner {
-        return Err("refusing a runtime directory another user owns".to_string());
-    }
-    trusted_dir_mode(uid, mode, owner).map_err(str::to_string)?;
+    record_dir_mode(uid, mode, owner).map_err(str::to_string)?;
     Ok(Some((opened, made)))
+}
+
+/// Whether a directory that holds `owner`'s runtime records, with `uid`
+/// and `mode`, is closed to every other writer.
+///
+/// This is stricter than [`trusted_dir_mode`] for a directory on the way:
+/// the sticky bit stops another user renaming or removing an entry, not
+/// making a new one, and a new seat or hold record is what they would plant.
+fn record_dir_mode(uid: u32, mode: u32, owner: u32) -> Result<(), &'static str> {
+    if uid != owner {
+        return Err("refusing a runtime directory another user owns");
+    }
+    if mode & 0o022 != 0 {
+        return Err("refusing a runtime directory other users can write");
+    }
+    Ok(())
 }
 
 /// Every home's directory under this user's `ljos-UID` in `tmp`, sorted. A
@@ -61828,6 +61841,13 @@ mod tests {
             exe_publish::open_dir_at_nofollow(rustix::fs::CWD, std::ffi::OsStr::new("/")).unwrap();
         let err = runtime_dir_at(&root, std::ffi::OsStr::new("tmp"), uid, false).unwrap_err();
         assert!(err.contains("another user owns"), "{err}");
+        let (owner, mode) = dir_owner_mode(
+            &exe_publish::open_dir_at_nofollow(&root, std::ffi::OsStr::new("etc")).unwrap(),
+        )
+        .unwrap();
+        assert!(owner == 0 && mode & 0o022 == 0, "/etc is {owner} {mode:o}");
+        let err = runtime_dir_at(&root, std::ffi::OsStr::new("etc"), uid, false).unwrap_err();
+        assert!(err.contains("another user owns"), "{err}");
     }
 
     #[test]
@@ -61929,6 +61949,42 @@ mod tests {
         assert!(err.contains("moved"), "{err}");
         assert_eq!(entries(&tmp), 0, "swapped-in parent");
         assert_eq!(entries(&moved), 0, "held parent");
+    }
+
+    /// The sticky bit keeps another user from renaming a record, not from
+    /// planting a new one, so it does not open a record directory.
+    #[test]
+    fn a_sticky_runtime_directory_others_can_write_is_not_used() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let uid = euid();
+        let cache = home.path().join(".cache/ljos/run");
+        let want = runtime_fallback(tmp.path(), Some(home.path()), uid);
+        let base = want.parent().unwrap().to_path_buf();
+        std::fs::create_dir(&base).unwrap();
+        crate::change_mode(&base, 0o1777).unwrap();
+        assert_eq!(
+            runtime_fallback_in(tmp.path(), Some(home.path()), uid, true),
+            cache
+        );
+        assert_eq!(entries(&base), 0);
+        assert!(runtime_fallback_homes(tmp.path(), uid).is_empty());
+        let own = runtime_fallback_in(tmp.path(), None, uid, true);
+        assert!(
+            own.ends_with(format!("ljos-{uid}-own")),
+            "{}",
+            own.display()
+        );
+        assert_eq!(entries(&base), 0);
+        crate::change_mode(&base, 0o700).unwrap();
+        std::fs::create_dir(&want).unwrap();
+        crate::change_mode(&want, 0o1777).unwrap();
+        assert_eq!(
+            runtime_fallback_in(tmp.path(), Some(home.path()), uid, true),
+            cache
+        );
+        assert_eq!(entries(&want), 0);
+        assert!(runtime_fallback_homes(tmp.path(), uid).is_empty());
     }
 
     #[test]
