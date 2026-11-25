@@ -158,6 +158,9 @@ struct Asked {
     words: Vec<String>,
     word_terms: Vec<QueryTerms>,
     common: Vec<bool>,
+    /// The terms of the content words joined, which a title one word
+    /// shorter than the query must be inside.
+    joined: TermBag,
     terms: QueryTerms,
     /// Per entry of `terms`, whether it is a generic word.
     generic: Vec<bool>,
@@ -178,6 +181,7 @@ impl Asked {
                     || (corpus.len() >= 2 && corpus.iter().all(|title| terms.any_in(title)))
             })
             .collect();
+        let joined = TermBag::of(&words.join(" "));
         let terms = QueryTerms::of(&text);
         let generic = terms
             .written()
@@ -189,6 +193,7 @@ impl Asked {
             words,
             word_terms,
             common,
+            joined,
             terms,
             generic,
         }
@@ -781,7 +786,7 @@ fn band_with(asked: &Asked, title: &str, title_bag: &TermBag, blob: &TermBag) ->
     if asked.norm == title_norm {
         return Some(Band::Exact);
     }
-    if near(&asked.words, &asked.norm, title, &title_norm) {
+    if near(asked, title, &title_norm) {
         return Some(Band::Near);
     }
     if asked.words.is_empty() {
@@ -831,35 +836,70 @@ fn listed_common(word: &str) -> bool {
 
 /// Same content words, one content word apart, or a short typo.
 /// The two norms are [`norm`] of the query and the title.
-fn near(query_words: &[String], query_norm: &str, title: &str, title_norm: &str) -> bool {
-    let title_words = content_words(title);
-    if query_words.is_empty() || title_words.is_empty() {
+///
+/// Each title word is read once, so a long query against a long title is
+/// one pass over the title and not one per pair of words.
+fn near(asked: &Asked, title: &str, title_norm: &str) -> bool {
+    let title_words = title_words(title);
+    if asked.words.is_empty() || title_words.is_empty() {
         return false;
     }
-    if same_words(query_words, &title_words) || one_word_apart(query_words, &title_words) {
+    if same_words(asked, &title_words) || one_word_apart(asked, &title_words) {
         return true;
     }
-    typo_near(query_norm, title_norm)
+    typo_near(&asked.norm, title_norm)
 }
 
-fn same_words(left: &[String], right: &[String]) -> bool {
-    left.len() == right.len()
-        && left
+/// A content word of a title, with its own terms and the terms it holds.
+struct TitleWord<'t> {
+    word: &'t str,
+    terms: QueryTerms,
+    bag: TermBag,
+}
+
+/// The [`content_words`] of `title`, each analyzed once.
+fn title_words(title: &str) -> Vec<TitleWord<'_>> {
+    title
+        .split_whitespace()
+        .filter_map(|word| {
+            let terms = QueryTerms::of(word);
+            if terms.is_empty() {
+                return None;
+            }
+            let bag = TermBag::of(word);
+            terms.any_in(&bag).then_some(TitleWord { word, terms, bag })
+        })
+        .collect()
+}
+
+/// Every query word is covered by some title word, and the counts match.
+fn same_words(asked: &Asked, title: &[TitleWord<'_>]) -> bool {
+    asked.words.len() == title.len()
+        && asked
+            .word_terms
             .iter()
-            .all(|word| right.iter().any(|have| covers(word, have)))
+            .all(|terms| title.iter().any(|have| terms.any_in(&have.bag)))
 }
 
-fn one_word_apart(left: &[String], right: &[String]) -> bool {
-    let (short, long) = if left.len() <= right.len() {
-        (left, right)
+/// The shorter side has three or more words, the longer one more, and
+/// every shorter word is in the longer side.
+fn one_word_apart(asked: &Asked, title: &[TitleWord<'_>]) -> bool {
+    let (query, titled) = (asked.words.len(), title.len());
+    let (short, long) = if query <= titled {
+        (query, titled)
     } else {
-        (right, left)
+        (titled, query)
     };
-    if short.len() < 3 || long.len() - short.len() != 1 {
+    if short < 3 || long - short != 1 {
         return false;
     }
-    let blob = long.join(" ");
-    short.iter().all(|word| covers(word, &blob))
+    if query <= titled {
+        let joined: Vec<&str> = title.iter().map(|word| word.word).collect();
+        let blob = TermBag::of(&joined.join(" "));
+        asked.word_terms.iter().all(|terms| terms.any_in(&blob))
+    } else {
+        title.iter().all(|word| word.terms.any_in(&asked.joined))
+    }
 }
 
 /// Both texts are already [`norm`]ed.
@@ -887,10 +927,6 @@ fn content_words(text: &str) -> Vec<String> {
         .filter(|word| crate::word_rank::shares_term(word, word))
         .map(str::to_string)
         .collect()
-}
-
-fn covers(word: &str, text: &str) -> bool {
-    crate::word_rank::shares_term(word, text)
 }
 
 fn edit_within(left: &str, right: &str, max: usize) -> bool {

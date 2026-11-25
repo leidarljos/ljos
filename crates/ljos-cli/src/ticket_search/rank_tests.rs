@@ -15,8 +15,8 @@ use vissue_core::{IssueHeading, LogEntry};
 mod develop {
     use super::super::{
         content_words, edit_within, facts_of, hit_for, in_cwd, in_working_project, intrinsic,
-        is_ticket_hit, lift, norm, notes_text, same_words, score_intrinsic, search_blob, sink,
-        solo_local, stamp_ticket, Band, Facts, Found, Here, Scope, COMMON_TITLE,
+        is_ticket_hit, lift, norm, notes_text, score_intrinsic, search_blob, sink, solo_local,
+        stamp_ticket, Band, Facts, Found, Here, Scope, COMMON_TITLE,
     };
     use packset_client::Hit;
     use std::collections::{BTreeMap, BTreeSet};
@@ -358,6 +358,13 @@ mod develop {
             return true;
         }
         typo_near(query, title)
+    }
+
+    fn same_words(left: &[String], right: &[String]) -> bool {
+        left.len() == right.len()
+            && left
+                .iter()
+                .all(|word| right.iter().any(|have| covers(word, have)))
     }
 
     fn one_word_apart(left: &[String], right: &[String]) -> bool {
