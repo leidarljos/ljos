@@ -517,8 +517,11 @@ pub(crate) fn protected_write_targets() -> Vec<PathBuf> {
         out.push(home.join(".config/git/config"));
         out.push(home.join(".wgetrc"));
     }
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        out.push(PathBuf::from(xdg).join("git/config"));
+    // An empty value is unset, as `env_dir` skips it. Git then reads
+    // `$HOME/.config/git/config`, which is already listed, and a relative
+    // `git/config` is not added.
+    if let Some(xdg) = env_dir("XDG_CONFIG_HOME") {
+        out.push(xdg.join("git/config"));
     }
     out.extend(curl_config_files());
     for key in ["WGETRC", "SYSTEM_WGETRC"] {
@@ -542,23 +545,34 @@ pub(crate) fn protected_write_targets() -> Vec<PathBuf> {
 /// `$CURL_HOME`, then `$XDG_CONFIG_HOME` when `.curlrc` is present
 /// (7.73.0, `4be1f8dc01013e4dee2b99026cd3b806ea7253c4`), then `$HOME`,
 /// then `getpwuid`, then on Windows `%APPDATA%` and
-/// `%USERPROFILE%\Application Data`. The file is `.curlrc`. Windows
-/// opens `_curlrc` instead through 7.65 (`DOT_CHAR` in `curl_setup.h`)
-/// and from 7.66.0 opens `.curlrc` and then `_curlrc`
+/// `%USERPROFILE%\Application Data`. The file is `.curlrc`. Through
+/// 7.65, `DOT_CHAR` in `lib/curl_setup.h` is `_` under `WIN32` and
+/// under `MSDOS`, and `src/tool_parsecfg.c` opens `DOT_CHAR "curlrc"`.
+/// The executable-directory search is `WIN32` only, so MS-DOS opens
+/// the home `_curlrc` and not one beside the executable. ljos has no
+/// DOS target, and that home path stays on this list. From 7.66.0
+/// Windows opens `.curlrc` and then `_curlrc`
 /// (`862393243d16870347e56195e93dc47274e32601`), including beside the
-/// curl executable. `src/tool_findfile.c` from 7.81.0
+/// curl executable, and every other host asks for `.curlrc`.
+/// `src/tool_findfile.c` from 7.81.0
 /// (`2be1aa619bca699e2850baf53c7cc3561f1c1ac2`) checks each directory
 /// and adds `%USERPROFILE%` on its own. 7.82.0
 /// (`764e4f066d5719e68fa0d6b0b0d9efa0625c5c15`) also opens
-/// `$CURL_HOME/.config/curlrc` and `$HOME/.config/curlrc` when
-/// `XDG_CONFIG_HOME` is unset. 8.10.0
+/// `$CURL_HOME/.config/curlrc`, or `$HOME/.config/curlrc` when `CURL_HOME`
+/// is unset, and only when `XDG_CONFIG_HOME` is unset. 8.10.0
 /// (`26e9d3a896bba8212f7ece8b53ef91397a5088ea`) through 8.23.0 opens
-/// `$XDG_CONFIG_HOME/curlrc` with no leading dot, and still opens the
-/// `.config/curlrc` files when `XDG_CONFIG_HOME` is set (the same
-/// `src/tool_findfile.c` at the `curl-8_23_0` tag). An empty variable
-/// is skipped, as `curl_getenv` skips it. [`curl_config_name`] matches
-/// `.curlrc` and `_curlrc` in any directory, which is how the
-/// executable's own directory is covered.
+/// `$XDG_CONFIG_HOME/curlrc` with no leading dot. That entry clears
+/// `dotscore`, so the directories after it get no `_curlrc` check and
+/// both `.config/curlrc` entries are skipped: those files are still read
+/// only when `XDG_CONFIG_HOME` is unset (`findfile` in
+/// `src/tool_findfile.c` at the `curl-8_23_0` tag). An empty variable is
+/// skipped, as `curl_getenv` skips it. [`curl_config_name`] matches
+/// `.curlrc` and `_curlrc` in any directory. `_curlrc` is matched on
+/// every host, not only where `cfg!(windows)` is set: Windows users run
+/// the Linux build under WSL, and Windows `curl.exe` still opens
+/// `_curlrc`, including beside its executable. A false positive on that
+/// name is cheap. That match is how the executable's own directory is
+/// covered.
 fn curl_config_files() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(home) = crate::home()
@@ -820,9 +834,19 @@ fn config_file_name(path: &str) -> bool {
         || path.ends_with("/.wgetrc")
 }
 
-/// A curl config named by its file. `.curlrc` and `_curlrc` are the names
-/// `src/tool_parsecfg.c` opens, on Windows in either order and beside the
-/// executable (`862393243d16870347e56195e93dc47274e32601`). `curlrc` with
+/// A curl config named by its file. `.curlrc` is the name
+/// `src/tool_parsecfg.c` opens. A Windows curl also opens `_curlrc`,
+/// after `.curlrc` and beside the executable
+/// (`862393243d16870347e56195e93dc47274e32601`). `CURLRC_DOTSCORE` in
+/// `src/tool_findfile.h` is 2 only on Windows (`WIN32` at 7.82.0,
+/// `_WIN32` at 8.9.1 and 8.23.0). Curl 7.65 also opens `_curlrc` on
+/// MS-DOS: `DOT_CHAR` in `lib/curl_setup.h` is `_` under `MSDOS` as
+/// well as `WIN32`, and the executable-directory search is `WIN32`
+/// only, so that build opens the home file. The name match applies on
+/// every host anyway. A Linux build of ljos under WSL can run Windows
+/// `curl.exe`, which still reads `_curlrc`, and `cfg!(windows)` would
+/// describe this binary rather than that curl. A false positive is
+/// cheap. `curlrc` with
 /// no dot is `$XDG_CONFIG_HOME/curlrc` from 8.10.0
 /// (`26e9d3a896bba8212f7ece8b53ef91397a5088ea`) and `.config/curlrc` from
 /// 7.82.0 (`764e4f066d5719e68fa0d6b0b0d9efa0625c5c15`); those directories
@@ -885,9 +909,10 @@ fn paths_same(a: &Path, b: &Path) -> bool {
 
 /// A path the line writes, with `~`, `$HOME`, `$XDG_CONFIG_HOME`,
 /// `$XDG_DATA_HOME`, `$LJOS_GIT_HOOKS`, `$CURL_HOME`, `$USERPROFILE` and
-/// `$APPDATA` filled in. `None` when another `$` substitution hides the
-/// path: the guard cannot tell where it lands, so it says nothing about
-/// that write.
+/// `$APPDATA` filled in. An empty `$XDG_CONFIG_HOME` or `$XDG_DATA_HOME`
+/// is unset, as for `$CURL_HOME`, `$USERPROFILE` and `$APPDATA`. `None`
+/// when another `$` substitution hides the path: the guard cannot tell
+/// where it lands, so it says nothing about that write.
 fn expand_target(path: &str) -> Option<String> {
     let path = path.trim().trim_matches(|c| c == '"' || c == '\'');
     if path.is_empty() || path.contains('`') {
@@ -901,9 +926,9 @@ fn expand_target(path: &str) -> Option<String> {
     } else if let Some(rest) = strip_home_prefix(path) {
         join_env_rest(&home?, rest)
     } else if let Some(rest) = strip_xdg_prefix(path) {
-        join_env_rest(&PathBuf::from(std::env::var_os("XDG_CONFIG_HOME")?), rest)
+        join_env_rest(&env_dir("XDG_CONFIG_HOME")?, rest)
     } else if let Some(rest) = strip_data_prefix(path) {
-        join_env_rest(&PathBuf::from(std::env::var_os("XDG_DATA_HOME")?), rest)
+        join_env_rest(&env_dir("XDG_DATA_HOME")?, rest)
     } else if let Some(rest) = strip_curl_home_prefix(path) {
         join_env_rest(&env_dir("CURL_HOME")?, rest)
     } else if let Some(rest) = strip_userprofile_prefix(path) {
@@ -1244,5 +1269,198 @@ mod tests {
             }
         }
         assert!(!names_protected("$XDG_CONFIG_HOME/curlrc", None));
+    }
+
+    /// `_curlrc` is a curl name on every host. A Linux build under WSL
+    /// still sits next to Windows `curl.exe`, and that curl opens the name.
+    /// An empty `$XDG_CONFIG_HOME` is unset, so `$XDG_CONFIG_HOME/_curlrc`
+    /// is not the relative name `_curlrc` in the working directory. That
+    /// relative name would be protected by the every-host match.
+    #[test]
+    fn an_underscore_curlrc_is_a_curl_name_on_every_platform() {
+        let _env = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let dir = root.path().join("bin");
+        // SAFETY: test_env_lock serialises environment changes and restores them.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", "");
+            std::env::remove_var("CURL_HOME");
+        }
+        for word in ["$XDG_CONFIG_HOME/_curlrc", r"$XDG_CONFIG_HOME\_curlrc"] {
+            assert_eq!(expand_target(word), None, "{word}");
+            assert!(!names_protected(word, Some(&dir)), "{word}");
+        }
+        let xdg = root.path().join("xdg");
+        // SAFETY: test_env_lock serialises environment changes and restores them.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &xdg) };
+        assert_eq!(
+            expand_target("$XDG_CONFIG_HOME/_curlrc"),
+            Some(xdg.join("_curlrc").display().to_string())
+        );
+        assert!(names_protected("$XDG_CONFIG_HOME/_curlrc", None));
+        for path in [
+            "_curlrc".to_string(),
+            dir.join("_curlrc").display().to_string(),
+            r"C:\Program Files\curl\_curlrc".to_string(),
+        ] {
+            assert!(config_file_name(&path), "{path}");
+            assert!(names_protected(&path, None), "{path}");
+        }
+        let line = format!("touch {}", dir.join("_curlrc").display());
+        let (_push, hooks) = crate::cloud_guard::push_and_hooks(&line, None);
+        assert!(hooks, "{line}");
+        let line = format!("touch {}", dir.join(".curlrc").display());
+        let (_push, hooks) = crate::cloud_guard::push_and_hooks(&line, None);
+        assert!(hooks, "{line}");
+    }
+
+    /// An empty `XDG_CONFIG_HOME` is unset to the guard, as it is to curl,
+    /// so `$XDG_CONFIG_HOME/curlrc` is not read as `curlrc` in the working
+    /// directory.
+    #[test]
+    fn an_empty_xdg_config_home_is_not_filled_in() {
+        let _env = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let dotconfig = home.join(".config");
+        // SAFETY: test_env_lock serialises environment changes and restores them.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", "");
+            std::env::remove_var("CURL_HOME");
+        }
+        for word in [
+            "$XDG_CONFIG_HOME/curlrc",
+            "${XDG_CONFIG_HOME}/curlrc",
+            r"$XDG_CONFIG_HOME\curlrc",
+        ] {
+            assert_eq!(expand_target(word), None, "{word}");
+            assert!(!names_protected(word, Some(&dotconfig)), "{word}");
+        }
+
+        let xdg = root.path().join("xdg");
+        // SAFETY: test_env_lock serialises environment changes and restores them.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &xdg) };
+        assert_eq!(
+            expand_target("$XDG_CONFIG_HOME/curlrc"),
+            Some(xdg.join("curlrc").display().to_string())
+        );
+        assert!(names_protected("$XDG_CONFIG_HOME/curlrc", None));
+    }
+
+    /// An empty `XDG_DATA_HOME` is unset, as `env_dir` skips an empty
+    /// value. The written path is not a relative file in the working
+    /// directory. `data_base` also ignores a value that is not absolute
+    /// and falls back to `~/.local/share`.
+    #[test]
+    fn an_empty_xdg_data_home_is_not_filled_in() {
+        let _env = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        // SAFETY: test_env_lock serialises environment changes and restores them.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_DATA_HOME", "");
+        }
+        for word in [
+            "$XDG_DATA_HOME/ljos/git-hooks",
+            "${XDG_DATA_HOME}/ljos/git-hooks",
+        ] {
+            assert_eq!(expand_target(word), None, "{word}");
+            assert!(!names_protected(word, Some(&home)), "{word}");
+        }
+
+        let data = root.path().join("data");
+        // SAFETY: test_env_lock serialises environment changes and restores them.
+        unsafe { std::env::set_var("XDG_DATA_HOME", &data) };
+        assert_eq!(
+            expand_target("$XDG_DATA_HOME/ljos/git-hooks"),
+            Some(data.join("ljos/git-hooks").display().to_string())
+        );
+        assert_eq!(
+            expand_target("${XDG_DATA_HOME}/ljos/git-hooks"),
+            Some(data.join("ljos/git-hooks").display().to_string())
+        );
+    }
+
+    /// An empty `XDG_CONFIG_HOME` does not add a relative `git/config`.
+    /// Git reads `$HOME/.config/git/config` in that case.
+    #[test]
+    fn an_empty_xdg_config_home_adds_no_relative_git_config() {
+        let _env = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        // SAFETY: test_env_lock serialises environment changes and restores them.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", "");
+        }
+        let got = protected_write_targets();
+        assert!(got
+            .iter()
+            .any(|path| path == &home.join(".config/git/config")));
+        assert!(
+            !got.iter()
+                .any(|path| path == std::path::Path::new("git/config")),
+            "an empty XDG_CONFIG_HOME added a relative git/config"
+        );
+        assert!(!names_protected("git/config", None));
+        assert!(!names_protected("$XDG_CONFIG_HOME/git/config", None));
+
+        let xdg = root.path().join("xdg");
+        // SAFETY: test_env_lock serialises environment changes and restores them.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &xdg) };
+        let got = protected_write_targets();
+        assert!(got.iter().any(|path| path == &xdg.join("git/config")));
+        assert!(names_protected("$XDG_CONFIG_HOME/git/config", None));
+    }
+
+    /// Curl 7.65 opened the home `_curlrc` on MS-DOS (`DOT_CHAR` under
+    /// `MSDOS`) and did not search beside the executable. That search is
+    /// `WIN32` only. ljos has no DOS target, and the home path stays on
+    /// [`curl_config_files`].
+    #[test]
+    fn msdos_home_underscore_curlrc_stays_on_the_list() {
+        let notes = include_str!("cloud_hook.rs")
+            .split("mod tests")
+            .next()
+            .unwrap();
+        assert!(
+            notes.contains("under `MSDOS`"),
+            "the curl note does not record MS-DOS DOT_CHAR"
+        );
+        assert!(
+            notes.contains("executable-directory search is `WIN32` only"),
+            "the curl note does not record the WIN32-only executable search"
+        );
+        let _env = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        // SAFETY: test_env_lock serialises environment changes and restores them.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("XDG_CONFIG_HOME");
+            std::env::remove_var("CURL_HOME");
+            std::env::remove_var("USERPROFILE");
+            std::env::remove_var("APPDATA");
+        }
+        let got = curl_config_files();
+        assert!(
+            got.iter().any(|path| path == &home.join("_curlrc")),
+            "home _curlrc missing from {}",
+            got.iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let exe = std::env::current_exe().unwrap();
+        let beside = exe.parent().unwrap().join("_curlrc");
+        assert!(
+            !got.iter().any(|path| path == &beside),
+            "executable-directory _curlrc was enumerated at {}",
+            beside.display()
+        );
     }
 }
