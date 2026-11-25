@@ -20138,6 +20138,7 @@ mod ephemeral_state_tests {
         claim_new_private_dir_at, created_dir_is_private_for, log_recall_in, open_trusted_dir,
         still_at, trusted_dir_mode, EphemeralState, EPHEMERAL_STATE_WARNING, EPHEMERAL_WARNINGS,
     };
+    use crate::tests::env_guard;
     use std::os::unix::fs::MetadataExt as _;
     use std::path::Path;
 
@@ -20151,6 +20152,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_precreated_fallback_directory_is_refused() {
+        let _g = env_guard();
         let parent = tempfile::tempdir().unwrap();
         let name = format!("ljos-no-home-{}", super::euid());
         let planted = parent.path().join(&name);
@@ -20170,6 +20172,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_symlinked_fallback_directory_is_refused() {
+        let _g = env_guard();
         let parent = tempfile::tempdir().unwrap();
         let outside = parent.path().join("outside");
         std::fs::create_dir(&outside).unwrap();
@@ -20195,6 +20198,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn the_post_create_check_refuses_a_symlink() {
+        let _g = env_guard();
         let parent = tempfile::tempdir().unwrap();
         let outside = parent.path().join("outside");
         std::fs::create_dir(&outside).unwrap();
@@ -20212,6 +20216,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn the_post_create_check_refuses_another_owner() {
+        let _g = env_guard();
         let parent = tempfile::tempdir().unwrap();
         let private = parent.path().join("private");
         std::fs::create_dir(&private).unwrap();
@@ -20227,6 +20232,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_wide_directory_is_not_a_private_state_directory() {
+        let _g = env_guard();
         let parent = tempfile::tempdir().unwrap();
         let wide = parent.path().join("wide");
         std::fs::create_dir(&wide).unwrap();
@@ -20275,6 +20281,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn an_ephemeral_state_dir_is_0700_and_recall_log_is_0600() {
+        let _g = env_guard();
         let parent = tempfile::tempdir().unwrap();
         let state = EphemeralState::create(parent.path()).unwrap();
         let dir = state.path();
@@ -20451,6 +20458,7 @@ mod ephemeral_state_tests {
 
     #[test]
     fn a_missing_home_warns_that_state_is_temporary() {
+        let _g = env_guard();
         let parent = tempfile::tempdir().unwrap();
         let _state = EphemeralState::create(parent.path()).unwrap();
         assert!(
