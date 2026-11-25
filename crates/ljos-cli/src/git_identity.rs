@@ -6,15 +6,16 @@
 //! through the environment: `git -c` writes `GIT_CONFIG_PARAMETERS`, and
 //! `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>`
 //! adds more, an include among them. A seat that calls ljos exports
-//! whatever its own runner set, so a tracker commit dropped all of these
-//! and kept the identity git config files give it. Dates are not
+//! whatever its own runner set, so a tracker git child drops all of these
+//! and keeps the identity git's config files give it. Dates are not
 //! identity and stay.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::process::Command;
 
-/// Variables git reads an author or committer from before config.
+/// Variables git reads an author or committer from outside config: the
+/// `GIT_*` names before it, `EMAIL` when config names no email.
 const IDENTITY_ENV: &[&str] = &[
     "GIT_AUTHOR_NAME",
     "GIT_AUTHOR_EMAIL",
