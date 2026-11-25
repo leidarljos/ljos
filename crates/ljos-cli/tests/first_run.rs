@@ -908,6 +908,50 @@ fn curl_version(curl: &str) -> CurlVersion {
     }
 }
 
+/// Why the passwd home places cannot run here, or `None` when they can.
+/// They bind a copy of `/etc/passwd` inside
+/// `unshare --user --mount --map-root-user`, which a kernel or AppArmor can
+/// refuse to an unprivileged user. That refusal is a skip whatever
+/// [`tools::REQUIRE_TOOLS`] says; a missing `unshare` fails under it.
+fn no_user_namespace() -> Option<String> {
+    let said = ljos_cli::program("unshare")
+        .unwrap_or_else(|err| panic!("unshare: {err}"))
+        .args([
+            "--user",
+            "--mount",
+            "--map-root-user",
+            "--",
+            "mount",
+            "--bind",
+            "/etc/passwd",
+            "/etc/passwd",
+        ])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output();
+    let why = match said {
+        Ok(said) if said.status.success() => return None,
+        Ok(said) => String::from_utf8_lossy(&said.stderr)
+            .lines()
+            .next()
+            .unwrap_or("no message")
+            .trim()
+            .to_string(),
+        Err(err)
+            if err.kind() == std::io::ErrorKind::NotFound
+                && std::env::var(tools::REQUIRE_TOOLS).as_deref() == Ok("1") =>
+        {
+            panic!("unshare is not in /usr/bin or /bin ({err}); apt-get install util-linux")
+        }
+        Err(err) => err.to_string(),
+    };
+    Some(format!(
+        "unshare --user --mount --map-root-user is unavailable ({why}), so the passwd home curlrc places were skipped."
+    ))
+}
+
 fn passwd_naming_root(home: &Path) -> String {
     let text =
         std::fs::read_to_string("/etc/passwd").unwrap_or_else(|err| panic!("read passwd: {err}"));
@@ -1002,6 +1046,10 @@ fn curl_body(said: &std::process::Output) -> Result<String, String> {
 #[test]
 fn a_curlrc_url_in_every_file_curl_reads_is_not_fetched() {
     let version = curl_version("/usr/bin/curl");
+    let no_userns = no_user_namespace();
+    if let Some(line) = &no_userns {
+        eprintln!("{line}");
+    }
     let root = tempfile::tempdir().unwrap_or_else(|err| panic!("root: {err}"));
     let asked = root.path().join("asked");
     let hidden = root.path().join("hidden");
@@ -1014,6 +1062,9 @@ fn a_curlrc_url_in_every_file_curl_reads_is_not_fetched() {
     let lookup = "https://crates.io/api/v1/crates/ljos";
     let mut failures = Vec::new();
     for place in curlrc_files(root.path()) {
+        if place.passwd_home.is_some() && no_userns.is_some() {
+            continue;
+        }
         if let Some(parent) = place.file.parent() {
             std::fs::create_dir_all(parent)
                 .unwrap_or_else(|err| panic!("create {}: {err}", parent.display()));
