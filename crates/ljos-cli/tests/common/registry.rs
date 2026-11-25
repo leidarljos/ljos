@@ -7,64 +7,39 @@
 //! when the host does not resolve. The stand-in reads curl's arguments:
 //! every URL a call names, positional or after `--url`, is written to
 //! `bin/.curl-asked`, one line a call with its URLs in order.
+//!
+//! A config file can name URLs the arguments do not, so the stand-in
+//! fails closed. It refuses `-K` and `--config` in any form, any option
+//! it does not know, and a call that would read a default `.curlrc`
+//! unless `-q` comes first. What it refused is written on the call's line
+//! after `refused:`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const CRATES: &str = "https://crates.io/api/v1/crates/";
 
-/// Short options of curl that take the next argument as their value.
-const SHORT_VALUED: &str = "AbcdDeEFHKmoQrTuUwxXyYz";
+/// Short flags of curl the stand-in lets through. None of them changes
+/// which URLs a call reads.
+const SHORT_FLAGS: &str = "fsS";
 
-/// Long options of curl that take the next argument as their value, other
-/// than `--url`.
-const LONG_VALUED: &[&str] = &[
-    "--cacert",
-    "--capath",
-    "--cert",
-    "--config",
-    "--connect-timeout",
-    "--connect-to",
-    "--cookie",
-    "--cookie-jar",
-    "--data",
-    "--data-binary",
-    "--data-raw",
-    "--data-urlencode",
-    "--dns-servers",
-    "--dump-header",
-    "--form",
-    "--header",
-    "--interface",
-    "--key",
-    "--limit-rate",
-    "--max-filesize",
-    "--max-time",
-    "--output",
-    "--proxy",
-    "--proxy-user",
-    "--quote",
-    "--range",
-    "--referer",
-    "--request",
-    "--resolve",
-    "--retry",
-    "--retry-delay",
-    "--retry-max-time",
-    "--speed-limit",
-    "--speed-time",
-    "--time-cond",
-    "--upload-file",
-    "--user",
-    "--user-agent",
-    "--write-out",
-];
+/// Short options of curl the stand-in lets through that take a value,
+/// either attached or as the next argument.
+const SHORT_VALUED: &str = "Am";
+
+/// Long flags of curl the stand-in lets through.
+const LONG_FLAGS: &[&str] = &["--fail", "--silent", "--show-error"];
+
+/// Long options of curl the stand-in lets through that take the next
+/// argument as their value, other than `--url`.
+const LONG_VALUED: &[&str] = &["--connect-timeout", "--max-time", "--user-agent"];
 
 fn log_of(bin: &Path) -> PathBuf {
     bin.join(".curl-asked")
 }
 
-/// The URLs each call of the stand-in named, one entry a call, in order.
+/// The URLs each call of the stand-in named, and what it refused, one
+/// entry a call, in order.
 #[allow(dead_code)]
 pub fn asked(bin: &Path) -> Vec<Vec<String>> {
     match std::fs::read_to_string(log_of(bin)) {
@@ -120,8 +95,11 @@ pub fn stand_in(bin: &Path, delay: Duration) {
         r#"#!/bin/sh
 set -f
 urls=
+refused=
 next=
 ended=
+first=1
+quiet=
 for arg; do
   if [ -n "$next" ]; then
     [ "$next" = url ] && urls="$urls $arg"
@@ -133,25 +111,45 @@ for arg; do
     continue
   fi
   case $arg in
+    -q|--disable)
+      if [ -n "$first" ]; then quiet=1; else refused="$refused refused:$arg"; fi ;;
     --) ended=1 ;;
     --url) next=url ;;
-    --url=*) urls="$urls ${{arg#--url=}}" ;;
-    --*=*) ;;
-    {long}) next=value ;;
-    --*) ;;
-    -?*)
+    {long_valued}) next=value ;;
+    {long_flags}) ;;
+    -[!-]*)
       rest=${{arg#-}}
       while [ -n "$rest" ]; do
         flag=${{rest%"${{rest#?}}"}}
         rest=${{rest#?}}
         case $flag in
-          [{short}]) [ -z "$rest" ] && next=value; break ;;
+          [{short_flags}]) ;;
+          [{short_valued}]) [ -z "$rest" ] && next=value; break ;;
+          *) refused="$refused refused:$arg"; break ;;
         esac
       done ;;
+    ''|-*) refused="$refused refused:$arg" ;;
     *) urls="$urls $arg" ;;
   esac
+  first=
 done
-printf '%s\n' "${{urls# }}" >> '{log}'
+[ -z "$next" ] || refused="$refused refused:no-value"
+if [ -z "$quiet" ]; then
+  [ -n "$HOME" ] || refused="$refused refused:no-HOME"
+  for rc in \
+    "${{CURL_HOME:+$CURL_HOME/.curlrc}}" \
+    "${{XDG_CONFIG_HOME:-$HOME/.config}}/.curlrc" \
+    "${{XDG_CONFIG_HOME:-$HOME/.config}}/curlrc" \
+    "$HOME/.curlrc"; do
+    [ -n "$rc" ] && [ -e "$rc" ] && refused="$refused refused:$rc"
+  done
+fi
+line="$urls$refused"
+printf '%s\n' "${{line# }}" >> '{log}'
+if [ -n "$refused" ]; then
+  echo "curl: the crates.io stand-in refuses${{refused}}" >&2
+  exit 2
+fi
 set -- $urls
 url=$1
 [ $# -eq 1 ] || url=
@@ -179,8 +177,10 @@ printf '{{"crate":{{"name":"%s","max_version":"%s"}}}}\n' "$name" "$version"
         fallback = env!("CARGO_PKG_VERSION"),
         log = log_of(bin).display(),
         crates = CRATES,
-        long = LONG_VALUED.join("|"),
-        short = SHORT_VALUED,
+        long_valued = LONG_VALUED.join("|"),
+        long_flags = LONG_FLAGS.join("|"),
+        short_flags = SHORT_FLAGS,
+        short_valued = SHORT_VALUED,
     );
     std::fs::create_dir_all(bin).unwrap_or_else(|err| panic!("create {}: {err}", bin.display()));
     ljos_cli::install_executable(&bin.join("curl"), body)

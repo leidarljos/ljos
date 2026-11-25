@@ -1,0 +1,1 @@
+The crates.io stand-in in the first-run tests refuses a call that could read a URL its arguments do not name: `-K` or `--config` in any form, including `-K -` and `--config=FILE`, any option it does not know, and a default `.curlrc` in `CURL_HOME`, `XDG_CONFIG_HOME` or `HOME` unless `-q` comes first.

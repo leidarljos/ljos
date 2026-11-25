@@ -515,7 +515,8 @@ fn the_curl_stand_in_reads_every_url_a_call_names() {
             &["-sS", "-A", "ljos-doctor", "--max-time", "3", lookup],
             true,
         ),
-        (&["-sSm", "3", "--user-agent=ljos-doctor", lookup], true),
+        (&["-sSm", "3", "-Aljos-doctor", lookup], true),
+        (&["-sSm3", "--user-agent", "ljos-doctor", lookup], true),
         (
             &[
                 "-sS",
@@ -539,24 +540,155 @@ fn the_curl_stand_in_reads_every_url_a_call_names() {
         (&["-sS", "-A", "ljos-doctor"], false),
     ];
     for (args, passes) in cases {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("bin");
-        registry::stand_in(&bin, Duration::ZERO);
-        let said = ljos_cli::program(bin.join("curl"))
-            .unwrap_or_else(|err| panic!("the stand-in: {err}"))
-            .args(*args)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap_or_else(|err| panic!("run the stand-in: {err}"));
-        assert_eq!(
-            said.status.success(),
-            *passes,
-            "{args:?} answered {}",
-            String::from_utf8_lossy(&said.stdout)
-        );
-        let checked =
-            std::panic::catch_unwind(|| registry::assert_only_registry(&bin, "a stand-in call"));
-        assert_eq!(checked.is_ok(), *passes, "{args:?}");
+        let (answered, held) = stand_in_call(args, false, CurlSeat::Clean);
+        assert_eq!(answered, *passes, "{args:?}");
+        assert_eq!(held, *passes, "{args:?}");
+    }
+}
+
+/// A URL a config file names that the arguments do not.
+const HIDDEN: &str = "https://github.com/leidarljos/ljos/releases/latest";
+
+/// Where a call to the stand-in finds a default `.curlrc`.
+#[derive(Debug, Clone, Copy)]
+enum CurlSeat {
+    /// An empty home, with no `.curlrc` anywhere curl looks.
+    Clean,
+    Home,
+    CurlHome,
+    Xdg,
+    XdgNoDot,
+    NoHome,
+}
+
+/// Runs the crates.io stand-in once with `args` in an empty home, and says
+/// whether it answered and whether `assert_only_registry` held after it.
+/// `curl.conf` in the working directory names [`HIDDEN`], and so does
+/// stdin when `stdin_conf` is set and any `.curlrc` `seat` puts down.
+fn stand_in_call(args: &[&str], stdin_conf: bool, seat: CurlSeat) -> (bool, bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    let home = dir.path().join("home");
+    let curl_home = dir.path().join("curl-home");
+    let xdg = home.join(".config");
+    for dir in [&home, &curl_home, &xdg] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    registry::stand_in(&bin, Duration::ZERO);
+    let conf = format!("url = \"{HIDDEN}\"\n");
+    let write = |path: PathBuf| {
+        ljos_cli::write_file(&path, &conf)
+            .unwrap_or_else(|err| panic!("write {}: {err}", path.display()))
+    };
+    write(dir.path().join("curl.conf"));
+    match seat {
+        CurlSeat::Clean | CurlSeat::NoHome => {}
+        CurlSeat::Home => write(home.join(".curlrc")),
+        CurlSeat::CurlHome => write(curl_home.join(".curlrc")),
+        CurlSeat::Xdg => write(xdg.join(".curlrc")),
+        CurlSeat::XdgNoDot => write(xdg.join("curlrc")),
+    }
+    let mut call =
+        ljos_cli::program(bin.join("curl")).unwrap_or_else(|err| panic!("the stand-in: {err}"));
+    call.args(args)
+        .current_dir(dir.path())
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env("CURL_HOME", &curl_home);
+    if !matches!(seat, CurlSeat::NoHome) {
+        call.env("HOME", &home);
+    }
+    if stdin_conf {
+        call.stdin(std::fs::File::open(dir.path().join("curl.conf")).unwrap());
+    } else {
+        call.stdin(Stdio::null());
+    }
+    let said = call
+        .output()
+        .unwrap_or_else(|err| panic!("run the stand-in: {err}"));
+    let held = std::panic::catch_unwind(|| registry::assert_only_registry(&bin, "a stand-in call"))
+        .is_ok();
+    (said.status.success(), held)
+}
+
+/// A config file can name a URL the arguments do not, so the stand-in
+/// refuses every way to give curl one, every option it does not know, and
+/// a default `.curlrc` unless `-q` comes first.
+#[test]
+fn the_curl_stand_in_refuses_what_could_hide_a_url() {
+    use CurlSeat::{Clean, CurlHome, Home, NoHome, Xdg, XdgNoDot};
+    let lookup = "https://crates.io/api/v1/crates/ljos";
+    let doctor = ["-sS", "-A", "ljos-doctor", "--max-time", "3", lookup];
+    let quiet = ["-q", "-sS", "-A", "ljos-doctor", "--max-time", "3", lookup];
+    let cases: &[(&[&str], bool, CurlSeat, bool)] = &[
+        (&doctor, false, Clean, true),
+        (&quiet, false, Home, true),
+        (&quiet, false, CurlHome, true),
+        (&quiet, false, NoHome, true),
+        (
+            &[
+                "--silent",
+                "--show-error",
+                "--fail",
+                "--connect-timeout",
+                "2",
+                lookup,
+            ],
+            false,
+            Clean,
+            true,
+        ),
+        (&["-K", "curl.conf", lookup], false, Clean, false),
+        (&["-sK", "curl.conf", lookup], false, Clean, false),
+        (&["-sSKcurl.conf", lookup], false, Clean, false),
+        (&["--config", "curl.conf", lookup], false, Clean, false),
+        (&["--config=curl.conf", lookup], false, Clean, false),
+        (&["--conf", "curl.conf", lookup], false, Clean, false),
+        (&["-K", "-", lookup], true, Clean, false),
+        (&["-sK-", lookup], true, Clean, false),
+        (&["--config", "-", lookup], true, Clean, false),
+        (&doctor, false, Home, false),
+        (&doctor, false, CurlHome, false),
+        (&doctor, false, Xdg, false),
+        (&doctor, false, XdgNoDot, false),
+        (&doctor, false, NoHome, false),
+        (&["-sS", "-q", lookup], false, Home, false),
+        (&["-qs", lookup], false, Home, false),
+        (&[lookup, "--next", HIDDEN], false, Clean, false),
+        (&[lookup, "-:", HIDDEN], false, Clean, false),
+        (&["--next", lookup], false, Clean, false),
+        (&["@curl.conf"], false, Clean, false),
+        (&[lookup, "@curl.conf"], false, Clean, false),
+        (
+            &["https://crates.io/api/v1/crates/{ljos,serde}"],
+            false,
+            Clean,
+            false,
+        ),
+        (
+            &["https://crates.io/api/v1/crates/ljo[r-s]"],
+            false,
+            Clean,
+            false,
+        ),
+        (&["--user-agent=ljos-doctor", lookup], false, Clean, false),
+        (&["--url=https://example.org/", lookup], false, Clean, false),
+        (&["-x", "http://127.0.0.1:9", lookup], false, Clean, false),
+        (
+            &["--resolve", "crates.io:443:127.0.0.1", lookup],
+            false,
+            Clean,
+            false,
+        ),
+        (&["-sSv", lookup], false, Clean, false),
+        (&["", lookup], false, Clean, false),
+        (&[lookup, "--max-time"], false, Clean, false),
+    ];
+    for (args, stdin_conf, seat, passes) in cases {
+        let (answered, held) = stand_in_call(args, *stdin_conf, *seat);
+        assert_eq!(answered, *passes, "{args:?} with {seat:?}");
+        assert_eq!(held, *passes, "{args:?} with {seat:?}");
     }
 }
 
