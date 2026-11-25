@@ -300,18 +300,65 @@ fn link_programs(bin: &Path) {
 /// A `curl` that fails for crates.io and runs the real one for anything
 /// else, so the doctor and first-run rows are the same whether or not this
 /// host can reach the registry.
+///
+/// The real `curl` is the one on this test's `PATH`, found before the stub
+/// is installed. With none, the stub fails other calls as a missing `curl`.
 fn stub_unreachable_crates_io(bin: &Path) {
-    ljos_cli::install_executable(
-        &bin.join("curl"),
+    let real = which("curl");
+    ljos_cli::install_executable(&bin.join("curl"), curl_stub(real.as_deref()))
+        .unwrap_or_else(|err| panic!("curl stub: {err}"));
+}
+
+fn curl_stub(real: Option<&Path>) -> String {
+    let rest = match real {
+        Some(real) => format!(
+            "exec '{}' \"$@\"\n",
+            real.display().to_string().replace('\'', r"'\''")
+        ),
+        None => "echo 'curl: not found on PATH' >&2\nexit 127\n".to_string(),
+    };
+    format!(
         "#!/bin/sh\n\
          for arg in \"$@\"; do\n\
          \x20 case \"$arg\" in\n\
          \x20   https://crates.io/*) echo 'curl: (6) Could not resolve host: crates.io' >&2; exit 6;;\n\
          \x20 esac\n\
          done\n\
-         exec /usr/bin/curl \"$@\"\n",
+         {rest}"
     )
-    .unwrap_or_else(|err| panic!("curl stub: {err}"));
+}
+
+#[test]
+fn the_curl_stub_runs_the_curl_on_path_for_other_urls() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("it's curl");
+    ljos_cli::install_executable(&real, "#!/bin/sh\necho \"real curl: $*\"\n").unwrap();
+    let stub = dir.path().join("stub");
+    ljos_cli::install_executable(&stub, curl_stub(Some(&real))).unwrap();
+    let run = |url: &str| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "runs the curl stub a first-run seat gets"
+        )]
+        let out = std::process::Command::new(&stub)
+            .args(["-fsS", url])
+            .output()
+            .unwrap();
+        out
+    };
+    let other = run("https://example.invalid/x");
+    assert!(other.status.success(), "{other:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&other.stdout),
+        "real curl: -fsS https://example.invalid/x\n"
+    );
+    let registry = run("https://crates.io/api/v1/crates/ljos");
+    assert_eq!(registry.status.code(), Some(6), "{registry:?}");
+    assert!(registry.stdout.is_empty(), "{registry:?}");
+
+    ljos_cli::install_executable(&stub, curl_stub(None)).unwrap();
+    let missing = run("https://example.invalid/x");
+    assert_eq!(missing.status.code(), Some(127), "{missing:?}");
 }
 
 fn which(name: &str) -> Option<PathBuf> {
