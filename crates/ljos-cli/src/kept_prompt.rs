@@ -75,7 +75,8 @@ fn writes(cmd: &str, args: &[String]) -> bool {
 /// The runtime ljos directories a tool call could write into, resolved:
 /// the one this process uses, `/run/user/UID/ljos`, and the fallback a
 /// shell without `XDG_RUNTIME_DIR` uses, for this home and for every other
-/// home under the same `ljos-UID`.
+/// home under the same `ljos-UID`. A path under `/dev/null`, which holds
+/// nothing, is left out.
 fn dirs() -> Vec<PathBuf> {
     let uid = crate::euid();
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -86,6 +87,7 @@ fn dirs() -> Vec<PathBuf> {
         crate::runtime_fallback(&std::env::temp_dir(), None, uid),
     ]
     .iter()
+    .filter(|d| crate::keeps_runtime_records(d))
     .map(|d| resolve(d))
     .collect();
     out.dedup();
@@ -394,6 +396,7 @@ fn names_it(code: &str) -> bool {
                 crate::runtime_dir_path(),
                 PathBuf::from(format!("/run/user/{uid}/ljos")),
             ])
+            .filter(|d| crate::keeps_runtime_records(d))
             .any(|d| d.to_str().is_some_and(|d| code.contains(d)))
 }
 
@@ -584,5 +587,40 @@ pub(crate) fn after_cd(words: &[String], cwd: Option<&Path>) -> Option<PathBuf> 
         None => var("HOME").map(|h| crate::lexical_path(Path::new(&h))),
         Some("-") => None,
         Some(t) => logical_path_of(t, cwd),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With no safe runtime directory the fallback is a path under
+    /// `/dev/null`. It holds no kept prompt, so `/dev` and `/dev/null` are
+    /// not above one and naming that path in code is not a write.
+    #[test]
+    fn the_no_runtime_path_is_not_a_runtime_directory() {
+        const TEST: &str = "kept_prompt::tests::the_no_runtime_path_is_not_a_runtime_directory";
+        let Some(_) = crate::tests::runtime_env_child(TEST) else {
+            let open = tempfile::tempdir().unwrap();
+            crate::change_mode(open.path(), 0o777).unwrap();
+            crate::tests::run_in_runtime_env(TEST, open.path(), None, None);
+            return;
+        };
+        let _guard = crate::test_env_lock();
+        // SAFETY: this child runs this one test and holds `test_env_lock`.
+        unsafe {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+            std::env::remove_var("HOME");
+        }
+        let found = dirs();
+        assert!(
+            !found.iter().any(|d| d.starts_with("/dev/null")),
+            "{found:?}"
+        );
+        assert_eq!(above(Path::new("/dev")), None);
+        assert_eq!(above(Path::new("/dev/null")), None);
+        assert!(!inside(Path::new("/dev/null/x")));
+        let uid = crate::euid();
+        assert!(!names_it(&format!("open('/dev/null/ljos-{uid}/x', 'w')")));
     }
 }
