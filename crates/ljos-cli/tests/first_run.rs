@@ -8,6 +8,8 @@
 //! the tracker, the memory writer and the deed store, which is `ljos
 //! onboard` when no coding tool is installed. That command runs in the
 //! skipped line's place. Every other command is the one the page prints.
+//! The version check doctor makes asks a crates.io stand-in on the seat's
+//! `PATH`, so no step reads the public network.
 
 #![allow(
     clippy::disallowed_macros,
@@ -18,6 +20,8 @@ ljos_test_boot::harness!();
 
 #[path = "common/pty.rs"]
 mod pty;
+#[path = "common/registry.rs"]
+mod registry;
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -108,6 +112,7 @@ impl Seat {
         }
         ljos_cli::change_mode(root.join("run"), 0o700).unwrap();
         link_programs(&bin);
+        registry::stand_in(&bin, Duration::ZERO);
         let port = free_port();
         let mut env = BTreeMap::new();
         env.insert("HOME".into(), home.display().to_string());
