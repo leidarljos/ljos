@@ -65,16 +65,42 @@ struct Found {
 /// existing command fallback.
 #[derive(Debug, Default)]
 pub struct LoadedClaims {
-    by_id: BTreeMap<String, String>,
+    by_id: BTreeMap<String, Claim>,
     complete: bool,
 }
 
+/// The claim on the heading search kept for one id.
+#[derive(Debug)]
+struct Claim {
+    /// `:CLAIMED_BY:` as the heading writes it.
+    holder: String,
+    started: bool,
+}
+
+/// Who holds one ticket, as a [`LoadedClaims`] read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoadedClaim<'a> {
+    /// The seat that asked.
+    Seat,
+    /// A holder that is not that seat, as the heading writes it. `LJOS_HOLD`
+    /// or a runner record can still make it this conversation's holder.
+    Other { holder: &'a str, started: bool },
+    /// No live claim, and every tracker loaded.
+    Free,
+}
+
 impl LoadedClaims {
-    pub(crate) fn claimed_by_seat(&self, id: &str, seat: &str) -> Option<bool> {
+    pub(crate) fn claim(&self, id: &str, seat: &str) -> Option<LoadedClaim<'_>> {
         let seat = crate::canonical_seat_name(seat);
         match self.by_id.get(id) {
-            Some(holder) => Some(holder == &seat),
-            None if self.complete => Some(false),
+            Some(claim) if crate::canonical_seat_name(&claim.holder) == seat => {
+                Some(LoadedClaim::Seat)
+            }
+            Some(claim) => Some(LoadedClaim::Other {
+                holder: &claim.holder,
+                started: claim.started,
+            }),
+            None if self.complete => Some(LoadedClaim::Free),
             None => None,
         }
     }
@@ -376,24 +402,28 @@ fn tickets() -> (Vec<IssueRec>, LoadedClaims) {
     let mut claims = BTreeMap::new();
     let mut seen = BTreeSet::new();
     for layout in &layouts {
-        let snapshot = match vissue_core::catalog::CatalogSnapshot::load(layout) {
-            Ok(snapshot) => snapshot,
+        let records = match vissue_core::catalog::load_recs(layout) {
+            Ok(records) => records,
             Err(_) => {
                 complete = false;
                 continue;
             }
         };
-        let loaded_claims: BTreeMap<String, String> = snapshot
-            .claims()
-            .map(|(id, holder)| (id.to_string(), crate::canonical_seat_name(holder)))
-            .collect();
-        for rec in snapshot.into_records() {
+        for rec in records {
             if rec.heading.id.is_empty() {
                 continue;
             }
+            // A repeated id keeps its first heading, and the claim is that
+            // heading's, not another heading's with the same id.
             if seen.insert(rec.heading.id.clone()) {
-                if let Some(holder) = loaded_claims.get(&rec.heading.id) {
-                    claims.insert(rec.heading.id.clone(), holder.clone());
+                if let Some(holder) = rec.heading.claimed_by() {
+                    claims.insert(
+                        rec.heading.id.clone(),
+                        Claim {
+                            holder: holder.to_string(),
+                            started: rec.heading.state == "STARTED",
+                        },
+                    );
                 }
                 out.push(rec);
             }
