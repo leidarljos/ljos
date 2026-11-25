@@ -2,12 +2,13 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/tools.rs"]
+mod tools;
+
 use packset_client::Hit;
 use std::ffi::OsString;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
-
-static ENV: Mutex<()> = Mutex::new(());
+use std::sync::MutexGuard;
 
 /// The process environment for one test. It is held for the test and put
 /// back as it was when the test returns.
@@ -18,7 +19,7 @@ struct Guard {
 
 impl Guard {
     fn new() -> Self {
-        let lock = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = tools::env_lock();
         let saved = std::env::vars_os().collect();
         Self { saved, _lock: lock }
     }
@@ -231,5 +232,74 @@ fn a_repeated_id_takes_its_claim_from_the_heading_search_kept() {
         ljos_cli::search_finish_hint_with_claims(&hits, Some(&claims)),
         None,
         "the kept heading has no claim, so the other heading's claim must not name finish"
+    );
+}
+
+#[test]
+fn a_claim_held_under_ljos_hold_names_finish_for_another_seat_name() {
+    let _env = Guard::new();
+    let temp = tempfile::tempdir().unwrap();
+    sit_on_tracker(
+        temp.path(),
+        "ada",
+        Some("bob"),
+        "* STARTED Bob holds the kiln\n\
+         :PROPERTIES:\n\
+         :ID: Software-0002\n\
+         :CLAIMED_BY: bob\n\
+         :END:\n",
+    );
+    let mut hits = Vec::<Hit>::new();
+    let claims = ljos_cli::ticket_search::merge(&mut hits, "Bob holds the kiln");
+
+    assert_eq!(
+        hits.first().and_then(|hit| hit.id.as_deref()),
+        Some("Software-0002")
+    );
+    assert_eq!(
+        ljos_cli::search_finish_hint_with_claims(&hits, Some(&claims)).as_deref(),
+        Some("This ticket is yours. Run `ljos finish Software-0002 --lesson \"...\"`.\n"),
+        "bob is the name LJOS_HOLD holds under, so bob's claim is this conversation's"
+    );
+}
+
+#[test]
+fn another_holders_heading_is_not_yours_when_a_later_copy_is_held() {
+    let _env = Guard::new();
+    // The answer to guard against comes from `vissue claims`.
+    if tools::halt(tools::Tool::Vissue) {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    sit_on_tracker(
+        temp.path(),
+        "ada",
+        Some("bob"),
+        "* STARTED Carol kept the kiln\n\
+         :PROPERTIES:\n\
+         :ID: Software-0004\n\
+         :CLAIMED_BY: carol\n\
+         :END:\n\n\
+         * STARTED Bob kept a copy\n\
+         :PROPERTIES:\n\
+         :ID: Software-0004\n\
+         :CLAIMED_BY: bob\n\
+         :END:\n",
+    );
+    assert_eq!(
+        ljos_cli::held_issue().as_deref(),
+        Some("Software-0004"),
+        "bob's claims list the copy"
+    );
+    let mut hits = Vec::<Hit>::new();
+    let claims = ljos_cli::ticket_search::merge(&mut hits, "Carol kept the kiln");
+
+    let top = hits.first().expect("the ticket is on the page");
+    assert_eq!(top.id.as_deref(), Some("Software-0004"));
+    assert_eq!(top.text, "Carol kept the kiln");
+    assert_eq!(
+        ljos_cli::search_finish_hint_with_claims(&hits, Some(&claims)),
+        None,
+        "carol holds the heading search shows, so finish must not be offered"
     );
 }
