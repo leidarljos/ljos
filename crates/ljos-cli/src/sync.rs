@@ -5033,9 +5033,12 @@ fn tracker_root() -> Result<PathBuf> {
     Ok(layout.root().to_path_buf())
 }
 
+/// A git child on the tracker. A merge here commits, so it names the seat
+/// and takes no identity from the caller's environment.
 fn git(root: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
     let mut cmd = crate::git_at(root);
     cmd.args(args);
+    crate::seat_git_child(&mut cmd)?;
     crate::bounded_output(&mut cmd)
 }
 
@@ -6026,17 +6029,6 @@ fn repo_rows(root: &Path) -> Result<Vec<crate::user_rules::UserRule>> {
 /// How long a git past its budget has to clean up after SIGTERM.
 const TERM_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Variables git reads before `user.name` and `user.email`. The
-/// user-rules commit names the tracker checkout's git config, not
-/// whatever the caller exported.
-const IDENTITY_ENV: &[&str] = &[
-    "GIT_AUTHOR_NAME",
-    "GIT_AUTHOR_EMAIL",
-    "GIT_COMMITTER_NAME",
-    "GIT_COMMITTER_EMAIL",
-    "EMAIL",
-];
-
 fn git_within(
     root: &Path,
     args: &[&str],
@@ -6058,9 +6050,10 @@ fn git_within(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for key in IDENTITY_ENV {
-        cmd.env_remove(key);
-    }
+    // The user-rules merge and commit name the tracker checkout's git
+    // config, not whatever the caller exported.
+    crate::git_identity::strip_git_identity(&mut cmd)
+        .map_err(|why| anyhow::anyhow!("sync: user rules: {why}"))?;
     // SAFETY: the closure runs in the forked child before exec. setpgid
     // makes that child a group leader so a timed-out fetch can be killed
     // with the helpers it started. The child has no other threads.
