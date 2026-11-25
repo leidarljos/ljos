@@ -438,11 +438,6 @@ fn every_binary_starts_with_its_output_setup() {
             "\nfn main() {\n",
             &[
                 "let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();",
-                "if HOOK_CHILD {",
-                "run_hook_child(argv);",
-                "return;",
-                "}",
-                "handoff_hook_child(&argv);",
                 "ljos_cli::output::set_output_kind(output_kind(&argv));",
                 "ljos_cli::output::install_panic_hook();",
             ][..],
@@ -459,14 +454,6 @@ fn every_binary_starts_with_its_output_setup() {
             "ljos-hud/src/bin.rs",
             "\nfn main() {\n",
             &["ljos_cli::output::install_panic_hook();"][..],
-        ),
-        (
-            "ljos-cli/src/main.rs",
-            "\nfn run_hook_child(argv: Vec<std::ffi::OsString>) {\n",
-            &[
-                "ljos_cli::output::set_output_kind(output_kind(&argv));",
-                "ljos_cli::output::install_panic_hook();",
-            ][..],
         ),
     ] {
         let text = std::fs::read_to_string(crates.join(file)).unwrap();
