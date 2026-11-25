@@ -92,13 +92,15 @@ impl Seat {
         use std::os::unix::process::CommandExt as _;
         let started = Instant::now();
         let mut child = cmd.process_group(0).spawn().unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-        match finish_by(child, started + DEADLINE) {
+        let pipes = pipe_inodes(&child);
+        let mut stdin = child.stdin.take().unwrap();
+        if let Err(err) = stdin.write_all(input.as_bytes()) {
+            drop(stdin);
+            kill_group(&mut child, &pipes);
+            panic!("could not write the input: {err}");
+        }
+        drop(stdin);
+        match finish_by(child, &pipes, started + DEADLINE) {
             Ok(out) => (out, started.elapsed()),
             Err(said) => {
                 let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
@@ -131,16 +133,121 @@ impl Seat {
     }
 }
 
+/// The pipe inodes of `child`'s stdin, stdout and stderr, read before any
+/// of them is handed off.
+fn pipe_inodes(child: &Child) -> Vec<u64> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt as _;
+    let fds = [
+        child.stdin.as_ref().map(AsRawFd::as_raw_fd),
+        child.stdout.as_ref().map(AsRawFd::as_raw_fd),
+        child.stderr.as_ref().map(AsRawFd::as_raw_fd),
+    ];
+    fds.into_iter()
+        .flatten()
+        .filter_map(|fd| std::fs::metadata(format!("/proc/self/fd/{fd}")).ok())
+        .map(|meta| meta.ino())
+        .collect()
+}
+
+/// Whether `child` has exited, without reaping it. An unreaped child keeps
+/// its process group id, so [`kill_group`] cannot reach another group.
+fn exited(child: &Child) -> bool {
+    // SAFETY: siginfo_t is plain data, and all zeroes is a valid value.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: waitid with WNOWAIT only reads the state of this test's own
+    // child and writes `info`.
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id(),
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    // SAFETY: waitid filled `info`, or left it zeroed with WNOHANG.
+    rc == 0 && unsafe { info.si_pid() } != 0
+}
+
+/// Kill the process group `child` leads, then every other process that
+/// still holds one of `pipes`, such as one that left the group with
+/// `setsid`, and reap `child`.
+fn kill_group(child: &mut Child, pipes: &[u64]) {
+    let group = libc::pid_t::try_from(child.id()).unwrap();
+    // SAFETY: a negative pid names the process group the child leads. The
+    // child is not reaped yet, so that group id is still this test's.
+    unsafe {
+        libc::kill(-group, libc::SIGKILL);
+    }
+    for pid in holders(pipes) {
+        // SAFETY: SIGKILL to a process that holds this test's pipe.
+        unsafe {
+            libc::kill(libc::pid_t::try_from(pid).unwrap(), libc::SIGKILL);
+        }
+    }
+    let _ = child.wait();
+}
+
+/// Every process but this one with a descriptor on one of `pipes`.
+fn holders(pipes: &[u64]) -> Vec<u32> {
+    let names: Vec<String> = pipes.iter().map(|ino| format!("pipe:[{ino}]")).collect();
+    let me = std::process::id();
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            let holds = std::fs::read_dir(entry.path().join("fd"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+                .any(|link| names.iter().any(|name| link.as_os_str() == name.as_str()));
+            (pid != me && holds).then_some(pid)
+        })
+        .collect()
+}
+
+/// A command that exits while a process it started in another session
+/// still holds its pipes is killed at the deadline, and so is that
+/// process: nothing it started outlives the test.
+#[test]
+fn a_late_command_leaves_nothing_holding_its_pipes() {
+    use std::os::unix::process::CommandExt as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-c", "setsid sleep 300 & sleep 300 & exit 0"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = cmd.spawn().unwrap();
+    let pipes = pipe_inodes(&child);
+    assert_eq!(pipes.len(), 3);
+    drop(child.stdin.take());
+    let late = finish_by(child, &pipes, Instant::now() + Duration::from_secs(1));
+    assert!(late.is_err(), "{late:?}");
+    let until = Instant::now() + Duration::from_secs(5);
+    while !holders(&pipes).is_empty() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(holders(&pipes), Vec::<u32>::new());
+}
+
 /// The output of `child` once it has exited and closed its pipes, or, when
-/// it has not by `by`, what it said before it was killed with its process
-/// group.
-fn finish_by(mut child: Child, by: Instant) -> Result<Output, String> {
+/// it has not by `by`, what it said before [`kill_group`] killed it and
+/// whatever still held its pipes.
+fn finish_by(mut child: Child, pipes: &[u64], by: Instant) -> Result<Output, String> {
     let (tx, said) = std::sync::mpsc::channel();
-    let pipes: [(bool, Box<dyn Read + Send>); 2] = [
+    let readers: [(bool, Box<dyn Read + Send>); 2] = [
         (false, Box::new(child.stdout.take().unwrap())),
         (true, Box::new(child.stderr.take().unwrap())),
     ];
-    for (err, mut pipe) in pipes {
+    for (err, mut pipe) in readers {
         let tx = tx.clone();
         std::thread::spawn(move || {
             let mut chunk = [0u8; 8192];
@@ -153,10 +260,10 @@ fn finish_by(mut child: Child, by: Instant) -> Result<Output, String> {
     }
     drop(tx);
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-    let mut status = None;
+    let mut done = false;
     let mut open = true;
-    while (status.is_none() || open) && Instant::now() < by {
-        status = child.try_wait().unwrap();
+    while (!done || open) && Instant::now() < by {
+        done = exited(&child);
         if !open {
             std::thread::sleep(Duration::from_millis(20));
             continue;
@@ -168,21 +275,16 @@ fn finish_by(mut child: Child, by: Instant) -> Result<Output, String> {
             Err(RecvTimeoutError::Timeout) => {}
         }
     }
-    if let (Some(status), false) = (status, open) {
+    if done && !open {
         return Ok(Output {
-            status,
+            status: child.wait().unwrap(),
             stdout,
             stderr,
         });
     }
-    let group = libc::pid_t::try_from(child.id()).unwrap();
-    // SAFETY: a negative pid names the process group the child leads. The
-    // child is unreaped or a member still holds a pipe, so that group is
-    // still the one this test started.
-    unsafe {
-        libc::kill(-group, libc::SIGKILL);
-    }
-    let _ = child.wait();
+    // The child has not exited, or it has and something still holds its
+    // pipes. Either way nothing it started may outlive the test.
+    kill_group(&mut child, pipes);
     while let Ok((err, bytes)) = said.recv_timeout(Duration::from_millis(200)) {
         if err { &mut stderr } else { &mut stdout }.extend(bytes);
     }
