@@ -1,0 +1,2 @@
+The shell guard now labels a write to every default curl config curl 7.x through 8.23 reads, including `$XDG_CONFIG_HOME/curlrc`, which curl 8.10.0 and later opens.
+The files are `$CURL_HOME` (`.curlrc`, `_curlrc`, and `.config/curlrc`), `$XDG_CONFIG_HOME` with and without the leading dot, `$HOME`, the passwd home, and `.curlrc` and `_curlrc` under `%USERPROFILE%`, `%APPDATA%` and `%USERPROFILE%\Application Data`.

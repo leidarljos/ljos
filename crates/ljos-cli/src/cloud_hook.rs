@@ -492,8 +492,9 @@ fn key_or_empty(url: &str) -> Option<String> {
 /// other `.git/config` or `.gitconfig` is matched by name in
 /// `names_protected`. The curl and wget configs are included too, with any
 /// a curl or wget on the line names: a write to one changes a file the
-/// guard already read. A write inside a git hooks directory is the seat
-/// guard's `writes-seat-file`, so it is not listed here.
+/// guard already read. Curl's own files are [`curl_config_files`]. A write
+/// inside a git hooks directory is the seat guard's `writes-seat-file`, so
+/// it is not listed here.
 pub(crate) fn protected_write_targets() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(path) = allow_path() {
@@ -514,25 +515,12 @@ pub(crate) fn protected_write_targets() -> Vec<PathBuf> {
     if let Ok(home) = crate::home() {
         out.push(home.join(".gitconfig"));
         out.push(home.join(".config/git/config"));
-        out.push(home.join(".curlrc"));
-        out.push(home.join(".config/curlrc"));
         out.push(home.join(".wgetrc"));
     }
-    if let Some(own) = crate::proc_tree::own_home() {
-        out.push(own.join(".curlrc"));
-    }
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        let xdg = PathBuf::from(xdg);
-        out.push(xdg.join("git/config"));
-        out.push(xdg.join(".curlrc"));
+        out.push(PathBuf::from(xdg).join("git/config"));
     }
-    if let Some(path) = std::env::var_os("CURL_HOME") {
-        let path = PathBuf::from(&path);
-        if !path.as_os_str().is_empty() {
-            out.push(path.join(".curlrc"));
-            out.push(path.join(".config/curlrc"));
-        }
-    }
+    out.extend(curl_config_files());
     for key in ["WGETRC", "SYSTEM_WGETRC"] {
         if let Some(path) = std::env::var_os(key) {
             let path = PathBuf::from(path);
@@ -545,6 +533,78 @@ pub(crate) fn protected_write_targets() -> Vec<PathBuf> {
         out.push(seat.join(".git/config"));
     }
     out
+}
+
+/// Default curl configs any curl from 7.x through 8.23 opens.
+///
+/// `src/tool_homedir.c` through 7.80.0 returns one directory and
+/// `src/tool_parsecfg.c` opens the config there. The directory is
+/// `$CURL_HOME`, then `$XDG_CONFIG_HOME` when `.curlrc` is present
+/// (7.73.0, `4be1f8dc01013e4dee2b99026cd3b806ea7253c4`), then `$HOME`,
+/// then `getpwuid`, then on Windows `%APPDATA%` and
+/// `%USERPROFILE%\Application Data`. The file is `.curlrc`. Windows
+/// opens `_curlrc` instead through 7.65 (`DOT_CHAR` in `curl_setup.h`)
+/// and from 7.66.0 opens `.curlrc` and then `_curlrc`
+/// (`862393243d16870347e56195e93dc47274e32601`), including beside the
+/// curl executable. `src/tool_findfile.c` from 7.81.0
+/// (`2be1aa619bca699e2850baf53c7cc3561f1c1ac2`) checks each directory
+/// and adds `%USERPROFILE%` on its own. 7.82.0
+/// (`764e4f066d5719e68fa0d6b0b0d9efa0625c5c15`) also opens
+/// `$CURL_HOME/.config/curlrc` and `$HOME/.config/curlrc` when
+/// `XDG_CONFIG_HOME` is unset. 8.10.0
+/// (`26e9d3a896bba8212f7ece8b53ef91397a5088ea`) through 8.23.0 opens
+/// `$XDG_CONFIG_HOME/curlrc` with no leading dot, and still opens the
+/// `.config/curlrc` files when `XDG_CONFIG_HOME` is set (the same
+/// `src/tool_findfile.c` at the `curl-8_23_0` tag). An empty variable
+/// is skipped, as `curl_getenv` skips it. [`curl_config_name`] matches
+/// `.curlrc` and `_curlrc` in any directory, which is how the
+/// executable's own directory is covered.
+fn curl_config_files() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(home) = crate::home()
+        .ok()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        push_curl_pair(&mut out, &home);
+        push_curl_dotconfig(&mut out, &home);
+    }
+    if let Some(own) = crate::proc_tree::own_home().filter(|path| !path.as_os_str().is_empty()) {
+        push_curl_pair(&mut out, &own);
+    }
+    if let Some(xdg) = env_dir("XDG_CONFIG_HOME") {
+        // Dotted from 7.73.0 through 8.9.x, undotted from 8.10.0, and
+        // `_curlrc` on Windows from 7.81.0 through 8.9.x.
+        out.push(xdg.join(".curlrc"));
+        out.push(xdg.join("curlrc"));
+        out.push(xdg.join("_curlrc"));
+    }
+    if let Some(dir) = env_dir("CURL_HOME") {
+        push_curl_pair(&mut out, &dir);
+        push_curl_dotconfig(&mut out, &dir);
+    }
+    if let Some(dir) = env_dir("USERPROFILE") {
+        push_curl_pair(&mut out, &dir);
+        push_curl_pair(&mut out, &dir.join("Application Data"));
+    }
+    if let Some(dir) = env_dir("APPDATA") {
+        push_curl_pair(&mut out, &dir);
+    }
+    out
+}
+
+fn env_dir(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn push_curl_pair(out: &mut Vec<PathBuf>, dir: &Path) {
+    out.push(dir.join(".curlrc"));
+    out.push(dir.join("_curlrc"));
+}
+
+fn push_curl_dotconfig(out: &mut Vec<PathBuf>, dir: &Path) {
+    out.push(dir.join(".config").join("curlrc"));
 }
 
 pub(crate) fn names_protected(target: &str, cwd: Option<&Path>) -> bool {
@@ -612,8 +672,8 @@ pub(crate) fn git_hooks_dirs() -> Vec<PathBuf> {
 }
 
 /// Whether `target` is a git hooks directory from [`git_hooks_dirs`], or a
-/// path inside one. `~`, `$HOME`, `$XDG_DATA_HOME` and `$LJOS_GIT_HOOKS`
-/// are filled in. A different `$` substitution is not a match.
+/// path inside one. `~` and the variables [`expand_target`] fills in are
+/// filled in. A different `$` substitution is not a match.
 pub(crate) fn in_git_hooks_dir(target: &str, cwd: Option<&Path>) -> bool {
     let Some(expanded) = expand_target(target) else {
         return false;
@@ -755,11 +815,39 @@ fn config_file_name(path: &str) -> bool {
         || path.ends_with("/.gitconfig")
         || path == ".git/config"
         || path.ends_with(".git/config")
-        || path == ".curlrc"
-        || path.ends_with("/.curlrc")
-        || path.ends_with("/.config/curlrc")
+        || curl_config_name(path)
         || path == ".wgetrc"
         || path.ends_with("/.wgetrc")
+}
+
+/// A curl config named by its file. `.curlrc` and `_curlrc` are the names
+/// `src/tool_parsecfg.c` opens, on Windows in either order and beside the
+/// executable (`862393243d16870347e56195e93dc47274e32601`). `curlrc` with
+/// no dot is `$XDG_CONFIG_HOME/curlrc` from 8.10.0
+/// (`26e9d3a896bba8212f7ece8b53ef91397a5088ea`) and `.config/curlrc` from
+/// 7.82.0 (`764e4f066d5719e68fa0d6b0b0d9efa0625c5c15`); those directories
+/// are [`curl_config_files`].
+fn curl_config_name(path: &str) -> bool {
+    path == ".curlrc"
+        || path.ends_with("/.curlrc")
+        || path.ends_with("\\.curlrc")
+        || path == "_curlrc"
+        || path.ends_with("/_curlrc")
+        || path.ends_with("\\_curlrc")
+        || path.ends_with("/.config/curlrc")
+        || path.ends_with("\\.config\\curlrc")
+        || path.ends_with("/.config\\curlrc")
+        || path.ends_with("\\.config/curlrc")
+        || path == ".config/curlrc"
+        || path == ".config\\curlrc"
+        || xdg_undotted_curlrc(path)
+}
+
+fn xdg_undotted_curlrc(path: &str) -> bool {
+    let Some(xdg) = env_dir("XDG_CONFIG_HOME") else {
+        return false;
+    };
+    Path::new(path) == xdg.join("curlrc")
 }
 
 fn path_under(path: &Path, dir: &Path) -> bool {
@@ -795,9 +883,11 @@ fn paths_same(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// A path the line writes, with `~` and `$HOME` filled in. `None` when a
-/// substitution other than those two hides the path: the guard cannot
-/// tell where it lands, so it says nothing about that write.
+/// A path the line writes, with `~`, `$HOME`, `$XDG_CONFIG_HOME`,
+/// `$XDG_DATA_HOME`, `$LJOS_GIT_HOOKS`, `$CURL_HOME`, `$USERPROFILE` and
+/// `$APPDATA` filled in. `None` when another `$` substitution hides the
+/// path: the guard cannot tell where it lands, so it says nothing about
+/// that write.
 fn expand_target(path: &str) -> Option<String> {
     let path = path.trim().trim_matches(|c| c == '"' || c == '\'');
     if path.is_empty() || path.contains('`') {
@@ -809,19 +899,23 @@ fn expand_target(path: &str) -> Option<String> {
     } else if path == "~" || path == "$HOME" || path == "${HOME}" {
         home?.display().to_string()
     } else if let Some(rest) = strip_home_prefix(path) {
-        home?.join(rest).display().to_string()
+        join_env_rest(&home?, rest)
     } else if let Some(rest) = strip_xdg_prefix(path) {
-        let xdg = std::env::var_os("XDG_CONFIG_HOME")?;
-        PathBuf::from(xdg).join(rest).display().to_string()
+        join_env_rest(&PathBuf::from(std::env::var_os("XDG_CONFIG_HOME")?), rest)
     } else if let Some(rest) = strip_data_prefix(path) {
-        let xdg = std::env::var_os("XDG_DATA_HOME")?;
-        PathBuf::from(xdg).join(rest).display().to_string()
+        join_env_rest(&PathBuf::from(std::env::var_os("XDG_DATA_HOME")?), rest)
+    } else if let Some(rest) = strip_curl_home_prefix(path) {
+        join_env_rest(&env_dir("CURL_HOME")?, rest)
+    } else if let Some(rest) = strip_userprofile_prefix(path) {
+        join_env_rest(&env_dir("USERPROFILE")?, rest)
+    } else if let Some(rest) = strip_appdata_prefix(path) {
+        join_env_rest(&env_dir("APPDATA")?, rest)
     } else if let Some(rest) = strip_hooks_prefix(path) {
         let base = std::env::var_os("LJOS_GIT_HOOKS")?;
         if rest.is_empty() {
             PathBuf::from(base).display().to_string()
         } else {
-            PathBuf::from(base).join(rest).display().to_string()
+            join_env_rest(&PathBuf::from(base), rest)
         }
     } else if path.contains('$') {
         return None;
@@ -836,13 +930,47 @@ fn expand_target(path: &str) -> Option<String> {
 }
 
 fn strip_home_prefix(path: &str) -> Option<&str> {
-    path.strip_prefix("$HOME/")
-        .or_else(|| path.strip_prefix("${HOME}/"))
+    strip_var_prefix(path, "$HOME", "${HOME}")
 }
 
 fn strip_xdg_prefix(path: &str) -> Option<&str> {
-    path.strip_prefix("$XDG_CONFIG_HOME/")
-        .or_else(|| path.strip_prefix("${XDG_CONFIG_HOME}/"))
+    strip_var_prefix(path, "$XDG_CONFIG_HOME", "${XDG_CONFIG_HOME}")
+}
+
+fn strip_curl_home_prefix(path: &str) -> Option<&str> {
+    strip_var_prefix(path, "$CURL_HOME", "${CURL_HOME}")
+}
+
+fn strip_userprofile_prefix(path: &str) -> Option<&str> {
+    strip_var_prefix(path, "$USERPROFILE", "${USERPROFILE}")
+}
+
+fn strip_appdata_prefix(path: &str) -> Option<&str> {
+    strip_var_prefix(path, "$APPDATA", "${APPDATA}")
+}
+
+fn strip_var_prefix<'a>(path: &'a str, bare: &str, braced: &str) -> Option<&'a str> {
+    for base in [bare, braced] {
+        for sep in ['/', '\\'] {
+            let mut prefix = String::with_capacity(base.len() + 1);
+            prefix.push_str(base);
+            prefix.push(sep);
+            if let Some(rest) = path.strip_prefix(&prefix) {
+                return Some(rest);
+            }
+        }
+    }
+    None
+}
+
+/// `rest` may use `\` the way a Windows curl path does. Join keeps `/`
+/// so the result matches [`curl_config_files`] on every host.
+fn join_env_rest(base: &Path, rest: &str) -> String {
+    if rest.contains('\\') {
+        base.join(rest.replace('\\', "/")).display().to_string()
+    } else {
+        base.join(rest).display().to_string()
+    }
 }
 
 fn strip_data_prefix(path: &str) -> Option<&str> {
@@ -1001,5 +1129,120 @@ mod tests {
         );
         assert!(hooks_path_assignment("[core \"ssh\"]\nhooksPath = /tmp/no\n").is_none());
         assert!(hooks_path_assignment("[user]\nname = x\n").is_none());
+    }
+
+    /// Every default config curl 7.x through 8.23 opens is a protected
+    /// write. `$XDG_CONFIG_HOME/curlrc` is the file curl 8.10.0 reads and
+    /// the list used to omit.
+    #[test]
+    fn every_curl_config_curl_7_through_8_23_reads_is_a_protected_write() {
+        let _env = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let xdg = root.path().join("xdg");
+        let curl_home = root.path().join("curl-home");
+        let passwd = root.path().join("passwd");
+        let profile = root.path().join("profile");
+        let appdata = root.path().join("appdata");
+        let _own = crate::proc_tree::HoldOwnHome::set(&passwd);
+        // SAFETY: test_env_lock serialises environment changes and restores them.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", &xdg);
+            std::env::set_var("CURL_HOME", &curl_home);
+            std::env::set_var("USERPROFILE", &profile);
+            std::env::set_var("APPDATA", &appdata);
+        }
+
+        let want = [
+            home.join(".curlrc"),
+            home.join("_curlrc"),
+            home.join(".config").join("curlrc"),
+            xdg.join(".curlrc"),
+            xdg.join("curlrc"),
+            xdg.join("_curlrc"),
+            curl_home.join(".curlrc"),
+            curl_home.join("_curlrc"),
+            curl_home.join(".config").join("curlrc"),
+            passwd.join(".curlrc"),
+            passwd.join("_curlrc"),
+            profile.join(".curlrc"),
+            profile.join("_curlrc"),
+            profile.join("Application Data").join(".curlrc"),
+            profile.join("Application Data").join("_curlrc"),
+            appdata.join(".curlrc"),
+            appdata.join("_curlrc"),
+        ];
+        let got = protected_write_targets();
+        for path in &want {
+            assert!(
+                got.iter().any(|have| have == path),
+                "missing {}",
+                path.display()
+            );
+        }
+
+        let lines = [
+            "touch $XDG_CONFIG_HOME/curlrc",
+            "touch $XDG_CONFIG_HOME/.curlrc",
+            "touch $XDG_CONFIG_HOME/_curlrc",
+            "touch $CURL_HOME/.curlrc",
+            "touch $CURL_HOME/_curlrc",
+            "touch $CURL_HOME/.config/curlrc",
+            "touch $HOME/.curlrc",
+            "touch $HOME/_curlrc",
+            "touch $HOME/.config/curlrc",
+            "touch $APPDATA/.curlrc",
+            "touch $APPDATA/_curlrc",
+            // `\\` in double quotes is one backslash, so the word is `$APPDATA\_curlrc`.
+            r#"touch "$APPDATA\\_curlrc""#,
+            "touch $USERPROFILE/.curlrc",
+            "touch $USERPROFILE/_curlrc",
+            "touch \"$USERPROFILE/Application Data/.curlrc\"",
+            "touch \"$USERPROFILE/Application Data/_curlrc\"",
+            "touch ~/.curlrc",
+            "touch ~/.config/curlrc",
+        ];
+        for line in lines {
+            let (_push, hooks) = crate::cloud_guard::push_and_hooks(line, None);
+            assert!(hooks, "{line}");
+        }
+        for path in [
+            passwd.join(".curlrc"),
+            passwd.join("_curlrc"),
+            xdg.join("curlrc"),
+        ] {
+            let line = format!("touch {}", path.display());
+            let (_push, hooks) = crate::cloud_guard::push_and_hooks(&line, None);
+            assert!(hooks, "{line}");
+        }
+        assert!(names_protected(r"C:\Users\a\.curlrc", None));
+        assert!(names_protected(r"C:\Users\a\_curlrc", None));
+        assert!(names_protected(
+            r"C:\Users\a\Application Data\_curlrc",
+            None
+        ));
+        assert!(!names_protected("/not/the/xdg/curlrc", None));
+        let (_push, hooks) =
+            crate::cloud_guard::push_and_hooks("cat $XDG_CONFIG_HOME/curlrc", None);
+        assert!(!hooks, "a read was taken for a write");
+        let (_push, hooks) = crate::cloud_guard::push_and_hooks("touch /not/the/xdg/curlrc", None);
+        assert!(
+            !hooks,
+            "a file named curlrc outside the curl dirs was protected"
+        );
+
+        // SAFETY: test_env_lock serialises environment changes and restores them.
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        for path in curl_config_files() {
+            if path.file_name().is_some_and(|name| name == "curlrc") {
+                assert!(
+                    path.parent().is_some_and(|dir| dir.ends_with(".config")),
+                    "{}",
+                    path.display()
+                );
+            }
+        }
+        assert!(!names_protected("$XDG_CONFIG_HOME/curlrc", None));
     }
 }
