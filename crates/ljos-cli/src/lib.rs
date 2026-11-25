@@ -35212,7 +35212,7 @@ fn installer_sibling(bin: &str) -> bool {
 }
 
 /// The releases `install.sh` installs by default, one `name version` per line.
-const RELEASE_PIN: &str = include_str!("../../../.github/release-pin");
+const RELEASE_PIN: &str = include_str!("../release-pin");
 
 /// The version `install.sh` pins for `bin`. `vissue-mcp` ships in the
 /// vissue archive, so it follows vissue's pin. packset is not pinned:
@@ -89522,6 +89522,14 @@ lesson, due yesterday, seat ada
             .find(|(bin, _)| *bin == "ljos-mcp")
             .map(|(_, name)| *name);
         assert_eq!(crate_name, Some("ljos"));
+    }
+
+    #[test]
+    fn the_packaged_release_pins_match_the_installer() {
+        assert_eq!(
+            super::RELEASE_PIN,
+            include_str!("../../../.github/release-pin")
+        );
     }
 
     #[test]

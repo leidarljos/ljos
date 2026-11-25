@@ -1,1 +1,0 @@
-A sitting whose pack read answers with no matching memories now prints `No matching memories for this task.` under its island heading instead of leaving that part blank, whether the writer searched or listed.
