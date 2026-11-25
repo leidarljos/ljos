@@ -11,6 +11,13 @@ Write the entry as one Markdown bullet body, one sentence per line, with no lead
 CI runs `towncrier build --draft --version` with the version from `[workspace.package]` in `Cargo.toml`.
 A malformed name, an unknown type, or two files for the same number and type fails that draft.
 At release time `towncrier build --version X.Y.Z` collects the fragments into `CHANGELOG.md` and removes them.
+A patch release (`Z` is not 0) carries fixes, documentation and miscellaneous entries only.
+A `feature` or `removal` fragment needs a minor bump, because towncrier files every `feature` fragment under Features whatever version it is given.
+`scripts/changelog-check.py` fails when `Cargo.toml` names a patch version that has no section in `CHANGELOG.md` yet and a `feature` or `removal` fragment is waiting, and when a release after 0.45.4 has a Features or Removals section under a patch number.
+Move the fragment to the next minor release or give it another type.
+The same script fails when one release, or the waiting fragments, state a change twice: the same entry, or one RUSTSEC, GHSA or CVE advisory in two entries.
+One change is one fragment, also when it lands on two branches.
+The CI `changelog fragments` job runs it, and `--selftest` runs its own cases.
 
 ## Tests
 
