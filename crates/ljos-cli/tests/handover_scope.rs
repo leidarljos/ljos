@@ -163,17 +163,32 @@ impl World {
     /// [`World::ljos`] with `first` searched before the tools.
     fn ljos_with(&self, machine: &str, args: &[&str], first: &Path) -> Output {
         let home = self.root.path().join(machine);
+        let mut cmd = self.command(machine, first);
+        cmd.args(args)
+            .env("HOME", &home)
+            .env("XDG_RUNTIME_DIR", home.join("run"));
+        cmd.output().unwrap()
+    }
+
+    /// [`World::ljos`] for a user with no directory safe for runtime
+    /// records: `tmp` is the temporary directory, and neither `HOME` nor
+    /// `XDG_RUNTIME_DIR` is set.
+    fn ljos_without_runtime(&self, machine: &str, args: &[&str], tmp: &Path) -> Output {
+        let mut cmd = self.command(machine, &self.tools);
+        cmd.args(args).env("TMPDIR", tmp);
+        cmd.output().unwrap()
+    }
+
+    fn command(&self, machine: &str, first: &Path) -> Command {
+        let home = self.root.path().join(machine);
         #[expect(
             clippy::disallowed_methods,
             reason = "starts a program outside git hook code"
         )]
-        return Command::new(env!("CARGO_BIN_EXE_ljos"))
-            .args(args)
-            .env_clear()
-            .env("HOME", &home)
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        cmd.env_clear()
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("XDG_STATE_HOME", home.join(".local/state"))
-            .env("XDG_RUNTIME_DIR", home.join("run"))
             .env(
                 "PATH",
                 format!(
@@ -188,9 +203,8 @@ impl World {
             .env("ISSUE_ROOT", &self.tracker)
             .env("LJOS_USER_RULES_SYNC", "off")
             .env("DEEDAR_HOST_SIGNING_KEY", "off")
-            .current_dir(self.root.path())
-            .output()
-            .unwrap();
+            .current_dir(self.root.path());
+        cmd
     }
 
     fn bag(&self, name: &str) -> PathBuf {
@@ -408,4 +422,50 @@ fn a_handover_without_a_scope_still_carries_the_workspace() {
         seat.contains(CLOUD_TEXT) && seat.contains(BOX_TEXT),
         "{seat}"
     );
+}
+
+/// The plaintext export needs a private directory. With none safe from
+/// other users the handover stops before the export, says why in one
+/// line, and leaves nothing in the open temporary directory.
+#[test]
+fn a_scoped_handover_with_no_safe_runtime_directory_hands_nothing_over() {
+    if tools::halt(tools::Tool::Packsetd) {
+        return;
+    }
+    let w = World::new();
+    let open = w.root.path().join("open");
+    std::fs::create_dir(&open).unwrap();
+    ljos_cli::change_mode(&open, 0o777).unwrap();
+    let bag = w.bag("unsafe");
+    let bag_arg = bag.display().to_string();
+    let out = w.ljos_without_runtime(
+        "box",
+        &[
+            "handover",
+            "--out",
+            &bag_arg,
+            "--project",
+            "probe",
+            "--scope",
+            "cloud",
+        ],
+        &open,
+    );
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    let why = format!(
+        "handover: nothing was handed over: no runtime directory for the scoped handover's plaintext export, {} is not safe from other users; set XDG_RUNTIME_DIR or HOME to an absolute path",
+        open.display()
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr).trim_end(), why);
+    for raw in ["panicked", "Not a directory", "os error", "/dev/null"] {
+        assert!(!text.contains(raw), "{raw}:\n{text}");
+    }
+    let left: Vec<_> = std::fs::read_dir(&open)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert!(left.is_empty(), "{left:?}\n{text}");
+    assert!(!bag.exists(), "{text}");
 }
