@@ -19886,42 +19886,46 @@ fn dir_owner_mode(dir: &std::fs::File) -> std::io::Result<(u32, u32)> {
     Ok((meta.uid(), meta.mode() & 0o7777))
 }
 
+/// [`walk_trusted_dir`] for the temporary state root.
+fn open_trusted_dir(parent: &Path, owner: u32) -> Result<(PathBuf, std::fs::File), String> {
+    walk_trusted_dir(parent, owner).map_err(|why| no_home_message(&why))
+}
+
 /// A descriptor for `parent`, reached from `/` one directory at a time.
 ///
 /// A symlink in `parent` is resolved first, and the resolved path is then
 /// opened without following any symlink. Every directory on it, `/`
 /// included, must pass [`trusted_dir_mode`] for `owner`, so no other user
 /// can rename a directory on the way after this check.
-fn open_trusted_dir(parent: &Path, owner: u32) -> Result<(PathBuf, std::fs::File), String> {
-    let real = std::fs::canonicalize(parent).map_err(|err| {
-        no_home_message(&format!("could not resolve {}: {err}", parent.display()))
-    })?;
+fn walk_trusted_dir(parent: &Path, owner: u32) -> Result<(PathBuf, std::fs::File), String> {
+    let real = std::fs::canonicalize(parent)
+        .map_err(|err| format!("could not resolve {}: {err}", parent.display()))?;
     let mut reached = PathBuf::from("/");
     let mut dir = exe_publish::open_dir_at_nofollow(rustix::fs::CWD, std::ffi::OsStr::new("/"))
-        .map_err(|err| no_home_message(&format!("could not open /: {err}")))?;
+        .map_err(|err| format!("could not open /: {err}"))?;
     for part in real.components() {
         match part {
             std::path::Component::RootDir => {}
             std::path::Component::Normal(name) => {
                 reached.push(name);
                 dir = exe_publish::open_dir_at_nofollow(&dir, name).map_err(|err| {
-                    no_home_message(&format!(
+                    format!(
                         "could not open {} without following a symlink: {err}",
                         reached.display()
-                    ))
+                    )
                 })?;
             }
             _ => {
-                return Err(no_home_message(&format!(
+                return Err(format!(
                     "{} did not resolve to a plain path",
                     parent.display()
-                )))
+                ))
             }
         }
-        let (uid, mode) = dir_owner_mode(&dir)
-            .map_err(|err| no_home_message(&format!("{}: {err}", reached.display())))?;
+        let (uid, mode) =
+            dir_owner_mode(&dir).map_err(|err| format!("{}: {err}", reached.display()))?;
         if let Err(why) = trusted_dir_mode(uid, mode, owner) {
-            return Err(no_home_message(&format!("{why}: {}", reached.display())));
+            return Err(format!("{why}: {}", reached.display()));
         }
     }
     Ok((real, dir))
