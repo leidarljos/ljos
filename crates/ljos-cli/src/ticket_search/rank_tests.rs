@@ -1015,3 +1015,247 @@ fn the_seats_project_comes_before_one_word_matches_from_other_repos() {
         ]
     );
 }
+
+const ROUGH: &[&str] = &[
+    "b+rine_foo",
+    "-(brineSpindle)",
+    "cedar\u{b}latch",
+    "café",
+    "CAFÉ",
+    "Straße",
+    "ΣΊΣΥΦΟΣ",
+    "İstanbul",
+    "/}MOUNTion",
+    "list_scans,",
+    "(store)",
+    "mount.",
+    "HTTPServer",
+    "sha-1",
+    "\u{a0}kiln",
+    "glaze\u{1c}drain",
+    "東京",
+    "naïve",
+    "über-store",
+    "-?Stories5",
+    "-[-[Glaze",
+    "rev x20",
+    "it\u{2019}s\u{2014}done",
+    "ABcABcABc",
+    "\t\u{c}\u{85}\u{2028}",
+];
+
+const ROUGH_ASKS: &[&str] = &[
+    "brinefoo",
+    "brine spindle",
+    "brinespindle",
+    "cedar latch",
+    "café",
+    "cafe",
+    "pelican",
+    "istanbul",
+    "mountion",
+    "straße",
+    "σίσυφος",
+    "xylophone quadrature",
+    "über store",
+    "httpserver",
+    "stories5",
+    "glaze0",
+    "rev20",
+    "done",
+    "abc",
+];
+
+fn roughen(rng: &mut Lcg, text: &str) -> String {
+    let mut out = String::new();
+    for word in text.split(' ') {
+        out.push_str(word);
+        out.push_str(rng.pick(&[" ", " ", " ", "\n", "-", "+", ", ", "\u{b}", "\u{a0}", "/"]));
+        if rng.chance(20) {
+            out.push_str(rng.pick(ROUGH));
+            out.push(' ');
+        }
+    }
+    out
+}
+
+/// [`tracker`] with punctuation, Unicode and control characters through
+/// titles, bodies, notes and drawers, org tags that hold query words, and
+/// a second copy of some ids with words of their own.
+fn rough_tracker(seed: u64, n: usize) -> Vec<IssueRec> {
+    let mut rng = Lcg(seed ^ 0xbeef);
+    let mut records = tracker(seed, n);
+    for rec in &mut records {
+        let heading = &mut rec.heading;
+        heading.body = roughen(&mut rng, &heading.body);
+        if rng.chance(30) {
+            heading.title = roughen(&mut rng, &heading.title);
+        }
+        for entry in &mut heading.logbook {
+            if let Some(text) = entry.note.as_mut() {
+                *text = roughen(&mut rng, text);
+            }
+        }
+        if rng.chance(30) {
+            let tag = rng.pick(&["pelican", "store", "café"]);
+            heading.org_tags.push(tag.to_string());
+        }
+        if rng.chance(10) {
+            heading.extra_drawers.push(roughen(&mut rng, "kiln drawer"));
+        }
+    }
+    for index in 0..n / 10 {
+        let mut copy = records[index * 7 % n].clone();
+        copy.heading.title = "Second copy zebrafinch".to_string();
+        copy.heading.body = roughen(&mut rng, "zebrafinch only here");
+        records.push(copy);
+    }
+    records
+}
+
+/// The page 0.45.4 built, with its analyzer and a term bag per ticket, is
+/// the page the one analyzer and a query cover build: the same rows in the
+/// same order. [`crate::word_rank::fuzz_scale`] reads more generated trackers.
+#[test]
+fn the_old_analyzer_and_the_cover_build_the_same_page() {
+    let mut compared = 0usize;
+    let seeds = (0..3 * crate::word_rank::fuzz_scale())
+        .map(|round| [3_u64, 71, 4_099][round % 3] + 7_919 * (round / 3) as u64);
+    for seed in seeds {
+        let records = rough_tracker(seed, 100);
+        let mut rng = Lcg(seed);
+        let mut asks = queries(&mut rng, &records);
+        asks.extend(ROUGH_ASKS.iter().map(|ask| (*ask).to_string()));
+        for (index, query) in asks.iter().enumerate() {
+            let place = || {
+                at_home(
+                    ["ada", "bao", "zed"][index % 3],
+                    index % 4 == 0,
+                    index % 5 != 0,
+                    [&[][..], &["Kiln"], &["media", "LJOS"]][index % 7 % 3],
+                )
+            };
+            let start = pack_hits(&mut rng, &records);
+            let mut before = start.clone();
+            crate::word_rank::with_old_terms(|| {
+                develop::merge(&mut before, query, &records, &place());
+            });
+            let mut after = start;
+            merge_records(&mut after, query, &records, place);
+            assert_eq!(
+                format!("{after:#?}"),
+                format!("{before:#?}"),
+                "seed {seed} query {query:?}"
+            );
+            compared += 1;
+        }
+    }
+    assert!(compared >= 250, "{compared} pages");
+}
+
+/// `brinefoo` is the joined form of `b+rine_foo` in a body, so the ticket
+/// is found. A word only in an org tag, a word only on a second copy of an
+/// id the tracker read drops, and an unrelated query add no row.
+#[test]
+fn a_joined_body_word_is_found_and_a_miss_adds_no_row() {
+    let path = PathBuf::from(format!("{ROOT}/Software/issues.org"));
+    let filed = vec![note("[2026-11-01 Sun 09:00]", "filed by ada")];
+    let mut tagged = ticket(
+        "Software",
+        "soft-tag",
+        "Kiln night shift",
+        "overnight firing only",
+        filed.clone(),
+        None,
+        path.clone(),
+    );
+    tagged.heading.org_tags.push("pelican".to_string());
+    let records = vec![
+        ticket(
+            "Software",
+            "soft-punc",
+            "Ordinary kiln schedule",
+            "see b+rine_foo for the valve",
+            filed.clone(),
+            None,
+            path.clone(),
+        ),
+        tagged,
+        ticket(
+            "Software",
+            "soft-dup",
+            "Glaze batch",
+            "cone six",
+            filed,
+            None,
+            path,
+        ),
+    ];
+    for query in ["brinefoo", "pelican", "zebrafinch", "xylophone quadrature"] {
+        let mut before = Vec::new();
+        crate::word_rank::with_old_terms(|| {
+            develop::merge(&mut before, query, &records, &here("ada", false, true));
+        });
+        let mut after = Vec::new();
+        merge_records(&mut after, query, &records, || here("ada", false, true));
+        assert_eq!(format!("{after:#?}"), format!("{before:#?}"), "{query}");
+        let ids: Vec<_> = after.iter().filter_map(|hit| hit.id.as_deref()).collect();
+        if query == "brinefoo" {
+            assert_eq!(ids, ["soft-punc"]);
+        } else {
+            assert!(ids.is_empty(), "{query}: {ids:?}");
+        }
+    }
+}
+
+/// A log of filler, ASCII or not, with the query in the middle: the ticket
+/// is found, and a hundred times the filler splits and stems no more words.
+#[test]
+fn a_long_log_is_not_read_word_by_word() {
+    let path = PathBuf::from(format!("{ROOT}/Software/issues.org"));
+    let filed = vec![note("[2026-11-01 Sun 09:00]", "filed by ada")];
+    let read = |filler: &str, times: usize| {
+        let body = format!(
+            "{}brine spindle sits in the log {}",
+            filler.repeat(times),
+            filler.repeat(times)
+        );
+        let records = vec![
+            ticket(
+                "Software",
+                "soft-1",
+                "Kiln schedule for the night",
+                &body,
+                filed.clone(),
+                None,
+                path.clone(),
+            ),
+            ticket(
+                "Software",
+                "soft-2",
+                "Glaze batch",
+                &filler.repeat(2 * times),
+                filed.clone(),
+                None,
+                path.clone(),
+            ),
+        ];
+        let before = crate::word_rank::tokens_read();
+        let mut hits = Vec::new();
+        merge_records(&mut hits, "brine spindle", &records, || {
+            here("ada", false, true)
+        });
+        let ids: Vec<_> = hits.iter().filter_map(|hit| hit.id.clone()).collect();
+        assert_eq!(ids, ["soft-1"], "{filler:?}");
+        crate::word_rank::tokens_read() - before
+    };
+    for filler in [
+        "qx00000001 ",
+        "qx00000001 café ümlaut 東京 ",
+        "qx00000001 we\u{2019}re \u{2014} done ",
+    ] {
+        let short = read(filler, 20);
+        let long = read(filler, 2_000);
+        assert_eq!(long, short, "{filler:?}");
+    }
+}

@@ -542,3 +542,136 @@ fn word_ranked_tickets_prefer_the_seats_project() {
         "another project's ticket came before the seat's project:\n{said}"
     );
 }
+
+/// A pack with no lesson that answers every search with no hits, and keeps
+/// the path of each request it is sent.
+fn serve_empty(listener: TcpListener, asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    for conn in listener.incoming().flatten() {
+        let asked = asked.clone();
+        thread::spawn(move || {
+            let mut sock = conn;
+            let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            while !buf.windows(4).any(|window| window == b"\r\n\r\n") {
+                match sock.read(&mut tmp) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                }
+            }
+            let head = String::from_utf8_lossy(&buf).to_string();
+            let path = head
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/")
+                .split('?')
+                .next()
+                .unwrap_or("/")
+                .to_string();
+            let body = match path.as_str() {
+                "/v1/search" => r#"{"hits":[],"rank":"relevance"}"#,
+                "/v1/status" => {
+                    r#"{"embedder":{"available":true,"answering":true,"enabled":true},"search":{"ranks":["fused","relevance"]}}"#
+                }
+                "/v1/atoms" => r#"{"atoms":[]}"#,
+                _ => r#"{"ok":true}"#,
+            };
+            asked.lock().unwrap().push(path);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes());
+        });
+    }
+}
+
+/// Words a person or a log glues to punctuation are found in a body, and
+/// a query that matches nothing prints the same page as 0.45.4 and asks
+/// the pack the same questions. A word only in an org tag, a word only on
+/// a second copy of an id, and an unrelated query are those misses.
+#[test]
+fn glued_body_words_are_found_and_a_miss_prints_the_old_page() {
+    let mut seat = Seat::open_with(
+        true,
+        "\
+#+TITLE: Software issues
+#+VISSUE: 1
+#+CATEGORY: Software
+#+TODO: TODO STARTED BLOCKED | DONE CANCELLED
+
+* TODO [#B] Ordinary kiln schedule
+:PROPERTIES:
+:ID:         Software-punc
+:END:
+see b+rine_foo for the valve, then valve -(brineSpindle) reset
+
+* TODO [#B] Kiln night shift :pelican:
+:PROPERTIES:
+:ID:         Software-tagd
+:END:
+overnight firing only
+
+* TODO [#B] Glaze batch
+:PROPERTIES:
+:ID:         Software-dupe
+:END:
+cone six and cedar\u{b}latch it\u{2019}s cured \u{2014} reload
+
+* TODO [#B] Second copy of the glaze batch
+:PROPERTIES:
+:ID:         Software-dupe
+:END:
+zebrafinch only here
+",
+    );
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    seat.url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let log = asked.clone();
+    thread::spawn(move || serve_empty(listener, log));
+
+    for (query, id) in [
+        ("brinefoo", "Software-punc"),
+        ("brinespindle", "Software-punc"),
+        ("cedar latch", "Software-dupe"),
+        ("reload", "Software-dupe"),
+    ] {
+        let out = seat.search(&["search", "--porcelain", query]);
+        let said = text(&out);
+        assert!(out.status.success(), "{said}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains(id),
+            "{query}: {said}"
+        );
+    }
+
+    for (query, page) in MISSES {
+        asked.lock().unwrap().clear();
+        let out = seat.search(&["search", query]);
+        assert!(out.status.success(), "{}", text(&out));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), *page, "{query}");
+        let atoms = asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| *path == "/v1/atoms")
+            .count();
+        assert_eq!(atoms, 2, "{query}: {:?}", asked.lock().unwrap());
+    }
+}
+
+const MISSES: &[(&str, &str)] = &[
+    (
+        "pelican",
+        "Nothing matched pelican. A shorter search would miss too. Try storing a lesson\nin your own words, such as:\nljos remember \"LESSON\"\n",
+    ),
+    (
+        "zebrafinch",
+        "Nothing matched zebrafinch. A shorter search would miss too. Try storing a\nlesson in your own words, such as:\nljos remember \"LESSON\"\n",
+    ),
+    (
+        "xylophone quadrature",
+        "Nothing matched \"xylophone quadrature\". A shorter search would miss too. Try\nstoring a lesson in your own words, such as:\nljos remember \"LESSON\"\n",
+    ),
+];

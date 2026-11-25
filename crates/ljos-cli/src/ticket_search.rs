@@ -36,7 +36,7 @@
 //! this seat's. The one local case is a tracker whose `seats` roster names
 //! only this seat. An empty roster is not that case: any seat may write.
 
-use crate::word_rank::{QueryTerms, TermBag};
+use crate::word_rank::{Cover, Have, QueryTerms, TermBag};
 use packset_client::Hit;
 use std::collections::{BTreeMap, BTreeSet};
 use vissue_core::views::IssueRec;
@@ -229,7 +229,7 @@ impl Asked {
             .zip(&word_terms)
             .map(|(word, terms)| {
                 listed_common(word)
-                    || (corpus.len() >= 2 && corpus.iter().all(|title| terms.any_in(title)))
+                    || (corpus.len() >= 2 && corpus.iter().all(|title| terms.any_in(*title)))
             })
             .collect();
         let joined = TermBag::of(&words.join(" "));
@@ -289,6 +289,10 @@ fn read_tickets<'r>(records: &'r [IssueRec], query: &str) -> Vec<Ticket<'r>> {
     let asked = Asked::new(query, &corpus);
     let total = asked.terms.written().count();
     let query_bag = TermBag::of(&asked.text);
+    let queries: Vec<&QueryTerms> = std::iter::once(&asked.terms)
+        .chain(&asked.word_terms)
+        .collect();
+    let mut blob = Cover::of(&queries);
     let mut named: BTreeMap<&str, bool> = BTreeMap::new();
     records
         .iter()
@@ -298,7 +302,9 @@ fn read_tickets<'r>(records: &'r [IssueRec], query: &str) -> Vec<Ticket<'r>> {
             let named = *named
                 .entry(project)
                 .or_insert_with(|| QueryTerms::of(project).any_in(&query_bag));
-            let blob = TermBag::of(&search_blob(rec));
+            blob.clear();
+            blob.read(rec.heading.title.trim());
+            each_note(&rec.heading, |text| blob.read(text));
             let band = title_bag
                 .as_ref()
                 .and_then(|bag| band_with(&asked, rec.heading.title.trim(), bag, &blob));
@@ -408,34 +414,40 @@ fn tickets() -> (Vec<IssueRec>, LoadedClaims) {
     )
 }
 
-fn notes_text(heading: &vissue_core::IssueHeading) -> String {
-    let mut notes = String::new();
-    push_note(&mut notes, heading.body.trim());
+/// The body, each logbook note and each drawer, trimmed. After the title,
+/// that is what a lexical match reads, one line each.
+fn each_note(heading: &vissue_core::IssueHeading, mut each: impl FnMut(&str)) {
+    each(heading.body.trim());
     for entry in &heading.logbook {
         if entry.is_bookkeeping() {
             continue;
         }
         if let Some(text) = crate::logbook_text(entry) {
-            push_note(&mut notes, text.trim());
+            each(text.trim());
         }
     }
     for drawer in &heading.extra_drawers {
-        push_note(&mut notes, drawer.trim());
+        each(drawer.trim());
     }
+}
+
+#[cfg(test)]
+fn notes_text(heading: &vissue_core::IssueHeading) -> String {
+    let mut notes = String::new();
+    each_note(heading, |text| {
+        if text.is_empty() {
+            return;
+        }
+        if !notes.is_empty() {
+            notes.push('\n');
+        }
+        notes.push_str(text);
+    });
     notes
 }
 
-fn push_note(notes: &mut String, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    if !notes.is_empty() {
-        notes.push('\n');
-    }
-    notes.push_str(text);
-}
-
 /// Title, body and logbook notes, which is what a lexical match reads.
+#[cfg(test)]
 fn search_blob(rec: &IssueRec) -> String {
     let notes = notes_text(&rec.heading);
     let title = rec.heading.title.trim();
@@ -955,7 +967,7 @@ fn band(query: &str, title: &str, notes: &str, corpus: &[&str]) -> Option<Band> 
 
 /// `title` is trimmed. `title_bag` is its terms, and `blob` is the terms
 /// of the title, body and notes.
-fn band_with(asked: &Asked, title: &str, title_bag: &TermBag, blob: &TermBag) -> Option<Band> {
+fn band_with(asked: &Asked, title: &str, title_bag: &TermBag, blob: &impl Have) -> Option<Band> {
     if asked.text.is_empty() || title.is_empty() {
         return None;
     }
