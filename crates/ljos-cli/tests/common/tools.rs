@@ -22,10 +22,19 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Set to `1` when a missing tool must fail the test.
 pub const REQUIRE_TOOLS: &str = "LJOS_TEST_REQUIRE_TOOLS";
+
+static ENV: Mutex<()> = Mutex::new(());
+
+/// Held by the tests in this file, which start programs. A test binary
+/// that writes the process environment holds it around each write and
+/// around [`halt`], so neither runs while a variable changes.
+pub fn env_lock() -> MutexGuard<'static, ()> {
+    ENV.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// `age` on Ubuntu 24.04. The package ships `age` and `age-keygen`.
 const AGE_VERSION: &str = "1.1.1";
@@ -287,6 +296,7 @@ mod tests {
 
     #[test]
     fn a_missing_tool_skips() {
+        let _env = env_lock();
         for tool in [Tool::AgeKeygen, Tool::Emacs, Tool::Packsetd, Tool::Vissue] {
             let line = skip_line(tool);
             assert_eq!(line.lines().count(), 1, "{line}");
@@ -313,6 +323,7 @@ mod tests {
 
     #[test]
     fn a_missing_tool_fails_when_ljos_test_require_tools_is_1() {
+        let _env = env_lock();
         let path = OsStr::new("/no/such/tools");
         let line = skip_line(Tool::AgeKeygen);
         assert_eq!(
@@ -339,6 +350,7 @@ mod tests {
 
     #[test]
     fn a_present_tool_runs() {
+        let _env = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let vissue = format!("#!/bin/sh\necho 'vissue {}'\n", Tool::Vissue.version());
         let packsetd = format!("#!/bin/sh\necho 'packsetd {}'\n", Tool::Packsetd.version());
