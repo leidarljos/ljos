@@ -11,12 +11,16 @@ ljos_test_boot::harness!();
 #[path = "common/seat_env.rs"]
 mod seat_env;
 
-use std::io::Write as _;
+use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 const WARNING: &str = "ljos: keeping no runtime records, ";
+/// How long one command here may take. Each exits in a few seconds at
+/// most, and the hook call's own bound is 4 seconds.
+const DEADLINE: Duration = Duration::from_secs(20);
 const REASON: &str =
     "is not safe from other users; set XDG_RUNTIME_DIR or HOME to an absolute path";
 
@@ -80,17 +84,35 @@ impl Seat {
         cmd
     }
 
+    /// Run `cmd` with `input` on stdin, and fail when it has not exited and
+    /// closed its pipes within [`DEADLINE`]. A command that found a place
+    /// for its records, such as a hook server waiting on its socket, would
+    /// otherwise hold the test open.
     fn run(&self, mut cmd: Command, input: &str) -> (Output, Duration) {
+        use std::os::unix::process::CommandExt as _;
         let started = Instant::now();
-        let mut child = cmd.spawn().unwrap();
+        let mut child = cmd.process_group(0).spawn().unwrap();
         child
             .stdin
             .take()
             .unwrap()
             .write_all(input.as_bytes())
             .unwrap();
-        let out = child.wait_with_output().unwrap();
-        (out, started.elapsed())
+        match finish_by(child, started + DEADLINE) {
+            Ok(out) => (out, started.elapsed()),
+            Err(said) => {
+                let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
+                let left: Vec<_> = std::fs::read_dir(&self.open)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect();
+                panic!(
+                    "`{}` was still running {DEADLINE:?} after it started, and was killed; {} holds {left:?}:\n{said}",
+                    args.join(" "),
+                    self.open.display(),
+                );
+            }
+        }
     }
 
     /// The checks every command here meets, and its stderr.
@@ -107,6 +129,68 @@ impl Seat {
         );
         err
     }
+}
+
+/// The output of `child` once it has exited and closed its pipes, or, when
+/// it has not by `by`, what it said before it was killed with its process
+/// group.
+fn finish_by(mut child: Child, by: Instant) -> Result<Output, String> {
+    let (tx, said) = std::sync::mpsc::channel();
+    let pipes: [(bool, Box<dyn Read + Send>); 2] = [
+        (false, Box::new(child.stdout.take().unwrap())),
+        (true, Box::new(child.stderr.take().unwrap())),
+    ];
+    for (err, mut pipe) in pipes {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            while let Ok(n @ 1..) = pipe.read(&mut chunk) {
+                if tx.send((err, chunk[..n].to_vec())).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    drop(tx);
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    let mut status = None;
+    let mut open = true;
+    while (status.is_none() || open) && Instant::now() < by {
+        status = child.try_wait().unwrap();
+        if !open {
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+        match said.recv_timeout(Duration::from_millis(20)) {
+            Ok((false, bytes)) => stdout.extend(bytes),
+            Ok((true, bytes)) => stderr.extend(bytes),
+            Err(RecvTimeoutError::Disconnected) => open = false,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+    if let (Some(status), false) = (status, open) {
+        return Ok(Output {
+            status,
+            stdout,
+            stderr,
+        });
+    }
+    let group = libc::pid_t::try_from(child.id()).unwrap();
+    // SAFETY: a negative pid names the process group the child leads. The
+    // child is unreaped or a member still holds a pipe, so that group is
+    // still the one this test started.
+    unsafe {
+        libc::kill(-group, libc::SIGKILL);
+    }
+    let _ = child.wait();
+    while let Ok((err, bytes)) = said.recv_timeout(Duration::from_millis(200)) {
+        if err { &mut stderr } else { &mut stdout }.extend(bytes);
+    }
+    Err(format!(
+        "{}{}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    ))
 }
 
 fn entries(dir: &Path) -> usize {
