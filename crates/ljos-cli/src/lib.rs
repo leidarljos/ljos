@@ -19787,19 +19787,14 @@ fn show_ephemeral_warning() {
 #[cfg(test)]
 static EPHEMERAL_WARNINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// A directory this process just made is usable only when it is not a
-/// symlink, is owned by this user, and is mode `0700`.
-fn created_dir_is_private(path: &Path) -> Result<(), String> {
-    created_dir_is_private_for(path, euid())
-}
-
-fn created_dir_is_private_for(path: &Path, owner: u32) -> Result<(), String> {
+/// A directory this process just made is usable only when it is owned by
+/// `owner` and is mode `0700`.
+fn created_dir_is_private_for(dir: &std::fs::File, owner: u32) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt as _;
-    let meta = std::fs::symlink_metadata(path).map_err(|err| no_home_message(&err.to_string()))?;
-    if meta.file_type().is_symlink() {
-        return Err(no_home_message("refusing a symlinked state directory"));
-    }
-    if !meta.is_dir() || meta.uid() != owner || meta.mode() & 0o777 != 0o700 {
+    let meta = dir
+        .metadata()
+        .map_err(|err| no_home_message(&err.to_string()))?;
+    if !meta.is_dir() || meta.uid() != owner || meta.mode() & 0o7777 != 0o700 {
         return Err(no_home_message(
             "refusing a state directory with the wrong owner or mode",
         ));
@@ -19807,26 +19802,47 @@ fn created_dir_is_private_for(path: &Path, owner: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Create `path` as a new directory mode `0700`.
+/// Create `name` under `dir` as a new directory mode `0700`, and hold it.
 ///
-/// A path that already exists is refused, and so is a symlink: either one
+/// A name that already exists is refused, and so is a symlink: either one
 /// may have been planted before this process started. The directory is
-/// removed again when the mode or the owner does not check.
-pub(crate) fn claim_new_private_dir(path: &Path) -> Result<(), String> {
-    if let Ok(meta) = std::fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            return Err(no_home_message("refusing a symlinked state directory"));
+/// made, opened and checked through descriptors, and removed again when
+/// the mode or the owner does not check.
+fn claim_new_private_dir_at(
+    dir: &std::fs::File,
+    name: &std::ffi::OsStr,
+    owner: u32,
+) -> Result<std::fs::File, String> {
+    let made = exe_publish::make_private_dir_at(dir, name).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::AlreadyExists {
+            no_home_message("refusing a pre-existing state directory")
+        } else {
+            no_home_message(&err.to_string())
         }
-        return Err(no_home_message("refusing a pre-existing state directory"));
-    }
-    std::fs::create_dir(path).map_err(|err| no_home_message(&err.to_string()))?;
-    if let Err(err) = change_mode(path, 0o700) {
-        let _ = std::fs::remove_dir(path);
-        return Err(no_home_message(&err.to_string()));
-    }
-    if let Err(err) = created_dir_is_private(path) {
-        let _ = std::fs::remove_dir(path);
+    })?;
+    if let Err(err) = created_dir_is_private_for(&made, owner) {
+        exe_publish::remove_dir_at(dir, name);
         return Err(err);
+    }
+    Ok(made)
+}
+
+/// Whether `path` still names the directory `dir` holds, and is not a
+/// symlink.
+fn still_at(dir: &std::fs::File, path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let moved = || {
+        no_home_message(&format!(
+            "refusing a state directory that moved after it was made: {}",
+            path.display()
+        ))
+    };
+    let held = dir
+        .metadata()
+        .map_err(|err| no_home_message(&err.to_string()))?;
+    let named = std::fs::symlink_metadata(path).map_err(|_| moved())?;
+    if named.file_type().is_symlink() || named.dev() != held.dev() || named.ino() != held.ino() {
+        return Err(moved());
     }
     Ok(())
 }
@@ -19930,18 +19946,34 @@ impl EphemeralState {
                 "the temporary directory is not an absolute path",
             ));
         }
-        let (parent, _dir) = open_trusted_dir(parent, owner)?;
-        let parent = parent.as_path();
+        let (parent, dir) = open_trusted_dir(parent, owner)?;
+        Self::create_in(&dir, &parent, owner)
+    }
+
+    /// Make the state root and `ljos` under `dir`, which `parent` named
+    /// when it was checked.
+    ///
+    /// Both are made relative to the held descriptors. The paths the rest
+    /// of ljos uses are then checked to name those same directories.
+    fn create_in(dir: &std::fs::File, parent: &Path, owner: u32) -> Result<Self, String> {
+        let ljos_name = std::ffi::OsStr::new("ljos");
         for _ in 0..8 {
-            let root = parent.join(random_state_name());
-            match claim_new_private_dir(&root) {
-                Ok(()) => {}
+            let name = random_state_name();
+            let name = std::ffi::OsStr::new(&name);
+            let root_dir = match claim_new_private_dir_at(dir, name, owner) {
+                Ok(held) => held,
                 Err(err) if err.contains("pre-existing") => continue,
                 Err(err) => return Err(err),
-            }
-            let ljos = root.join("ljos");
-            if let Err(err) = claim_new_private_dir(&ljos) {
-                let _ = std::fs::remove_dir(&root);
+            };
+            let root = parent.join(name);
+            let ljos = root.join(ljos_name);
+            let made = claim_new_private_dir_at(&root_dir, ljos_name, owner).and_then(|ljos_dir| {
+                still_at(&root_dir, &root)?;
+                still_at(&ljos_dir, &ljos)
+            });
+            if let Err(err) = made {
+                exe_publish::remove_dir_at(&root_dir, ljos_name);
+                exe_publish::remove_dir_at(dir, name);
                 return Err(err);
             }
             show_ephemeral_warning();
@@ -20037,8 +20069,8 @@ fn isolated_state_dir() -> PathBuf {
 #[cfg(test)]
 mod ephemeral_state_tests {
     use super::{
-        claim_new_private_dir, created_dir_is_private, created_dir_is_private_for, log_recall_in,
-        trusted_dir_mode, EphemeralState, EPHEMERAL_STATE_WARNING, EPHEMERAL_WARNINGS,
+        claim_new_private_dir_at, created_dir_is_private_for, log_recall_in, open_trusted_dir,
+        still_at, trusted_dir_mode, EphemeralState, EPHEMERAL_STATE_WARNING, EPHEMERAL_WARNINGS,
     };
     use std::os::unix::fs::MetadataExt as _;
     use std::path::Path;
@@ -20047,15 +20079,19 @@ mod ephemeral_state_tests {
         std::fs::symlink_metadata(path).unwrap().mode() & 0o777
     }
 
+    fn held(path: &Path) -> std::fs::File {
+        std::fs::File::open(path).unwrap()
+    }
+
     #[test]
     fn a_precreated_fallback_directory_is_refused() {
         let parent = tempfile::tempdir().unwrap();
-        let planted = parent
-            .path()
-            .join(format!("ljos-no-home-{}", super::euid()));
+        let name = format!("ljos-no-home-{}", super::euid());
+        let planted = parent.path().join(&name);
         std::fs::create_dir(&planted).unwrap();
         crate::write_file(planted.join("marker"), b"planted").unwrap();
-        let err = claim_new_private_dir(&planted).unwrap_err();
+        let err = claim_new_private_dir_at(&held(parent.path()), name.as_ref(), super::euid())
+            .unwrap_err();
         assert!(err.contains("pre-existing"), "{err}");
         assert!(err.contains("HOME"), "{err}");
         assert!(err.contains("XDG_STATE_HOME"), "{err}");
@@ -20078,8 +20114,10 @@ mod ephemeral_state_tests {
             reason = "a test plants a symlink to prove the state directory refuses it"
         )]
         std::os::unix::fs::symlink(&outside, &link).unwrap();
-        let err = claim_new_private_dir(&link).unwrap_err();
-        assert!(err.contains("symlink"), "{err}");
+        let err =
+            claim_new_private_dir_at(&held(parent.path()), "linked-state".as_ref(), super::euid())
+                .unwrap_err();
+        assert!(err.contains("pre-existing"), "{err}");
         assert!(err.contains("HOME"), "{err}");
         assert!(err.contains("XDG_STATE_HOME"), "{err}");
         assert_eq!(std::fs::read(outside.join("marker")).unwrap(), b"outside");
@@ -20101,8 +20139,9 @@ mod ephemeral_state_tests {
             reason = "a test plants a symlink to exercise the post-create check"
         )]
         std::os::unix::fs::symlink(&outside, &link).unwrap();
-        let err = created_dir_is_private(&link).unwrap_err();
-        assert!(err.contains("symlink"), "{err}");
+        let err = still_at(&held(&outside), &link).unwrap_err();
+        assert!(err.contains("moved"), "{err}");
+        assert_eq!(still_at(&held(&outside), &outside), Ok(()));
     }
 
     #[test]
@@ -20112,8 +20151,12 @@ mod ephemeral_state_tests {
         std::fs::create_dir(&private).unwrap();
         crate::change_mode(&private, 0o700).unwrap();
         let another_owner = super::euid().wrapping_add(1);
-        let err = created_dir_is_private_for(&private, another_owner).unwrap_err();
+        let err = created_dir_is_private_for(&held(&private), another_owner).unwrap_err();
         assert!(err.contains("owner"), "{err}");
+        let err = claim_new_private_dir_at(&held(parent.path()), "fresh".as_ref(), another_owner)
+            .unwrap_err();
+        assert!(err.contains("owner"), "{err}");
+        assert!(!parent.path().join("fresh").exists());
     }
 
     #[test]
@@ -20122,10 +20165,46 @@ mod ephemeral_state_tests {
         let wide = parent.path().join("wide");
         std::fs::create_dir(&wide).unwrap();
         crate::change_mode(&wide, 0o755).unwrap();
-        let err = created_dir_is_private(&wide).unwrap_err();
+        let err = created_dir_is_private_for(&held(&wide), super::euid()).unwrap_err();
         assert!(err.contains("mode"), "{err}");
         assert!(err.contains("HOME"), "{err}");
         assert!(err.contains("XDG_STATE_HOME"), "{err}");
+    }
+
+    #[test]
+    fn a_new_state_dir_is_0700_whatever_the_umask() {
+        let parent = tempfile::tempdir().unwrap();
+        let made = claim_new_private_dir_at(&held(parent.path()), "fresh".as_ref(), super::euid())
+            .unwrap();
+        assert_eq!(mode_of(&parent.path().join("fresh")), 0o700);
+        assert_eq!(still_at(&made, &parent.path().join("fresh")), Ok(()));
+    }
+
+    #[test]
+    fn a_parent_swapped_after_the_check_gets_nothing() {
+        let top = tempfile::tempdir().unwrap();
+        let parent = top.path().join("parent");
+        let moved = top.path().join("moved");
+        std::fs::create_dir(&parent).unwrap();
+        crate::change_mode(&parent, 0o700).unwrap();
+        let (real, dir) = open_trusted_dir(&parent, super::euid()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test swaps the temporary directory after it was checked"
+        )]
+        std::fs::rename(&parent, &moved).unwrap();
+        std::fs::create_dir(&parent).unwrap();
+        crate::change_mode(&parent, 0o700).unwrap();
+        let Err(err) = EphemeralState::create_in(&dir, &real, super::euid()) else {
+            panic!("a state root was made under a parent that was swapped after the check");
+        };
+        assert!(err.contains("moved"), "{err}");
+        assert_eq!(
+            std::fs::read_dir(&parent).unwrap().count(),
+            0,
+            "swapped-in parent"
+        );
+        assert_eq!(std::fs::read_dir(&moved).unwrap().count(), 0, "held parent");
     }
 
     #[test]
