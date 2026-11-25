@@ -723,6 +723,10 @@ mod tests {
     /// product's, and neither is one that holds it.
     #[test]
     fn a_trackers_own_repository_is_not_a_product_checkout() {
+        // Tests holding the lock export `VISSUE_PREFIX` and `GIT_DIR` for a
+        // moment, and `is_tracker` and the git steps here read both.
+        let _lock = crate::test_env_lock();
+        clear_tracker_env();
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().join("tracker");
         repo(&root);
