@@ -15068,6 +15068,12 @@ fn ljos_toml_project(path: &Path) -> Option<String> {
 /// so a note can say which sitting is open without asking the tracker.
 #[must_use]
 pub fn recorded_sitting() -> Option<String> {
+    held_from_records(&conversation_holders())
+}
+
+/// The names this conversation's claims can be held under: the holders
+/// the runner records above this process name, then [`holder_name`].
+fn conversation_holders() -> Vec<String> {
     // The record the runner's own server left names the holder its claims
     // were made under. A hook's environment can carry session variables
     // the server's did not, which hash to another holder that holds
@@ -15077,7 +15083,7 @@ pub fn recorded_sitting() -> Option<String> {
     if !holders.contains(&own) {
         holders.push(own);
     }
-    held_from_records(&holders)
+    holders
 }
 
 /// The issue this conversation's holder claimed last and still works: a
@@ -15093,12 +15099,7 @@ pub fn held_issue() -> Option<String> {
     if std::env::var_os("LJOS_IN_HOOK").is_some() {
         return None;
     }
-    let mut holders: Vec<String> = runner_record_holders(&own_ancestry());
-    let own = holder_name();
-    if !holders.contains(&own) {
-        holders.push(own);
-    }
-    holders.iter().find_map(|holder| {
+    conversation_holders().iter().find_map(|holder| {
         let out = run_captured_within(
             "vissue",
             &["claims", "--by", holder, "--json"],
@@ -54418,9 +54419,16 @@ pub fn search_finish_hint_with_claims(
     let ours = if sitting.as_deref() == Some(id) {
         true
     } else {
-        claims
-            .and_then(|loaded| loaded.claimed_by_seat(id, &seat))
-            .unwrap_or_else(|| held_issue().as_deref() == Some(id) || ticket_claimed_by_seat(id))
+        match claims.and_then(|loaded| loaded.claim(id, &seat)) {
+            Some(ticket_search::LoadedClaim::Seat) => true,
+            Some(ticket_search::LoadedClaim::Free) => false,
+            // Only this row's heading counts. `held_issue` also matches
+            // another heading that repeats the id.
+            Some(ticket_search::LoadedClaim::Other { holder, started }) => {
+                started && conversation_holders().iter().any(|own| own == holder)
+            }
+            None => held_issue().as_deref() == Some(id) || ticket_claimed_by_seat(id),
+        }
     };
     if !ours {
         return None;
