@@ -31,6 +31,8 @@ use packset_client::Hit;
 use std::collections::{BTreeMap, BTreeSet};
 use vissue_core::views::IssueRec;
 
+#[cfg(test)]
+mod rank_tests;
 
 /// How close a ticket is to the query. Earlier bands are printed first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

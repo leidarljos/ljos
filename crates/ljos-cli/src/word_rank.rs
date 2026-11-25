@@ -470,6 +470,18 @@ impl QueryTerms {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static ANALYZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many texts this thread has analyzed. A test reads the difference
+/// across a call to see how the work grows.
+#[cfg(test)]
+pub(crate) fn analyzed() -> usize {
+    ANALYZED.with(std::cell::Cell::get)
+}
+
 /// Whether `term` is a common word that does not name a project or a subject.
 ///
 /// `docs`, `release` and `video` are the ones a long query shares with an
@@ -944,6 +956,8 @@ fn prepare(doc: &Doc<'_>) -> Prepared {
 }
 
 fn analyze(text: &str) -> Field {
+    #[cfg(test)]
+    ANALYZED.with(|count| count.set(count.get() + 1));
     let mut seq = Vec::new();
     let mut bag = Vec::new();
     let mut slot = 0u32;
