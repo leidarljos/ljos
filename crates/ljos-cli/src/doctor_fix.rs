@@ -283,6 +283,9 @@ fn repair_pack() -> Option<String> {
 fn repair_session() -> Option<String> {
     let session = unrecorded_session()?;
     let path = session_path(&session.id);
+    if let Some(err) = crate::no_runtime_dir_for("the session seat", &path) {
+        return Some(format!("left session seat: {err:#}"));
+    }
     if let Some(dir) = path.parent() {
         if let Err(err) = create_private_dir(dir) {
             return Some(format!(

@@ -1,0 +1,1 @@
+A no-runtime-directory test that kills a late command also kills any process still holding its pipes, including one that left the process group with `setsid`, so no `ljos`, `hookd` or `open-panel` process outlives the test.

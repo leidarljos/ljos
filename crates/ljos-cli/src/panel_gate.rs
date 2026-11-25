@@ -645,8 +645,8 @@ fn bound_of(
 }
 
 /// The voice `claimed` folds into on `issue`, when a live row shares its
-/// shell or its harness root. `None` when this process has no tree, or
-/// no row matches.
+/// shell or its harness root. `None` when this process has no tree,
+/// there are no runtime records, or no row matches.
 pub(crate) fn peek_bound(
     issue: &str,
     claimed: &ballot_sig::SessionIdentity,
@@ -656,7 +656,7 @@ pub(crate) fn peek_bound(
         return None;
     }
     let key = session_key(&claimed.harness, &claimed.nonce);
-    let text = std::fs::read_to_string(tree_path(issue)).unwrap_or_default();
+    let text = std::fs::read_to_string(tree_path(issue)?).unwrap_or_default();
     let rows: Vec<TreeRow> = text
         .lines()
         .filter_map(TreeRow::parse)
@@ -666,15 +666,18 @@ pub(crate) fn peek_bound(
 }
 
 /// The rows of `issue` on this tracker: another tracker's issue of the
-/// same name is another question.
-fn tree_path(issue: &str) -> PathBuf {
+/// same name is another question. `None` with no runtime records, where
+/// no row can be kept or read.
+fn tree_path(issue: &str) -> Option<PathBuf> {
     use sha2::{Digest, Sha256};
     let tracker = std::env::var_os("VISSUE_ROOT").unwrap_or_default();
     let tracker = hex::encode(Sha256::digest(tracker.as_encoded_bytes()));
-    crate::runtime_dir()
-        .join("ballot-trees")
-        .join(&tracker[..16])
-        .join(crate::subagent::token(issue))
+    Some(
+        crate::runtime_records()?
+            .join("ballot-trees")
+            .join(&tracker[..16])
+            .join(crate::subagent::token(issue)),
+    )
 }
 
 /// Rewrite the rows of `path` under its lock. `edit` sees the rows still
@@ -717,19 +720,22 @@ struct TreeHold {
 /// Record this process's row. A shared shell or harness does not refuse
 /// the cast. It binds the ballot to the earlier row's session, which is
 /// the voice both ballots count as. The row stores that voice.
+///
+/// The rows live in the runtime directory. With none, the ballot is cast
+/// as its own session's, as it is for a process with no tree.
 fn hold_tree(
     issue: &str,
     claimed: &ballot_sig::SessionIdentity,
     tree: &CastTree,
 ) -> Result<Option<TreeHold>> {
-    if tree.shell.is_none() && tree.harness.is_none() {
+    let has_tree = tree.shell.is_some() || tree.harness.is_some();
+    let Some(path) = has_tree.then(|| tree_path(issue)).flatten() else {
         ballot_sig::clear_voice_bind();
         return Ok(None);
-    }
+    };
     let key = session_key(&claimed.harness, &claimed.nonce);
     let me =
         proc_tree::of(std::process::id()).map_or_else(|| "-".to_string(), |p| proc_tree::token(&p));
-    let path = tree_path(issue);
     let row = edit_rows(&path, |rows| {
         let bound = bound_of(rows, &key, tree, claimed);
         let session = bound

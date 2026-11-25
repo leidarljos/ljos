@@ -841,7 +841,7 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn create(issue: &str) -> Result<Self> {
-        let dir = crate::runtime_dir().join(format!(
+        let dir = crate::runtime_dir_for("the deed export")?.join(format!(
             "deed-export-{}-{}",
             std::process::id(),
             crate::seat_slug(issue)
@@ -869,6 +869,26 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_no_runtime_directory_the_deed_export_says_why() {
+        const TEST: &str = "deedbag::tests::with_no_runtime_directory_the_deed_export_says_why";
+        if crate::tests::runtime_env_child(TEST).is_some() {
+            let err = format!("{:#}", Scratch::create("probe-a1b2").err().unwrap());
+            assert!(
+                err.starts_with("no runtime directory for the deed export, "),
+                "{err}"
+            );
+            return;
+        }
+        let open = tempfile::tempdir().unwrap();
+        crate::change_mode(open.path(), 0o777).unwrap();
+        crate::tests::run_in_runtime_env(TEST, open.path(), None, None);
+        assert_eq!(
+            crate::tests::runtime_left(open.path()),
+            Vec::<std::ffi::OsString>::new()
+        );
+    }
 
     #[test]
     fn uppercase_and_short_hex_are_refused() {

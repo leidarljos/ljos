@@ -1,0 +1,1 @@
+The no-runtime-directory tests kill a command still running after 20 seconds and fail with its output and what it left in the temporary directory, so a hook server that found a place for its socket fails the test instead of holding it open.

@@ -226,7 +226,7 @@ fn every_machine_kind_entry_point_is_unwrapped_on_a_tty() {
     cases.push((
         "hookd",
         hookd,
-        "ljos hookd: cannot open /proc/ljos-output-kind-directory-cannot-be-created/ljos/hookd.lock",
+        "ljos hookd: could not make the runtime directory /proc/ljos-output-kind-directory-cannot-be-created/ljos: No such file or directory (os error 2)",
         None,
     ));
     cases.push((

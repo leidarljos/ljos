@@ -1691,11 +1691,13 @@ struct Here {
 /// Where a tool-call record is kept. The first directory follows
 /// `XDG_RUNTIME_DIR`. Another directory does not: the home cache, or the
 /// per-user fallback when there is no home. A reader whose variable
-/// differs from the writer's still finds the record there.
+/// differs from the writer's still finds the record there. A path under
+/// `/dev/null`, where no record can be kept, is left out, so the list can
+/// be empty.
 fn record_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut push = |dir: PathBuf| {
-        if !dirs.iter().any(|have| have == &dir) {
+        if crate::keeps_runtime_records(&dir) && !dirs.iter().any(|have| have == &dir) {
             dirs.push(dir);
         }
     };
@@ -1860,6 +1862,13 @@ fn append_record(dir: &Path, name: &str, line: &str) -> bool {
 
 fn tool_marks() -> Result<Vec<ToolMark>, String> {
     let dirs = read_dirs();
+    // No directory can hold a record, so a tool call's would have been lost.
+    if dirs.is_empty() {
+        return Err(format!(
+            "no runtime directory keeps tool-call records, so nothing is kept as the person's: {}",
+            crate::no_runtime_reason()
+        ));
+    }
     let mut broken = false;
     let mut texts = Vec::new();
     for dir in &dirs {
@@ -2805,24 +2814,29 @@ mod tests {
     /// runtime that has recorded no tool call.
     #[test]
     fn a_tool_call_record_is_seen_when_xdg_runtime_dir_differs() {
-        let home = tempfile::tempdir().unwrap();
-        let writer = tempfile::tempdir().unwrap();
-        let reader = tempfile::tempdir().unwrap();
-        let tmpdir = writer.path().join("tmp");
-        std::fs::create_dir_all(&tmpdir).unwrap();
-        // Hold the env lock after all tempdirs so drop order restores env
-        // before those directories are deleted.
+        const TEST: &str =
+            "proc_tree::tests::a_tool_call_record_is_seen_when_xdg_runtime_dir_differs";
+        let Some(tmpdir) = crate::tests::runtime_env_child(TEST) else {
+            let home = tempfile::tempdir().unwrap();
+            let writer = tempfile::tempdir().unwrap();
+            let tmpdir = writer.path().join("tmp");
+            std::fs::create_dir_all(&tmpdir).unwrap();
+            crate::tests::run_in_runtime_env(TEST, &tmpdir, Some(home.path()), None);
+            return;
+        };
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let writer = tmpdir.parent().unwrap().to_path_buf();
+        let reader = tempfile::tempdir_in(&writer).unwrap();
         let _guard = crate::test_env_lock();
-        // SAFETY: geteuid has no arguments and only reads process identity.
-        let uid = unsafe { libc::geteuid() };
-        let fallback = crate::runtime_fallback(&tmpdir, Some(home.path()), uid);
-        // SAFETY: this test holds `test_env_lock`, which puts the variables
-        // back when it drops. Nothing else on this thread reads them.
+        // SAFETY: this child runs this one test and holds `test_env_lock`.
         unsafe {
-            std::env::set_var("HOME", home.path());
+            std::env::set_var("HOME", &home);
             std::env::set_var("TMPDIR", &tmpdir);
             std::env::remove_var("XDG_RUNTIME_DIR");
         }
+        // SAFETY: geteuid has no arguments and only reads process identity.
+        let uid = unsafe { libc::geteuid() };
+        let fallback = crate::runtime_fallback(&tmpdir, Some(&home), uid);
         let opener = Proc {
             pid: 1,
             start: 1,
@@ -2839,12 +2853,13 @@ mod tests {
             "the hook did not write the record under its default runtime directory"
         );
         assert!(
-            home.path().join(".cache/ljos/run/tool-calls").is_file(),
+            home.join(".cache/ljos/run/tool-calls").is_file(),
             "the hook did not keep a copy outside XDG_RUNTIME_DIR"
         );
+        // SAFETY: this child runs this one test and holds `test_env_lock`.
         unsafe {
             std::env::set_var("XDG_RUNTIME_DIR", reader.path());
-            std::env::set_var("HOME", writer.path().join("other-home"));
+            std::env::set_var("HOME", writer.join("other-home"));
         }
         assert!(
             !reader.path().join("ljos/tool-calls").exists(),
@@ -2855,6 +2870,87 @@ mod tests {
             why.contains("tool call"),
             "a different XDG_RUNTIME_DIR hid the record: {why}"
         );
+    }
+
+    /// With `XDG_RUNTIME_DIR` set and no home, a temporary directory open
+    /// to other users gives no fallback. The record is still kept and read
+    /// under `XDG_RUNTIME_DIR`, and no path under `/dev/null` is looked in.
+    #[test]
+    fn a_tool_call_record_under_xdg_runtime_dir_needs_no_fallback() {
+        const TEST: &str =
+            "proc_tree::tests::a_tool_call_record_under_xdg_runtime_dir_needs_no_fallback";
+        let Some(_) = crate::tests::runtime_env_child(TEST) else {
+            let open = tempfile::tempdir().unwrap();
+            crate::change_mode(open.path(), 0o777).unwrap();
+            let run = tempfile::tempdir().unwrap();
+            crate::tests::run_in_runtime_env(TEST, open.path(), None, Some(run.path()));
+            assert_eq!(std::fs::read_dir(open.path()).unwrap().count(), 0);
+            return;
+        };
+        let run = std::env::var_os("XDG_RUNTIME_DIR").unwrap();
+        let _guard = crate::test_env_lock();
+        // SAFETY: this child runs this one test and holds `test_env_lock`.
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", &run);
+            std::env::remove_var("HOME");
+        }
+        let dirs = read_dirs();
+        assert!(
+            !dirs.iter().any(|dir| dir.starts_with("/dev/null")),
+            "{dirs:?}"
+        );
+        assert!(tool_marks().unwrap().is_empty(), "no record yet");
+        let opener = Proc {
+            pid: 1,
+            start: 1,
+            comm: "claude".into(),
+        };
+        let young = Proc {
+            pid: 999_999,
+            start: u64::MAX,
+            comm: "claude".into(),
+        };
+        assert!(confirm_runner(&young).is_ok(), "no record yet");
+        note_tool_call(&opener).unwrap();
+        let why = confirm_runner(&young).unwrap_err();
+        assert!(why.contains("tool call"), "{why}");
+        assert!(!why.contains("/dev/null"), "{why}");
+    }
+
+    /// With no directory that can hold a record, a tool call's record was
+    /// lost, so the read fails closed. It says why without naming a path
+    /// under `/dev/null`.
+    #[test]
+    fn with_no_runtime_directory_the_tool_call_record_fails_closed() {
+        const TEST: &str =
+            "proc_tree::tests::with_no_runtime_directory_the_tool_call_record_fails_closed";
+        let Some(_) = crate::tests::runtime_env_child(TEST) else {
+            let open = tempfile::tempdir().unwrap();
+            crate::change_mode(open.path(), 0o777).unwrap();
+            crate::tests::run_in_runtime_env(TEST, open.path(), None, None);
+            assert_eq!(std::fs::read_dir(open.path()).unwrap().count(), 0);
+            return;
+        };
+        let _guard = crate::test_env_lock();
+        // SAFETY: this child runs this one test and holds `test_env_lock`.
+        unsafe {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+            std::env::remove_var("HOME");
+        }
+        assert_eq!(read_dirs(), Vec::<PathBuf>::new());
+        let opener = Proc {
+            pid: 1,
+            start: 1,
+            comm: "claude".into(),
+        };
+        let why = confirm_runner(&opener).unwrap_err();
+        assert!(
+            why.starts_with("no runtime directory keeps tool-call records"),
+            "{why}"
+        );
+        assert!(why.contains("is not safe from other users"), "{why}");
+        assert!(!why.contains("/dev/null"), "{why}");
+        assert!(note_tool_call(&opener).is_err());
     }
 
     #[test]

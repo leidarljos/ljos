@@ -243,7 +243,22 @@ refused. With nothing set and 8761 another user's, the seat uses port
 Without =XDG_RUNTIME_DIR=, the hold records and the seat records go in
 a directory named for =HOME=, such as =ljos-UID/home-1a2b3c4d5e6f=, under the
 temporary directory, mode 0700, so two homes of one user do not share a hold.
-They go in =~/.cache/ljos/run= when =ljos-UID= is another user's or a symlink.
+The temporary directory gets the check the temporary state root gets: every
+directory to it, resolved, is owned by root or the user, and sticky when another
+user can write it. =ljos-UID= and the home's directory must be the user's,
+closed to group and other writers even when sticky, and not symlinks.
+They go in =~/.cache/ljos/run= when any of that fails. With no absolute =HOME=,
+they go in =ljos-UID-own= when only =ljos-UID= failed, and otherwise ljos warns
+once and keeps no runtime records.
+
+With no runtime records, the hook server, the decision panel, a scoped
+handover and a deed export stop with one line that says why, and leave
+nothing behind. A vote is cast as its own session's voice, a hook call is
+judged at once with no queue, a tracker push runs in the foreground, and
+=ljos hook --drain= has nothing to drain. No tool-call record can be kept,
+so no hook's prompt is taken as the person's. The line names the cause:
+an =XDG_RUNTIME_DIR= under =/dev/null=, an open temporary directory, or
+an =ljos-UID= and =ljos-UID-own= that cannot be used.
 
 This flag list is copied from command help.
 A test fails when this list and the binary differ.

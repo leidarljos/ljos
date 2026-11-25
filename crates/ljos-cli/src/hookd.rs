@@ -14,7 +14,9 @@
 //! meets no server takes a short lock for its own seat. Another seat's
 //! lock is a different file, so a burst of seats does not queue on one
 //! holder. A lock whose recorded process has exited is removed and taken
-//! again. A missing server costs throughput, never the cap.
+//! again. A missing server costs throughput, never the cap. With no
+//! runtime directory there is no queue and no cap: every call is judged
+//! at once.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -123,6 +125,11 @@ pub fn admit() {
     }
     let gate = !args.iter().any(|a| a == "--prompt")
         && crate::is_gate_event(&crate::hook_call_as(&input, event.as_deref()).event);
+    // The socket and the flight lock are in the runtime directory. With
+    // none there is nothing to wait on, and the call is judged here at once.
+    if crate::runtime_records().is_none() {
+        return;
+    }
     match wait_turn() {
         Ok((held, waited)) => {
             WAITED_MS.store(waited, Ordering::Relaxed);
@@ -651,7 +658,13 @@ fn same_user(_stream: &UnixStream) -> bool {
 /// socket is removed or replaced.
 #[must_use]
 pub fn serve() -> i32 {
-    let dir = run_dir();
+    let dir = match crate::runtime_dir_for("the hook server's socket") {
+        Ok(dir) => dir,
+        Err(e) => {
+            say!("ljos hookd: {e:#}");
+            return 1;
+        }
+    };
     let Some(lock) = open_lock(&dir.join("hookd.lock")) else {
         say!(
             "ljos hookd: cannot open {}",
