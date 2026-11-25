@@ -143,15 +143,15 @@ fn park(here: &Path, move_process_cwd: bool) {
         }
     }
     remember_skip(here);
-    match park_dir(&std::env::temp_dir(), crate::euid()) {
-        Some(park) => {
-            use std::os::fd::AsRawFd as _;
-            // SAFETY: fchdir on a descriptor `park` owns for this call.
-            let _ = unsafe { libc::fchdir(park.as_raw_fd()) };
-        }
-        None => {
-            let _ = std::env::set_current_dir("/");
-        }
+    let parked = park_dir(&std::env::temp_dir(), crate::euid()).is_some_and(|park| {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: fchdir on a descriptor `park` owns for this call.
+        unsafe { libc::fchdir(park.as_raw_fd()) == 0 }
+    });
+    // A park this user cannot search, such as one left mode 0600, is
+    // opened but not entered.
+    if !parked {
+        let _ = std::env::set_current_dir("/");
     }
 }
 
@@ -482,6 +482,26 @@ mod tests {
         std::fs::create_dir(tmp.path().join(&name)).unwrap();
         crate::change_mode(tmp.path().join(&name), 0o777).unwrap();
         assert!(park_dir(tmp.path(), uid).is_none());
+    }
+
+    /// A park left mode 0600 can be opened but not entered, so the process
+    /// goes to `/` instead of staying where it was.
+    #[test]
+    fn a_park_that_cannot_be_entered_leaves_for_the_root() {
+        const TEST: &str = "cwd_probe::tests::a_park_that_cannot_be_entered_leaves_for_the_root";
+        let Some(tmp) = crate::tests::runtime_env_child(TEST) else {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            crate::tests::run_in_runtime_env(TEST, tmp.path(), Some(home.path()), None);
+            return;
+        };
+        let closed = tmp.join(format!("ljos-cwd-{}", std::process::id()));
+        std::fs::create_dir(&closed).unwrap();
+        crate::change_mode(&closed, 0o600).unwrap();
+        let here = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+        std::env::set_current_dir(here.path()).unwrap();
+        park(here.path(), true);
+        assert_eq!(std::env::current_dir().unwrap(), Path::new("/"));
     }
 
     #[test]
