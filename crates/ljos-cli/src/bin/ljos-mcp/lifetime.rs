@@ -596,7 +596,7 @@ mod tests {
 
     #[test]
     fn a_shell_and_npx_are_launchers_and_an_editor_is_not() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         assert!(is_launcher(
             "bash",
             &["bash".into(), "-lc".into(), "ljos-mcp".into()]
@@ -629,7 +629,7 @@ mod tests {
 
     #[test]
     fn the_drain_outlasts_a_raised_pack_timeout() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let previous = std::env::var("PACKSET_TIMEOUT_MS").ok();
         std::env::set_var("PACKSET_TIMEOUT_MS", "45000");
         let window = settle_window();
@@ -646,7 +646,7 @@ mod tests {
     /// Stay alive when a child test process selects only this test.
     #[test]
     fn child_pid_process_helper() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         if std::env::var_os("LJOS_CHILD_PID_TEST").is_some() {
             std::thread::sleep(Duration::from_secs(30));
         }
@@ -655,7 +655,7 @@ mod tests {
     /// Use this test binary by path because parallel tests can change `PATH`.
     #[test]
     fn child_pids_names_a_live_child() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         #[expect(
             clippy::disallowed_methods,
             reason = "starts a program outside git hook code"
@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn a_failed_prctl_is_reported_once() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         note_prctl(-1);
         note_prctl(-1);
         assert!(PRCTL_LOGGED.load(Ordering::Relaxed));

@@ -5663,7 +5663,7 @@ mod tests {
 
     #[test]
     fn a_scratch_file_is_private_unique_and_never_left_behind() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         use std::os::unix::fs::PermissionsExt as _;
         let base = tempfile::tempdir().unwrap();
         let mode =
@@ -5690,7 +5690,7 @@ mod tests {
 
     #[test]
     fn a_server_names_the_encoder_install_once() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let server = LjosServer::at(PathBuf::from("."));
         let line = "matched by words (encoder not installed), so run `cargo install --locked packset-embed`.\n";
         assert_eq!(
@@ -5707,7 +5707,7 @@ mod tests {
 
     #[test]
     fn a_server_names_the_install_page_once() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let server = LjosServer::at(PathBuf::from("."));
         let line = "matched by words (encoder not installed), so read https://leidarljos.github.io/ljos/getting-started.html#install or run `ljos doctor`.\n";
         assert_eq!(server.search_rank_note(line), line.trim());
@@ -5720,7 +5720,7 @@ mod tests {
     /// `close: true` is not a field of this tool. Passing it is an error.
     #[test]
     fn finish_rejects_a_close_field() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let text = match serde_json::from_str::<FinishSittingArgs>(
             r#"{"issue":"probe-1","close":true}"#,
         ) {
@@ -5735,7 +5735,7 @@ mod tests {
 
     #[test]
     fn a_finish_says_whether_the_ticket_closed() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let open = "sitting ended; ticket probe-a1b2 is still open\n";
         let line = finish_close_line("probe-a1b2", open);
         assert_eq!(
@@ -5783,7 +5783,7 @@ mod tests {
 
     #[test]
     fn a_call_names_its_thread_in_the_meta() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let meta = |v: serde_json::Value| v.as_object().unwrap().clone();
         assert_eq!(
             thread_in_meta(&meta(serde_json::json!({
@@ -5813,7 +5813,7 @@ mod tests {
     /// a session of its own.
     #[test]
     fn a_call_names_its_subagent_in_the_meta() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let meta = |v: serde_json::Value| v.as_object().unwrap().clone();
         let codex = |thread: &str| {
             meta(serde_json::json!({
@@ -5842,7 +5842,7 @@ mod tests {
     /// what the shell below this runner reads.
     #[test]
     fn a_tool_call_before_initialized_does_not_pin_runner() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let _guard = CALL_QUEUE_TEST
             .lock()
             .unwrap_or_else(|err| err.into_inner());
@@ -5916,6 +5916,35 @@ mod tests {
         );
     }
 
+    /// A seat one test announced is not the seat of the next test that
+    /// takes the process lock.
+    #[test]
+    fn an_announced_seat_ends_with_the_process_lock() {
+        let first = crate::process_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let isolate = || unsafe {
+            std::env::set_var("HOME", dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::remove_var("LJOS_HOLD");
+        };
+        isolate();
+        unsafe { std::env::set_var("LJOS_SEAT", "saddle") };
+        reset_connected_client();
+        note_connected_client(Some("Codex"));
+        reset_connected_client();
+        unsafe { std::env::remove_var("LJOS_SEAT") };
+        assert_eq!(ljos_cli::seat_for_thread("announced").seat, "saddle");
+        drop(first);
+
+        let _process = crate::process_lock();
+        isolate();
+        let seat = ljos_cli::seat_for_thread("after").seat;
+        assert_ne!(seat, "saddle", "the last test's announcement survived");
+    }
+
     struct ConnectedReset;
 
     impl Drop for ConnectedReset {
@@ -5956,7 +5985,7 @@ mod tests {
     /// EasyBuild tools wait for an opt-in.
     #[test]
     fn the_core_set_is_the_default_and_all_lists_every_tool() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let every: Vec<String> = LjosServer::tool_router()
             .list_all()
             .into_iter()
@@ -5988,7 +6017,7 @@ mod tests {
     /// is read under `mcp.servers`.
     #[test]
     fn the_core_set_contains_recall_and_opencode_exposes_it() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let core = tool_set(None).expect("core set");
         assert!(
             core.iter().any(|name| name == "ljos_recall"),
@@ -6035,7 +6064,7 @@ mod tests {
     /// it, whichever set the server lists.
     #[test]
     fn the_guard_and_memory_lead_and_the_personas_close_the_list() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let order = |set: Option<&[String]>| -> Vec<String> {
             let mut tools: Vec<Tool> = LjosServer::tool_router()
                 .list_all()
@@ -6063,7 +6092,7 @@ mod tests {
     /// call the protocol cannot route stays a protocol error.
     #[test]
     fn a_refusal_is_a_tool_result_with_is_error() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let said = as_tool_error(refused(anyhow::anyhow!("vissue exited 1: no such issue")))
             .expect("a refusal is a result");
         let CallToolResponse::Complete(result) = said else {
@@ -6080,7 +6109,7 @@ mod tests {
     /// so a read never queues behind a read and nothing else queues.
     #[test]
     fn ordered_calls_match_their_annotations() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let tools = LjosServer::tool_router().list_all();
         let hint = |name: &str| {
             tools
@@ -6118,7 +6147,7 @@ mod tests {
     /// A later answer waits until the call read ahead of it has been written.
     #[test]
     fn a_later_ordered_answer_waits_for_the_one_read_first() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let _guard = CALL_QUEUE_TEST
             .lock()
             .unwrap_or_else(|err| err.into_inner());
@@ -6192,7 +6221,7 @@ mod tests {
     /// the queue behind the note, so it waits even though it asks first.
     #[test]
     fn a_recall_queued_behind_a_note_waits_even_when_it_asks_first() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         use std::sync::atomic::{AtomicU8, Ordering};
 
         let _guard = CALL_QUEUE_TEST
@@ -6271,7 +6300,7 @@ mod tests {
     /// for the answer.
     #[test]
     fn the_end_of_input_waits_for_a_call_whose_handler_has_not_started() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         use tokio::io::AsyncRead as _;
 
         let _guard = CALL_QUEUE_TEST
@@ -6310,7 +6339,7 @@ mod tests {
     /// and never takes a queue place.
     #[test]
     fn a_tool_call_rmcp_does_not_accept_is_not_in_flight() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let _guard = CALL_QUEUE_TEST
             .lock()
             .unwrap_or_else(|err| err.into_inner());
@@ -6341,7 +6370,7 @@ mod tests {
     /// writer still need the seat.
     #[test]
     fn only_readers_and_the_guard_run_without_a_seat() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let tools = LjosServer::tool_router().list_all();
         for name in SEAT_FREE_TOOLS {
             let tool = tools
@@ -6377,7 +6406,7 @@ mod tests {
     /// Every tool is annotated, and the writers are the ones the contract names.
     #[test]
     fn the_writers_are_the_ones_the_contract_names() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
@@ -6455,7 +6484,7 @@ mod tests {
     /// The instructions a bot hears are the loop, and every tool accepts seat.
     #[test]
     fn the_bot_loop_is_the_instructions_and_every_tool_takes_a_seat() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let cards = tempfile::tempdir().unwrap();
         let info = LjosServer::at(cards.path().to_path_buf()).get_info();
         assert_eq!(info.instructions.as_deref(), Some(SERVER_INSTRUCTIONS));
@@ -6591,7 +6620,7 @@ mod tests {
 
     #[test]
     fn unknown_tool_arguments_name_the_field_and_take_listed_names() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let tool = LjosServer::tool_router()
             .list_all()
             .into_iter()
@@ -6635,7 +6664,7 @@ mod tests {
 
     #[test]
     fn issue_id_alias_moves_id_into_issue_before_the_handler_runs() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let tool = LjosServer::tool_router()
             .list_all()
             .into_iter()
@@ -6655,7 +6684,7 @@ mod tests {
     /// A finish that did not run must not tell the model the claim is released.
     #[test]
     fn a_failed_finish_does_not_say_the_claim_is_released() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let CallToolResponse::Complete(done) = attach_next(
             "ljos_finish",
             CallToolResult::error(vec![ContentBlock::text(
@@ -6682,7 +6711,7 @@ mod tests {
     /// notes.
     #[test]
     fn memory_writes_are_scoped_to_what_the_person_stated() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         assert!(
             !SERVER_INSTRUCTIONS.contains("freely"),
             "{SERVER_INSTRUCTIONS}"
@@ -6771,7 +6800,7 @@ mod tests {
     /// depends on whatever else is on PATH.
     #[tokio::test]
     async fn a_refusal_is_an_error() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let _env_lock = ENV_TEST_LOCK.lock().await;
         let _saved = RestoreEnv::new(&["PATH"]);
         let cards = tempfile::tempdir().unwrap();
@@ -6809,7 +6838,7 @@ mod tests {
     /// Cards are the two named files; nothing is created; nothing else reads.
     #[tokio::test]
     async fn cards_are_read_and_never_made() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         #[expect(
             clippy::disallowed_methods,
@@ -6838,7 +6867,7 @@ mod tests {
     /// rule that fires on it is one warning line.
     #[tokio::test]
     async fn guard_check_allows_an_ordinary_command_and_a_commit() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let _env_lock = ENV_TEST_LOCK.lock().await;
         // A parallel test points HOME at a temporary directory, which
         // suspends the guard. This check is about the command, so keep it on.
@@ -6871,7 +6900,7 @@ mod tests {
 
     #[tokio::test]
     async fn guard_check_uses_the_passed_cwd() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let _env_lock = ENV_TEST_LOCK.lock().await;
         let _saved = RestoreEnv::new(&["POLICYD_BIN", "LJOS_GUARD", "LJOS_OFF"]);
         let home = tempfile::tempdir().expect("tempdir");
@@ -6923,7 +6952,7 @@ mod tests {
 
     #[tokio::test]
     async fn guard_check_expands_tilde_and_names_an_unresolved_cwd() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         let _env_lock = ENV_TEST_LOCK.lock().await;
         let _saved = RestoreEnv::new(&["POLICYD_BIN", "LJOS_GUARD", "LJOS_OFF", "HOME"]);
         let home = tempfile::tempdir().expect("tempdir");
@@ -6987,7 +7016,7 @@ mod tests {
     /// sees for the hook write.
     #[tokio::test]
     async fn guard_check_asks_policyd_what_the_hook_asks() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         if !ljos_cli::tool_installed("ljos-policyd") {
             ljos_cli::say!("skipped: ljos-policyd is not installed");
             return;
@@ -7062,7 +7091,7 @@ mod tests {
     /// tools in the order a sitting calls them.
     #[test]
     fn the_protocol_is_served_and_orders_the_sitting() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         assert_eq!(card_named(PROTOCOL_URI), None, "the protocol is not a card");
         let protocol = protocol_text();
         for verb in [
@@ -7103,7 +7132,7 @@ mod tests {
     /// Every prompt renders from what it declares.
     #[tokio::test]
     async fn every_prompt_renders() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         fn text(message: &PromptMessage) -> &str {
             &message.content.as_text().expect("a text prompt").text
         }
@@ -7189,7 +7218,7 @@ mod tests {
 
     #[test]
     fn mcp_search_reading_does_not_say_place_1() {
-        let _process = ljos_test_boot::env_lock();
+        let _process = crate::process_lock();
         for seat_ahead in [true, false] {
             let reading = mcp_search_reading(1, seat_ahead);
             assert!(!reading.contains("Place 1"), "{reading}");

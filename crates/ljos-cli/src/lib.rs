@@ -2031,20 +2031,22 @@ impl Seat {
 }
 
 /// What the MCP client said at initialize, kept for every tool call after.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-hooks")))]
 static ANNOUNCED: std::sync::OnceLock<Seat> = std::sync::OnceLock::new();
 
 /// Tests run many server lifetimes in one process, so their announcement
-/// must end when the process-state guard does.
-#[cfg(test)]
+/// must end when the process-state guard does. The binaries' unit tests
+/// link this library without `cfg(test)`, and get this one through
+/// `test-hooks`.
+#[cfg(any(test, feature = "test-hooks"))]
 static ANNOUNCED: std::sync::Mutex<Option<Seat>> = std::sync::Mutex::new(None);
 
 fn announced_seat() -> Option<Seat> {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-hooks")))]
     {
         ANNOUNCED.get().cloned()
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     {
         ANNOUNCED
             .lock()
@@ -2054,11 +2056,11 @@ fn announced_seat() -> Option<Seat> {
 }
 
 fn announce_once(seat: &Seat) {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-hooks")))]
     {
         let _ = ANNOUNCED.set(seat.clone());
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     {
         let mut announced = ANNOUNCED
             .lock()
@@ -2069,8 +2071,11 @@ fn announce_once(seat: &Seat) {
     }
 }
 
-#[cfg(test)]
-fn clear_announced_seat() {
+/// End the seat a test announced. A binary's test guard calls this before
+/// it lets the next test in.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub fn clear_announced_seat() {
     *ANNOUNCED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;

@@ -15,6 +15,28 @@ mod shapes;
 
 use rmcp::{transport::stdio, ServiceExt};
 
+/// The process-state writer for this binary's tests. A seat a test
+/// announced ends before the next test gets the lock.
+#[cfg(test)]
+#[must_use = "the environment and the announced seat are restored when this guard drops"]
+struct ProcessLock {
+    _env: ljos_test_boot::TestEnv,
+}
+
+#[cfg(test)]
+impl Drop for ProcessLock {
+    fn drop(&mut self) {
+        ljos_cli::clear_announced_seat();
+    }
+}
+
+#[cfg(test)]
+fn process_lock() -> ProcessLock {
+    ProcessLock {
+        _env: ljos_test_boot::env_lock(),
+    }
+}
+
 /// Print `--version` or `--help` and report that a flag was handled.
 fn flag_line() -> bool {
     let args: Vec<String> = std::env::args().skip(1).collect();

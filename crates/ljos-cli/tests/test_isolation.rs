@@ -162,7 +162,7 @@ fn process_global_test_state_is_guarded() {
         let source = std::fs::read_to_string(&path).unwrap();
         for body in test_bodies(&source, &path) {
             assert!(
-                has_nearby(body, "ljos_test_boot::env_lock()"),
+                has_nearby(body, "crate::process_lock()"),
                 "{} has a binary unit test without the process-state writer",
                 path.display()
             );
