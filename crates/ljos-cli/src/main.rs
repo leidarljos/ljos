@@ -399,6 +399,23 @@ enum CloudCmd {
 }
 
 #[derive(Subcommand)]
+enum NotesCmd {
+    /// Note each `*.md`, `*.txt` and `*.log` file in DIR on a ticket.
+    ///
+    /// Example: `ljos notes import kits/34dh --ticket proj-1a2b`
+    Import {
+        /// The directory. Files directly in it are read; subdirectories are not.
+        dir: PathBuf,
+        /// The ticket the notes go on.
+        #[arg(long)]
+        ticket: String,
+        /// Print what would be noted and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum MeshCmd {
     /// Join the private network and print this machine and the others on it.
     ///
@@ -1086,6 +1103,9 @@ enum Cmd {
         /// An unknown name exits 1 and names the projects.
         #[arg(short = 'p', long, value_name = "PROJECT")]
         project: Option<String>,
+        /// Search the text of long notes instead of memory. Pages changed since the local index last read them are read again first.
+        #[arg(long, conflicts_with_all = ["json", "porcelain", "rerank", "as_of", "valid_at", "explain", "source_machine", "source_seat", "import_id", "attempts", "project"])]
+        long: bool,
     },
     /// List memories that contradict each other.
     ///
@@ -1442,12 +1462,47 @@ enum Cmd {
     /// line off. A first word that is an id `vissue create` mints is the
     /// id; any other first word is part of the note.
     ///
+    /// A note past 4,096 bytes, or with a line past 2,048 bytes, is kept
+    /// whole as a long note, as `--file -` keeps it, and one line on stderr
+    /// says so.
+    ///
+    /// `ljos note ID --file PATH` keeps the file as a long note: an org page
+    /// at `notes/LEAF/SLUG.org` beside the board's issue file, with
+    /// `#+title:`, `#+ticket:`, `#+kind:`, `#+seat:` and `#+created:` at the
+    /// top. `--file -` reads stdin. Markdown is converted to org with pandoc
+    /// when it is on `PATH` (`LJOS_PANDOC=off` skips it), else with a small
+    /// converter. A `.log`, a `.txt` or `--kind log` goes in an example
+    /// block. Org is kept as it is. The logbook gets one stub line under 200
+    /// bytes: an org link to the page, its title, its size and lines. The
+    /// page and the stub are one tracker commit. The page is plain org and
+    /// can be edited in place; its path is its name. A file whose bytes the
+    /// ticket already has writes nothing. Past 256 KiB a line warns. Past
+    /// 1 MiB the page keeps the first and last 128 KiB and a line naming the
+    /// full size and sha256, and `deedar` keeps the full body, cited on the
+    /// ticket; `--refuse-trim` refuses instead. A body with a NUL byte, bytes
+    /// that are not UTF-8, or a run past 2,048 bytes with no space exits 1,
+    /// writes nothing and names `deedar create file`.
+    ///
     /// Example: `ljos note "the door seats when it is cold"`
-    #[command(after_help = "Example: `ljos note \"the door seats when it is cold\"`")]
+    #[command(
+        after_help = "Example: `ljos note \"the door seats when it is cold\"`\nExample: `ljos note proj-1a2b --file LAND.md --kind land`"
+    )]
     Note {
-        /// The note, or an issue id and then the note.
-        #[arg(value_name = "WORDS", required = true, num_args = 1..)]
+        /// The note, or an issue id and then the note. With `--file`, only the id.
+        #[arg(value_name = "WORDS", required_unless_present = "file", num_args = 1..)]
         words: Vec<String>,
+        /// Keep this file as a long note on the ticket. `-` reads stdin.
+        #[arg(long, value_name = "PATH")]
+        file: Option<String>,
+        /// The long note's title. The file name when omitted.
+        #[arg(long, requires = "file")]
+        title: Option<String>,
+        /// What the long note is.
+        #[arg(long, requires = "file", value_parser = ["land", "report", "gate", "log"])]
+        kind: Option<String>,
+        /// Refuse a long note past 1 MiB instead of keeping its head and tail.
+        #[arg(long, requires = "file")]
+        refuse_trim: bool,
         /// Print the tracker and sync lines. Without it, a commit that landed
         /// is quiet, and so is a push that landed. A refusal is still printed.
         #[arg(long)]
@@ -1459,6 +1514,33 @@ enum Cmd {
         /// Leave off the line that names another issue.
         #[arg(long)]
         quiet: bool,
+    },
+    /// List a ticket's long notes, or import a directory of them.
+    ///
+    /// `ljos notes ID` lists the pages `ljos note ID --file` wrote, oldest
+    /// first: title, kind, size, lines, seat, when it was created, and the
+    /// path from the tracker checkout. `--json` prints the same rows.
+    /// `ljos notes import DIR --ticket ID` notes each `*.md`, `*.txt` and
+    /// `*.log` file directly in DIR on ID, in one tracker commit, and prints
+    /// one line per file: noted, already noted, skipped or refused. A file
+    /// whose bytes the ticket already has is left, so a second run notes
+    /// nothing. Bundles, patches and every other file are skipped.
+    /// `--dry-run` prints the lines and writes nothing. A refused file
+    /// makes the command exit 1 after the others are noted.
+    ///
+    /// Example: `ljos notes proj-1a2b`
+    #[command(
+        args_conflicts_with_subcommands = true,
+        after_help = "Example: `ljos notes proj-1a2b`\nExample: `ljos notes import kits/34dh --ticket proj-1a2b --dry-run`"
+    )]
+    Notes {
+        #[command(subcommand)]
+        cmd: Option<NotesCmd>,
+        /// The ticket whose long notes to list.
+        issue: Option<String>,
+        /// Print JSON rows.
+        #[arg(long)]
+        json: bool,
     },
     /// List one seat's tracker commits.
     ///
@@ -1677,6 +1759,9 @@ enum Cmd {
     /// An unknown id exits 1 and says it is neither a ticket nor a memory.
     /// An id that matches more than one memory lists those ids.
     /// An id that matches more than one ticket exits 1 and names one `ljos show` command.
+    /// `--long` prints the ticket's newest long note as it is on disk, and
+    /// `--long NOTE` the one NOTE names: its file name, the name without
+    /// `.org`, its path, or six or more hex digits of its source sha256.
     ///
     /// Example: `ljos show proj-1a2b`
     Show {
@@ -1688,6 +1773,9 @@ enum Cmd {
         /// Print every note. `--verbose` is the same flag.
         #[arg(long, visible_alias = "verbose")]
         all: bool,
+        /// Print a long note: the newest, or the one NOTE names.
+        #[arg(long, value_name = "NOTE", num_args = 0..=1, default_missing_value = "", conflicts_with_all = ["json", "all"])]
+        long: Option<String>,
     },
     /// List tickets that are open and not waiting on another open ticket.
     ///
@@ -3864,6 +3952,40 @@ fn note_target(words: &[String]) -> Result<(String, String, bool)> {
     Ok((issue, words.join(" "), true))
 }
 
+/// Write one long note and its stub, then do what a short note does after
+/// it lands: retry a claim the graph did not take, name an assist, and
+/// mark the seat's write.
+fn note_long(
+    req: &ljos_cli::long_note::Request<'_>,
+    inferred: bool,
+    (verbose, json, quiet): (bool, bool, bool),
+) -> Result<()> {
+    ljos_cli::refuse_product_init(req.issue)?;
+    stop_ticket(req.issue);
+    let mut said = ljos_cli::long_note::note_file(req)?;
+    warn_other_sitting(req.issue, quiet, inferred, false);
+    said.push_str(&ljos_cli::retry_pending_claim(req.issue));
+    if let Some(line) = ljos_cli::assist_note_line(req.issue) {
+        said.push_str(&line);
+    }
+    ljos_cli::stamp_note_seat(req.issue);
+    ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
+    ljos_cli::tell_raw!("{}", render_write(&said, git_detail(verbose), json, None));
+    Ok(())
+}
+
+/// The ticket a long note goes on: the one id given, else the open sitting.
+fn long_note_target(words: &[String]) -> Result<(String, bool)> {
+    match words {
+        [] => ljos_cli::held_issue()
+            .map(|issue| (issue, true))
+            .ok_or_else(|| anyhow::anyhow!("{}", ljos_cli::NO_OPEN_SITTING)),
+        [id] if id.trim().is_empty() => bail!("{}", ljos_cli::EMPTY_TICKET_ID),
+        [id] => Ok((id.trim().to_string(), false)),
+        _ => bail!("note: with --file the note is the file, so pass only the ticket id"),
+    }
+}
+
 /// One stderr line when `wrote` is not the open sitting. An inferred id
 /// is that sitting. `--quiet` leaves the line off, and does not ask.
 /// `finish` names the finished id. `note` says a note was written.
@@ -4428,6 +4550,10 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
 /// offboard, uninstall and doctor do not create the queue or its lock,
 /// and they do not rewrite a queue that is already there.
 fn queued_lesson_may_go(cmd: &Cmd) -> bool {
+    // A search of long notes reads the local note index, not the pack.
+    if let Cmd::Search { long: true, .. } = cmd {
+        return false;
+    }
     // A search with no query and no filters exits as usage. Keep that one
     // line clean and skip queue drain noise.
     if let Cmd::Search {
@@ -4480,6 +4606,7 @@ fn queued_lesson_may_go(cmd: &Cmd) -> bool {
         cmd,
         Cmd::Remember { .. }
             | Cmd::Note { .. }
+            | Cmd::Notes { .. }
             | Cmd::File { .. }
             | Cmd::Parent { .. }
             | Cmd::Sitting { .. }
@@ -4614,6 +4741,7 @@ fn seat_kind(cmd: &Cmd) -> ljos_cli::seat_resolve::Kind {
         | Cmd::Options { .. }
         | Cmd::Deed { .. }
         | Cmd::Table { .. }
+        | Cmd::Notes { cmd: Some(_), .. }
         | Cmd::Seat { action: Some(_) } => Kind::Write,
         _ => Kind::Keep,
     }
@@ -6098,7 +6226,15 @@ fn run_command() -> Result<()> {
             attempts,
             min_score,
             project,
+            long,
         } => {
+            if long {
+                ljos_cli::tell_raw!(
+                    "{}",
+                    ljos_cli::long_note::search(&join(&query), limit as usize)?
+                );
+                return Ok(());
+            }
             if !min_score.is_finite() || min_score < 0.0 {
                 ljos_cli::say!("search: --min-score takes a number from 0 up, not {min_score}.");
                 std::process::exit(USAGE_STATUS);
@@ -6830,40 +6966,85 @@ fn run_command() -> Result<()> {
         }
         Cmd::Note {
             words,
+            file: Some(file),
+            title,
+            kind,
+            refuse_trim,
             verbose,
             json,
             quiet,
         } => {
-            let (issue, text, inferred) = note_target(&words)?;
-            // A product checkout is not a tracker. `vissue note` would
-            // create one there when the id is missing.
-            ljos_cli::refuse_product_init(&issue)?;
-            stop_ticket(&issue);
-            // The note is the tracker write. Reconciling a claim the
-            // graph did not take waits until that write has landed, and
-            // only for a short bound. The tracker prints `{id}: noted`
-            // and nothing else is added to that confirmation: a second
-            // `noted on` line used to follow it.
-            let captured = ljos_cli::run_for(
-                "vissue",
-                &["note", &issue, &text],
-                ljos_cli::tracker_verb_wait(),
+            let (issue, inferred) = long_note_target(&words)?;
+            note_long(
+                &ljos_cli::long_note::Request {
+                    issue: &issue,
+                    file: &file,
+                    body: None,
+                    title: title.as_deref(),
+                    kind: kind.as_deref(),
+                    refuse_trim,
+                },
+                inferred,
+                (verbose, json, quiet),
             )?;
-            ljos_cli::say_raw!("{}", captured.stderr);
-            warn_other_sitting(&issue, quiet, inferred, false);
-            let mut said = format!("{issue}: noted\n");
-            said.push_str(&ljos_cli::retry_pending_claim(&issue));
-            if let Some(line) = ljos_cli::assist_note_line(&issue) {
-                said.push_str(&line);
+        }
+        Cmd::Note {
+            words,
+            verbose,
+            json,
+            quiet,
+            ..
+        } => {
+            let (issue, text, inferred) = note_target(&words)?;
+            // Text past a tracker note's caps is kept whole as a long note
+            // with a stub on the logbook, never refused or dropped.
+            if let Some(why) = ljos_cli::note_overflow(&text) {
+                note_long(
+                    &ljos_cli::long_note::Request {
+                        issue: &issue,
+                        file: "-",
+                        body: Some(&text),
+                        title: None,
+                        kind: None,
+                        refuse_trim: false,
+                    },
+                    inferred,
+                    (verbose, json, quiet),
+                )?;
+                // An encoded run is refused inside note_long. The line is
+                // printed only once the page and the stub are stored.
+                ljos_cli::say!("note: {why}, so it is kept as a long note beside the ticket");
+            } else {
+                // A product checkout is not a tracker. `vissue note` would
+                // create one there when the id is missing.
+                ljos_cli::refuse_product_init(&issue)?;
+                stop_ticket(&issue);
+                // The note is the tracker write. Reconciling a claim the
+                // graph did not take waits until that write has landed, and
+                // only for a short bound. The tracker prints `{id}: noted`
+                // and nothing else is added to that confirmation: a second
+                // `noted on` line used to follow it.
+                let captured = ljos_cli::run_for(
+                    "vissue",
+                    &["note", &issue, &text],
+                    ljos_cli::tracker_verb_wait(),
+                )?;
+                ljos_cli::say_raw!("{}", captured.stderr);
+                warn_other_sitting(&issue, quiet, inferred, false);
+                let mut said = format!("{issue}: noted\n");
+                said.push_str(&ljos_cli::retry_pending_claim(&issue));
+                if let Some(line) = ljos_cli::assist_note_line(&issue) {
+                    said.push_str(&line);
+                }
+                match ljos_cli::ballot_sig::sign_own_ballot(&issue) {
+                    Ok(line) => said.push_str(&line),
+                    Err(e) => ljos_cli::say!("ljos note: {e:#}"),
+                }
+                said.push_str(&ljos_cli::persist_tracker(&issue, "noted"));
+                ljos_cli::stamp_note_seat(&issue);
+                ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
+                ljos_cli::tell_raw!("{}", render_write(&said, git_detail(verbose), json, None));
             }
-            match ljos_cli::ballot_sig::sign_own_ballot(&issue) {
-                Ok(line) => said.push_str(&line),
-                Err(e) => ljos_cli::say!("ljos note: {e:#}"),
-            }
-            said.push_str(&ljos_cli::persist_tracker(&issue, "noted"));
-            ljos_cli::stamp_note_seat(&issue);
-            ljos_cli::seat_resolve::note_seat_write(&ljos_cli::seat_name());
-            ljos_cli::tell_raw!("{}", render_write(&said, git_detail(verbose), json, None));
         }
         Cmd::Slot {
             issue,
@@ -6999,7 +7180,47 @@ fn run_command() -> Result<()> {
             stop_ticket(&parent);
             ljos_cli::tell_raw!("{}", ljos_cli::reparent_issue(&issue, &parent)?);
         }
-        Cmd::Show { issue, json, all } => {
+        Cmd::Show {
+            issue,
+            long: Some(which),
+            ..
+        } => {
+            ljos_cli::emit_raw!(
+                "{}",
+                ljos_cli::long_note::show(&issue, Some(which.as_str()).filter(|w| !w.is_empty()))?
+            );
+        }
+        Cmd::Notes {
+            cmd:
+                Some(NotesCmd::Import {
+                    dir,
+                    ticket,
+                    dry_run,
+                }),
+            ..
+        } => {
+            stop_ticket(&ticket);
+            let done = ljos_cli::long_note::import(&dir, &ticket, dry_run)?;
+            ljos_cli::tell_raw!("{}", done.text);
+            if done.refused > 0 {
+                std::process::exit(1);
+            }
+        }
+        Cmd::Notes {
+            cmd: None,
+            issue,
+            json,
+        } => {
+            let issue = match issue {
+                Some(issue) => issue,
+                None => ljos_cli::held_issue()
+                    .ok_or_else(|| anyhow::anyhow!("{}", ljos_cli::NO_OPEN_SITTING))?,
+            };
+            ljos_cli::tell_raw!("{}", ljos_cli::long_note::list(&issue, json)?);
+        }
+        Cmd::Show {
+            issue, json, all, ..
+        } => {
             let said = ljos_cli::show_memory::show_any(&issue, json, all, Width::stdout())
                 .map_err(show_error)?;
             if json {
@@ -8703,6 +8924,10 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         Cmd::Options { .. } => "options",
         Cmd::Deed { add, remove, .. } if !add.is_empty() || !remove.is_empty() => "deed",
         Cmd::Table { add: Some(_), .. } => "table",
+        Cmd::Notes {
+            cmd: Some(NotesCmd::Import { dry_run: false, .. }),
+            ..
+        } => "notes import",
         Cmd::Workflow {
             action,
             start,

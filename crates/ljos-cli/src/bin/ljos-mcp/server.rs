@@ -257,6 +257,7 @@ fn unlisted_line(tool: &str) -> String {
         "guard_check" | "mail_search" | "mail_show" => String::new(),
         "bump_plan" => ", or run `ljos bump-plan` in a shell".to_string(),
         "deed_show" => ", or run `ljos deed --show ACCESSION` in a shell".to_string(),
+        "show_long" => ", or run `ljos show ISSUE --long` in a shell".to_string(),
         "table" => ", or run `ljos table ISSUE` in a shell".to_string(),
         "file_from" => ", or run `ljos file --from FILE` in a shell".to_string(),
         other => format!(", or run `ljos {other}` in a shell"),
@@ -395,6 +396,8 @@ const SEAT_FREE_TOOLS: &[&str] = &[
     "ljos_evidence",
     "ljos_current",
     "ljos_deed_show",
+    "ljos_notes",
+    "ljos_show_long",
     "ljos_digest",
     "ljos_timeline",
     "ljos_cards",
@@ -1040,7 +1043,28 @@ pub struct NoteArgs {
     pub issue: String,
     /// The note, one or two sentences, such as `Tried a longer timeout; the
     /// 429s came from the proxy.`
+    #[serde(default)]
     pub text: String,
+    /// A file to keep as a long note, such as LAND.md or a build log, in place of text.
+    #[serde(default)]
+    pub file: Option<String>,
+    /// The long note's title.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// land, report, gate or log.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// A ticket's long note.
+#[derive(Deserialize, JsonSchema)]
+pub struct ShowLongArgs {
+    /// The issue's tracker id, such as `proj-1a2b`.
+    #[serde(alias = "id")]
+    pub issue: String,
+    /// The note's file name, as ljos_notes lists it. Omitted is the newest.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// Options appended to an issue's body.
@@ -1985,7 +2009,8 @@ fn tracker_refusal(
             .filter(|value| !value.is_empty())
     };
     let needs = match name {
-        "ljos_file" | "ljos_options" | "ljos_start" | "ljos_deed" | "ljos_show" => true,
+        "ljos_file" | "ljos_options" | "ljos_start" | "ljos_deed" | "ljos_show" | "ljos_notes"
+        | "ljos_show_long" => true,
         "ljos_note" | "ljos_finish" => text("issue").is_some(),
         "ljos_claim" | "ljos_release" | "ljos_complete" => text("node").is_some(),
         // A sitting on an unknown id names that id. The tracker sentence
@@ -2839,7 +2864,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this for your own working notes on an issue: progress, a finding, or a claim you read in a file, a tool's output or a web page. A dated line on its logbook, with the tracker committed. The note stays on the ticket and is not written into memory, so it is never recalled and never falls due for review. Recall fences the logbook as unverified tracker text. The note goes on the issue you name, else the one this seat holds; it never files an issue. A claim a sitting left pending on that issue is retried.",
+        description = "Call this for your own working notes on an issue: progress, a finding, or a claim you read in a file, a tool's output or a web page. A dated line on its logbook, with the tracker committed. The note stays on the ticket and is not written into memory, so it is never recalled and never falls due for review. Recall fences the logbook as unverified tracker text. The note goes on the issue you name, else the one this seat holds; it never files an issue. A claim a sitting left pending on that issue is retried. Pass file instead of text for a long note, such as LAND.md or a log; text past 4 KiB, or with a line past 2 KiB, is kept the same way: an org page beside the ticket, linked from one logbook line.",
         annotations(
             title = "Note progress",
             read_only_hint = false,
@@ -2855,6 +2880,30 @@ impl LjosServer {
         // A note never files an issue. Prose in `issue` is not a title and
         // not an id: the note goes on the issue this seat holds, else it
         // is refused.
+        if let Some(file) = args
+            .file
+            .as_deref()
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+        {
+            let raw = args.issue.trim();
+            let passed = (!raw.is_empty()).then_some(raw.to_string());
+            let issue = ljos_cli::tool_bound::blocking(move || {
+                ljos_cli::bookkeep::note_issue(passed.as_deref())
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("note: {e}"), None))?
+            .map_err(|e| refused(anyhow::anyhow!(e)))?;
+            let mut argv: Vec<String> = vec!["note".into(), issue, "--file".into(), file.into()];
+            for (flag, value) in [("--title", &args.title), ("--kind", &args.kind)] {
+                if let Some(v) = value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                    argv.push(flag.into());
+                    argv.push(v.into());
+                }
+            }
+            let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+            return habitat("ljos", &refs);
+        }
         let raw_issue = args.issue.clone();
         let note = args.text.clone();
         let stored = note.clone();
@@ -2878,12 +2927,65 @@ impl LjosServer {
         .map_err(|e| McpError::internal_error(format!("note: {e}"), None))?
         .map_err(|e| refused(anyhow::anyhow!(e)))?;
         match issue {
-            Some(issue) => habitat("ljos", &["note", &issue, &note]),
+            // Past a tracker note's caps the text goes on stdin, which has
+            // no per-argument limit, and is kept whole as a long note.
+            Some(issue) => match ljos_cli::note_overflow(&note) {
+                Some(why) => {
+                    let out = ljos_cli::run_fed("ljos", &["note", &issue, "--file", "-"], &note)
+                        .map_err(refused)?;
+                    let Json(mut kept) = said(out);
+                    kept.text = format!(
+                        "note: {why}, so it is kept as a long note beside the ticket\n{}",
+                        kept.text
+                    );
+                    Ok(Json(kept))
+                }
+                None => habitat("ljos", &["note", &issue, &note]),
+            },
             None => Ok(Json(Said {
                 text: format!("label unattached-note: {}\n", ljos_cli::NOTE_WITHOUT_TICKET),
                 aside: None,
             })),
         }
+    }
+
+    #[tool(
+        description = "List an issue's long notes: title, kind, size, seat, date and path.",
+        annotations(
+            title = "List long notes",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_notes(
+        &self,
+        Parameters(args): Parameters<IssueArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        habitat("ljos", &["notes", &args.issue])
+    }
+
+    #[tool(
+        description = "Read one long note on an issue as it is on disk: the newest, or the one note names.",
+        annotations(
+            title = "Read a long note",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_show_long(
+        &self,
+        Parameters(args): Parameters<ShowLongArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let mut argv = vec!["show", args.issue.as_str(), "--long"];
+        if let Some(note) = args
+            .note
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
+            argv.push(note);
+        }
+        habitat("ljos", &argv)
     }
 
     #[tool(
@@ -6260,7 +6362,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            57,
+            59,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
@@ -6486,13 +6588,16 @@ mod tests {
         let line = unknown_arguments_line("ljos_note", &schema, &bad).expect("id with issue");
         assert_eq!(
             line,
-            "ljos_note has no argument id; it takes issue, text, seat"
+            "ljos_note has no argument id; it takes issue, text, file, title, kind, seat"
         );
         let typo: serde_json::Map<String, serde_json::Value> =
             serde_json::from_value(serde_json::json!({"isue": "proj-1a2b", "text": "x"})).unwrap();
         let line = unknown_arguments_line("ljos_note", &schema, &typo).expect("unknown field");
         assert!(line.contains("has no argument isue"), "{line}");
-        assert!(line.contains("it takes issue, text, seat"), "{line}");
+        assert!(
+            line.contains("it takes issue, text, file, title, kind, seat"),
+            "{line}"
+        );
 
         let file = LjosServer::tool_router()
             .list_all()

@@ -86,7 +86,7 @@ fn unknown_argument_on_ljos_note_writes_nothing_and_names_the_field() {
     let blocks = text_blocks(&answer);
     assert_eq!(
         blocks[0],
-        "ljos_note has no argument bogus; it takes issue, text, seat"
+        "ljos_note has no argument bogus; it takes issue, text, file, title, kind, seat"
     );
     assert_eq!(
         blocks.last().unwrap(),
@@ -188,7 +188,7 @@ fn id_and_issue_together_are_refused() {
     let blocks = text_blocks(&answer);
     assert_eq!(
         blocks[0],
-        "ljos_note has no argument id; it takes issue, text, seat"
+        "ljos_note has no argument id; it takes issue, text, file, title, kind, seat"
     );
     assert_eq!(
         blocks.last().unwrap(),

@@ -16,7 +16,7 @@ as `ljos VERB` in the shell.
 | question | store | verbs |
 |---|---|---|
 | what did the human freeze | cards | `cards` (read-only; never extract-on-write) |
-| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `file_from`, `options`, `note`, `show`, `recall`, `vote`, `consensus`, `deed`, `table` |
+| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `file_from`, `options`, `note`, `show`, `recall`, `vote`, `consensus`, `deed`, `table`, `notes`, `show_long` |
 | what does this seat know, standing | pack (packset) | `search`, `island`, `remember`, `prefer`, `forget`, `due`, `graded` |
 | what did the work produce | deed store (deedar) | `evidence`, `current`, `deed_show`; `deedar create` |
 | which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |
@@ -282,6 +282,11 @@ cloud seat git runs only the hooks the repository and the login name.
   `ljos deed --show ACCESSION` prints them once the stored copy checks.
   `ljos deed --remove ACCESSION --ticket ISSUE` drops a citation. The
   removal is appended. The heading is not rewritten.
+- A land summary, a report, a gate verdict or a log is a long note:
+  `ljos note ISSUE --file PATH --kind land` keeps it as an org page beside
+  the ticket, linked from one logbook line, and a note past 4 KiB is kept
+  the same way. `ljos notes ISSUE` lists them and `ljos show ISSUE --long`
+  prints one.
 - A lesson in the person's words is one `ljos remember` of two short
   sentences at most and takes effect at once. Under a runner the agent's
   own words are stored at once too, as a lesson labelled `agent-derived` at
