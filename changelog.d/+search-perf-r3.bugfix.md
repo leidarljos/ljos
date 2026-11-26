@@ -1,0 +1,2 @@
+`ljos search` no longer builds a term bag of every tracked ticket: each ticket's text is read once, through the same analyzer the bag uses, and only the terms the query can match are built, so the same tickets come back in the same order.
+On a generated 100 MB tracker with the pack answering it takes about a tenth of the time it took, also when tickets hold non-ASCII text such as `café`, an em dash or a curly apostrophe, and one long token is read in linear time.

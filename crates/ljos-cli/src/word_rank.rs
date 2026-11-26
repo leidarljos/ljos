@@ -409,6 +409,130 @@ impl TermBag {
     }
 }
 
+/// A text that [`QueryTerms`] are checked against.
+pub trait Have {
+    /// Whether a term of the text is `want`, or a [`forms_match`] of it.
+    fn has(&self, want: &str) -> bool;
+}
+
+impl Have for TermBag {
+    fn has(&self, want: &str) -> bool {
+        set_has(&self.0, want)
+    }
+}
+
+/// Which forms of some queries' terms a text holds, without a [`TermBag`]
+/// of the text.
+///
+/// A ticket log is mostly words that no query form starts with. Building a
+/// set of them is what made `ljos search` slow on a tracker of long logs.
+/// [`Words`] reads the text as a bag would, and a term that cannot match a
+/// form here is not built: it starts with another letter, or it is longer
+/// than any form and an inflection.
+pub(crate) struct Cover {
+    marks: Marks,
+    words: Words,
+}
+
+struct Marks {
+    forms: Vec<String>,
+    found: Vec<bool>,
+    ascii: [bool; 128],
+    other: Vec<char>,
+    longest: usize,
+}
+
+impl Cover {
+    /// Every form a [`QueryTerms::hits`] on these queries asks about.
+    pub(crate) fn of(queries: &[&QueryTerms]) -> Self {
+        let mut forms: Vec<String> = Vec::new();
+        for concept in queries.iter().flat_map(|query| &query.terms) {
+            for form in concept.1.forms() {
+                if !form.is_empty() && !forms.contains(form) {
+                    forms.push(form.clone());
+                }
+            }
+        }
+        let mut ascii = [false; 128];
+        let mut other = Vec::new();
+        for first in forms.iter().filter_map(|form| form.chars().next()) {
+            match usize::try_from(u32::from(first)) {
+                Ok(index) if index < ascii.len() => ascii[index] = true,
+                _ => other.push(first),
+            }
+        }
+        // `forms_match` allows an inflection of up to five bytes past the form.
+        let longest = forms.iter().map(String::len).max().unwrap_or(0) + "ation".len();
+        Self {
+            marks: Marks {
+                found: vec![false; forms.len()],
+                forms,
+                ascii,
+                other,
+                longest,
+            },
+            words: Words::default(),
+        }
+    }
+
+    /// Forget the text read so far.
+    pub(crate) fn clear(&mut self) {
+        self.marks.found.fill(false);
+        self.words.slot = 0;
+        self.words.prev = None;
+    }
+
+    /// Read `text` as the next line of the same text.
+    pub(crate) fn read(&mut self, text: &str) {
+        self.words.read(text, &mut self.marks);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained(&self) -> usize {
+        let words = &self.words;
+        [
+            &words.prev_term,
+            &words.last,
+            &words.word,
+            &words.joined,
+            &words.stems,
+        ]
+        .iter()
+        .map(|buffer| buffer.capacity())
+        .sum()
+    }
+}
+
+impl Have for Cover {
+    fn has(&self, want: &str) -> bool {
+        let marks = &self.marks;
+        marks
+            .forms
+            .iter()
+            .position(|form| form == want)
+            .is_some_and(|index| marks.found[index])
+    }
+}
+
+impl Sink for Marks {
+    fn wants(&self, first: char) -> bool {
+        match usize::try_from(u32::from(first)) {
+            Ok(index) if index < self.ascii.len() => self.ascii[index],
+            _ => self.other.contains(&first),
+        }
+    }
+
+    fn longest(&self) -> usize {
+        self.longest
+    }
+
+    fn term(&mut self, term: &str) {
+        for (form, found) in self.forms.iter().zip(&mut self.found) {
+            *found = *found || forms_match(term, form);
+        }
+    }
+}
+
 /// A query's terms, analyzed once and checked against any number of
 /// [`TermBag`]s. [`term_coverage`] and [`covered_query_terms`] read the
 /// same terms.
@@ -441,27 +565,27 @@ impl QueryTerms {
     }
 
     /// Whether each term occurs in `bag`, in the order they were typed.
-    pub fn hits<'a>(&'a self, bag: &'a TermBag) -> impl Iterator<Item = bool> + 'a {
+    pub fn hits<'a>(&'a self, bag: &'a impl Have) -> impl Iterator<Item = bool> + 'a {
         self.terms
             .iter()
-            .map(move |(_, concept)| covered_by(concept, &bag.0))
+            .map(move |(_, concept)| concept.covered(|want| bag.has(want)))
     }
 
     /// Whether any term occurs in `bag`.
     #[must_use]
-    pub fn any_in(&self, bag: &TermBag) -> bool {
+    pub fn any_in(&self, bag: &impl Have) -> bool {
         self.hits(bag).any(|hit| hit)
     }
 
     /// How many terms occur in `bag`.
     #[must_use]
-    pub fn coverage(&self, bag: &TermBag) -> usize {
+    pub fn coverage(&self, bag: &impl Have) -> usize {
         self.hits(bag).filter(|hit| *hit).count()
     }
 
     /// The terms that occur in `bag`, in the order they were typed.
     #[must_use]
-    pub fn covered(&self, bag: &TermBag) -> Vec<String> {
+    pub fn covered(&self, bag: &impl Have) -> Vec<String> {
         self.written()
             .zip(self.hits(bag))
             .filter(|(_, hit)| *hit)
@@ -473,6 +597,8 @@ impl QueryTerms {
 #[cfg(test)]
 thread_local! {
     static ANALYZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TOKENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static OLD_TERMS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// How many texts this thread has analyzed. A test reads the difference
@@ -480,6 +606,31 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn analyzed() -> usize {
     ANALYZED.with(std::cell::Cell::get)
+}
+
+/// How many tokens this thread has split and stemmed.
+#[cfg(test)]
+pub(crate) fn tokens_read() -> usize {
+    TOKENS.with(std::cell::Cell::get)
+}
+
+/// Run `f` with the analyzer `ljos` 0.45.4 shipped, kept in the tests.
+#[cfg(test)]
+pub(crate) fn with_old_terms<T>(f: impl FnOnce() -> T) -> T {
+    OLD_TERMS.with(|old| old.set(true));
+    let out = f();
+    OLD_TERMS.with(|old| old.set(false));
+    out
+}
+
+/// How many times over the generated tests that compare the old analyzer
+/// with this one run: 1 unless `LJOS_TEST_FUZZ_SCALE` asks for more.
+#[cfg(test)]
+pub(crate) fn fuzz_scale() -> usize {
+    std::env::var("LJOS_TEST_FUZZ_SCALE")
+        .ok()
+        .and_then(|scale| scale.parse().ok())
+        .unwrap_or(1)
 }
 
 /// Whether `term` is a common word that does not name a project or a subject.
@@ -829,29 +980,43 @@ fn is_sep(c: char) -> bool {
     matches!(c, '_' | '-' | '.' | '/')
 }
 
+/// Asked of every part of every word a search reads, so the list is kept as
+/// sorted integers rather than compared as strings. A stop word is at most
+/// six bytes. Seven still fit under the sentinel bit; a longer word is not
+/// on the list.
 fn is_stop(word: &str) -> bool {
-    STOP.contains(&word)
+    static KEYS: std::sync::LazyLock<Vec<u64>> = std::sync::LazyLock::new(|| {
+        let mut keys: Vec<u64> = STOP.iter().map(|word| stop_key(word)).collect();
+        keys.sort_unstable();
+        keys
+    });
+    word.len() <= 7 && KEYS.binary_search(&stop_key(word)).is_ok()
+}
+
+/// The bytes of a word of at most seven, with a sentinel bit just above
+/// them. The sentinel keeps a leading NUL, so `\0the` is not `the`.
+fn stop_key(word: &str) -> u64 {
+    word.bytes()
+        .fold(1u64, |key, byte| key << 8 | u64::from(byte))
 }
 
 fn stem(word: &str) -> String {
-    let word = word.to_lowercase();
-    if word.chars().any(|c| !c.is_ascii_alphabetic()) {
-        return word;
-    }
-    let word = super::singular(&word);
-    if word.len() > 5 && word.ends_with("ing") {
-        let stem = &word[..word.len() - 3];
-        if stem.len() >= 3 {
-            return stem.to_string();
-        }
-    }
-    if word.len() > 4 && word.ends_with("ed") {
-        let stem = &word[..word.len() - 2];
-        if stem.len() >= 3 {
-            return stem.to_string();
-        }
-    }
+    let mut word = word.to_lowercase();
+    stem_in(&mut word);
     word
+}
+
+/// [`stem`] of a word that is already lowercase, in place.
+fn stem_in(word: &mut String) {
+    if !word.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return;
+    }
+    super::singular_in(word);
+    if word.len() > 5 && word.ends_with("ing") {
+        word.truncate(word.len() - 3);
+    } else if word.len() > 4 && word.ends_with("ed") {
+        word.truncate(word.len() - 2);
+    }
 }
 
 struct Concept {
@@ -875,24 +1040,32 @@ fn concept_of(written: &str) -> Concept {
     }
 }
 
+impl Concept {
+    /// The joined form, the joined stems, or every part. `has` says whether
+    /// a text holds a form or a [`forms_match`] of it.
+    fn covered(&self, has: impl Fn(&str) -> bool) -> bool {
+        has(&self.joined)
+            || has(&self.joined_stems)
+            || (!self.parts.is_empty() && self.parts.iter().all(|part| has(part)))
+    }
+
+    fn forms(&self) -> impl Iterator<Item = &String> {
+        [&self.joined, &self.joined_stems]
+            .into_iter()
+            .chain(&self.parts)
+    }
+}
+
 fn concept_covered(written: &str, have: &std::collections::BTreeSet<String>) -> bool {
     covered_by(&concept_of(written), have)
 }
 
 fn covered_by(concept: &Concept, have: &std::collections::BTreeSet<String>) -> bool {
-    if !concept.joined.is_empty() && have.contains(&concept.joined) {
-        return true;
-    }
-    if !concept.joined_stems.is_empty()
-        && concept.joined_stems != concept.joined
-        && have.contains(&concept.joined_stems)
-    {
-        return true;
-    }
-    if !concept.parts.is_empty() && concept.parts.iter().all(|part| have.contains(part)) {
-        return true;
-    }
-    form_covered(concept, have)
+    concept.covered(|want| set_has(have, want))
+}
+
+fn set_has(have: &std::collections::BTreeSet<String>, want: &str) -> bool {
+    have.contains(want) || have.iter().any(|got| forms_match(got, want))
 }
 
 /// A shared prefix plus an inflection, so `narration` covers `narrated`.
@@ -900,7 +1073,8 @@ fn forms_match(left: &str, right: &str) -> bool {
     if left == right {
         return true;
     }
-    if !left.bytes().all(|byte| byte.is_ascii_lowercase())
+    if left.as_bytes().first() != right.as_bytes().first()
+        || !left.bytes().all(|byte| byte.is_ascii_lowercase())
         || !right.bytes().all(|byte| byte.is_ascii_lowercase())
     {
         return false;
@@ -919,22 +1093,6 @@ fn inflection(rest: &str) -> bool {
         rest,
         "" | "e" | "ed" | "es" | "s" | "ing" | "ion" | "tion" | "ation"
     )
-}
-
-fn form_covered(concept: &Concept, have: &std::collections::BTreeSet<String>) -> bool {
-    let joined = [concept.joined.as_str(), concept.joined_stems.as_str()];
-    let joined_ok = joined
-        .iter()
-        .filter(|term| term.len() >= 2)
-        .any(|term| have.iter().any(|got| forms_match(got, term)));
-    if joined_ok {
-        return true;
-    }
-    !concept.parts.is_empty()
-        && concept
-            .parts
-            .iter()
-            .all(|part| have.iter().any(|got| forms_match(got, part)))
 }
 
 fn prepare(doc: &Doc<'_>) -> Prepared {
@@ -958,53 +1116,259 @@ fn prepare(doc: &Doc<'_>) -> Prepared {
 fn analyze(text: &str) -> Field {
     #[cfg(test)]
     ANALYZED.with(|count| count.set(count.get() + 1));
-    let mut seq = Vec::new();
-    let mut bag = Vec::new();
-    let mut slot = 0u32;
-    for raw in text.split(|c: char| c.is_whitespace()) {
-        let raw = raw.trim_matches(|c: char| !c.is_alphanumeric() && !is_sep(c));
-        if raw.is_empty() {
-            continue;
-        }
-        let (joined, parts) = split_run(raw);
-        let content: Vec<String> = parts
-            .iter()
-            .map(|part| stem(part))
-            .filter(|part| part.len() >= 2 && !is_stop(part))
-            .collect();
-        if content.is_empty() && joined.chars().filter(|c| c.is_alphabetic()).count() < 3 {
-            slot = slot.saturating_add(1);
-            continue;
-        }
-        if !joined.is_empty() && (parts.len() > 1 || joined.chars().any(|c| c.is_ascii_digit())) {
-            bag.push(joined);
-        }
-        let stems_joined = content.concat();
-        if content.len() > 1 && stems_joined.chars().count() >= 4 {
-            bag.push(stems_joined);
-        }
-        for term in &content {
-            seq.push((term.clone(), slot));
-            bag.push(term.clone());
-        }
-        slot = slot.saturating_add(1);
+    #[cfg(test)]
+    if OLD_TERMS.with(std::cell::Cell::get) {
+        return tests::old_analyze(text);
     }
-    // Adjacent content words written as two tokens (`list scans`) share the
-    // joined form of `list_scans`.
-    let mut extra = Vec::new();
-    for pair in seq.windows(2) {
-        if pair[1].1 == pair[0].1.saturating_add(1) {
-            let joined = format!("{}{}", pair[0].0, pair[1].0);
-            if joined.chars().count() >= 4 {
-                extra.push(joined);
-            }
-        }
-    }
-    bag.extend(extra);
-    Field { seq, bag }
+    let mut field = Field {
+        seq: Vec::new(),
+        bag: Vec::new(),
+    };
+    Words::default().read(text, &mut field);
+    field
 }
 
-/// `(alphanumeric join, raw parts before stemming)`.
+/// Where [`Words`] puts the terms of a text.
+trait Sink {
+    /// Whether a term that starts with `first` can matter. A term that
+    /// cannot is not built.
+    fn wants(&self, _first: char) -> bool {
+        true
+    }
+
+    /// The longest term in bytes that can matter. A longer one is not built.
+    fn longest(&self) -> usize {
+        usize::MAX
+    }
+
+    fn term(&mut self, term: &str);
+
+    /// The term of a content word, at word `slot`.
+    fn content(&mut self, term: &str, _slot: u32) {
+        self.term(term);
+    }
+}
+
+impl Sink for Field {
+    fn term(&mut self, term: &str) {
+        self.bag.push(term.to_string());
+    }
+
+    fn content(&mut self, term: &str, slot: u32) {
+        self.seq.push((term.to_string(), slot));
+        self.term(term);
+    }
+}
+
+/// Reads text into terms. A [`TermBag`] and a [`Cover`] read through this
+/// one path, so the terms a query is checked against are the same.
+///
+/// Per whitespace token: the joined form of an identifier, its stemmed
+/// parts, and those parts joined. A content word next to the previous one
+/// (`list scans`) adds the two joined, the form `list_scans` has. A stop
+/// word takes a slot, so it breaks that pair.
+#[derive(Default)]
+struct Words {
+    slot: u32,
+    /// The slot of the previous content word, when its last term was built.
+    prev: Option<u32>,
+    prev_term: String,
+    last: String,
+    word: String,
+    joined: String,
+    stems: String,
+}
+
+impl Words {
+    /// Splits at [`char::is_whitespace`] in one pass over the bytes, noting
+    /// per token whether a term it holds can start with a wanted character.
+    ///
+    /// A term starts with the previous word's term when the two pair, or
+    /// with the lowercase of a character where the joined form or a part of
+    /// [`pieces`] can start: one after no letter or digit, an uppercase one,
+    /// or one where digits meet other characters.
+    fn read(&mut self, text: &str, sink: &mut impl Sink) {
+        let ascii: [Class; 128] = std::array::from_fn(|byte| {
+            Class::of(char::from(u8::try_from(byte).unwrap_or(0)), sink)
+        });
+        let (mut start, mut at) = (0, 0);
+        let (mut wanted, mut kept, mut before) = (false, false, Class::default());
+        while let Some(&byte) = text.as_bytes().get(at) {
+            let (class, width) = if byte.is_ascii() {
+                (ascii[usize::from(byte)], 1)
+            } else {
+                let c = text[at..].chars().next().unwrap_or(' ');
+                (Class::of(c, sink), c.len_utf8())
+            };
+            if class.is(Class::SPACE) {
+                self.word(&text[start..at], wanted, kept, sink);
+                (start, wanted, kept, before) = (at + width, false, false, Class::default());
+            } else {
+                wanted |= class.is(Class::WANTED)
+                    && (!before.is(Class::ALNUM)
+                        || class.is(Class::UPPER)
+                        || before.is(Class::DIGIT) != class.is(Class::DIGIT));
+                kept |= class.is(Class::ALNUM | Class::SEP);
+                before = class;
+            }
+            at += width;
+        }
+        self.word(&text[start..], wanted, kept, sink);
+    }
+
+    /// A token that starts no wanted term and does not pair is only counted.
+    fn word(&mut self, token: &str, wanted: bool, kept: bool, sink: &mut impl Sink) {
+        let pairs = self
+            .prev
+            .is_some_and(|slot| self.slot == slot.saturating_add(1));
+        if !pairs && !wanted {
+            if kept {
+                self.slot = self.slot.saturating_add(1);
+                self.prev = None;
+            }
+            return;
+        }
+        let raw = token.trim_matches(|c: char| !c.is_alphanumeric() && !is_sep(c));
+        if !raw.is_empty() {
+            self.token(raw, pairs, sink);
+        }
+    }
+
+    fn token(&mut self, raw: &str, pairs: bool, sink: &mut impl Sink) {
+        #[cfg(test)]
+        TOKENS.with(|count| count.set(count.get() + 1));
+        let longest = sink.longest();
+        // A longer part stems to a content term longer than `longest`.
+        let part_cap = longest.max(6).saturating_add(4);
+        let (mut letters, mut digit, mut join) = (0usize, false, None);
+        self.joined.clear();
+        let mut add = |lower: char| {
+            letters += usize::from(lower.is_alphabetic());
+            digit |= lower.is_ascii_digit();
+            if *join.get_or_insert_with(|| sink.wants(lower)) && self.joined.len() <= longest {
+                self.joined.push(lower);
+            }
+        };
+        for c in raw.chars().filter(|c| c.is_alphanumeric()) {
+            if c.is_ascii() {
+                add(c.to_ascii_lowercase());
+            } else {
+                c.to_lowercase().for_each(&mut add);
+            }
+        }
+        let (mut parts, mut content, mut stems_ok, mut last_ok) = (0usize, 0usize, false, false);
+        self.stems.clear();
+        pieces(raw, |piece| {
+            parts += 1;
+            // One ASCII character, shorter than any term.
+            if piece.len() < 2 {
+                return;
+            }
+            self.word.clear();
+            // A character is at most four bytes and lowercases to one or more.
+            let bound = if piece.is_ascii() { 1 } else { 4 };
+            let fits = piece.len() <= part_cap.saturating_mul(bound) && {
+                if piece.is_ascii() {
+                    self.word.push_str(piece);
+                    self.word.make_ascii_lowercase();
+                } else {
+                    self.word.push_str(&piece.to_lowercase());
+                }
+                self.word.len() <= part_cap
+            };
+            if fits {
+                stem_in(&mut self.word);
+                if self.word.len() < 2 || is_stop(&self.word) {
+                    return;
+                }
+            }
+            content += 1;
+            let wanted = fits
+                && self.word.len() <= longest
+                && self.word.chars().next().is_some_and(|c| sink.wants(c));
+            if content == 1 {
+                stems_ok = wanted;
+                if pairs && fits && self.prev_term.len() + self.word.len() <= longest {
+                    self.prev_term.push_str(&self.word);
+                    if self.prev_term.chars().count() >= 4 {
+                        sink.term(&self.prev_term);
+                    }
+                }
+            }
+            stems_ok &= fits && self.stems.len() + self.word.len() <= longest;
+            if stems_ok {
+                self.stems.push_str(&self.word);
+            }
+            last_ok = wanted;
+            if wanted {
+                self.last.clear();
+                self.last.push_str(&self.word);
+                sink.content(&self.word, self.slot);
+            }
+        });
+        if content == 0 && letters < 3 {
+            self.slot = self.slot.saturating_add(1);
+            return;
+        }
+        if !self.joined.is_empty() && (parts > 1 || digit) && self.joined.len() <= longest {
+            sink.term(&self.joined);
+        }
+        if content > 1 && stems_ok && self.stems.chars().count() >= 4 {
+            sink.term(&self.stems);
+        }
+        if content > 0 {
+            std::mem::swap(&mut self.prev_term, &mut self.last);
+            self.prev = last_ok.then_some(self.slot);
+        }
+        self.slot = self.slot.saturating_add(1);
+    }
+}
+
+/// What [`Words::read`] needs of one character, as flags in one byte.
+#[derive(Clone, Copy, Default)]
+struct Class(u8);
+
+impl Class {
+    const SPACE: u8 = 1;
+    /// A term that starts here can matter.
+    const WANTED: u8 = 2;
+    const ALNUM: u8 = 4;
+    const SEP: u8 = 8;
+    const UPPER: u8 = 16;
+    const DIGIT: u8 = 32;
+
+    fn of(c: char, sink: &impl Sink) -> Self {
+        let flags = [
+            (c.is_whitespace(), Self::SPACE),
+            (sink.wants(lower_first(c)), Self::WANTED),
+            (c.is_alphanumeric(), Self::ALNUM),
+            (is_sep(c), Self::SEP),
+            (c.is_uppercase(), Self::UPPER),
+            (c.is_ascii_digit(), Self::DIGIT),
+        ];
+        Self(
+            flags
+                .iter()
+                .filter(|(on, _)| *on)
+                .fold(0, |all, (_, flag)| all | flag),
+        )
+    }
+
+    fn is(self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+}
+
+/// The first character of `c` lowercased, which a term made from it starts with.
+fn lower_first(c: char) -> char {
+    if c.is_ascii() {
+        c.to_ascii_lowercase()
+    } else {
+        c.to_lowercase().next().unwrap_or(c)
+    }
+}
+
+/// `(alphanumeric join, lowercase parts before stemming)`.
 fn split_run(run: &str) -> (String, Vec<String>) {
     let joined: String = run
         .chars()
@@ -1012,47 +1376,38 @@ fn split_run(run: &str) -> (String, Vec<String>) {
         .flat_map(char::to_lowercase)
         .collect();
     let mut parts = Vec::new();
-    for segment in run.split(is_sep) {
-        if segment.is_empty() {
-            continue;
-        }
-        for piece in split_camel_digit(segment) {
-            if !piece.is_empty() {
-                parts.push(piece.to_lowercase());
-            }
-        }
-    }
-    if parts.is_empty() && !joined.is_empty() {
-        parts.push(joined.clone());
-    }
+    pieces(run, |piece| parts.push(piece.to_lowercase()));
     (joined, parts)
 }
 
-fn split_camel_digit(seg: &str) -> Vec<String> {
-    let chars: Vec<char> = seg.chars().collect();
-    if chars.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    for index in 1..chars.len() {
-        let prev = chars[index - 1];
-        let here = chars[index];
-        let next = chars.get(index + 1).copied();
-        let camel = prev.is_lowercase() && here.is_uppercase();
-        let acronym = index.saturating_sub(start) > 1
-            && prev.is_uppercase()
-            && here.is_uppercase()
-            && next.is_some_and(char::is_lowercase);
-        let digit_edge = (prev.is_ascii_alphabetic() && here.is_ascii_digit())
-            || (prev.is_ascii_digit() && here.is_ascii_alphabetic());
-        if camel || acronym || digit_edge {
-            out.push(chars[start..index].iter().collect());
-            start = index;
+/// The parts of `run`, as written: split at `_ - . /`, then where lower case
+/// meets upper case, where an acronym meets a word (`HTTPServer`), and where
+/// a letter meets a digit. One pass, so a long run costs its length.
+fn pieces(run: &str, mut each: impl FnMut(&str)) {
+    for segment in run.split(is_sep).filter(|segment| !segment.is_empty()) {
+        let mut chars = segment.char_indices().peekable();
+        let (mut start, mut len, mut prev) = (0, 0usize, None::<char>);
+        while let Some((at, here)) = chars.next() {
+            if let Some(prev) = prev {
+                let next = chars.peek().map(|&(_, next)| next);
+                let camel = prev.is_lowercase() && here.is_uppercase();
+                let acronym = len > 1
+                    && prev.is_uppercase()
+                    && here.is_uppercase()
+                    && next.is_some_and(char::is_lowercase);
+                let digit_edge = (prev.is_ascii_alphabetic() && here.is_ascii_digit())
+                    || (prev.is_ascii_digit() && here.is_ascii_alphabetic());
+                if camel || acronym || digit_edge {
+                    each(&segment[start..at]);
+                    start = at;
+                    len = 0;
+                }
+            }
+            prev = Some(here);
+            len += 1;
         }
+        each(&segment[start..]);
     }
-    out.push(chars[start..].iter().collect());
-    out
 }
 
 fn form_document_frequency(
@@ -1278,6 +1633,374 @@ mod tests {
         analyze(text).bag.into_iter().collect()
     }
 
+    /// `analyze` as `ljos` 0.45.4 shipped it, the reference the one
+    /// [`Words`] path is checked against.
+    pub(super) fn old_analyze(text: &str) -> Field {
+        let mut seq = Vec::new();
+        let mut bag = Vec::new();
+        let mut slot = 0u32;
+        for raw in text.split(|c: char| c.is_whitespace()) {
+            let raw = raw.trim_matches(|c: char| !c.is_alphanumeric() && !is_sep(c));
+            if raw.is_empty() {
+                continue;
+            }
+            let (joined, parts) = old_split_run(raw);
+            let content: Vec<String> = parts
+                .iter()
+                .map(|part| old_stem(part))
+                .filter(|part| part.len() >= 2 && !is_stop(part))
+                .collect();
+            if content.is_empty() && joined.chars().filter(|c| c.is_alphabetic()).count() < 3 {
+                slot = slot.saturating_add(1);
+                continue;
+            }
+            if !joined.is_empty() && (parts.len() > 1 || joined.chars().any(|c| c.is_ascii_digit()))
+            {
+                bag.push(joined);
+            }
+            let stems_joined = content.concat();
+            if content.len() > 1 && stems_joined.chars().count() >= 4 {
+                bag.push(stems_joined);
+            }
+            for term in &content {
+                seq.push((term.clone(), slot));
+                bag.push(term.clone());
+            }
+            slot = slot.saturating_add(1);
+        }
+        let mut extra = Vec::new();
+        for pair in seq.windows(2) {
+            if pair[1].1 == pair[0].1.saturating_add(1) {
+                let joined = format!("{}{}", pair[0].0, pair[1].0);
+                if joined.chars().count() >= 4 {
+                    extra.push(joined);
+                }
+            }
+        }
+        bag.extend(extra);
+        Field { seq, bag }
+    }
+
+    fn old_stem(word: &str) -> String {
+        let word = word.to_lowercase();
+        if word.chars().any(|c| !c.is_ascii_alphabetic()) {
+            return word;
+        }
+        let word = if word.len() > 4 && word.ends_with("ies") {
+            format!("{}y", &word[..word.len() - 3])
+        } else if word.len() > 3
+            && word.ends_with('s')
+            && !word.ends_with("ss")
+            && !word.ends_with("us")
+            && !word.ends_with("is")
+        {
+            word[..word.len() - 1].to_string()
+        } else {
+            word
+        };
+        if word.len() > 5 && word.ends_with("ing") {
+            let stem = &word[..word.len() - 3];
+            if stem.len() >= 3 {
+                return stem.to_string();
+            }
+        }
+        if word.len() > 4 && word.ends_with("ed") {
+            let stem = &word[..word.len() - 2];
+            if stem.len() >= 3 {
+                return stem.to_string();
+            }
+        }
+        word
+    }
+
+    fn old_split_run(run: &str) -> (String, Vec<String>) {
+        let joined: String = run
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect();
+        let mut parts = Vec::new();
+        for segment in run.split(is_sep) {
+            if segment.is_empty() {
+                continue;
+            }
+            let chars: Vec<char> = segment.chars().collect();
+            let mut start = 0usize;
+            for index in 1..chars.len() {
+                let prev = chars[index - 1];
+                let here = chars[index];
+                let next = chars.get(index + 1).copied();
+                let camel = prev.is_lowercase() && here.is_uppercase();
+                let acronym = index.saturating_sub(start) > 1
+                    && prev.is_uppercase()
+                    && here.is_uppercase()
+                    && next.is_some_and(char::is_lowercase);
+                let digit_edge = (prev.is_ascii_alphabetic() && here.is_ascii_digit())
+                    || (prev.is_ascii_digit() && here.is_ascii_alphabetic());
+                if camel || acronym || digit_edge {
+                    let piece: String = chars[start..index].iter().collect();
+                    parts.push(piece.to_lowercase());
+                    start = index;
+                }
+            }
+            let piece: String = chars[start..].iter().collect();
+            if !piece.is_empty() {
+                parts.push(piece.to_lowercase());
+            }
+        }
+        if parts.is_empty() && !joined.is_empty() {
+            parts.push(joined.clone());
+        }
+        (joined, parts)
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(self.0 >> 33).unwrap_or(0) % n.max(1)
+        }
+
+        fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+            items[self.below(items.len())]
+        }
+    }
+
+    const STEMS: &[&str] = &[
+        "brine",
+        "spindle",
+        "mount",
+        "scan",
+        "narrat",
+        "sign",
+        "analys",
+        "cedar",
+        "latch",
+        "list",
+        "store",
+        "stories",
+        "glaze",
+        "rev",
+        "the",
+        "café",
+        "straße",
+        "ΣΊΣΥΦΟΣ",
+        "İstanbul",
+        "\u{212a}elvin",
+        "東京",
+        "nAïve",
+        "Ñu",
+        "sha",
+        "http",
+        "gp",
+        "ridge",
+        "qx0000000b",
+        "abc",
+        "ABcABc",
+        "HTTPServer",
+        "listScans",
+        "x20",
+        "20",
+        "007",
+        "is",
+        "a",
+    ];
+    const ENDS: &[&str] = &[
+        "", "", "s", "es", "ed", "ing", "ion", "ation", "ies", "1", "2", "20", "Scan", "X9",
+    ];
+    const GLUE: &[&str] = &[
+        " ", " ", " ", "\n", "\t", "\r", "\u{c}", "\u{b}", "\u{1c}", "\u{85}", "\u{a0}",
+        "\u{2003}", "\u{2028}", "\0", "-", "_", ".", "/", "+", "(", ")", "[", "]", "{", "}", ",",
+        ";", ":", "\"", "'", "`", "&", "#", "$", "^", "*", "=", "!", "?", "@", "~", "%", "<", ">",
+        "|", "\\", "\u{2014}", "\u{2019}", "",
+    ];
+    const SOUP: &str =
+        "abcXYZ019_-./()[],;:'\"+*&!?@#\u{e9}\u{f1}\u{a0}\u{b}\0\t\u{3a3}\u{130}\u{2014}\u{2019}";
+
+    /// A word as a person or a log might write it: any case, a suffix, a
+    /// digit or camel run, glued to another word by a separator, punctuation,
+    /// a control or odd space, or nothing. Now and then a soup of characters.
+    fn rough_word(rng: &mut Lcg) -> String {
+        if rng.below(8) == 0 {
+            let soup: Vec<char> = SOUP.chars().collect();
+            return (0..1 + rng.below(9))
+                .map(|_| soup[rng.below(soup.len())])
+                .collect();
+        }
+        let mut word = format!("{}{}", rng.pick(STEMS), rng.pick(ENDS));
+        match rng.below(5) {
+            0 => word = word.to_uppercase(),
+            1 => {
+                let mut chars = word.chars();
+                word = chars.next().map_or_else(String::new, |first| {
+                    first.to_uppercase().chain(chars).collect()
+                });
+            }
+            _ => {}
+        }
+        word
+    }
+
+    fn rough_text(rng: &mut Lcg, min: usize, max: usize) -> String {
+        let mut text = String::new();
+        for _ in 0..min + rng.below(max - min + 1) {
+            text.push_str(&rough_word(rng));
+            text.push_str(rng.pick(GLUE));
+        }
+        text
+    }
+
+    fn sorted(field: &Field) -> (Vec<String>, Vec<(String, u32)>) {
+        let mut bag = field.bag.clone();
+        bag.sort();
+        (bag, field.seq.clone())
+    }
+
+    /// The bag and the phrase sequence are the ones 0.45.4 read, on text
+    /// with punctuation, control characters, Unicode case and odd spaces.
+    #[test]
+    fn the_terms_are_the_terms_the_old_analyzer_read() {
+        let mut rng = Lcg(17);
+        for round in 0..20_000 * fuzz_scale() {
+            let text = rough_text(&mut rng, 1, 12);
+            assert_eq!(
+                sorted(&analyze(&text)),
+                sorted(&old_analyze(&text)),
+                "round {round}: {text:?}"
+            );
+        }
+    }
+
+    /// A query cover reports what a term bag of the same text would, for
+    /// the shapes the r2 byte scan missed and for generated text read
+    /// across several lines. Which tickets a search shows, and in what
+    /// order, is read from these answers alone.
+    #[test]
+    fn a_cover_marks_what_a_bag_of_the_text_holds() {
+        let abc = "ABc".repeat(1_000);
+        let cases = [
+            ("brinefoo", "ordinary b+rine_foo"),
+            ("brinespindle", "valve -(brineSpindle) reset"),
+            ("brine spindle", "valve -(brineSpindle) reset"),
+            ("cedarlatch", "-]-(cedarlatch) jammed"),
+            ("cedar latch", "cedar\u{b}latch"),
+            ("cedar latch", "cedar\u{1c}latch"),
+            ("cedar latch", "cedar\u{2014}latch it\u{2019}s"),
+            ("mount", "/}MOUNTion"),
+            ("scansion", "_\"/:scans"),
+            ("signed", "-&SIGNEDing"),
+            ("analysiss", ".$/^analysis"),
+            ("Stories5", "-?Stories5"),
+            ("Glaze0", "-[-[Glaze"),
+            ("rev20", "rev x20"),
+            ("abc", abc.as_str()),
+            ("list scans", "list_scans nightly"),
+            ("listscan", "list to scans"),
+            ("café", "a CAFÉ menu"),
+            ("cafe", "a café menu"),
+            ("brine", "\u{212a}brine"),
+            ("istanbul", "İstanbul"),
+        ];
+        for (query, text) in cases {
+            assert_same(query, &[text]);
+        }
+        let mut rng = Lcg(29);
+        for _ in 0..6_000 * fuzz_scale() {
+            let query = rough_text(&mut rng, 1, 3);
+            let lines: Vec<String> = (0..1 + rng.below(3))
+                .map(|_| rough_text(&mut rng, 0, 7))
+                .collect();
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            assert_same(&query, &lines);
+        }
+    }
+
+    fn assert_same(query: &str, lines: &[&str]) {
+        let terms = QueryTerms::of(query);
+        let words: Vec<QueryTerms> = query.split_whitespace().map(QueryTerms::of).collect();
+        let mut queries = vec![&terms];
+        queries.extend(&words);
+        let mut cover = Cover::of(&queries);
+        cover.clear();
+        for line in lines {
+            cover.read(line);
+        }
+        let old = with_old_terms(|| TermBag::of(&lines.join("\n")));
+        for query in queries {
+            assert_eq!(
+                query.hits(&cover).collect::<Vec<_>>(),
+                query.hits(&old).collect::<Vec<_>>(),
+                "{query:?} against {lines:?}",
+                query = query.written().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn a_stop_word_is_one_of_the_list() {
+        assert!(STOP.iter().all(|word| is_stop(word)));
+        for word in [
+            "", "qx", "ann", "the1", "thee", "pleases", "yours", "\u{e9}",
+        ] {
+            assert_eq!(is_stop(word), STOP.contains(&word), "{word}");
+        }
+    }
+
+    /// A leading NUL used to pack as the stop word after it, so `brine_\0the`
+    /// dropped that piece and paired `brine` with the next word.
+    #[test]
+    fn a_leading_nul_does_not_make_a_stop_word() {
+        assert!(is_stop("the"));
+        assert!(!is_stop("\0the"));
+        assert!(!is_stop("\0and"));
+        assert!(!is_stop("\0please"));
+        let text = "brine_\0the foo";
+        let got = bag(text);
+        assert!(got.contains("\0the"), "{got:?}");
+        assert!(got.contains("\0thefoo"), "{got:?}");
+        let old = with_old_terms(|| bag(text));
+        assert_eq!(got, old);
+    }
+
+    /// One whitespace-free run is read in one pass, and the buffers a
+    /// cover keeps between texts stay the size of the query, not the run.
+    #[test]
+    fn a_long_run_is_read_once_into_small_buffers() {
+        let terms = QueryTerms::of("brine zorbulax");
+        let mut cover = Cover::of(&[&terms]);
+        let mut tokens = Vec::new();
+        for run in [
+            "ABc".repeat(100_000),
+            "ABc".repeat(400_000),
+            "brine".repeat(200_000),
+            "Ωb".repeat(300_000),
+            format!("b{}", "-x".repeat(300_000)),
+        ] {
+            let before = tokens_read();
+            cover.clear();
+            cover.read(&run);
+            // One whitespace-free run is one token, or none when no query
+            // form can start in it. The count does not grow with the run.
+            tokens.push(tokens_read() - before);
+            assert!(cover.retained() <= 512, "{} bytes kept", cover.retained());
+            assert_eq!(
+                terms.hits(&cover).collect::<Vec<_>>(),
+                terms.hits(&TermBag::of(&run)).collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            tokens.iter().all(|count| *count <= 1),
+            "a run was split into more than one token: {tokens:?}"
+        );
+        assert_eq!(
+            tokens[0], tokens[1],
+            "a longer run of the same text read a different number of tokens: {tokens:?}"
+        );
+    }
     #[test]
     fn an_identifier_matches_its_words_its_digits_and_its_stem() {
         let scans = bag("escapees list_scans returns uppercase keys");

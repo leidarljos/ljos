@@ -11014,18 +11014,24 @@ const CUE_STOP_SHORT: &[&str] = &[
 /// `migration`, `dependencies` as `dependency`. `class` and `status`
 /// keep theirs.
 fn singular(w: &str) -> String {
+    let mut word = w.to_string();
+    singular_in(&mut word);
+    word
+}
+
+/// [`singular`] in place.
+pub(crate) fn singular_in(w: &mut String) {
     if w.len() > 4 && w.ends_with("ies") {
-        return format!("{}y", &w[..w.len() - 3]);
-    }
-    if w.len() > 3
+        w.truncate(w.len() - 3);
+        w.push('y');
+    } else if w.len() > 3
         && w.ends_with('s')
         && !w.ends_with("ss")
         && !w.ends_with("us")
         && !w.ends_with("is")
     {
-        return w[..w.len() - 1].to_string();
+        w.pop();
     }
-    w.to_string()
 }
 
 /// The words a prompt and a claim are matched on: three letters or
