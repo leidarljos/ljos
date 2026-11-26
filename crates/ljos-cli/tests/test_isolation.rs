@@ -27,21 +27,20 @@ struct TestFn {
     name: String,
     line: usize,
     /// Each top-level `let NAME = path(..);` in the body: the statement's
-    /// index, the name and the path called. A guard counts only when that
-    /// name is still bound at the end of the body.
+    /// index, the name and the path called. A guard counts when that
+    /// binding still holds the value at the end of the body.
     bindings: Vec<(usize, String, String)>,
-    /// Names ended by `drop(name)` or `let _ = name` before the body ends.
-    ended: Vec<String>,
+    /// Top-level statement indices whose name is used by value while that
+    /// binding is still in scope.
+    ended: Vec<usize>,
     /// Every function, method and macro-argument call in the body.
     calls: Vec<String>,
 }
 
 impl TestFn {
     fn guarded(&self, guards: &[&str]) -> bool {
-        self.bindings.iter().any(|(at, name, path)| {
-            *at < GUARD_WITHIN
-                && names_any(path, guards)
-                && !self.ended.iter().any(|ended| ended == name)
+        self.bindings.iter().any(|(at, _, path)| {
+            *at < GUARD_WITHIN && names_any(path, guards) && !self.ended.contains(at)
         })
     }
 
@@ -178,8 +177,9 @@ impl<'ast> Visit<'ast> for Calls {
 }
 
 /// `let NAME = path(..)` when `NAME` is a real binding. `let _ = path()`
-/// drops the value at once, so it is not a binding. A later `drop(NAME)`
-/// or `let _ = NAME` ends it, and a bare `path();` never binds it.
+/// drops the value at once, so it is not a binding. A later by-value use
+/// of that same binding ends it. A borrow or a method call does not, and
+/// a bare `path();` never binds it.
 fn guard_binding(stmt: &syn::Stmt) -> Option<(String, String)> {
     let syn::Stmt::Local(local) = stmt else {
         return None;
@@ -214,55 +214,350 @@ fn binding_name(pat: &syn::Pat) -> Option<String> {
     }
 }
 
-/// One path segment, so `guard` matches and `guard.field` does not.
+/// The single name inside parentheses, groups and references.
+/// `guard.field` and `a::guard` are not that name.
 fn path_leaf(expr: &syn::Expr) -> Option<String> {
-    let syn::Expr::Path(path) = expr else {
-        return None;
-    };
-    if path.qself.is_some() || path.path.segments.len() != 1 {
-        return None;
+    let mut expr = expr;
+    loop {
+        expr = match expr {
+            syn::Expr::Paren(inner) => &inner.expr,
+            syn::Expr::Group(inner) => &inner.expr,
+            syn::Expr::Reference(inner) => &inner.expr,
+            syn::Expr::RawAddr(inner) => &inner.expr,
+            syn::Expr::Path(path) => {
+                if path.qself.is_some() || path.path.segments.len() != 1 {
+                    return None;
+                }
+                return Some(path.path.segments[0].ident.to_string());
+            }
+            _ => return None,
+        };
     }
-    Some(path.path.segments[0].ident.to_string())
 }
 
-#[derive(Default)]
-struct Ended(Vec<String>);
-
-impl<'ast> Visit<'ast> for Ended {
-    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(func) = &*call.func {
-            let drop_call = func
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == "drop");
-            if drop_call && call.args.len() == 1 {
-                self.0.extend(call.args.first().and_then(path_leaf));
-            }
+/// A borrow hides the name from a by-value read. `path_leaf` still sees
+/// through it, so `&guard` can be named without ending the binding.
+fn hides_a_borrow(expr: &syn::Expr) -> bool {
+    let mut expr = expr;
+    loop {
+        match expr {
+            syn::Expr::Paren(inner) => expr = &inner.expr,
+            syn::Expr::Group(inner) => expr = &inner.expr,
+            syn::Expr::Reference(_) | syn::Expr::RawAddr(_) => return true,
+            _ => return false,
         }
-        syn::visit::visit_expr_call(self, call);
     }
+}
 
-    fn visit_local(&mut self, local: &'ast syn::Local) {
-        if matches!(local.pat, syn::Pat::Wild(_)) {
-            if let Some(name) = local
-                .init
+fn value_name(expr: &syn::Expr) -> Option<String> {
+    if hides_a_borrow(expr) {
+        None
+    } else {
+        path_leaf(expr)
+    }
+}
+
+fn local_name(stmt: &syn::Stmt) -> Option<String> {
+    let syn::Stmt::Local(local) = stmt else {
+        return None;
+    };
+    binding_name(&local.pat)
+}
+
+fn pattern_binds(pat: &syn::Pat, name: &str) -> bool {
+    match pat {
+        syn::Pat::Ident(pat) => {
+            pat.ident == name
+                || pat
+                    .subpat
+                    .as_ref()
+                    .is_some_and(|(_, sub)| pattern_binds(sub, name))
+        }
+        syn::Pat::Or(pat) => pat.cases.iter().any(|case| pattern_binds(case, name)),
+        syn::Pat::Paren(pat) => pattern_binds(&pat.pat, name),
+        syn::Pat::Reference(pat) => pattern_binds(&pat.pat, name),
+        syn::Pat::Type(pat) => pattern_binds(&pat.pat, name),
+        syn::Pat::Slice(pat) => pat.elems.iter().any(|elem| pattern_binds(elem, name)),
+        syn::Pat::Tuple(pat) => pat.elems.iter().any(|elem| pattern_binds(elem, name)),
+        syn::Pat::TupleStruct(pat) => pat.elems.iter().any(|elem| pattern_binds(elem, name)),
+        syn::Pat::Struct(pat) => pat
+            .fields
+            .iter()
+            .any(|field| pattern_binds(&field.pat, name)),
+        syn::Pat::Rest(_)
+        | syn::Pat::Wild(_)
+        | syn::Pat::Lit(_)
+        | syn::Pat::Path(_)
+        | syn::Pat::Range(_)
+        | syn::Pat::Const(_)
+        | syn::Pat::Macro(_)
+        | syn::Pat::Verbatim(_) => false,
+        _ => false,
+    }
+}
+
+/// Statement indices of top-level `let` bindings whose name is used by
+/// value after the let, in a scope that still sees that binding. A use
+/// before the let, or under a later binding of the same name, does not
+/// count.
+fn ended_bindings(stmts: &[syn::Stmt]) -> Vec<usize> {
+    let mut ended = Vec::new();
+    for (at, stmt) in stmts.iter().enumerate() {
+        let Some(name) = local_name(stmt) else {
+            continue;
+        };
+        if stmts_consume(&stmts[at + 1..], &name, true) {
+            ended.push(at);
+        }
+    }
+    ended
+}
+
+fn stmts_consume(stmts: &[syn::Stmt], name: &str, mut live: bool) -> bool {
+    for stmt in stmts {
+        if stmt_uses(stmt, name, live) {
+            return true;
+        }
+        if stmt_binds(stmt, name) {
+            live = false;
+        }
+    }
+    false
+}
+
+fn stmt_binds(stmt: &syn::Stmt, name: &str) -> bool {
+    let syn::Stmt::Local(local) = stmt else {
+        return false;
+    };
+    pattern_binds(&local.pat, name)
+}
+
+fn stmt_uses(stmt: &syn::Stmt, name: &str, live: bool) -> bool {
+    if !live {
+        return false;
+    }
+    match stmt {
+        syn::Stmt::Local(local) => local.init.as_ref().is_some_and(|init| {
+            expr_uses(&init.expr, name, Use::Value, true)
+                || init
+                    .diverge
+                    .as_ref()
+                    .is_some_and(|(_, expr)| expr_uses(expr, name, Use::Value, true))
+        }),
+        syn::Stmt::Expr(expr, _) => expr_uses(expr, name, Use::Value, true),
+        syn::Stmt::Item(_) | syn::Stmt::Macro(_) => false,
+    }
+}
+
+fn block_uses(block: &syn::Block, name: &str, live: bool) -> bool {
+    stmts_consume(&block.stmts, name, live)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Use {
+    Value,
+    Place,
+}
+
+fn compound_assign(op: &syn::BinOp) -> bool {
+    matches!(
+        op,
+        syn::BinOp::AddAssign(_)
+            | syn::BinOp::SubAssign(_)
+            | syn::BinOp::MulAssign(_)
+            | syn::BinOp::DivAssign(_)
+            | syn::BinOp::RemAssign(_)
+            | syn::BinOp::BitXorAssign(_)
+            | syn::BinOp::BitAndAssign(_)
+            | syn::BinOp::BitOrAssign(_)
+            | syn::BinOp::ShlAssign(_)
+            | syn::BinOp::ShrAssign(_)
+    )
+}
+
+fn expr_uses(expr: &syn::Expr, name: &str, how: Use, live: bool) -> bool {
+    if !live {
+        return false;
+    }
+    if how == Use::Value && value_name(expr).as_deref() == Some(name) {
+        return true;
+    }
+    match expr {
+        syn::Expr::Paren(inner) => expr_uses(&inner.expr, name, how, live),
+        syn::Expr::Group(inner) => expr_uses(&inner.expr, name, how, live),
+        syn::Expr::Reference(inner) => expr_uses(&inner.expr, name, Use::Place, live),
+        syn::Expr::RawAddr(inner) => expr_uses(&inner.expr, name, Use::Place, live),
+        syn::Expr::Path(_) => false,
+        syn::Expr::Field(field) => expr_uses(&field.base, name, Use::Place, live),
+        syn::Expr::Index(index) => {
+            expr_uses(&index.expr, name, Use::Place, live)
+                || expr_uses(&index.index, name, Use::Value, live)
+        }
+        syn::Expr::Unary(unary) => {
+            let how = if matches!(unary.op, syn::UnOp::Deref(_)) {
+                Use::Place
+            } else {
+                Use::Value
+            };
+            expr_uses(&unary.expr, name, how, live)
+        }
+        syn::Expr::MethodCall(call) => {
+            expr_uses(&call.receiver, name, Use::Place, live)
+                || call
+                    .args
+                    .iter()
+                    .any(|arg| expr_uses(arg, name, Use::Value, live))
+        }
+        syn::Expr::Call(call) => {
+            expr_uses(&call.func, name, Use::Value, live)
+                || call
+                    .args
+                    .iter()
+                    .any(|arg| expr_uses(arg, name, Use::Value, live))
+        }
+        syn::Expr::Assign(assign) => {
+            value_name(&assign.left).as_deref() == Some(name)
+                || expr_uses(&assign.left, name, Use::Place, live)
+                || expr_uses(&assign.right, name, Use::Value, live)
+        }
+        syn::Expr::Binary(bin) => {
+            let left = if compound_assign(&bin.op) {
+                Use::Place
+            } else {
+                Use::Value
+            };
+            expr_uses(&bin.left, name, left, live) || expr_uses(&bin.right, name, Use::Value, live)
+        }
+        syn::Expr::Array(array) => array
+            .elems
+            .iter()
+            .any(|elem| expr_uses(elem, name, Use::Value, live)),
+        syn::Expr::Tuple(tuple) => tuple
+            .elems
+            .iter()
+            .any(|elem| expr_uses(elem, name, Use::Value, live)),
+        syn::Expr::Repeat(repeat) => {
+            expr_uses(&repeat.expr, name, Use::Value, live)
+                || expr_uses(&repeat.len, name, Use::Value, live)
+        }
+        syn::Expr::Struct(expr) => {
+            expr.fields
+                .iter()
+                .any(|field| expr_uses(&field.expr, name, Use::Value, live))
+                || expr
+                    .rest
+                    .as_ref()
+                    .is_some_and(|rest| expr_uses(rest, name, Use::Value, live))
+        }
+        syn::Expr::Range(range) => {
+            range
+                .start
                 .as_ref()
-                .filter(|init| init.diverge.is_none())
-                .and_then(|init| path_leaf(&init.expr))
-            {
-                self.0.push(name);
-            }
+                .is_some_and(|start| expr_uses(start, name, Use::Value, live))
+                || range
+                    .end
+                    .as_ref()
+                    .is_some_and(|end| expr_uses(end, name, Use::Value, live))
         }
-        syn::visit::visit_local(self, local);
+        syn::Expr::Cast(cast) => expr_uses(&cast.expr, name, Use::Value, live),
+        syn::Expr::Try(try_expr) => expr_uses(&try_expr.expr, name, Use::Value, live),
+        syn::Expr::Await(await_expr) => expr_uses(&await_expr.base, name, Use::Value, live),
+        syn::Expr::Let(let_expr) => expr_uses(&let_expr.expr, name, Use::Value, live),
+        syn::Expr::Return(ret) => ret
+            .expr
+            .as_ref()
+            .is_some_and(|expr| expr_uses(expr, name, Use::Value, live)),
+        syn::Expr::Break(brk) => brk
+            .expr
+            .as_ref()
+            .is_some_and(|expr| expr_uses(expr, name, Use::Value, live)),
+        syn::Expr::Yield(yield_expr) => yield_expr
+            .expr
+            .as_ref()
+            .is_some_and(|expr| expr_uses(expr, name, Use::Value, live)),
+        syn::Expr::Block(block) => block_uses(&block.block, name, live),
+        syn::Expr::Unsafe(block) => block_uses(&block.block, name, live),
+        syn::Expr::Loop(block) => block_uses(&block.body, name, live),
+        syn::Expr::TryBlock(block) => block_uses(&block.block, name, live),
+        syn::Expr::Async(block) => block_uses(&block.block, name, live),
+        syn::Expr::Const(_) | syn::Expr::Continue(_) | syn::Expr::Infer(_) | syn::Expr::Lit(_) => {
+            false
+        }
+        syn::Expr::Macro(_) | syn::Expr::Verbatim(_) => false,
+        syn::Expr::If(expr) => if_uses(expr, name, live),
+        syn::Expr::While(expr) => while_uses(expr, name, live),
+        syn::Expr::ForLoop(expr) => {
+            expr_uses(&expr.expr, name, Use::Value, live)
+                || block_uses(&expr.body, name, live && !pattern_binds(&expr.pat, name))
+        }
+        syn::Expr::Match(expr) => match_uses(expr, name, live),
+        syn::Expr::Closure(expr) => {
+            let body_live = live && !expr.inputs.iter().any(|pat| pattern_binds(pat, name));
+            expr_uses(&expr.body, name, Use::Value, body_live)
+        }
+        _ => false,
     }
+}
+
+fn if_uses(expr: &syn::ExprIf, name: &str, live: bool) -> bool {
+    let (used, shadowed) = match &*expr.cond {
+        syn::Expr::Let(let_expr) => (
+            expr_uses(&let_expr.expr, name, Use::Value, live),
+            pattern_binds(&let_expr.pat, name),
+        ),
+        cond => (expr_uses(cond, name, Use::Value, live), false),
+    };
+    used || block_uses(&expr.then_branch, name, live && !shadowed)
+        || expr
+            .else_branch
+            .as_ref()
+            .is_some_and(|(_, else_expr)| expr_uses(else_expr, name, Use::Value, live))
+}
+
+fn while_uses(expr: &syn::ExprWhile, name: &str, live: bool) -> bool {
+    match &*expr.cond {
+        syn::Expr::Let(let_expr) => {
+            expr_uses(&let_expr.expr, name, Use::Value, live)
+                || block_uses(
+                    &expr.body,
+                    name,
+                    live && !pattern_binds(&let_expr.pat, name),
+                )
+        }
+        cond => expr_uses(cond, name, Use::Value, live) || block_uses(&expr.body, name, live),
+    }
+}
+
+fn match_uses(expr: &syn::ExprMatch, name: &str, live: bool) -> bool {
+    if expr_uses(&expr.expr, name, Use::Value, live) {
+        return true;
+    }
+    expr.arms.iter().any(|arm| {
+        let arm_live = live && !pattern_binds(&arm.pat, name);
+        arm.guard
+            .as_ref()
+            .is_some_and(|(_, cond)| expr_uses(cond, name, Use::Value, arm_live))
+            || expr_uses(&arm.body, name, Use::Value, arm_live)
+    })
+}
+
+fn is_semi(tree: &TokenTree) -> bool {
+    matches!(tree, TokenTree::Punct(punct) if punct.as_char() == ';')
+}
+
+fn is_eq(tree: &TokenTree) -> bool {
+    matches!(tree, TokenTree::Punct(punct) if punct.as_char() == '=')
+}
+
+fn is_colon(tree: Option<&TokenTree>) -> bool {
+    matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == ':')
 }
 
 /// The same binding read from a macro body's tokens, where `$name` and
 /// other fragments keep syn from parsing a statement.
 fn token_bindings(body: TokenStream) -> Vec<(usize, String, String)> {
     let trees: Vec<TokenTree> = body.into_iter().collect();
-    let statements = trees.split(|tree| matches!(tree, TokenTree::Punct(p) if p.as_char() == ';'));
+    let statements = trees.split(is_semi);
     let mut out = Vec::new();
     for (at, statement) in statements.enumerate() {
         let [TokenTree::Ident(keyword), TokenTree::Ident(name), TokenTree::Punct(eq), rest @ ..] =
@@ -280,7 +575,7 @@ fn token_bindings(body: TokenStream) -> Vec<(usize, String, String)> {
             || path.is_empty()
             || !path.iter().all(|tree| match tree {
                 TokenTree::Ident(_) => true,
-                TokenTree::Punct(p) => p.as_char() == ':',
+                TokenTree::Punct(punct) => punct.as_char() == ':',
                 _ => false,
             })
         {
@@ -292,77 +587,261 @@ fn token_bindings(body: TokenStream) -> Vec<(usize, String, String)> {
     out
 }
 
-/// `drop(name)` and `let _ = name` in a macro body, where syn cannot parse
-/// the statements.
-fn token_ended(body: TokenStream) -> Vec<String> {
+/// Statement indices in a macro body whose `let` name is used by value
+/// while that binding is still in scope. Semicolons inside braces stay
+/// with that block, matching `token_bindings`.
+fn token_ended(body: TokenStream) -> Vec<usize> {
+    let trees: Vec<TokenTree> = body.into_iter().collect();
+    let statements: Vec<&[TokenTree]> = trees.split(is_semi).collect();
     let mut ended = Vec::new();
-    token_ended_at(&body.into_iter().collect::<Vec<_>>(), &mut ended);
+    for (at, statement) in statements.iter().enumerate() {
+        let Some(name) = bound_simple(statement) else {
+            continue;
+        };
+        if rest_moves(&statements, at + 1, &name) {
+            ended.push(at);
+        }
+    }
     ended
 }
 
-fn token_ended_at(trees: &[TokenTree], ended: &mut Vec<String>) {
-    for (at, tree) in trees.iter().enumerate() {
-        if let TokenTree::Group(group) = tree {
-            token_ended_at(&group.stream().into_iter().collect::<Vec<_>>(), ended);
-        }
-        if let Some(name) = dropped_name(trees, at) {
-            ended.push(name);
-        }
-        if let Some(name) = moved_into_wild(trees, at) {
-            ended.push(name);
-        }
-    }
-}
-
-fn dropped_name(trees: &[TokenTree], at: usize) -> Option<String> {
-    let TokenTree::Ident(word) = &trees[at] else {
-        return None;
-    };
-    if word != "drop" {
-        return None;
-    }
-    let TokenTree::Group(args) = trees.get(at + 1)? else {
-        return None;
-    };
-    if args.delimiter() != Delimiter::Parenthesis {
-        return None;
-    }
-    let inner: Vec<TokenTree> = args.stream().into_iter().collect();
-    let [TokenTree::Ident(name)] = inner.as_slice() else {
-        return None;
-    };
-    Some(name.to_string())
-}
-
-fn moved_into_wild(trees: &[TokenTree], at: usize) -> Option<String> {
-    let TokenTree::Ident(keyword) = &trees[at] else {
+fn bound_simple(statement: &[TokenTree]) -> Option<String> {
+    let (TokenTree::Ident(keyword), rest) = statement.split_first()? else {
         return None;
     };
     if keyword != "let" {
         return None;
     }
-    let TokenTree::Ident(wild) = trees.get(at + 1)? else {
-        return None;
-    };
-    if wild != "_" {
-        return None;
+    let eq = rest.iter().position(is_eq)?;
+    simple_name(&rest[..eq])
+}
+
+fn simple_name(pattern: &[TokenTree]) -> Option<String> {
+    let mut index = 0;
+    while index < pattern.len() {
+        match &pattern[index] {
+            TokenTree::Ident(ident) if ident == "mut" || ident == "ref" => index += 1,
+            TokenTree::Ident(ident) => {
+                let typed = is_colon(pattern.get(index + 1)) && !is_colon(pattern.get(index + 2));
+                let alone = index + 1 == pattern.len();
+                let binding = matches!(
+                    pattern.get(index + 1),
+                    Some(TokenTree::Punct(punct)) if punct.as_char() == '@'
+                );
+                if typed || alone || binding {
+                    let name = ident.to_string();
+                    if name == "_" {
+                        return None;
+                    }
+                    return Some(name);
+                }
+                return None;
+            }
+            _ => return None,
+        }
     }
-    let TokenTree::Punct(eq) = trees.get(at + 2)? else {
-        return None;
-    };
-    if eq.as_char() != '=' {
-        return None;
+    None
+}
+
+fn rest_moves(statements: &[&[TokenTree]], from: usize, name: &str) -> bool {
+    let mut live = true;
+    for statement in &statements[from..] {
+        if live && statement_moves(statement, name) {
+            return true;
+        }
+        if statement_shadows(statement, name) {
+            live = false;
+        }
     }
-    let TokenTree::Ident(name) = trees.get(at + 3)? else {
-        return None;
+    false
+}
+
+fn statement_shadows(trees: &[TokenTree], name: &str) -> bool {
+    let Some(TokenTree::Ident(keyword)) = trees.first() else {
+        return false;
     };
-    if name == "_" {
-        return None;
+    if keyword != "let" {
+        return false;
     }
-    match trees.get(at + 4) {
-        Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Parenthesis => None,
-        Some(TokenTree::Punct(punct)) if punct.as_char() == '.' || punct.as_char() == ':' => None,
-        _ => Some(name.to_string()),
+    let Some(eq) = trees.iter().position(is_eq) else {
+        return false;
+    };
+    pattern_shadows(&trees[1..eq], name)
+}
+
+fn pattern_shadows(trees: &[TokenTree], name: &str) -> bool {
+    let mut index = 0;
+    while index < trees.len() {
+        match &trees[index] {
+            TokenTree::Ident(ident) if ident == "mut" || ident == "ref" => index += 1,
+            TokenTree::Ident(ident) => {
+                let leads_path = is_colon(trees.get(index + 1)) && is_colon(trees.get(index + 2));
+                let after_colon = index > 0 && is_colon(trees.get(index - 1));
+                if !leads_path && !after_colon && ident == name {
+                    return true;
+                }
+                index += 1;
+            }
+            TokenTree::Group(group) => {
+                let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+                if pattern_shadows(&inner, name) {
+                    return true;
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+fn statement_moves(trees: &[TokenTree], name: &str) -> bool {
+    walk_tokens(trees, name)
+}
+
+fn walk_tokens(trees: &[TokenTree], name: &str) -> bool {
+    for (index, tree) in trees.iter().enumerate() {
+        match tree {
+            TokenTree::Group(group) => {
+                let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+                let moved = if group.delimiter() == Delimiter::Brace {
+                    brace_moves(&inner, name)
+                } else if group_is_borrowed(trees, index) {
+                    moves_under_borrow(&inner, name)
+                } else {
+                    walk_tokens(&inner, name)
+                };
+                if moved {
+                    return true;
+                }
+            }
+            TokenTree::Ident(_) => {
+                if ident_moves(trees, index, name) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// `&(guard)` keeps the binding. The `&` is outside the parentheses, so
+/// the name inside is still a place, while `&(foo(guard))` is not.
+fn group_is_borrowed(trees: &[TokenTree], index: usize) -> bool {
+    if index == 0 {
+        return false;
+    }
+    match &trees[index - 1] {
+        TokenTree::Punct(punct) if punct.as_char() == '&' => true,
+        TokenTree::Ident(ident) if ident == "mut" || ident == "const" || ident == "raw" => {
+            let mut at = index;
+            while at > 0 {
+                at -= 1;
+                match &trees[at] {
+                    TokenTree::Ident(word) if word == "mut" || word == "const" || word == "raw" => {
+                    }
+                    TokenTree::Punct(punct) if punct.as_char() == '&' => return true,
+                    _ => return false,
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn moves_under_borrow(trees: &[TokenTree], name: &str) -> bool {
+    if let [TokenTree::Group(group)] = trees {
+        if group.delimiter() != Delimiter::Brace {
+            let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+            return moves_under_borrow(&inner, name);
+        }
+    }
+    walk_tokens(skip_place_head(trees), name)
+}
+
+fn skip_place_head(trees: &[TokenTree]) -> &[TokenTree] {
+    let Some(TokenTree::Ident(_)) = trees.first() else {
+        return trees;
+    };
+    let mut index = 0;
+    while index < trees.len() {
+        match &trees[index] {
+            TokenTree::Ident(_) => index += 1,
+            TokenTree::Punct(punct) if punct.as_char() == ':' => index += 1,
+            _ => break,
+        }
+    }
+    if matches!(&trees.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == '.') {
+        index += 1;
+        if matches!(trees.get(index), Some(TokenTree::Ident(_))) {
+            index += 1;
+        }
+    }
+    &trees[index..]
+}
+
+fn brace_moves(trees: &[TokenTree], name: &str) -> bool {
+    let mut live = true;
+    for statement in trees.split(is_semi) {
+        if live && statement_moves(statement, name) {
+            return true;
+        }
+        if statement_shadows(statement, name) {
+            live = false;
+        }
+    }
+    false
+}
+
+fn ident_moves(trees: &[TokenTree], index: usize, name: &str) -> bool {
+    let TokenTree::Ident(ident) = &trees[index] else {
+        return false;
+    };
+    ident == name && !next_keeps(trees, index) && !prev_keeps(trees, index)
+}
+
+fn next_keeps(trees: &[TokenTree], index: usize) -> bool {
+    match trees.get(index + 1) {
+        Some(TokenTree::Punct(punct)) => {
+            let ch = punct.as_char();
+            ch == '.' || ch == ':'
+        }
+        Some(TokenTree::Group(group)) => group.delimiter() == Delimiter::Bracket,
+        _ => false,
+    }
+}
+
+fn borrowed_keyword(trees: &[TokenTree], index: usize) -> bool {
+    let mut at = index;
+    while at > 0 {
+        at -= 1;
+        match &trees[at] {
+            TokenTree::Ident(ident) if ident == "mut" || ident == "const" || ident == "raw" => {}
+            TokenTree::Ident(ident) if ident == "let" || ident == "ref" => return true,
+            TokenTree::Punct(punct) if punct.as_char() == '&' => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn prev_keeps(trees: &[TokenTree], index: usize) -> bool {
+    if index == 0 {
+        return false;
+    }
+    match &trees[index - 1] {
+        TokenTree::Punct(punct) => {
+            let ch = punct.as_char();
+            ch == '.' || ch == ':' || ch == '&'
+        }
+        TokenTree::Ident(ident) if ident == "let" || ident == "ref" => true,
+        TokenTree::Ident(ident) if ident == "mut" || ident == "const" || ident == "raw" => {
+            borrowed_keyword(trees, index)
+        }
+        TokenTree::Ident(_) => false,
+        _ => false,
     }
 }
 
@@ -414,8 +893,6 @@ impl<'ast> Visit<'ast> for Tests {
         if item.attrs.iter().any(is_test_attr) {
             let mut calls = Calls::default();
             calls.visit_block(&item.block);
-            let mut ended = Ended::default();
-            ended.visit_block(&item.block);
             self.0.push(TestFn {
                 name: item.sig.ident.to_string(),
                 line: item.sig.ident.span().start().line,
@@ -429,7 +906,7 @@ impl<'ast> Visit<'ast> for Tests {
                         Some((at, name, path))
                     })
                     .collect(),
-                ended: ended.0,
+                ended: ended_bindings(&item.block.stmts),
                 calls: calls.0,
             });
         }
@@ -645,6 +1122,169 @@ fn a_dropped_guard_does_not_count() {
     assert_eq!(unguarded(&dropped, path, LIB_GUARDS), ["$name"]);
     let held_mac = shape("let guard = test_env_lock();");
     assert!(unguarded(&held_mac, path, LIB_GUARDS).is_empty());
+}
+
+fn cell(body: &str) -> String {
+    format!("macro_rules! cell {{ ($name:ident) => {{ #[test] fn $name() {{ {body} }} }}; }}")
+}
+
+#[test]
+fn a_wrapped_drop_does_not_count() {
+    let path = Path::new("probe.rs");
+    for body in [
+        "let guard = test_env_lock();\n    drop((guard));",
+        "let guard = test_env_lock();\n    let _ = (guard);",
+        "let guard = test_env_lock();\n    drop(((guard)));",
+        "let guard = test_env_lock();\n    std::mem::drop((guard));",
+        "let guard = test_env_lock();\n    drop({ guard });",
+        "let guard = test_env_lock();\n    let _ = { guard };",
+    ] {
+        assert_eq!(
+            unguarded(&probe(body), path, LIB_GUARDS),
+            ["probe"],
+            "{body}"
+        );
+    }
+    for body in [
+        "let guard = test_env_lock();\n    let _borrow = &guard;",
+        "let guard = test_env_lock();\n    let _borrow = &mut guard;",
+        "let guard = test_env_lock();\n    let _borrow = &(guard);",
+        "let guard = test_env_lock();\n    let _borrow = &((guard));",
+        "let guard = test_env_lock();\n    drop(&guard);",
+        "let guard = test_env_lock();\n    let _ = &guard;",
+        "let guard = test_env_lock();\n    guard.hold();",
+        "let guard = test_env_lock();\n    (guard).hold();",
+        "let guard = test_env_lock();\n    (&guard).hold();",
+    ] {
+        assert!(
+            unguarded(&probe(body), path, LIB_GUARDS).is_empty(),
+            "{body}"
+        );
+    }
+    for body in [
+        "let guard = test_env_lock(); drop((guard));",
+        "let guard = test_env_lock(); let _ = (guard);",
+    ] {
+        assert_eq!(
+            unguarded(&cell(body), path, LIB_GUARDS),
+            ["$name"],
+            "{body}"
+        );
+    }
+    for body in [
+        "let guard = test_env_lock(); let _borrow = &guard;",
+        "let guard = test_env_lock(); guard.hold();",
+        "let guard = test_env_lock(); let _ = &(guard);",
+    ] {
+        assert!(
+            unguarded(&cell(body), path, LIB_GUARDS).is_empty(),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn a_moved_guard_does_not_count() {
+    let path = Path::new("probe.rs");
+    for body in [
+        "let guard = test_env_lock();\n    let moved = guard;\n    drop(moved);",
+        "let guard = test_env_lock();\n    let moved = guard;",
+        "let guard = test_env_lock();\n    let moved = (guard);",
+        "let guard = test_env_lock();\n    { let moved = guard; }",
+        "let guard = test_env_lock();\n    let guard = guard;",
+    ] {
+        assert_eq!(
+            unguarded(&probe(body), path, LIB_GUARDS),
+            ["probe"],
+            "{body}"
+        );
+    }
+    for body in [
+        "let guard = test_env_lock();\n    let moved = &guard;",
+        "let guard = test_env_lock();\n    let moved = &(guard);",
+        "let guard = test_env_lock();\n    let guard = 1;",
+        "let guard = test_env_lock();\n    let guard = 1;\n    drop(guard);",
+    ] {
+        assert!(
+            unguarded(&probe(body), path, LIB_GUARDS).is_empty(),
+            "{body}"
+        );
+    }
+    let moved = cell("let guard = test_env_lock(); let moved = guard; drop(moved);");
+    assert_eq!(unguarded(&moved, path, LIB_GUARDS), ["$name"]);
+    let borrowed = cell("let guard = test_env_lock(); let moved = &guard;");
+    assert!(unguarded(&borrowed, path, LIB_GUARDS).is_empty());
+}
+
+#[test]
+fn a_guard_name_follows_scope() {
+    let path = Path::new("probe.rs");
+    for body in [
+        "let guard = test_env_lock();\n    { drop(guard); }",
+        "let guard = test_env_lock();\n    { let _ = (guard); }",
+        "let guard = test_env_lock();\n    { drop((guard)); }",
+        "let guard = test_env_lock();\n    { drop(guard);\n        let guard = 1; }",
+    ] {
+        assert_eq!(
+            unguarded(&probe(body), path, LIB_GUARDS),
+            ["probe"],
+            "{body}"
+        );
+    }
+    for body in [
+        "drop(guard);\n    let guard = test_env_lock();",
+        "let _ = (other);\n    let guard = test_env_lock();",
+        "let guard = test_env_lock();\n    { let guard = 1;\n        drop(guard); }",
+        "let guard = test_env_lock();\n    { let guard = 1;\n        let _ = (guard); }",
+        "let guard = test_env_lock();\n    { let guard = 1;\n        let moved = guard;\n        drop(moved); }",
+        "{ let guard = 1;\n        drop((guard)); }\n    let guard = test_env_lock();",
+        "{ drop(guard); }\n    let guard = test_env_lock();",
+    ] {
+        assert!(
+            unguarded(&probe(body), path, LIB_GUARDS).is_empty(),
+            "{body}"
+        );
+    }
+    for body in [
+        "let guard = test_env_lock(); { drop(guard); }",
+        "let guard = test_env_lock(); { drop((guard)); }",
+    ] {
+        assert_eq!(
+            unguarded(&cell(body), path, LIB_GUARDS),
+            ["$name"],
+            "{body}"
+        );
+    }
+    for body in [
+        "drop(guard); let guard = test_env_lock();",
+        "let guard = test_env_lock(); { let guard = 1; drop(guard); }",
+        "let guard = test_env_lock(); let guard = 1; drop(guard);",
+        "{ let guard = 1; drop((guard)); }; let guard = test_env_lock();",
+    ] {
+        assert!(
+            unguarded(&cell(body), path, LIB_GUARDS).is_empty(),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn path_leaf_unwraps_parens_groups_and_references() {
+    let paren: syn::Expr = syn::parse_str("(guard)").unwrap();
+    let nested: syn::Expr = syn::parse_str("((guard))").unwrap();
+    let reference: syn::Expr = syn::parse_str("&mut (guard)").unwrap();
+    let grouped = TokenTree::Group(proc_macro2::Group::new(
+        Delimiter::None,
+        "guard".parse().unwrap(),
+    ));
+    let group: syn::Expr = syn::parse2(std::iter::once(grouped).collect()).unwrap();
+    assert_eq!(path_leaf(&paren).as_deref(), Some("guard"));
+    assert_eq!(path_leaf(&nested).as_deref(), Some("guard"));
+    assert_eq!(path_leaf(&reference).as_deref(), Some("guard"));
+    assert_eq!(path_leaf(&group).as_deref(), Some("guard"));
+    assert!(hides_a_borrow(&reference));
+    assert!(value_name(&reference).is_none());
+    assert_eq!(value_name(&paren).as_deref(), Some("guard"));
 }
 
 #[test]
