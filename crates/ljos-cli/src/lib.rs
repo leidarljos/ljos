@@ -111,6 +111,7 @@ pub mod ask_pack;
 pub mod ballot_sig;
 pub mod book_queue;
 pub mod bookkeep;
+pub mod brief_rules;
 pub mod bulk_file;
 pub mod call_deadline;
 mod private_file;
@@ -48455,6 +48456,51 @@ fn sitting_limited_listing(client: &PacksetClient) -> Result<Vec<Value>> {
         .unwrap_or_default();
     atoms.truncate(SITTING_SEARCH_LIMIT);
     Ok(atoms)
+}
+
+#[cfg(test)]
+thread_local! {
+    static PLANTED_BRIEF_ATOMS: std::cell::RefCell<Option<Vec<Value>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn plant_brief_atoms(atoms: Option<Vec<Value>>) {
+    PLANTED_BRIEF_ATOMS.with(|slot| *slot.borrow_mut() = atoms);
+}
+
+/// Atoms the start recall would hand a search for the brief-rules lesson.
+///
+/// A sitting that already listed the pack contributes those rows. The kept
+/// listing and a bounded pack search for the lesson title are the same
+/// reads the sitting recall makes. A test may plant the atoms the recall
+/// would have returned.
+pub(crate) fn recall_brief_atoms() -> Vec<Value> {
+    #[cfg(test)]
+    if let Some(planted) = PLANTED_BRIEF_ATOMS.with(|slot| slot.borrow().clone()) {
+        return planted;
+    }
+    let mut atoms = Vec::new();
+    if let Some(listing) = sitting_listing() {
+        atoms.extend(listing.atoms.iter().cloned());
+    }
+    atoms.extend(local_store_rows().into_iter().filter_map(row_as_atom));
+    atoms.extend(pack_brief_atoms());
+    atoms
+}
+
+fn row_as_atom(row: Row) -> Option<Value> {
+    serde_json::to_value(row).ok()
+}
+
+fn pack_brief_atoms() -> Vec<Value> {
+    let Ok(client) = pack() else {
+        return Vec::new();
+    };
+    let _section = pack_link::PackSection::enter(SITTING_PACK_READ);
+    sitting_pack_read(&client, brief_rules::PHRASE)
+        .map(|(hits, _)| hits)
+        .unwrap_or_default()
 }
 
 impl Drop for SittingListingGuard {

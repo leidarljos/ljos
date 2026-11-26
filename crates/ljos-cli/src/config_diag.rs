@@ -387,6 +387,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_HANDOFF_DIR",
+        default: "unset; the brief rules print a placeholder",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_HARNESS_SESSION",
         default: "unset",
         group: "ljos",
