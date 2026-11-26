@@ -5916,21 +5916,22 @@ mod tests {
         );
     }
 
-    /// A seat one test announced is not the seat of the next test that
-    /// takes the process lock.
-    #[test]
-    fn an_announced_seat_ends_with_the_process_lock() {
-        let first = crate::process_lock();
-        let dir = tempfile::tempdir().unwrap();
-        let isolate = || unsafe {
-            std::env::set_var("HOME", dir.path());
-            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
-            std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
+    fn isolate(dir: &std::path::Path) {
+        unsafe {
+            std::env::set_var("HOME", dir);
+            std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
+            std::env::set_var("XDG_RUNTIME_DIR", dir.join("run"));
             std::env::remove_var("LJOS_SEAT");
             std::env::remove_var("VISSUE_AGENT");
             std::env::remove_var("LJOS_HOLD");
-        };
-        isolate();
+        }
+    }
+
+    /// Announces `saddle`, then drops that process lock so the seat ends.
+    fn announce_saddle_and_drop_the_lock() -> tempfile::TempDir {
+        let first = crate::process_lock();
+        let dir = tempfile::tempdir().unwrap();
+        isolate(dir.path());
         unsafe { std::env::set_var("LJOS_SEAT", "saddle") };
         reset_connected_client();
         note_connected_client(Some("Codex"));
@@ -5938,9 +5939,16 @@ mod tests {
         unsafe { std::env::remove_var("LJOS_SEAT") };
         assert_eq!(ljos_cli::seat_for_thread("announced").seat, "saddle");
         drop(first);
+        dir
+    }
 
+    /// A seat one test announced is not the seat of the next test that
+    /// takes the process lock.
+    #[test]
+    fn an_announced_seat_ends_with_the_process_lock() {
+        let dir = announce_saddle_and_drop_the_lock();
         let _process = crate::process_lock();
-        isolate();
+        isolate(dir.path());
         let seat = ljos_cli::seat_for_thread("after").seat;
         assert_ne!(seat, "saddle", "the last test's announcement survived");
     }

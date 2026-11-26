@@ -27,17 +27,22 @@ struct TestFn {
     name: String,
     line: usize,
     /// Each top-level `let NAME = path(..);` in the body: the statement's
-    /// index and the path called.
-    bindings: Vec<(usize, String)>,
+    /// index, the name and the path called. A guard counts only when that
+    /// name is still bound at the end of the body.
+    bindings: Vec<(usize, String, String)>,
+    /// Names ended by `drop(name)` or `let _ = name` before the body ends.
+    ended: Vec<String>,
     /// Every function, method and macro-argument call in the body.
     calls: Vec<String>,
 }
 
 impl TestFn {
     fn guarded(&self, guards: &[&str]) -> bool {
-        self.bindings
-            .iter()
-            .any(|(at, path)| *at < GUARD_WITHIN && names_any(path, guards))
+        self.bindings.iter().any(|(at, name, path)| {
+            *at < GUARD_WITHIN
+                && names_any(path, guards)
+                && !self.ended.iter().any(|ended| ended == name)
+        })
     }
 
     fn calls_any(&self, names: &[&str]) -> bool {
@@ -172,19 +177,14 @@ impl<'ast> Visit<'ast> for Calls {
     }
 }
 
-/// `let NAME = path(..);`. `let _ = guard()` and a bare `guard();` drop
-/// the guard on the same line, so neither holds anything.
-fn guard_binding(stmt: &syn::Stmt) -> Option<String> {
+/// `let NAME = path(..)` when `NAME` is a real binding. `let _ = path()`
+/// drops the value at once, so it is not a binding. A later `drop(NAME)`
+/// or `let _ = NAME` ends it, and a bare `path();` never binds it.
+fn guard_binding(stmt: &syn::Stmt) -> Option<(String, String)> {
     let syn::Stmt::Local(local) = stmt else {
         return None;
     };
-    let pat = match &local.pat {
-        syn::Pat::Type(typed) => &*typed.pat,
-        pat => pat,
-    };
-    let syn::Pat::Ident(_) = pat else {
-        return None;
-    };
+    let name = binding_name(&local.pat)?;
     let init = local.init.as_ref()?;
     if init.diverge.is_some() {
         return None;
@@ -195,12 +195,72 @@ fn guard_binding(stmt: &syn::Stmt) -> Option<String> {
     let syn::Expr::Path(func) = &*call.func else {
         return None;
     };
-    Some(path_name(&func.path))
+    Some((name, path_name(&func.path)))
+}
+
+fn binding_name(pat: &syn::Pat) -> Option<String> {
+    let pat = match pat {
+        syn::Pat::Type(typed) => &*typed.pat,
+        pat => pat,
+    };
+    let syn::Pat::Ident(ident) = pat else {
+        return None;
+    };
+    let name = ident.ident.to_string();
+    if name == "_" {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// One path segment, so `guard` matches and `guard.field` does not.
+fn path_leaf(expr: &syn::Expr) -> Option<String> {
+    let syn::Expr::Path(path) = expr else {
+        return None;
+    };
+    if path.qself.is_some() || path.path.segments.len() != 1 {
+        return None;
+    }
+    Some(path.path.segments[0].ident.to_string())
+}
+
+#[derive(Default)]
+struct Ended(Vec<String>);
+
+impl<'ast> Visit<'ast> for Ended {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(func) = &*call.func {
+            let drop_call = func
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "drop");
+            if drop_call && call.args.len() == 1 {
+                self.0.extend(call.args.first().and_then(path_leaf));
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        if matches!(local.pat, syn::Pat::Wild(_)) {
+            if let Some(name) = local
+                .init
+                .as_ref()
+                .filter(|init| init.diverge.is_none())
+                .and_then(|init| path_leaf(&init.expr))
+            {
+                self.0.push(name);
+            }
+        }
+        syn::visit::visit_local(self, local);
+    }
 }
 
 /// The same binding read from a macro body's tokens, where `$name` and
 /// other fragments keep syn from parsing a statement.
-fn token_bindings(body: TokenStream) -> Vec<(usize, String)> {
+fn token_bindings(body: TokenStream) -> Vec<(usize, String, String)> {
     let trees: Vec<TokenTree> = body.into_iter().collect();
     let statements = trees.split(|tree| matches!(tree, TokenTree::Punct(p) if p.as_char() == ';'));
     let mut out = Vec::new();
@@ -227,9 +287,83 @@ fn token_bindings(body: TokenStream) -> Vec<(usize, String)> {
             continue;
         }
         let path: String = path.iter().map(ToString::to_string).collect();
-        out.push((at, path));
+        out.push((at, name.to_string(), path));
     }
     out
+}
+
+/// `drop(name)` and `let _ = name` in a macro body, where syn cannot parse
+/// the statements.
+fn token_ended(body: TokenStream) -> Vec<String> {
+    let mut ended = Vec::new();
+    token_ended_at(&body.into_iter().collect::<Vec<_>>(), &mut ended);
+    ended
+}
+
+fn token_ended_at(trees: &[TokenTree], ended: &mut Vec<String>) {
+    for (at, tree) in trees.iter().enumerate() {
+        if let TokenTree::Group(group) = tree {
+            token_ended_at(&group.stream().into_iter().collect::<Vec<_>>(), ended);
+        }
+        if let Some(name) = dropped_name(trees, at) {
+            ended.push(name);
+        }
+        if let Some(name) = moved_into_wild(trees, at) {
+            ended.push(name);
+        }
+    }
+}
+
+fn dropped_name(trees: &[TokenTree], at: usize) -> Option<String> {
+    let TokenTree::Ident(word) = &trees[at] else {
+        return None;
+    };
+    if word != "drop" {
+        return None;
+    }
+    let TokenTree::Group(args) = trees.get(at + 1)? else {
+        return None;
+    };
+    if args.delimiter() != Delimiter::Parenthesis {
+        return None;
+    }
+    let inner: Vec<TokenTree> = args.stream().into_iter().collect();
+    let [TokenTree::Ident(name)] = inner.as_slice() else {
+        return None;
+    };
+    Some(name.to_string())
+}
+
+fn moved_into_wild(trees: &[TokenTree], at: usize) -> Option<String> {
+    let TokenTree::Ident(keyword) = &trees[at] else {
+        return None;
+    };
+    if keyword != "let" {
+        return None;
+    }
+    let TokenTree::Ident(wild) = trees.get(at + 1)? else {
+        return None;
+    };
+    if wild != "_" {
+        return None;
+    }
+    let TokenTree::Punct(eq) = trees.get(at + 2)? else {
+        return None;
+    };
+    if eq.as_char() != '=' {
+        return None;
+    }
+    let TokenTree::Ident(name) = trees.get(at + 3)? else {
+        return None;
+    };
+    if name == "_" {
+        return None;
+    }
+    match trees.get(at + 4) {
+        Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Parenthesis => None,
+        Some(TokenTree::Punct(punct)) if punct.as_char() == '.' || punct.as_char() == ':' => None,
+        _ => Some(name.to_string()),
+    }
 }
 
 fn macro_tests(tokens: TokenStream, out: &mut Vec<TestFn>) {
@@ -259,12 +393,14 @@ fn macro_tests(tokens: TokenStream, out: &mut Vec<TestFn>) {
             .take_while(|tree| !matches!(tree, TokenTree::Group(_)))
             .map(ToString::to_string)
             .collect();
+        let stream = body.stream();
         let mut calls = Vec::new();
-        token_calls(body.stream(), &mut calls);
+        token_calls(stream.clone(), &mut calls);
         out.push(TestFn {
             name,
             line: trees[at].span().start().line,
-            bindings: token_bindings(body.stream()),
+            bindings: token_bindings(stream.clone()),
+            ended: token_ended(stream),
             calls,
         });
     }
@@ -278,6 +414,8 @@ impl<'ast> Visit<'ast> for Tests {
         if item.attrs.iter().any(is_test_attr) {
             let mut calls = Calls::default();
             calls.visit_block(&item.block);
+            let mut ended = Ended::default();
+            ended.visit_block(&item.block);
             self.0.push(TestFn {
                 name: item.sig.ident.to_string(),
                 line: item.sig.ident.span().start().line,
@@ -286,8 +424,12 @@ impl<'ast> Visit<'ast> for Tests {
                     .stmts
                     .iter()
                     .enumerate()
-                    .filter_map(|(at, stmt)| Some((at, guard_binding(stmt)?)))
+                    .filter_map(|(at, stmt)| {
+                        let (name, path) = guard_binding(stmt)?;
+                        Some((at, name, path))
+                    })
                     .collect(),
+                ended: ended.0,
                 calls: calls.0,
             });
         }
@@ -477,6 +619,32 @@ fn a_comment_string_or_other_name_is_not_a_guard() {
     assert!(unguarded(&early, path, LIB_GUARDS).is_empty());
     let late = probe("let a = 1;\n    let b = 2;\n    let _g = env_guard();");
     assert_eq!(unguarded(&late, path, LIB_GUARDS), ["probe"]);
+}
+
+#[test]
+fn a_dropped_guard_does_not_count() {
+    let path = Path::new("probe.rs");
+    for body in [
+        "let guard = test_env_lock();\n    drop(guard);",
+        "let guard = crate::test_env_lock();\n    std::mem::drop(guard);",
+        "let guard = test_env_lock();\n    let _ = guard;",
+        "let _ = test_env_lock();",
+    ] {
+        assert_eq!(
+            unguarded(&probe(body), path, LIB_GUARDS),
+            ["probe"],
+            "{body}"
+        );
+    }
+    let held = probe("let guard = test_env_lock();");
+    assert!(unguarded(&held, path, LIB_GUARDS).is_empty(), "{held}");
+    let shape = |body: &str| {
+        format!("macro_rules! cell {{ ($name:ident) => {{ #[test] fn $name() {{ {body} }} }}; }}")
+    };
+    let dropped = shape("let guard = test_env_lock(); drop(guard);");
+    assert_eq!(unguarded(&dropped, path, LIB_GUARDS), ["$name"]);
+    let held_mac = shape("let guard = test_env_lock();");
+    assert!(unguarded(&held_mac, path, LIB_GUARDS).is_empty());
 }
 
 #[test]
