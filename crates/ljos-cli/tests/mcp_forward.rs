@@ -115,22 +115,49 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text
         .write(true)
         .open(&program)
         .unwrap();
+    let watched = program.clone();
     let releaser = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        drop(held);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if std::time::Instant::now() > deadline {
+                drop(held);
+                return;
+            }
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "starts a program outside git hook code"
+            )]
+            let spawned = std::process::Command::new(&watched).spawn();
+            match spawned {
+                Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    drop(held);
+                    return;
+                }
+                Ok(mut child) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                Err(_) => {}
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     });
-    let started = std::time::Instant::now();
-    let answer = ljos_cli::mcp_forward(
-        &program,
-        "TEST_FORWARDED",
-        None,
-        serde_json::json!({"name": "ping", "arguments": {}}),
-    )
-    .unwrap();
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(3),
-        "the retry did not finish"
-    );
+    let called = program.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let answer = ljos_cli::mcp_forward(
+            &called,
+            "TEST_FORWARDED",
+            None,
+            serde_json::json!({"name": "ping", "arguments": {}}),
+        );
+        let _ = tx.send(answer);
+    });
+    let answer = rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("the forward did not finish")
+        .unwrap();
     assert!(answer.to_string().contains("busy-ok"), "{answer}");
     releaser.join().unwrap();
+    worker.join().unwrap();
 }
