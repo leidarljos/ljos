@@ -5,6 +5,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
+# Org and rst pages name this crate's version. A stale meta description,
+# including one left inside a cog argument, fails before the export.
+python3 docs/scripts/finish_export.py --check-versions
+
 required="${CHECK_DOCS_EXPORT_REQUIRED:-0}"
 missing=()
 command -v pandoc >/dev/null 2>&1 || missing+=(pandoc)
@@ -65,7 +69,7 @@ trap cleanup EXIT
 
 git -C "$ROOT" worktree add --detach "$wt" HEAD >/dev/null
 git -C "$ROOT" worktree add --detach "$base_wt" "$compare_base" >/dev/null
-PYTHONPATH=docs/scripts python3 -m unittest docs/scripts/test_check_export_sync.py docs/scripts/test_gen_samples.py
+PYTHONPATH=docs/scripts python3 -m unittest docs/scripts/test_check_export_sync.py docs/scripts/test_finish_export.py docs/scripts/test_gen_samples.py
 cd "$wt"
 
 export PYTHONDONTWRITEBYTECODE=1
