@@ -9,7 +9,7 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -321,18 +321,19 @@ fn a_search_that_stays_cold_says_the_rows_were_ranked_by_words() {
     assert!(!stderr.contains(ljos_cli::FUSED_RANK_LINE), "{said}");
 }
 
-/// A cold encoder that stays cold, or becomes warm `delay` after the first
-/// search. `remaining_ms` is the load time the cold status reports.
-fn slow_pack(delay: Duration, stay_cold: bool, remaining_ms: Option<u64>) -> Pack {
+/// A cold encoder that stays cold, or becomes warm on status read
+/// `warm_on` (the first read is 1). `None` stays cold. `remaining_ms`
+/// is the load time the cold status reports.
+fn slow_pack(warm_on: Option<usize>, remaining_ms: Option<u64>) -> Pack {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let searches = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&searches);
-    let first_search = Arc::new(Mutex::new(None::<Instant>));
+    let statuses = Arc::new(AtomicUsize::new(0));
     thread::spawn(move || {
         for conn in listener.incoming().flatten() {
             let count = Arc::clone(&count);
-            let first_search = Arc::clone(&first_search);
+            let statuses = Arc::clone(&statuses);
             thread::spawn(move || {
                 let mut sock = conn;
                 let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
@@ -357,9 +358,6 @@ fn slow_pack(delay: Duration, stay_cold: bool, remaining_ms: Option<u64>) -> Pac
                 }
                 let seen = count.load(Ordering::SeqCst);
                 let (status, body) = if path == "/v1/search" {
-                    if seen == 0 {
-                        *first_search.lock().unwrap() = Some(Instant::now());
-                    }
                     count.fetch_add(1, Ordering::SeqCst);
                     let body = if seen == 0 {
                         r#"{"hits":[{"id":"other","kind":"lesson","text":"a ferry timetable for the docks","score":0.2,"entities":["seat:other"]}],"rank":"fused"}"#
@@ -368,8 +366,8 @@ fn slow_pack(delay: Duration, stay_cold: bool, remaining_ms: Option<u64>) -> Pac
                     };
                     (200, body.to_string())
                 } else if path == "/v1/status" {
-                    let age = first_search.lock().unwrap().map(|at| at.elapsed());
-                    let warm = !stay_cold && age.is_some_and(|age| age >= delay);
+                    let seen = statuses.fetch_add(1, Ordering::SeqCst) + 1;
+                    let warm = warm_on.is_some_and(|at| seen >= at);
                     if warm {
                         (
                             200,
@@ -450,7 +448,7 @@ fn a_slow_encoder_is_waited_for_and_the_search_is_semantic() {
     let state = root.path().join("state");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&state).unwrap();
-    let pack = slow_pack(Duration::from_millis(400), false, None);
+    let pack = slow_pack(Some(3), None);
     let started = Instant::now();
     let out = search_waited(&pack, &home, &state, "2", false);
     let elapsed = started.elapsed();
@@ -484,7 +482,7 @@ fn a_search_past_the_wait_says_to_rerun_and_names_the_ranking() {
     let state = root.path().join("state");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&state).unwrap();
-    let pack = slow_pack(Duration::from_secs(30), true, Some(4000));
+    let pack = slow_pack(None, Some(4_000));
     let started = Instant::now();
     let out = search_waited(&pack, &home, &state, "1", false);
     let elapsed = started.elapsed();
