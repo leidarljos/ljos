@@ -1091,6 +1091,9 @@ fn path_in(text: &str) -> bool {
             .checked_sub(1)
             .map(|at| words[at].to_lowercase())
             .unwrap_or_default();
+        if !word_can_hold_path(word) {
+            continue;
+        }
         for candidate in candidates(word) {
             if path_candidate(candidate, &before) {
                 return true;
@@ -1098,6 +1101,14 @@ fn path_in(text: &str) -> bool {
         }
     }
     false
+}
+
+/// A path is made of `/`, `\`, `~`, `$` or `%`.
+/// A colon-separated fingerprint has none of those. Cutting a suffix at
+/// every colon and reading each one is quadratic in that run, and none of
+/// those suffixes can be a path either.
+fn word_can_hold_path(word: &str) -> bool {
+    word.contains(['/', '\\', '~', '$', '%'])
 }
 
 fn lead_trim(text: &str) -> &str {
@@ -1474,9 +1485,16 @@ fn shapes_hit(chars: &[char]) -> bool {
         }
         let token = &chars[from..index];
         for at in 0..token.len() {
-            if (at == 0 || matches!(token[at - 1], '_' | '-' | '.'))
-                && shape_at(&token[at..].iter().collect::<String>())
-            {
+            if at != 0 && !matches!(token[at - 1], '_' | '-' | '.') {
+                continue;
+            }
+            // Every shape opens with a letter. A digit after each dot, as in
+            // `1.1.1.1`, cannot be one, and copying that whole suffix at
+            // every dot is quadratic in the run.
+            if !token[at].is_ascii_alphabetic() {
+                continue;
+            }
+            if shape_at(&token[at..].iter().collect::<String>()) {
                 return true;
             }
         }

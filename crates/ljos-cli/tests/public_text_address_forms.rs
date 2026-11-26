@@ -202,16 +202,50 @@ fn every_non_public_literal_is_refused_whatever_surrounds_it() {
     );
 }
 
+/// User time of this process. A loaded core changes wall time and leaves
+/// this alone, so a linear scan is compared here rather than to a wall cap.
+fn user_cpu() -> std::time::Duration {
+    let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    assert_eq!(rc, 0, "getrusage");
+    let secs = u64::try_from(usage.ru_utime.tv_sec).unwrap_or(0);
+    let micros = u64::try_from(usage.ru_utime.tv_usec).unwrap_or(0);
+    std::time::Duration::from_secs(secs) + std::time::Duration::from_micros(micros)
+}
+
+/// `long` is the same shape as `short` and about `long.len() / short.len()`
+/// times as long. Both must classify as `None`. User time may grow with
+/// that ratio, with slack, and a many-second wall cap only catches a hang.
+fn assert_linear_scan(short: &str, long: &str) {
+    let scale = long.len() as f64 / short.len() as f64;
+    let wall = std::time::Instant::now();
+    let before = user_cpu();
+    assert_eq!(classify(short, &Screen::default()), None);
+    let short_cpu = user_cpu().saturating_sub(before);
+    let before = user_cpu();
+    assert_eq!(classify(long, &Screen::default()), None);
+    let long_cpu = user_cpu().saturating_sub(before);
+    assert!(
+        wall.elapsed() < std::time::Duration::from_secs(30),
+        "the scan hung after {:?}",
+        wall.elapsed()
+    );
+    if long_cpu <= std::time::Duration::from_millis(20) {
+        return;
+    }
+    let base = short_cpu.max(std::time::Duration::from_millis(5));
+    let limit = base.mul_f64(scale * 1.75);
+    assert!(
+        long_cpu <= limit,
+        "user cpu {long_cpu:?} on {} bytes is past {limit:?}, scaled from {short_cpu:?} on {} bytes",
+        long.len(),
+        short.len()
+    );
+}
+
 #[test]
 fn the_ipv4_scan_is_linear_on_alphanumeric_runs() {
-    let text = "a1".repeat(5_000);
-    let started = std::time::Instant::now();
-    assert_eq!(classify(&text, &Screen::default()), None);
-    assert!(
-        started.elapsed() < std::time::Duration::from_millis(500),
-        "the IPv4 scan took {:?}",
-        started.elapsed()
-    );
+    assert_linear_scan(&"a1".repeat(1_250), &"a1".repeat(5_000));
 }
 
 const KEPT: &[&str] = &[
@@ -391,18 +425,13 @@ fn every_four_parts_of_a_dotted_run_are_read_as_inet_aton_reads_them() {
 
 #[test]
 fn a_long_colon_hex_run_is_read_in_linear_time() {
-    let fingerprint = (0..6_800)
-        .map(|i| format!("{:02x}", i % 256))
-        .collect::<Vec<_>>()
-        .join(":");
-    for text in [fingerprint, "ab:".repeat(6_800), "1.".repeat(10_000)] {
-        let started = std::time::Instant::now();
-        assert_eq!(classify(&text, &Screen::default()), None);
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(3),
-            "a {}-character run took {:?}",
-            text.len(),
-            started.elapsed()
-        );
-    }
+    let colon = |groups: usize| {
+        (0..groups)
+            .map(|i| format!("{:02x}", i % 256))
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    assert_linear_scan(&colon(1_700), &colon(6_800));
+    assert_linear_scan(&"ab:".repeat(1_700), &"ab:".repeat(6_800));
+    assert_linear_scan(&"1.".repeat(2_500), &"1.".repeat(10_000));
 }
