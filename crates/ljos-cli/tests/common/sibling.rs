@@ -264,35 +264,27 @@ mod tests {
     }
 
     #[test]
-    fn a_different_version_fails_with_one_line() {
-        let dir = tempfile::tempdir().unwrap();
-        stand_in(dir.path(), "vissue", "#!/bin/sh\necho 'vissue 0.20.0'\n");
-        let err = require_on(dir.path().as_os_str(), "vissue").unwrap_err();
-        let want = pin("vissue").unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(
-            err,
-            format!(
-                "{} {} is not on PATH (found vissue 0.20.0)",
-                want.name, want.version
-            )
-        );
-        assert_eq!(err.lines().count(), 1, "{err}");
-    }
-
-    #[test]
     fn a_binary_that_prints_no_version_fails_with_one_line() {
-        let dir = tempfile::tempdir().unwrap();
-        stand_in(dir.path(), "claimdag", "#!/bin/sh\nexit 1\n");
-        let err = require_on(dir.path().as_os_str(), "claimdag").unwrap_err();
-        let want = pin("claimdag").unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(
-            err,
-            format!(
-                "{} {} is not on PATH (found no version)",
-                want.name, want.version
-            )
-        );
-        assert_eq!(err.lines().count(), 1, "{err}");
+        let rows = [
+            (
+                "vissue",
+                "#!/bin/sh\necho 'vissue 0.20.0'\n",
+                "found vissue 0.20.0",
+            ),
+            ("claimdag", "#!/bin/sh\nexit 1\n", "found no version"),
+        ];
+        for (name, body, found) in rows {
+            let dir = tempfile::tempdir().unwrap();
+            stand_in(dir.path(), name, body);
+            let err = require_on(dir.path().as_os_str(), name).unwrap_err();
+            let want = pin(name).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(
+                err,
+                format!("{} {} is not on PATH ({found})", want.name, want.version),
+                "{name}"
+            );
+            assert_eq!(err.lines().count(), 1, "{err}");
+        }
     }
 
     #[test]
