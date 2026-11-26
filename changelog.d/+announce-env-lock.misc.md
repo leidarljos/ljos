@@ -1,1 +1,1 @@
-A test that announces a seat without the process-state write guard now fails in debug builds.
+A debug build now fails a test that announces a seat without the process-state lock.

@@ -60992,12 +60992,13 @@ mod tests {
         assert!(marker.exists(), "{}", marker.display());
     }
 
-    #[test]
-    fn a_seat_dir_waits_out_a_home_another_test_set() {
+    /// Two seat directories. The second is made while another thread has
+    /// `HOME` set to the first, and the reader is let go so that thread
+    /// can take the writer.
+    fn seat_dir_raced_against_another_home() -> (SeatDir, SeatDir) {
         let env_read = crate::test_env_read_lock();
         let other = SeatDir::new("other-home");
         let home = other.path().to_path_buf();
-        // The holder takes the writer, which waits for every reader.
         drop(env_read);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
@@ -61012,6 +61013,13 @@ mod tests {
         ready_rx.recv().unwrap();
         let mine = SeatDir::new("waits-out");
         holder.join().unwrap();
+        (other, mine)
+    }
+
+    #[test]
+    fn a_seat_dir_waits_out_a_home_another_test_set() {
+        let (other, mine) = seat_dir_raced_against_another_home();
+        let _env_read = crate::test_env_read_lock();
         assert!(
             !mine.path().starts_with(other.path()),
             "{} is inside {}",

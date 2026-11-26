@@ -1,1 +1,2 @@
-Tests now share one process-state guard, bound network and fixture waits, and use a signalled rerank fixture, so parallel runs cannot exchange environment, cwd, temporary paths, or outlive their isolation.
+Parallel runs no longer exchange the process environment, working directory or temporary paths between tests.
+A test no longer outlives the fixture it waits on, and a network wait in a test stays bounded.
