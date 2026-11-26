@@ -60358,6 +60358,12 @@ pub(crate) fn strip_guard_bin(cmd: &mut std::process::Command) {
 
 /// A git child with the guard directory off its search list, which never
 /// waits on a terminal for a credential.
+///
+/// `core.fsmonitor` is false and `maintenance.auto` is false. On macOS
+/// the fsmonitor daemon keeps the child's stdout open after git exits,
+/// and it can sit forever waiting on its own client, so the wait never
+/// returns. A detached auto-maintenance process can hold that same pipe.
+/// A later `-c` still wins. Stdin is closed so a helper cannot wait here.
 pub(crate) fn git_cmd() -> std::process::Command {
     #[expect(
         clippy::disallowed_methods,
@@ -60366,6 +60372,8 @@ pub(crate) fn git_cmd() -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
     strip_guard_bin(&mut cmd);
     no_git_prompt(&mut cmd);
+    cmd.args(["-c", "core.fsmonitor=false", "-c", "maintenance.auto=false"]);
+    cmd.stdin(std::process::Stdio::null());
     cmd
 }
 

@@ -74,7 +74,7 @@ fn git_verb(args: &[impl AsRef<str>]) -> &str {
     let mut index = 0;
     while index < args.len() {
         match arg(args, index) {
-            "-C" | "--git-dir" | "--work-tree" | "--namespace" => index += 2,
+            "-C" | "--git-dir" | "--work-tree" | "--namespace" | "-c" => index += 2,
             word if word.starts_with('-') => index += 1,
             word => return word,
         }
@@ -184,6 +184,26 @@ mod tests {
         let secs = Duration::from_secs(60);
         assert_eq!(
             stall_line("git", &["-C", "/tmp/x", "commit", "-m", "n"], secs),
+            "git did not answer in 60s; the commit was not written, so run it again"
+        );
+        assert_eq!(
+            stall_line(
+                "git",
+                &[
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    "maintenance.auto=false",
+                    "-C",
+                    "/tmp/x",
+                    "-c",
+                    "gc.auto=0",
+                    "commit",
+                    "-m",
+                    "n",
+                ],
+                secs,
+            ),
             "git did not answer in 60s; the commit was not written, so run it again"
         );
         assert_eq!(
