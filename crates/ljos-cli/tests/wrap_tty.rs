@@ -191,25 +191,23 @@ fn ready_on_a_tty_at_28_cols_wraps_once_without_overflow() {
 }
 
 #[test]
-fn ready_json_on_a_tty_stays_valid_json() {
-    let board = Board::open(
-        "This is a deliberately long title to verify JSON stays valid on a narrow terminal",
-    );
-    let shown = pty_output(board.command(&["ready", "--json"], 40), 10);
-    let parsed: serde_json::Value =
-        serde_json::from_str(shown.trim()).unwrap_or_else(|err| panic!("{err}: {shown}"));
-    assert!(parsed["rows"].is_array(), "{shown}");
-}
-
-#[test]
 fn list_json_on_a_tty_stays_valid_json() {
-    let board = Board::open(
-        "This is a deliberately long title to verify list JSON stays valid on a narrow terminal",
-    );
-    let shown = pty_output(board.command(&["list", "--json"], 40), 10);
-    let parsed: serde_json::Value =
-        serde_json::from_str(shown.trim()).unwrap_or_else(|err| panic!("{err}: {shown}"));
-    assert!(parsed["rows"].is_array(), "{shown}");
+    for (verb, title) in [
+        (
+            "ready",
+            "This is a deliberately long title to verify JSON stays valid on a narrow terminal",
+        ),
+        (
+            "list",
+            "This is a deliberately long title to verify list JSON stays valid on a narrow terminal",
+        ),
+    ] {
+        let board = Board::open(title);
+        let shown = pty_output(board.command(&[verb, "--json"], 40), 10);
+        let parsed: serde_json::Value =
+            serde_json::from_str(shown.trim()).unwrap_or_else(|err| panic!("{verb} {err}: {shown}"));
+        assert!(parsed["rows"].is_array(), "{verb}: {shown}");
+    }
 }
 
 #[test]
