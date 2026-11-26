@@ -1,1 +1,0 @@
-`ljos claim` with no id reads a claim refusal from the top error again, and reads the whole error chain only for the node-creation collision, so a deeper cause that mentions a claimed status stops the claim instead of passing the ticket over.

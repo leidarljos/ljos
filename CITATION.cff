@@ -8,6 +8,6 @@ authors:
 license: MIT
 repository-code: https://github.com/leidarljos/ljos
 # [[[cog import ljos_version as v; v.lines('version: "{version}"')]]]
-version: "0.45.4"
+version: "0.46.0"
 # [[[end]]]
-date-released: 2026-11-24
+date-released: 2026-11-26
