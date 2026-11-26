@@ -960,41 +960,6 @@ fn required_installer_shells_are_not_skipped() {
 }
 
 #[test]
-fn a_newline_in_bin_dir_is_refused_before_installing() {
-    let dir = tempfile::tempdir().unwrap();
-    let progs = dir.path().join("progs");
-    let bin = dir.path().join("line\nbreak");
-    std::fs::create_dir_all(&progs).unwrap();
-    for name in PROGRAMS {
-        script(&progs, name, "#!/bin/sh\nexit 0\n");
-    }
-
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "starts a program outside git hook code"
-    )]
-    let out = Command::new("sh")
-        .arg(install_sh())
-        .arg("--from-dir")
-        .arg(&progs)
-        .arg("--bin-dir")
-        .arg(&bin)
-        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
-        .env_clear()
-        .env("HOME", dir.path().join("home"))
-        .env("PATH", "/usr/bin:/bin")
-        .output()
-        .unwrap();
-    let text = said(&out);
-    assert!(!out.status.success(), "{text}");
-    assert_eq!(
-        text, "install.sh: bin directory contains a newline\n",
-        "{text}"
-    );
-    assert!(!bin.exists(), "{text}");
-}
-
-#[test]
 fn a_missing_home_is_created_before_it_is_resolved() {
     let dir = tempfile::tempdir().unwrap();
     let progs = dir.path().join("progs");
@@ -1125,60 +1090,6 @@ fn a_symlinked_tmpdir_keeps_temporary_home_memory_off() {
         !text.contains("Setting up the ticket tracker, memory writer, and deed store."),
         "{text}"
     );
-}
-
-#[test]
-fn a_colon_in_a_path_entry_is_refused_before_installing() {
-    let dir = tempfile::tempdir().unwrap();
-    let progs = dir.path().join("progs");
-    std::fs::create_dir_all(&progs).unwrap();
-    for name in PROGRAMS {
-        script(&progs, name, "#!/bin/sh\nexit 0\n");
-    }
-
-    for (case, home, bin) in [
-        (
-            "bin directory",
-            dir.path().join("home"),
-            Some(dir.path().join("bin:split")),
-        ),
-        ("HOME", dir.path().join("home:split"), None),
-    ] {
-        std::fs::create_dir_all(&home).unwrap();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "starts a program outside git hook code"
-        )]
-        let mut install = Command::new("sh");
-        install
-            .arg(install_sh())
-            .arg("--from-dir")
-            .arg(&progs)
-            .args(["--no-embed", "--no-onboard", "--no-modify-path"]);
-        if let Some(path) = &bin {
-            install.arg("--bin-dir").arg(path);
-        }
-        let out = install
-            .env_clear()
-            .env("HOME", &home)
-            .env("PATH", "/usr/bin:/bin")
-            .output()
-            .unwrap();
-        let text = said(&out);
-        assert!(!out.status.success(), "{case}:\n{text}");
-        let extra = if case == "HOME" {
-            ". Pass --bin-dir DIR to install outside HOME."
-        } else {
-            ""
-        };
-        assert_eq!(
-            text,
-            format!("install.sh: {case} contains ':'{extra}\n"),
-            "{case}:\n{text}"
-        );
-        let path = bin.unwrap_or_else(|| home.join(".local/bin"));
-        assert!(!path.exists(), "{case} was installed:\n{text}");
-    }
 }
 
 #[test]
@@ -1364,71 +1275,71 @@ fn a_blank_packset_port_hides_ljos_mem_port_under_a_temporary_home() {
 }
 
 #[test]
-fn an_empty_bin_dir_is_refused_before_installing() {
-    let dir = tempfile::tempdir().unwrap();
-    let progs = dir.path().join("progs");
-    let work = dir.path().join("work");
-    std::fs::create_dir_all(&progs).unwrap();
-    std::fs::create_dir_all(&work).unwrap();
-    for name in PROGRAMS {
-        script(&progs, name, "#!/bin/sh\nexit 0\n");
-    }
-
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "starts a program outside git hook code"
-    )]
-    let out = Command::new("sh")
-        .arg(install_sh())
-        .arg("--from-dir")
-        .arg(&progs)
-        .arg("--bin-dir")
-        .arg("")
-        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
-        .current_dir(&work)
-        .env_clear()
-        .env("HOME", dir.path().join("home"))
-        .env("PATH", "/usr/bin:/bin")
-        .output()
-        .unwrap();
-    let text = said(&out);
-    assert!(!out.status.success(), "{text}");
-    assert_eq!(text, "install.sh: bin directory is empty\n", "{text}");
-    for name in PROGRAMS {
-        assert!(!work.join(name).exists(), "{name} was installed:\n{text}");
-    }
-}
-
-#[test]
 fn a_blank_bin_dir_is_refused_before_installing() {
     let dir = tempfile::tempdir().unwrap();
     let progs = dir.path().join("progs");
     let work = dir.path().join("work");
+    let home = dir.path().join("home");
+    let colon_home = dir.path().join("home:split");
     std::fs::create_dir_all(&progs).unwrap();
     std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&colon_home).unwrap();
     for name in PROGRAMS {
         script(&progs, name, "#!/bin/sh\nexit 0\n");
     }
 
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "starts a program outside git hook code"
-    )]
-    let out = Command::new("sh")
-        .arg(install_sh())
-        .arg("--from-dir")
-        .arg(&progs)
-        .arg("--bin-dir")
-        .arg(" ")
-        .args(["--no-embed", "--no-onboard", "--no-modify-path"])
-        .current_dir(&work)
-        .env_clear()
-        .env("HOME", dir.path().join("home"))
-        .env("PATH", "/usr/bin:/bin")
-        .output()
-        .unwrap();
-    let text = said(&out);
-    assert!(!out.status.success(), "{text}");
+    let run = |home: &std::path::Path, bin: Option<&std::path::Path>| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        let mut install = Command::new("sh");
+        install
+            .arg(install_sh())
+            .arg("--from-dir")
+            .arg(&progs)
+            .args(["--no-embed", "--no-onboard", "--no-modify-path"])
+            .current_dir(&work)
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", "/usr/bin:/bin");
+        if let Some(path) = bin {
+            install.arg("--bin-dir").arg(path);
+        }
+        let out = install.output().unwrap();
+        let text = said(&out);
+        assert!(!out.status.success(), "{text}");
+        text
+    };
+
+    let newline = dir.path().join("line\nbreak");
+    let text = run(&home, Some(newline.as_path()));
+    assert_eq!(
+        text, "install.sh: bin directory contains a newline\n",
+        "{text}"
+    );
+    assert!(!newline.exists(), "{text}");
+
+    let colon = dir.path().join("bin:split");
+    let text = run(&home, Some(colon.as_path()));
+    assert_eq!(text, "install.sh: bin directory contains ':'\n", "{text}");
+    assert!(!colon.exists(), "{text}");
+
+    let text = run(&colon_home, None);
+    assert_eq!(
+        text, "install.sh: HOME contains ':'. Pass --bin-dir DIR to install outside HOME.\n",
+        "{text}"
+    );
+    assert!(!colon_home.join(".local/bin").exists(), "{text}");
+
+    let text = run(&home, Some(std::path::Path::new("")));
+    assert_eq!(text, "install.sh: bin directory is empty\n", "{text}");
+    for name in PROGRAMS {
+        assert!(!work.join(name).exists(), "{name} was installed:\n{text}");
+    }
+
+    let text = run(&home, Some(std::path::Path::new(" ")));
     assert_eq!(text, "install.sh: bin directory is blank\n", "{text}");
     assert!(!work.join(" ").exists(), "{text}");
 }
