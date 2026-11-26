@@ -10,7 +10,8 @@
 #![cfg(target_os = "linux")]
 
 ljos_test_boot::harness!();
-use std::io::Write;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,33 @@ mod seat_root;
 /// Each tracker call of the shim sleeps this long, standing in for a
 /// tracker large enough that reading it takes a while.
 const TRACKER_READ: &str = "0.15";
+
+/// `RssAnon` + `RssShmem` while a burst call sleeps with stdin still open.
+/// Above a hook that has only its own pages, and below an 8 MB buffer held
+/// from the start of `main`.
+const HOOK_ANON_AT_STDIN_KB: u64 = 4 * 1024;
+
+/// Anonymous resident kilobytes a call may add after that read.
+/// A multi-megabyte buffer kept in the call is over it.
+const HOOK_ANON_GROWTH_KB: u64 = 1024;
+
+/// Two baseline reads within this many kilobytes are the same set.
+/// A short `/proc` read can disagree with the next by a page or two.
+const ANON_BASELINE_SLACK_KB: u64 = 16;
+
+/// A baseline under this has not finished loading. A hook blocked on
+/// stdin holds more.
+const ANON_BASELINE_FLOOR_KB: u64 = 512;
+
+/// How long the watcher reads `/proc` without pausing after it closes
+/// stdin, when the watcher and the child are on different CPUs.
+/// A fill that is freed at once stays resident for less than a
+/// millisecond, so a paused reader misses it.
+const ANON_SPIN_MS: u64 = 3;
+
+const ANON_DIED: &str = "exited before stdin was closed";
+const ANON_NEVER: &str = "never blocked reading stdin";
+const ANON_UNSETTLED: &str = "anonymous resident memory at the stdin read never settled";
 
 const VISSUE: &str = r#"#!/usr/bin/env python3
 import os, sys, time, pathlib, fcntl
@@ -227,37 +255,246 @@ fn feed(mut cmd: Command, payload: &str) -> std::process::Child {
     child
 }
 
-/// The child, and its largest `RssAnon` in KB. The kernel keeps no peak for
-/// anonymous memory, so this is the largest value seen at one sample per
-/// millisecond.
-fn feed_measured(
-    mut cmd: Command,
-    payload: &str,
-) -> (std::process::Child, std::thread::JoinHandle<u64>) {
-    let mut child = cmd.spawn().unwrap();
-    let pid = child.id();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(payload.as_bytes())
-        .unwrap();
-    let peak = std::thread::spawn(move || {
-        let path = format!("/proc/{pid}/status");
-        let mut peak = 0;
-        while let Ok(status) = std::fs::read_to_string(&path) {
-            if let Some(kb) = status.lines().find_map(|line| {
-                line.strip_prefix("RssAnon:")
-                    .and_then(|value| value.split_whitespace().next())
-                    .and_then(|value| value.parse::<u64>().ok())
-            }) {
-                peak = peak.max(kb);
+/// `RssAnon` + `RssShmem` at the stdin read, the peak from there through
+/// exit, and how many readings saw the live child after stdin was closed.
+struct AnonReading {
+    baseline_kb: u64,
+    peak_kb: u64,
+    live_after_stdin: u32,
+}
+
+fn reread(file: &mut File, buf: &mut String) -> bool {
+    buf.clear();
+    file.seek(SeekFrom::Start(0)).is_ok() && file.read_to_string(buf).is_ok_and(|n| n > 0)
+}
+
+fn field_kb(text: &str, key: &str) -> Option<u64> {
+    text.lines()
+        .find_map(|line| line.strip_prefix(key))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Resident anonymous pages. File-backed pages are not in the sum, so the
+/// executable's own code does not move it.
+fn anon_resident_kb(status: &str) -> Option<u64> {
+    Some(field_kb(status, "RssAnon:")?.saturating_add(field_kb(status, "RssShmem:")?))
+}
+
+fn proc_state(status: &str) -> Option<char> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("State:"))?
+        .trim_start()
+        .chars()
+        .next()
+}
+
+/// `None` when the process is gone, a zombie, or has no anonymous fields.
+fn live_anon(file: &mut File, buf: &mut String) -> Option<u64> {
+    if !reread(file, buf) || matches!(proc_state(buf), Some('Z' | 'X')) {
+        return None;
+    }
+    anon_resident_kb(buf)
+}
+
+fn note_live(peak: &mut u64, live: &mut u32, kb: Option<u64>) -> bool {
+    let Some(kb) = kb else {
+        return false;
+    };
+    *live += 1;
+    *peak = (*peak).max(kb);
+    true
+}
+
+/// Puts the affinity masks back to the values read before the split.
+struct CpuSplit {
+    child: libc::pid_t,
+    child_mask: libc::cpu_set_t,
+    self_mask: libc::cpu_set_t,
+}
+
+impl Drop for CpuSplit {
+    fn drop(&mut self) {
+        // A child that has already exited makes the kernel refuse the write.
+        let _ = write_affinity(self.child, &self.child_mask);
+        let _ = write_affinity(0, &self.self_mask);
+    }
+}
+
+fn empty_set() -> libc::cpu_set_t {
+    // SAFETY: `cpu_set_t` is a plain bitset. All zeros is an empty mask.
+    unsafe { std::mem::zeroed() }
+}
+
+fn cpus_of(set: &libc::cpu_set_t) -> Vec<usize> {
+    let width = usize::try_from(libc::CPU_SETSIZE).unwrap_or(0);
+    let mut found = Vec::new();
+    for cpu in 0..width {
+        // SAFETY: `cpu` is below `CPU_SETSIZE`, so it names a bit in `set`.
+        if unsafe { libc::CPU_ISSET(cpu, set) } {
+            found.push(cpu);
+        }
+    }
+    found
+}
+
+fn mask_of(cpus: &[usize]) -> libc::cpu_set_t {
+    let mut set = empty_set();
+    for cpu in cpus {
+        // SAFETY: `cpu` was read from a mask, so it is below `CPU_SETSIZE`.
+        unsafe { libc::CPU_SET(*cpu, &mut set) };
+    }
+    set
+}
+
+fn read_affinity(pid: libc::pid_t) -> Option<libc::cpu_set_t> {
+    let mut mask = empty_set();
+    let size = std::mem::size_of::<libc::cpu_set_t>();
+    // SAFETY: `mask` is a writable `cpu_set_t` and `size` is its length.
+    // `pid` is the hook, or 0 for this thread.
+    let ok = unsafe { libc::sched_getaffinity(pid, size, &mut mask) == 0 };
+    ok.then_some(mask)
+}
+
+fn write_affinity(pid: libc::pid_t, mask: &libc::cpu_set_t) -> bool {
+    let size = std::mem::size_of::<libc::cpu_set_t>();
+    // SAFETY: `mask` points at a filled `cpu_set_t`. `pid` is the hook, or
+    // 0 for this thread. The kernel copies the mask before it returns.
+    unsafe { libc::sched_setaffinity(pid, size, mask) == 0 }
+}
+
+/// Split the CPUs both masks already allow into two non-empty lists.
+/// `None` when those masks share fewer than two CPUs.
+fn pin_sets(child_cpus: &[usize], self_cpus: &[usize]) -> Option<(Vec<usize>, Vec<usize>)> {
+    let mut shared: Vec<usize> = child_cpus
+        .iter()
+        .copied()
+        .filter(|cpu| self_cpus.contains(cpu))
+        .collect();
+    if shared.len() < 2 {
+        return None;
+    }
+    let mid = shared.len() / 2;
+    let rest = shared.split_off(mid);
+    Some((shared, rest))
+}
+
+fn separate_cpus(child: u32) -> Option<CpuSplit> {
+    let child_pid = libc::pid_t::try_from(child).ok()?;
+    let child_mask = read_affinity(child_pid)?;
+    let self_mask = read_affinity(0)?;
+    let (child_cpus, self_cpus) = pin_sets(&cpus_of(&child_mask), &cpus_of(&self_mask))?;
+    let child_pin = mask_of(&child_cpus);
+    let self_pin = mask_of(&self_cpus);
+    if !write_affinity(child_pid, &child_pin) || !write_affinity(0, &self_pin) {
+        let _ = write_affinity(child_pid, &child_mask);
+        let _ = write_affinity(0, &self_mask);
+        return None;
+    }
+    Some(CpuSplit {
+        child: child_pid,
+        child_mask,
+        self_mask,
+    })
+}
+
+/// Read `pid` until it sleeps with stdin open, close stdin from this
+/// thread, and keep reading until the process exits.
+///
+/// The write follows a baseline, so this thread is already running when
+/// the child is released. A child that exits first has no live reading.
+/// Each reading is `RssAnon` + `RssShmem` at that instant. `/proc` keeps
+/// no anonymous peak, so a fill counts only while a read still sees it.
+/// The stretch with no pause is that window, and only when this thread
+/// and the child are on different CPUs.
+fn watch_anon(
+    pid: u32,
+    mut stdin: std::process::ChildStdin,
+    payload: String,
+) -> Result<AnonReading, &'static str> {
+    let mut status = File::open(format!("/proc/{pid}/status")).map_err(|_| ANON_DIED)?;
+    let mut buf = String::new();
+    let started = Instant::now();
+    let mut prev: Option<u64> = None;
+    let mut settling = false;
+    let baseline = loop {
+        if started.elapsed() > Duration::from_secs(10) {
+            return Err(if settling { ANON_UNSETTLED } else { ANON_NEVER });
+        }
+        if !reread(&mut status, &mut buf) {
+            return Err(ANON_DIED);
+        }
+        let state = proc_state(&buf);
+        if matches!(state, Some('Z' | 'X')) {
+            return Err(ANON_DIED);
+        }
+        // Stdin is still open, so a sleep is that read. The wait-channel
+        // file is not read: since Linux 6.15 the name is `anon_pipe_read`,
+        // and a kernel that hides the name writes `0`.
+        if state != Some('S') {
+            prev = None;
+            settling = false;
+            // Yield, do not sleep. A sleep here is charged to the hook's
+            // admission clock once the child is already in the read, and
+            // under load that sleep runs long.
+            std::thread::yield_now();
+            continue;
+        }
+        settling = true;
+        let Some(kb) = anon_resident_kb(&buf) else {
+            prev = None;
+            std::thread::yield_now();
+            continue;
+        };
+        if kb < ANON_BASELINE_FLOOR_KB {
+            prev = None;
+            std::thread::yield_now();
+            continue;
+        }
+        if let Some(earlier) = prev {
+            if kb.abs_diff(earlier) <= ANON_BASELINE_SLACK_KB {
+                break kb.max(earlier);
             }
+            // The two reads disagreed. Give the child the CPU and try once more.
+            prev = Some(kb);
+            std::thread::yield_now();
+        } else {
+            // Second read in this same turn, so a stretched sleep cannot
+            // split the pair.
+            prev = Some(kb);
+        }
+    };
+    let pin = separate_cpus(pid);
+    if stdin.write_all(payload.as_bytes()).is_err() {
+        return Err(ANON_DIED);
+    }
+    drop(stdin);
+    let mut peak = baseline;
+    let mut live = 0u32;
+    let mut dead = false;
+    if let Some(pin) = pin {
+        let until = Instant::now() + Duration::from_millis(ANON_SPIN_MS);
+        while Instant::now() < until {
+            if !note_live(&mut peak, &mut live, live_anon(&mut status, &mut buf)) {
+                dead = true;
+                break;
+            }
+        }
+        drop(pin);
+    }
+    if !dead {
+        while note_live(&mut peak, &mut live, live_anon(&mut status, &mut buf)) {
             std::thread::sleep(Duration::from_millis(1));
         }
-        peak
-    });
-    (child, peak)
+    }
+    Ok(AnonReading {
+        baseline_kb: baseline,
+        peak_kb: peak,
+        live_after_stdin: live,
+    })
 }
 
 /// The child's output, or a panic naming `what` when it runs past `limit`.
@@ -363,10 +600,18 @@ fn wait_for(path: &Path) {
 /// within 200 ms once it holds a slot, and within the admission budget
 /// end to end; how many run at once is the server's slot count, which
 /// follows the box's cores.
+///
+/// Anonymous resident memory at the stdin read stays under 4 MB, and the
+/// call adds under 1 MB after that. The figure is `RssAnon` plus
+/// `RssShmem`. File-backed pages, including the debug executable, stay
+/// out of it. A 9 MB `RssAnon` peak taken after stdin was written passed
+/// a multi-megabyte buffer the hook kept, and a call that exited first
+/// recorded 0.
 #[test]
-fn twenty_calls_at_once_each_answer_inside_200_ms_and_9_mb_anonymous() {
-    if !Path::new("/proc/self/status").is_file() {
-        eprintln!("skipped: /proc/self/status is not available");
+fn twenty_calls_at_once_each_answer_inside_200_ms_and_anon_cap() {
+    let self_status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    if !self_status.contains("RssAnon:") || !self_status.contains("RssShmem:") {
+        eprintln!("skipped: /proc/self/status has no RssAnon and RssShmem");
         return;
     }
     let hab = hab("twenty");
@@ -378,6 +623,9 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_9_mb_anonymous() {
     assert!(warm.status.success());
     wait_for(&hab.run.join("ljos/hookd.sock"));
     drain(&hab);
+    // Each watcher closes its own stdin once that call is blocked, so one
+    // call is not charged for polling the other nineteen. The wait sits in
+    // the admission clock, which starts before the read.
     let calls: Vec<_> = (0..20)
         .map(|i| {
             let payload = if i % 2 == 0 {
@@ -386,16 +634,23 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_9_mb_anonymous() {
                 cursor_shell(&hab, &format!("burst-{i}"), "ls -la")
             };
             let started = Instant::now();
-            let (child, peak) = feed_measured(ljos(&hab, &["hook"]), &payload);
-            (i, started, child, peak)
+            let mut child = ljos(&hab, &["hook"]).spawn().unwrap();
+            let pid = child.id();
+            let stdin = child.stdin.take().unwrap();
+            let watch = std::thread::spawn(move || watch_anon(pid, stdin, payload));
+            (i, started, child, watch)
         })
         .collect();
     let mut rows = Vec::new();
-    for (i, started, child, peak) in calls {
+    for (i, started, child, watch) in calls {
         let out = within(child, Duration::from_secs(10), "a burst call");
         let took = started.elapsed();
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let reading = watch
+            .join()
+            .expect("anon watcher panicked")
+            .unwrap_or_else(|err| panic!("call {i} {err}\nstdout:\n{stdout}\nstderr:\n{stderr}"));
         assert!(out.status.success(), "call {i}: {stdout}\n{stderr}");
         assert!(!stdout.contains("deny"), "call {i} was refused: {stdout}");
         if i % 2 == 1 {
@@ -404,27 +659,49 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_9_mb_anonymous() {
                 "call {i}: {stdout}"
             );
         }
-        rows.push((i, took, peak.join().unwrap()));
+        rows.push((i, took, reading));
     }
     let report: Vec<String> = rows
         .iter()
-        .map(|(i, took, kb)| format!("call {i}: {} ms, {kb} KB anonymous", took.as_millis()))
+        .map(|(i, took, reading)| {
+            format!(
+                "call {i}: {} ms, anon {} KB at stdin, peak {} KB, grew {} KB, {} readings after stdin",
+                took.as_millis(),
+                reading.baseline_kb,
+                reading.peak_kb,
+                reading.peak_kb.saturating_sub(reading.baseline_kb),
+                reading.live_after_stdin,
+            )
+        })
         .collect();
     eprintln!("{}", report.join("\n"));
-    for (i, took, kb) in &rows {
+    for (i, took, reading) in &rows {
         assert!(
             *took < Duration::from_millis(ljos_cli::hookd::ADMIT_MS),
             "call {i} took {took:?}, past the admission budget:\n{}",
             report.join("\n")
         );
-        // Anonymous memory only: file-backed text pages in a debug build
-        // follow code layout and fault-around, not what the hook allocates.
-        // Four times the hook's 2.1 MB, rounded up to a whole MB.
-        let room = 9 * 1024;
-        assert!(*kb < room, "call {i} peaked at {kb} KB anonymous");
+        assert!(
+            reading.live_after_stdin >= 1,
+            "call {i} had no reading of the live child after stdin closed:\n{}",
+            report.join("\n")
+        );
+        assert!(
+            reading.baseline_kb < HOOK_ANON_AT_STDIN_KB,
+            "call {i} held {} KB anonymous at stdin, past {HOOK_ANON_AT_STDIN_KB}:\n{}",
+            reading.baseline_kb,
+            report.join("\n")
+        );
+        let grew = reading.peak_kb.saturating_sub(reading.baseline_kb);
+        assert!(
+            grew < HOOK_ANON_GROWTH_KB,
+            "call {i} anonymous resident memory grew {grew} KB after stdin, past {HOOK_ANON_GROWTH_KB}:\n{}",
+            report.join("\n")
+        );
     }
     let times = std::fs::read_to_string(hab.run.join("ljos/hook-times.log")).unwrap();
     let mut answered = 0;
+    let mut work_max = 0u64;
     for line in times.lines() {
         let words: Vec<&str> = line.split(' ').collect();
         if words.len() != 4 || words[0] != "hook" {
@@ -432,13 +709,15 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_9_mb_anonymous() {
         }
         let took: u64 = words[2].parse().unwrap();
         let waited: u64 = words[3].parse().unwrap();
+        let work = took.saturating_sub(waited);
         assert!(
-            took.saturating_sub(waited) < 200,
-            "a call answered in {} ms past its {waited} ms slot wait:\n{times}",
-            took.saturating_sub(waited)
+            work < 200,
+            "a call answered in {work} ms past its {waited} ms slot wait:\n{times}"
         );
+        work_max = work_max.max(work);
         answered += 1;
     }
+    eprintln!("queue work max {work_max} ms over {answered} hook lines");
     assert!(
         answered >= 21,
         "{answered} hook timing lines for 21 calls:\n{times}"
