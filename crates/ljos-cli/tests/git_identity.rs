@@ -186,16 +186,47 @@ fn doctor_says_nothing_of_git_identity_when_git_has_one() {
     );
 }
 
+/// A tracker commit drops the identity the environment exports, so the
+/// row does not count one either: it warns as it would with none.
 #[test]
-fn an_identity_from_the_environment_is_one() {
+fn an_identity_only_in_the_environment_is_not_one() {
+    let exports: [&[(&str, &str)]; 2] = [
+        &[
+            ("GIT_AUTHOR_NAME", "Ada Example"),
+            ("GIT_AUTHOR_EMAIL", "ada@example.com"),
+            ("GIT_COMMITTER_NAME", "Ada Example"),
+            ("GIT_COMMITTER_EMAIL", "ada@example.com"),
+        ],
+        &[(
+            "GIT_CONFIG_PARAMETERS",
+            "'user.name'='Ada Example' 'user.email=ada@example.com'",
+        )],
+    ];
+    for export in exports {
+        let seat = Seat::new();
+        let mut cmd = seat.command(None);
+        cmd.args(["doctor", "--all"]);
+        for (key, value) in export {
+            cmd.env(key, value);
+        }
+        let text = said(&cmd.output().unwrap());
+        let line =
+            row(&text, "git identity").unwrap_or_else(|| panic!("no git identity row:\n{text}"));
+        assert!(line.starts_with("warn\t"), "{export:?}: {line}");
+        assert!(line.contains(NAME_COMMAND), "{line}");
+    }
+}
+
+/// An identity in git config is one, whatever the environment exports.
+#[test]
+fn an_identity_in_git_config_is_one_whatever_the_environment_says() {
     let seat = Seat::new();
+    let identity = "[user]\n\tname = Ada Example\n\temail = ada@example.com\n";
     let out = seat
-        .command(None)
+        .command(Some(identity))
         .args(["doctor", "--all"])
-        .env("GIT_AUTHOR_NAME", "Ada Example")
-        .env("GIT_AUTHOR_EMAIL", "ada@example.com")
-        .env("GIT_COMMITTER_NAME", "Ada Example")
-        .env("GIT_COMMITTER_EMAIL", "ada@example.com")
+        .env("GIT_AUTHOR_NAME", "Other")
+        .env("GIT_CONFIG_PARAMETERS", "'user.name=Other'")
         .output()
         .unwrap();
     let text = said(&out);

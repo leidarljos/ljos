@@ -62,6 +62,13 @@ jobs:
           python -m pip install --disable-pip-version-check -q 'towncrier==26.9.0'
           version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           towncrier build --draft --version "$version"
+      # A patch cannot carry a feature or a removal, and one change is
+      # one entry. See CONTRIBUTING.md, Changelog entries.
+      - name: Changelog matches the version bump
+        run: |
+          set -euo pipefail
+          python3 scripts/changelog-check.py --selftest
+          python3 scripts/changelog-check.py
   # install.sh's archive names against the names the release workflow
   # publishes, then an install from a local directory of those archives,
   # for every target the release builds.
@@ -123,10 +130,14 @@ jobs:
       # The identity gate tests start a one-shot runner under zsh -c.
       # The hook queue test reads each call's peak RSS from GNU time.
       # Installer tests run the printed fish lines, including quotes and backslashes.
+      # The handbook and workflow render tests run org-lint in emacs-nox, which ships Org.
       - name: Use a reachable Ubuntu mirror
         run: sudo timeout -k 5 90 bash .github/scripts/apt-mirror.sh
-      - name: Install age, tmux, notmuch and time
-        run: sudo apt-get install -y --no-install-recommends age tmux notmuch time zsh shellcheck fish
+      - name: Install age, tmux, notmuch, time and Emacs
+        run: |
+          set -eu
+          sudo apt-get install -y --no-install-recommends age tmux notmuch time zsh shellcheck fish emacs-nox
+          emacs --batch -Q --eval "(progn (require 'org) (require 'ob-dot) (message \"org %s\" org-version))"
       # vissue, claimdag and deedar are named in .github/sibling-pin.
       # packset, phronesis and ljos-policyd are named in
       # scripts/sibling-tools.sh. The script builds each pin, checks the
@@ -157,7 +168,7 @@ jobs:
       # the next commit here runs hooks from a temp home that is gone.
       # Without --no-fail-fast one failing lib test stopped cargo before
       # any tests/*.rs ran (run 41565021207).
-      # A missing age-keygen, packsetd or vissue skips unless this is set,
+      # A missing age-keygen, emacs, packsetd or vissue skips unless this is set,
       # so this job cannot pass a test that did not run.
       - name: Workspace tests
         env:
@@ -166,6 +177,13 @@ jobs:
           set -euo pipefail
           git config --local --list > "${{ runner.temp }}/git-config-before"
           cargo test --workspace --no-fail-fast
+          # .gitignore hides seat state a test leaves in a crate, so git
+          # status would not show it.
+          stray=$(find crates -mindepth 2 -maxdepth 2 -name ljos)
+          if [ -n "$stray" ]; then
+            printf 'a test left seat state in a crate:\n%s\n' "$stray" >&2
+            exit 1
+          fi
           git config --local --list > "${{ runner.temp }}/git-config-after"
           diff -u "${{ runner.temp }}/git-config-before" "${{ runner.temp }}/git-config-after"
       - name: MCP tool list size
@@ -243,13 +261,19 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # The sync, rules and push tests seal with age, as on the Linux job.
       # Installer tests run the printed fish lines, including quotes and backslashes.
-      - name: age
+      # The handbook unit test runs org-lint in Emacs, which ships Org.
+      # Homebrew's Emacs carries a newer Org than emacs-nox on the Linux job.
+      - name: age, fish and Emacs
         run: |
           set -eu
-          brew install age fish
+          brew install age fish emacs
           command -v age-keygen
           command -v fish
+          emacs --batch -Q --eval "(progn (require 'org) (require 'ob-dot) (message \"org %s\" org-version))"
+      # A missing emacs fails the handbook unit test instead of skipping it.
       - name: Unit tests
+        env:
+          LJOS_TEST_REQUIRE_TOOLS: "1"
         run: cargo test --locked --workspace --lib --no-fail-fast
 
   # release.yml already builds on macos-latest. This job runs the

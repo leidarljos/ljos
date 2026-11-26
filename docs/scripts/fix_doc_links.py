@@ -7,9 +7,11 @@ import re
 import sys
 from pathlib import Path
 
-# Pandoc anonymous links: `label <foo.org>`__  and single `_` form.
+# Pandoc anonymous links on one line: `label <foo.org>`__ and the single `_` form.
+# The label and the target stay on that line. A heredoc `<<'TOML'` is not a
+# link, and a match must not run from a code span into a later `.org`.
 _LINK = re.compile(
-    r"`([^`<]+)\s+<((?![a-z][a-z0-9+.-]*:)[^>]+?\.(?:rst|org))>`__?"
+    r"(?<!<)`([^`<\n]+)\s+<((?![a-z][a-z0-9+.-]*:)[^>\s]+?\.(?:rst|org))>`__?"
 )
 
 

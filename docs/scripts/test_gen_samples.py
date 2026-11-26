@@ -2,7 +2,7 @@
 
 import unittest
 
-from gen_samples import unwrap_breaks
+from gen_samples import listening_port, unwrap_breaks
 
 
 class UnwrapBreaksTests(unittest.TestCase):
@@ -22,6 +22,21 @@ class UnwrapBreaksTests(unittest.TestCase):
     def test_spaces_inside_a_line_stay(self) -> None:
         self.assertNotEqual(unwrap_breaks("a  b"), "a b")
         self.assertNotEqual(unwrap_breaks("a\t\nb"), "a b")
+
+
+class ListeningPortTests(unittest.TestCase):
+    def test_a_line_cut_before_or_inside_the_port_is_not_read_yet(self) -> None:
+        for partial in (
+            "writer: listening on http://",
+            "writer: listening on http://127.0.0.1",
+            "writer: listening on http://127.0.0.1:",
+            "writer: listening on http://127.0.0.1:87",
+        ):
+            self.assertIsNone(listening_port(partial), partial)
+
+    def test_a_whole_host_and_port_is_read(self) -> None:
+        self.assertEqual(listening_port("writer: listening on http://127.0.0.1:8765\n"), 8765)
+        self.assertEqual(listening_port("listening on http://localhost:41234/ (ctrl-c)"), 41234)
 
 
 if __name__ == "__main__":

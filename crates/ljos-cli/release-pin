@@ -13,6 +13,12 @@
 # sidecar, and the tests need that commit's output, so the install stays
 # on the release behind it.
 # Move a line here only together with its line in sibling-pin.
+# This file is the source. Two copies of the list follow it:
+# crates/ljos-cli/release-pin is the whole file, comments included, because
+# the published crate embeds it and cannot reach .github/. The fallback list
+# in scripts/install.sh, the `for item in` line in apply_release_pins, is for
+# a download that does not sit next to this tree. Change all three together.
+# scripts/release-install-check.sh fails when a copy differs.
 vissue 0.25.0
 claimdag 0.8.0
 deedar 0.4.0

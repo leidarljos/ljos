@@ -67,6 +67,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "memory",
             "memories",
             "export",
+            "handbook",
             "accept",
             "forget",
             "proposals",

@@ -77,7 +77,21 @@ impl Seat {
         }
     }
 
+    fn add_project(&self, project: &str, issues: &str) {
+        let dir = self.root.join("tracker/Software").join(project);
+        std::fs::create_dir_all(&dir).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        std::fs::write(dir.join("issues.org"), issues).unwrap();
+    }
+
     fn search(&self, args: &[&str]) -> Output {
+        self.search_with(args, &[])
+    }
+
+    fn search_with(&self, args: &[&str], extra: &[(&str, &str)]) -> Output {
         let home = self.root.join("home");
         #[expect(
             clippy::disallowed_methods,
@@ -106,6 +120,7 @@ impl Seat {
             .env("NO_COLOR", "1")
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
+            .envs(extra.iter().copied())
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap_or_else(|err| panic!("ljos {}: {err}", args.join(" ")));
@@ -439,4 +454,91 @@ fn a_single_common_word_does_not_return_the_ticket() {
     assert!(stdout.contains("Software-kiln"), "{said}");
     assert!(!stdout.contains("Software-mail"), "{said}");
     assert!(!stdout.contains("Software-docs"), "{said}");
+}
+
+fn tracker_file(project: &str, rows: &[(&str, &str)]) -> String {
+    let mut org = format!(
+        "#+TITLE: {project} issues\n#+VISSUE: 1\n#+CATEGORY: {project}\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n"
+    );
+    for (id, title) in rows {
+        org.push_str(&format!(
+            "\n* TODO [#B] {title}\n:PROPERTIES:\n:ID:         {id}\n:END:\n"
+        ));
+    }
+    org
+}
+
+/// `ljos search "LTO metatensor link"` on seat amsel-paper, word ranked
+/// while the encoder was not answering, printed nine other repos' tickets
+/// that share one word with the query. The seat's project comes first, and
+/// the other repos' one-word matches come after it.
+#[test]
+fn word_ranked_tickets_prefer_the_seats_project() {
+    let seat = Seat::open_with(
+        false,
+        &tracker_file(
+            "Software",
+            &[
+                ("Software-link", "Fix the broken link in the docs"),
+                ("Software-ltob", "LTO for release builds"),
+                ("Software-chck", "Link checker timeout"),
+            ],
+        ),
+    );
+    seat.add_project(
+        "media",
+        &tracker_file(
+            "media",
+            &[
+                ("media-tape", "LTO tape backup"),
+                ("media-prev", "Link previews in the gallery"),
+            ],
+        ),
+    );
+    seat.add_project(
+        "amsel-paper",
+        &tracker_file(
+            "amsel-paper",
+            &[
+                ("amsel-paper-lto", "Link metatensor with LTO"),
+                ("amsel-paper-figs", "Metatensor figures need the link step"),
+            ],
+        ),
+    );
+    let query = "LTO metatensor link";
+    let out = seat.search_with(
+        &["search", query, "-n", "12"],
+        &[("LJOS_PROJECT", "amsel-paper")],
+    );
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("These are word matches"),
+        "the search was not word ranked:\n{said}"
+    );
+    let at = |id: &str| stdout.find(&format!("ticket {id}"));
+    let own = ["amsel-paper-lto", "amsel-paper-figs"]
+        .map(|id| at(id).unwrap_or_else(|| panic!("{id} is missing:\n{said}")));
+    let others: Vec<usize> = [
+        "Software-link",
+        "Software-ltob",
+        "Software-chck",
+        "media-tape",
+        "media-prev",
+    ]
+    .into_iter()
+    .filter_map(at)
+    .collect();
+    assert!(
+        !others.is_empty(),
+        "no other project's ticket printed:\n{said}"
+    );
+    assert!(
+        others
+            .iter()
+            .all(|other| own.iter().all(|mine| mine < other)),
+        "another project's ticket came before the seat's project:\n{said}"
+    );
 }

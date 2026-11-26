@@ -334,7 +334,7 @@ pub struct HabitAtom {
     pub atom: AtomFields,
 }
 
-/// The reading a new one closed.
+/// The previous reading a new one supersedes.
 #[derive(Serialize, JsonSchema)]
 pub struct HabitWas {
     pub value: f64,
@@ -346,9 +346,10 @@ pub struct HabitWas {
     pub id: Option<String>,
 }
 
-/// What `ljos_habit` returns. With a value: `reading`, and `was` when an
-/// earlier reading was closed. Without one: `value`, the habits as they
-/// stand.
+/// What `ljos_habit` returns. With a value: `reading`, and `was` when a
+/// new reading supersedes the previous one (output `NAME: was X (age),
+/// now Y` / `NAME: first reading, Y`). Without one: `value`, the habits
+/// as they stand.
 #[derive(Serialize, JsonSchema)]
 pub struct HabitOut {
     #[serde(skip_serializing_if = "Option::is_none")]

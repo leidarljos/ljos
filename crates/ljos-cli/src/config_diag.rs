@@ -387,6 +387,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_HANDOFF_DIR",
+        default: "unset; the brief rules print a placeholder",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_HARNESS_SESSION",
         default: "unset",
         group: "ljos",
@@ -889,6 +894,11 @@ const VARS: &[Var] = &[
     Var {
         name: "LJOS_WAKE_SEAT",
         default: "unset",
+        group: "ljos",
+    },
+    Var {
+        name: "LJOS_WORKFLOW_LOCK_WAIT",
+        default: "30",
         group: "ljos",
     },
     Var {
@@ -1446,7 +1456,7 @@ fn report(cwd: Option<&Path>) -> Report {
     for layer in &files {
         parse_file(layer, &mut warnings, &mut found);
     }
-    for (key, value) in std::env::vars() {
+    for (key, value) in crate::env_vars() {
         if !key.starts_with("LJOS_") || known_var(&key) {
             continue;
         }

@@ -8,6 +8,9 @@
 //! the tracker, the memory writer and the deed store, which is `ljos
 //! onboard` when no coding tool is installed. That command runs in the
 //! skipped line's place. Every other command is the one the page prints.
+//! The version check doctor makes asks a crates.io stand-in on the seat's
+//! `PATH`, so no step reads the public network. The check that the registry
+//! did not answer replaces that stand-in with a curl that fails for crates.io.
 
 #![allow(
     clippy::disallowed_macros,
@@ -18,6 +21,8 @@ ljos_test_boot::harness!();
 
 #[path = "common/pty.rs"]
 mod pty;
+#[path = "common/registry.rs"]
+mod registry;
 #[path = "common/tools.rs"]
 mod tools;
 
@@ -82,6 +87,11 @@ struct Seat {
 }
 
 impl Seat {
+    /// The seat's `~/.local/bin`, first on its `PATH`.
+    fn bin(&self) -> PathBuf {
+        self.root.join("home/.local/bin")
+    }
+
     fn open() -> Self {
         let base = seat_base().unwrap_or_else(|line| panic!("{line}"));
         let root = tempfile::Builder::new()
@@ -108,6 +118,7 @@ impl Seat {
         }
         ljos_cli::change_mode(root.join("run"), 0o700).unwrap();
         link_programs(&bin);
+        registry::stand_in(&bin, Duration::ZERO);
         let port = free_port();
         let mut env = BTreeMap::new();
         env.insert("HOME".into(), home.display().to_string());
@@ -294,6 +305,70 @@ fn link_programs(bin: &Path) {
             let _ = symlink(&path, bin.join(name));
         }
     }
+}
+
+/// A `curl` that fails for crates.io and runs the real one for anything
+/// else. The unreachable-crates.io check installs it over the stand-in, so
+/// that row does not depend on whether this host can reach the registry.
+///
+/// The real `curl` is the one on this test's `PATH`, found before the stub
+/// is installed. With none, the stub fails other calls as a missing `curl`.
+fn stub_unreachable_crates_io(bin: &Path) {
+    let real = which("curl");
+    ljos_cli::install_executable(&bin.join("curl"), curl_stub(real.as_deref()))
+        .unwrap_or_else(|err| panic!("curl stub: {err}"));
+}
+
+fn curl_stub(real: Option<&Path>) -> String {
+    let rest = match real {
+        Some(real) => format!(
+            "exec '{}' \"$@\"\n",
+            real.display().to_string().replace('\'', r"'\''")
+        ),
+        None => "echo 'curl: not found on PATH' >&2\nexit 127\n".to_string(),
+    };
+    format!(
+        "#!/bin/sh\n\
+         for arg in \"$@\"; do\n\
+         \x20 case \"$arg\" in\n\
+         \x20   https://crates.io/*) echo 'curl: (6) Could not resolve host: crates.io' >&2; exit 6;;\n\
+         \x20 esac\n\
+         done\n\
+         {rest}"
+    )
+}
+
+#[test]
+fn the_curl_stub_runs_the_curl_on_path_for_other_urls() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("it's curl");
+    ljos_cli::install_executable(&real, "#!/bin/sh\necho \"real curl: $*\"\n").unwrap();
+    let stub = dir.path().join("stub");
+    ljos_cli::install_executable(&stub, curl_stub(Some(&real))).unwrap();
+    let run = |url: &str| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "runs the curl stub a first-run seat gets"
+        )]
+        let out = std::process::Command::new(&stub)
+            .args(["-fsS", url])
+            .output()
+            .unwrap();
+        out
+    };
+    let other = run("https://example.invalid/x");
+    assert!(other.status.success(), "{other:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&other.stdout),
+        "real curl: -fsS https://example.invalid/x\n"
+    );
+    let registry = run("https://crates.io/api/v1/crates/ljos");
+    assert_eq!(registry.status.code(), Some(6), "{registry:?}");
+    assert!(registry.stdout.is_empty(), "{registry:?}");
+
+    ljos_cli::install_executable(&stub, curl_stub(None)).unwrap();
+    let missing = run("https://example.invalid/x");
+    assert_eq!(missing.status.code(), Some(127), "{missing:?}");
 }
 
 fn which(name: &str) -> Option<PathBuf> {
@@ -1240,6 +1315,7 @@ fn a_new_seat_follows_the_readme_and_getting_started() {
         stood_in_for_install,
         "the docs no longer tell a new seat to run install.sh"
     );
+    registry::assert_only_registry(&seat.bin(), "the README and getting started");
 }
 
 /// Two votes typed in one shell are one voice. The settle this prints is
@@ -1299,6 +1375,51 @@ LJOS_SEAT=alice ljos consensus "$id" --no-file
         !output.contains("DeGroot") && !output.contains("influence:"),
         "the settle sample drifted back:\n{output}"
     );
+}
+
+/// The seat's `curl` cannot reach crates.io, so doctor prints the skipped
+/// version check, and that warn row names the one next command.
+#[test]
+fn an_unreachable_crates_io_row_names_the_next_command() {
+    if !tools_ready() {
+        return;
+    }
+    let mut seat = Seat::open();
+    // The open seat answers crates.io. This row is the lookup that does
+    // not, so the failing curl replaces that stand-in.
+    stub_unreachable_crates_io(&seat.bin());
+    let cwd = seat.work.clone();
+    let limit = budget("ljos onboard");
+    let (code, output, elapsed) = seat.run("ljos onboard", &cwd, limit);
+    assert_step(
+        "crates.io unreachable: onboard",
+        "ljos onboard",
+        code,
+        &output,
+        elapsed,
+        limit,
+    );
+    for line in [
+        "git config --global user.name \"Your Name\"",
+        "git config --global user.email \"you@example.com\"",
+    ] {
+        let (code, output, _) = seat.run(line, &cwd, Duration::from_secs(20));
+        assert_eq!(code, 0, "{line}\n{output}");
+    }
+    let limit = budget("ljos doctor");
+    let (_, output, elapsed) = seat.run("ljos doctor", &cwd, limit);
+    assert!(
+        elapsed <= limit,
+        "doctor took {}s:\n{output}",
+        elapsed.as_secs()
+    );
+    let row = logical_lines(&output)
+        .into_iter()
+        .find(|line| line.trim().starts_with("warn\tcrates.io\t"))
+        .unwrap_or_else(|| panic!("no crates.io row:\n{output}"));
+    assert!(row.contains("version check was skipped"), "{row}");
+    assert!(names_next(&row), "{row}");
+    assert_plain("crates.io unreachable: doctor", "ljos doctor", &output);
 }
 
 #[test]
@@ -1467,4 +1588,5 @@ fn a_confused_order_stays_plain() {
             limit,
         );
     }
+    registry::assert_only_registry(&seat.bin(), "a confused order");
 }

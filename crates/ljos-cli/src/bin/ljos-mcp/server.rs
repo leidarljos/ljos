@@ -2104,6 +2104,23 @@ fn mcp_doctor_state(name: &str, state: String) -> String {
     state
 }
 
+fn with_brief_rules(task: &str, items: &[String], mut text: String) -> String {
+    let mut cue = task.to_string();
+    for item in items {
+        if !cue.is_empty() && !item.is_empty() {
+            cue.push(' ');
+        }
+        cue.push_str(item);
+    }
+    if let Some(block) = ljos_cli::brief_rules::for_task(&cue) {
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&block);
+    }
+    text
+}
+
 #[tool_router]
 impl LjosServer {
     /// Read the cards directory from `LJOS_CARDS_DIR`, or the working directory,
@@ -2488,7 +2505,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when a number the seat tracks has been measured again: a benchmark score, a latency, a count. With a value it takes the reading, closes the habit's earlier reading (kept as `was`), and sets the next reading due one cadence on, so ljos_due and the hook say when it is late. Without a value it lists the habits as they stand, each with the change since the last reading and when the next is due. ljos_search with as_of answers what a habit stood at then.",
+        description = "Call this when a number the seat tracks has been measured again: a benchmark score, a latency, a count. With a value it takes the reading; a new reading supersedes the previous one (output `NAME: was X (age), now Y` / `NAME: first reading, Y`), kept as `was`, and sets the next reading due one cadence on, so ljos_due and the hook say when it is late. Without a value it lists the habits as they stand, each with the change since the last reading and when the next is due. ljos_search with as_of answers what a habit stood at then.",
         annotations(
             title = "Take or read a habit's reading",
             read_only_hint = false,
@@ -3134,7 +3151,10 @@ impl LjosServer {
                     .map_err(|e| refused(anyhow::anyhow!("options on {}: {e:#}", opened.parent)))?;
                 text.push_str(&extra);
             }
-            return Ok(Json(Said { text, aside: None }));
+            return Ok(Json(Said {
+                text: with_brief_rules(&args.task, &args.items, text),
+                aside: None,
+            }));
         }
         let mut text =
             ljos_cli::bookkeep::start_work(args.issue.as_deref(), args.repo.as_deref(), &args.task)
@@ -3153,7 +3173,10 @@ impl LjosServer {
                 text.push_str(&extra);
             }
         }
-        Ok(Json(Said { text, aside: None }))
+        Ok(Json(Said {
+            text: with_brief_rules(&args.task, &args.items, text),
+            aside: None,
+        }))
     }
 
     #[tool(

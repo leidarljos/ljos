@@ -922,12 +922,13 @@ fn git(dir: &Path, args: &[&str]) -> Output {
         .env("LC_ALL", "C")
         .stdin(std::process::Stdio::null());
     crate::git_hooks::hook_child_env(&mut cmd);
-    crate::seat_git_child(&mut cmd);
-    crate::bounded_output(&mut cmd).unwrap_or_else(|e| Output {
-        status: std::process::ExitStatus::from_raw(1),
-        stdout: Vec::new(),
-        stderr: e.to_string().into_bytes(),
-    })
+    crate::seat_git_child(&mut cmd)
+        .and_then(|()| crate::bounded_output(&mut cmd))
+        .unwrap_or_else(|e| Output {
+            status: std::process::ExitStatus::from_raw(1),
+            stdout: Vec::new(),
+            stderr: e.to_string().into_bytes(),
+        })
 }
 
 fn output_text(out: &Output) -> String {

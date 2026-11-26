@@ -168,7 +168,7 @@ The config rows show =set= for =LJOS_TRACKER_TOKEN=, =LJOS_WAKE_LAUNCHER_KEY= an
 With =curl= unable to reach crates.io, doctor printed:
 
 #+begin_src text
-warn	crates.io	did not answer, so the version check was skipped
+warn	crates.io	did not answer, so the version check was skipped; run `ljos doctor` again once it answers.
 #+end_src
 
 A missing binary then has no version in parentheses: not on PATH, so run =curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh=.
@@ -217,15 +217,15 @@ search: the query is empty, so run `ljos search "QUERY"`.
 Text with spaces, or a word that is not an id, exits 2 and points at the search command:
 
 #+begin_src text
-recall: "usability first-run ljos cli" is not a ticket id, so run `ljos search "usability first-run ljos cli"`.
+recall: that text is not a ticket id, so run `ljos search "<words>"`.
 #+end_src
 
 Words typed without quotes are several arguments, and recall takes one id.
-The line says so and prints the search that runs:
+The line says so and prints the search shape. It does not repeat the words, which may be private:
 
 #+begin_src text
 $ ljos recall some words
-ljos: recall takes one ticket id, so run `ljos search "some words"` to look up words.
+ljos: recall takes one ticket id, so run `ljos search "<words>"` to look up words.
 #+end_src
 
 =ljos search= takes the same words without quotes as one query, beside =-p=, =-n= and its other flags, so =ljos search lexical default= and =ljos search "lexical default"= are the same search.
@@ -236,10 +236,10 @@ ljos: recall takes one ticket id, so run `ljos search "some words"` to look up w
 The line exits 2 and names the three verbs that work with lessons, each as a command that runs:
 
 #+begin_src text
-ljos: no command lessons. To find lessons run `ljos search "lexical default"`, to save one run `ljos remember "The lexical default is BM25+."`, and to review the ones waiting run `ljos proposals`.
+ljos: no command lessons. To find lessons run `ljos search "<words>"`, to save one run `ljos remember "The lexical default is BM25+."`, and to review the ones waiting run `ljos proposals`.
 #+end_src
 
-Words typed after it become the query, so =ljos lessons kiln= names =ljos search "kiln"=.
+The words typed after it are not repeated.
 Any other word that is near a verb names that verb.
 A name with an ending, the start of one verb and a name with a verb as a part are all near:
 
@@ -247,4 +247,6 @@ A name with an ending, the start of one verb and a name with a verb as a part ar
 ljos: no command prop, and the closest is proposals, so run `ljos proposals`.
 #+end_src
 
-A start that two verbs share, such as =mem=, is not guessed, and the line names =ljos help=.
+A start that two verbs share, such as =mem=, is not guessed. The line then does not repeat the word, and names =ljos help=.
+
+An error line names a flag or a command word. It does not repeat a value you typed. A value, such as the text after =--limit= or a word after a command, is written =<value>= in the command the line prints. A word is repeated only when it is letters alone, short, and close to a real command or shell name.

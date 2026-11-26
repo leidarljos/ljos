@@ -112,6 +112,7 @@ LJOS variables
 - ``LJOS_GUARD`` default on outside a temporary home
 - ``LJOS_GUARD_FAIL_OPEN`` default unset
 - ``LJOS_GUARD_TIMEOUT`` default 5 seconds
+- ``LJOS_HANDOFF_DIR`` default unset; the brief rules print a placeholder
 - ``LJOS_HARNESS_SESSION`` default unset
 - ``LJOS_HOLD`` default unset
 - ``LJOS_HOOKD`` default on
@@ -213,6 +214,7 @@ LJOS variables
 - ``LJOS_WAKE_LAUNCHER_KEY`` default unset
 - ``LJOS_WAKE_MSG`` default unset
 - ``LJOS_WAKE_SEAT`` default unset
+- ``LJOS_WORKFLOW_LOCK_WAIT`` default 30
 - ``LJOS_WRITER_PIDFILE`` default unset
 - ``LJOS_WRITER_STANDIN`` default unset
 - ``LJOS_WRITE_SCOPE`` default unset

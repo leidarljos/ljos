@@ -341,8 +341,9 @@ EOF
     done < "$pinfile"
     return 0
   fi
-  # The versions in .github/release-pin. release-install-check.sh
-  # refuses a copy that has drifted.
+  # The versions in .github/release-pin, the same list as
+  # crates/ljos-cli/release-pin. release-install-check.sh refuses a copy
+  # that has drifted.
   for item in vissue=0.25.0 claimdag=0.8.0 deedar=0.4.0; do
     name=${item%%=*}
     [ -z "$(pinned "$name")" ] || continue

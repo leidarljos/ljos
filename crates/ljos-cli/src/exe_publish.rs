@@ -842,6 +842,76 @@ fn open_dir(path: &Path) -> Result<File, Error> {
     Ok(opened)
 }
 
+/// Open the directory `name` under `dir` without following a symlink at
+/// `name`. On Linux the descriptor is `O_PATH`: it can be looked through
+/// and stat'd, and the directory needs no read permission.
+#[cfg(unix)]
+pub(crate) fn open_dir_at_nofollow(
+    dir: impl std::os::fd::AsFd,
+    name: &std::ffi::OsStr,
+) -> Result<File, Error> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let access = rustix::fs::OFlags::PATH;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let access = rustix::fs::OFlags::RDONLY;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a directory on the way to a state root without following a symlink"
+    )]
+    rustix::fs::openat(
+        dir,
+        name,
+        access
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|err| Error::from_raw_os_error(err.raw_os_error()))
+}
+
+/// Make `name` under `dir` as a new directory mode `0700`, open it without
+/// following a symlink, and set `0700` again through that descriptor so the
+/// umask does not decide it.
+///
+/// A `name` that already exists fails with `AlreadyExists`, symlink or not.
+/// The new directory is removed again when the open or the mode fails.
+#[cfg(unix)]
+pub(crate) fn make_private_dir_at(dir: &File, name: &std::ffi::OsStr) -> Result<File, Error> {
+    rustix::fs::mkdirat(dir, name, rustix::fs::Mode::from_raw_mode(raw_mode(0o700)))
+        .map_err(|err| Error::from_raw_os_error(err.raw_os_error()))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens a directory this process just made without following a symlink"
+    )]
+    let opened = rustix::fs::openat(
+        dir,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|err| Error::from_raw_os_error(err.raw_os_error()))
+    .and_then(|made| {
+        fchmod_checked(&made, 0o700, Path::new(name))?;
+        Ok(made)
+    });
+    if opened.is_err() {
+        remove_dir_at(dir, name);
+    }
+    opened
+}
+
+/// Remove the empty directory `name` under `dir`, ignoring a failure.
+#[cfg(unix)]
+pub(crate) fn remove_dir_at(dir: &File, name: &std::ffi::OsStr) {
+    let _ = rustix::fs::unlinkat(dir, name, rustix::fs::AtFlags::REMOVEDIR);
+}
+
 #[cfg(unix)]
 fn moded(err: Error, what: &str, path: &Path) -> Error {
     Error::new(

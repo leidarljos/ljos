@@ -8,11 +8,18 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/registry.rs"]
+mod registry;
 #[path = "common/tools.rs"]
 mod tools;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
+
+/// Longer than the sitting's one-second memory read. Doctor runs between
+/// that read and the panel, and waits for the registry's answer.
+const SLOW_REGISTRY: Duration = Duration::from_millis(1500);
 
 fn script(dir: &Path, name: &str, body: &str) {
     std::fs::create_dir_all(dir).unwrap();
@@ -35,8 +42,14 @@ struct Seat {
 
 impl Seat {
     fn on(url: &str) -> Self {
+        Self::with_registry(url, Duration::ZERO)
+    }
+
+    /// A seat whose crates.io answers each lookup after `delay`.
+    fn with_registry(url: &str, delay: Duration) -> Self {
         let dir = tempfile::TempDir::new().unwrap();
         let bin = dir.path().join("bin");
+        registry::stand_in(&bin, delay);
         script(
             &bin,
             "claimdag",
@@ -189,7 +202,18 @@ fn a_decision_on_a_pack_with_a_persona_still_writes_the_panel() {
     let Some(daemon) = pack() else {
         return;
     };
-    let seat = Seat::on(daemon.url());
+    writes_the_panel(&Seat::on(daemon.url()));
+}
+
+#[test]
+fn a_registry_that_answers_late_still_leaves_the_panel_its_read() {
+    let Some(daemon) = pack() else {
+        return;
+    };
+    writes_the_panel(&Seat::with_registry(daemon.url(), SLOW_REGISTRY));
+}
+
+fn writes_the_panel(seat: &Seat) {
     let (code, said) = seat.run(&[
         "persona",
         "editor",

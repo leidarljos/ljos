@@ -111,6 +111,7 @@ pub mod ask_pack;
 pub mod ballot_sig;
 pub mod book_queue;
 pub mod bookkeep;
+pub mod brief_rules;
 pub mod bulk_file;
 pub mod call_deadline;
 mod private_file;
@@ -134,7 +135,10 @@ mod exe_publish;
 pub mod extract;
 pub mod gates;
 pub mod git_hooks;
+mod git_identity;
 pub mod graphify;
+pub mod handbook;
+mod handbook_ids;
 mod handover_scope;
 pub mod hookd;
 pub mod hud;
@@ -166,6 +170,7 @@ pub mod plan;
 pub mod plugin;
 pub mod policy_label;
 pub mod proc_tree;
+pub mod public_text;
 pub mod quiet_claims;
 pub mod quoted_yes;
 pub mod readability;
@@ -177,6 +182,7 @@ pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;
 pub mod scan;
+pub mod scrub;
 #[cfg(test)]
 mod seat_mcp_layout;
 pub mod seat_resolve;
@@ -190,6 +196,7 @@ pub mod swap_log;
 pub mod sync;
 pub mod table;
 pub mod takeover;
+mod text_canon;
 pub mod ticket_search;
 pub mod tool_bound;
 pub mod tools;
@@ -209,6 +216,7 @@ mod verbatim;
 mod version_skew;
 pub mod wake;
 pub mod word_rank;
+pub mod workflow_skel;
 
 #[cfg(test)]
 mod cursor_event_scan;
@@ -2022,7 +2030,39 @@ impl Seat {
 }
 
 /// What the MCP client said at initialize, kept for every tool call after.
+#[cfg(not(test))]
 static ANNOUNCED: std::sync::OnceLock<Seat> = std::sync::OnceLock::new();
+
+// It is set once and never cleared, so a process-wide one would carry a
+// test's seat into every test after it. Each test runs on its own thread.
+#[cfg(test)]
+thread_local! {
+    static ANNOUNCED: std::cell::OnceCell<Seat> = const { std::cell::OnceCell::new() };
+}
+
+fn announced() -> Option<Seat> {
+    #[cfg(not(test))]
+    {
+        ANNOUNCED.get().cloned()
+    }
+    #[cfg(test)]
+    {
+        ANNOUNCED.with(|slot| slot.get().cloned())
+    }
+}
+
+fn keep_announced(seat: &Seat) {
+    #[cfg(not(test))]
+    {
+        let _ = ANNOUNCED.set(seat.clone());
+    }
+    #[cfg(test)]
+    {
+        ANNOUNCED.with(|slot| {
+            let _ = slot.set(seat.clone());
+        });
+    }
+}
 
 /// A name as a seat: lower case, runs of letters and digits joined by one
 /// hyphen. `Acme CLI`, `acme-cli` and `acme_cli/1.2` are one seat.
@@ -2784,11 +2824,11 @@ fn stamp_env() -> Vec<(String, String)> {
     };
     above.unwrap_or_else(|| {
         if cfg!(test) {
-            std::env::vars().collect()
+            env_vars().collect()
         } else {
             proc_tree::environ(std::process::id())
                 .map(|e| clean_shell_environ(e, true))
-                .unwrap_or_else(|| std::env::vars().collect())
+                .unwrap_or_else(|| env_vars().collect())
         }
     })
 }
@@ -2960,7 +3000,7 @@ fn stamp_from_ancestors() -> Option<Vec<(String, String)>> {
             active
                 .iter()
                 .filter_map(|(pid, _)| proc_tree::environ(*pid))
-                .chain(std::iter::once_with(|| std::env::vars().collect()))
+                .chain(std::iter::once_with(|| env_vars().collect()))
                 .find_map(|env| {
                     env.into_iter()
                         .find(|(k, _)| k == key)
@@ -3357,10 +3397,18 @@ fn runner_stamp_env() -> Vec<(String, String)> {
     }
 }
 
+/// This process's environment, without the variables whose name or value
+/// is not UTF-8. [`std::env::vars`] panics on those, and a caller may
+/// export any bytes.
+pub(crate) fn env_vars() -> impl Iterator<Item = (String, String)> {
+    std::env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+}
+
 /// Every usable session variable in this process's own environment,
 /// sorted. A parent that did not pass the variable in does not count.
 pub(crate) fn own_stamped_sessions() -> Vec<(String, String)> {
-    let mut found: Vec<(String, String)> = std::env::vars()
+    let mut found: Vec<(String, String)> = env_vars()
         .filter(|(k, v)| runner_session_var(k, v) && usable_session_id(v).is_some())
         .map(|(k, v)| (k, v.trim().to_string()))
         .collect();
@@ -3585,7 +3633,7 @@ pub fn seat_for_thread(thread: &str) -> Seat {
     let thread = thread.trim();
     let mut seat = named_var("LJOS_SEAT")
         .and_then(|raw| seated_name(&raw))
-        .or_else(|| ANNOUNCED.get().map(|s| s.seat.clone()))
+        .or_else(|| announced().map(|s| s.seat))
         .or_else(mapped_box_seat)
         .unwrap_or_else(login_user);
     if named_var("LJOS_SEAT").is_none() {
@@ -3665,12 +3713,12 @@ pub fn announce_seat(client: &str, runner_pid: u32) -> Seat {
             format!("LJOS_SEAT, process {runner_pid}"),
         );
         write_record(&seat_record_path(runner_pid), &seat);
-        let _ = ANNOUNCED.set(seat.clone());
+        keep_announced(&seat);
         return seat;
     };
     let seat = Seat::tagged(name, &session_tag(&id), format!("conversation {id}"));
     write_record_ids(&session_record_path(&id), &seat, &[id]);
-    let _ = ANNOUNCED.set(seat.clone());
+    keep_announced(&seat);
     seat
 }
 
@@ -4224,7 +4272,7 @@ fn cause_of(
 /// The names of the runner variables set here, sorted. Never their values.
 #[must_use]
 pub fn runner_marks() -> Vec<String> {
-    let mut names: Vec<String> = std::env::vars()
+    let mut names: Vec<String> = env_vars()
         .filter(|(k, v)| runner_session_var(k, v) || RUNNER_MARKS.contains(&k.as_str()))
         .map(|(k, _)| k)
         .collect();
@@ -4779,16 +4827,13 @@ fn named_var(key: &str) -> Option<String> {
 /// name the conversation id that did not resolve.
 fn conversation_derived_seat() -> Option<String> {
     let recorded = seat_from_session_records();
-    if let Some(seat) = ANNOUNCED
-        .get()
-        .filter(|seat| !omitted_actor_name(&seat.seat))
-    {
+    if let Some(seat) = announced().filter(|seat| !omitted_actor_name(&seat.seat)) {
         // The record under this conversation id is that conversation. The
         // client name belongs to this process, and a record that names
         // another seat is not that client.
         let same = recorded.as_ref().is_none_or(|row| row.seat == seat.seat);
         if same {
-            return Some(seat.seat.clone());
+            return Some(seat.seat);
         }
     }
     if let Some(seat) = mapped_box_seat() {
@@ -4918,9 +4963,7 @@ fn whoami_resolved() -> Seat {
     // A record filed under a conversation id this shell carries. The
     // process tree is not consulted for a seat.
     let record = seat_from_session_records().filter(|seat| !omitted_actor_name(&seat.seat));
-    let program = ANNOUNCED
-        .get()
-        .cloned()
+    let program = announced()
         .or_else(|| record.clone())
         .or_else(seat_from_runner_env);
     let agent = named_var("VISSUE_AGENT");
@@ -5237,7 +5280,7 @@ pub fn resolve_call_seat(arg: Option<&str>) -> Result<Seat> {
         seat
     } else if known.contains(&named_slug) {
         named_slug
-    } else if ANNOUNCED.get().is_some_and(|seat| seat.seat == named_slug) {
+    } else if announced().is_some_and(|seat| seat.seat == named_slug) {
         bookkeep::log_line(&format!(
             "note: the tracker lists no seat {named_slug}; sitting it as the seat this server was given"
         ));
@@ -5444,7 +5487,7 @@ fn live_harness_session() -> Option<LiveSession> {
     }
     let id = call_cursor_conversation().filter(|id| !subagent_id(id))?;
     let family = if own_mark("CLAUDECODE")
-        || std::env::vars().any(|(key, value)| key.starts_with("CLAUDE_") && !value.is_empty())
+        || env_vars().any(|(key, value)| key.starts_with("CLAUDE_") && !value.is_empty())
     {
         "claude"
     } else if own_mark("CURSOR_AGENT") {
@@ -5655,7 +5698,7 @@ impl std::fmt::Display for Derived {
 #[must_use]
 pub fn derived_seat(who: &Seat) -> Option<Derived> {
     let named = call_seat_now().is_some()
-        || ANNOUNCED.get().is_some()
+        || announced().is_some()
         || named_var("LJOS_SEAT").is_some()
         || named_var("VISSUE_AGENT").is_some()
         || seat_from_runner_env().is_some();
@@ -5969,12 +6012,21 @@ pub fn checked_seat() -> Option<String> {
         .or_else(|| call_seat_now().map(|s| s.seat))
 }
 
-/// Name [`checked_seat`] on a `git` child that may commit to the tracker,
-/// so the commit hook checks the seat this process writes as.
-pub(crate) fn seat_git_child(cmd: &mut std::process::Command) {
+/// Name [`checked_seat`] on a `git` child that may commit to the tracker.
+///
+/// Tracker commits take their author and committer from git config, not
+/// identity overrides inherited from the seat that called ljos.
+///
+/// # Errors
+///
+/// The environment names git config in a form git would refuse; see
+/// [`git_identity::strip_git_identity`].
+pub(crate) fn seat_git_child(cmd: &mut std::process::Command) -> std::io::Result<()> {
+    git_identity::strip_git_identity(cmd)?;
     if let Some(seat) = checked_seat() {
         cmd.env("LJOS_SEAT", seat);
     }
+    Ok(())
 }
 
 /// The name this conversation's claims are held under.
@@ -15068,6 +15120,12 @@ fn ljos_toml_project(path: &Path) -> Option<String> {
 /// so a note can say which sitting is open without asking the tracker.
 #[must_use]
 pub fn recorded_sitting() -> Option<String> {
+    held_from_records(&conversation_holders())
+}
+
+/// The names this conversation's claims can be held under: the holders
+/// the runner records above this process name, then [`holder_name`].
+fn conversation_holders() -> Vec<String> {
     // The record the runner's own server left names the holder its claims
     // were made under. A hook's environment can carry session variables
     // the server's did not, which hash to another holder that holds
@@ -15077,7 +15135,7 @@ pub fn recorded_sitting() -> Option<String> {
     if !holders.contains(&own) {
         holders.push(own);
     }
-    held_from_records(&holders)
+    holders
 }
 
 /// The issue this conversation's holder claimed last and still works: a
@@ -15093,12 +15151,7 @@ pub fn held_issue() -> Option<String> {
     if std::env::var_os("LJOS_IN_HOOK").is_some() {
         return None;
     }
-    let mut holders: Vec<String> = runner_record_holders(&own_ancestry());
-    let own = holder_name();
-    if !holders.contains(&own) {
-        holders.push(own);
-    }
-    holders.iter().find_map(|holder| {
+    conversation_holders().iter().find_map(|holder| {
         let out = run_captured_within(
             "vissue",
             &["claims", "--by", holder, "--json"],
@@ -19766,7 +19819,10 @@ fn fallback_state_base() -> PathBuf {
 }
 
 /// The line shown when state has nowhere durable to live.
-const EPHEMERAL_STATE_WARNING: &str = "ljos: state is in a temporary directory and will be discarded; set HOME or XDG_STATE_HOME to an absolute path";
+///
+/// The directory is removed by an `atexit` handler, which a signal, `exec`
+/// or abort skips, so the line does not promise more than a normal exit.
+const EPHEMERAL_STATE_WARNING: &str = "ljos: state is in a temporary directory, removed when this command exits normally; set HOME or XDG_STATE_HOME to an absolute path";
 
 fn no_home_message(why: &str) -> String {
     format!("ljos: {why}; set HOME or XDG_STATE_HOME to an absolute path")
@@ -19784,19 +19840,14 @@ fn show_ephemeral_warning() {
 #[cfg(test)]
 static EPHEMERAL_WARNINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// A directory this process just made is usable only when it is not a
-/// symlink, is owned by this user, and is mode `0700`.
-fn created_dir_is_private(path: &Path) -> Result<(), String> {
-    created_dir_is_private_for(path, euid())
-}
-
-fn created_dir_is_private_for(path: &Path, owner: u32) -> Result<(), String> {
+/// A directory this process just made is usable only when it is owned by
+/// `owner` and is mode `0700`.
+fn created_dir_is_private_for(dir: &std::fs::File, owner: u32) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt as _;
-    let meta = std::fs::symlink_metadata(path).map_err(|err| no_home_message(&err.to_string()))?;
-    if meta.file_type().is_symlink() {
-        return Err(no_home_message("refusing a symlinked state directory"));
-    }
-    if !meta.is_dir() || meta.uid() != owner || meta.mode() & 0o777 != 0o700 {
+    let meta = dir
+        .metadata()
+        .map_err(|err| no_home_message(&err.to_string()))?;
+    if !meta.is_dir() || meta.uid() != owner || meta.mode() & 0o7777 != 0o700 {
         return Err(no_home_message(
             "refusing a state directory with the wrong owner or mode",
         ));
@@ -19804,26 +19855,47 @@ fn created_dir_is_private_for(path: &Path, owner: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Create `path` as a new directory mode `0700`.
+/// Create `name` under `dir` as a new directory mode `0700`, and hold it.
 ///
-/// A path that already exists is refused, and so is a symlink: either one
+/// A name that already exists is refused, and so is a symlink: either one
 /// may have been planted before this process started. The directory is
-/// removed again when the mode or the owner does not check.
-pub(crate) fn claim_new_private_dir(path: &Path) -> Result<(), String> {
-    if let Ok(meta) = std::fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            return Err(no_home_message("refusing a symlinked state directory"));
+/// made, opened and checked through descriptors, and removed again when
+/// the mode or the owner does not check.
+fn claim_new_private_dir_at(
+    dir: &std::fs::File,
+    name: &std::ffi::OsStr,
+    owner: u32,
+) -> Result<std::fs::File, String> {
+    let made = exe_publish::make_private_dir_at(dir, name).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::AlreadyExists {
+            no_home_message("refusing a pre-existing state directory")
+        } else {
+            no_home_message(&err.to_string())
         }
-        return Err(no_home_message("refusing a pre-existing state directory"));
-    }
-    std::fs::create_dir(path).map_err(|err| no_home_message(&err.to_string()))?;
-    if let Err(err) = change_mode(path, 0o700) {
-        let _ = std::fs::remove_dir(path);
-        return Err(no_home_message(&err.to_string()));
-    }
-    if let Err(err) = created_dir_is_private(path) {
-        let _ = std::fs::remove_dir(path);
+    })?;
+    if let Err(err) = created_dir_is_private_for(&made, owner) {
+        exe_publish::remove_dir_at(dir, name);
         return Err(err);
+    }
+    Ok(made)
+}
+
+/// Whether `path` still names the directory `dir` holds, and is not a
+/// symlink.
+fn still_at(dir: &std::fs::File, path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let moved = || {
+        no_home_message(&format!(
+            "refusing a state directory that moved after it was made: {}",
+            path.display()
+        ))
+    };
+    let held = dir
+        .metadata()
+        .map_err(|err| no_home_message(&err.to_string()))?;
+    let named = std::fs::symlink_metadata(path).map_err(|_| moved())?;
+    if named.file_type().is_symlink() || named.dev() != held.dev() || named.ino() != held.ino() {
+        return Err(moved());
     }
     Ok(())
 }
@@ -19844,6 +19916,70 @@ fn random_state_name() -> String {
     format!("ljos-state-{token}")
 }
 
+/// Whether a directory with `uid` and `mode` on the way to the state root
+/// is safe for `owner`.
+///
+/// Another user may rename entries in a directory they own, sticky or not,
+/// and in one they can write through its group or other bits that has no
+/// sticky bit. Either lets them swap the new state root for one of theirs.
+fn trusted_dir_mode(uid: u32, mode: u32, owner: u32) -> Result<(), &'static str> {
+    if uid != 0 && uid != owner {
+        return Err("refusing a temporary directory another user owns");
+    }
+    if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+        return Err("refusing a temporary directory another user can write that has no sticky bit");
+    }
+    Ok(())
+}
+
+/// `dir`'s owner and mode bits.
+fn dir_owner_mode(dir: &std::fs::File) -> std::io::Result<(u32, u32)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = dir.metadata()?;
+    Ok((meta.uid(), meta.mode() & 0o7777))
+}
+
+/// A descriptor for `parent`, reached from `/` one directory at a time.
+///
+/// A symlink in `parent` is resolved first, and the resolved path is then
+/// opened without following any symlink. Every directory on it, `/`
+/// included, must pass [`trusted_dir_mode`] for `owner`, so no other user
+/// can rename a directory on the way after this check.
+fn open_trusted_dir(parent: &Path, owner: u32) -> Result<(PathBuf, std::fs::File), String> {
+    let real = std::fs::canonicalize(parent).map_err(|err| {
+        no_home_message(&format!("could not resolve {}: {err}", parent.display()))
+    })?;
+    let mut reached = PathBuf::from("/");
+    let mut dir = exe_publish::open_dir_at_nofollow(rustix::fs::CWD, std::ffi::OsStr::new("/"))
+        .map_err(|err| no_home_message(&format!("could not open /: {err}")))?;
+    for part in real.components() {
+        match part {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(name) => {
+                reached.push(name);
+                dir = exe_publish::open_dir_at_nofollow(&dir, name).map_err(|err| {
+                    no_home_message(&format!(
+                        "could not open {} without following a symlink: {err}",
+                        reached.display()
+                    ))
+                })?;
+            }
+            _ => {
+                return Err(no_home_message(&format!(
+                    "{} did not resolve to a plain path",
+                    parent.display()
+                )))
+            }
+        }
+        let (uid, mode) = dir_owner_mode(&dir)
+            .map_err(|err| no_home_message(&format!("{}: {err}", reached.display())))?;
+        if let Err(why) = trusted_dir_mode(uid, mode, owner) {
+            return Err(no_home_message(&format!("{why}: {}", reached.display())));
+        }
+    }
+    Ok((real, dir))
+}
+
 /// A private state directory under `parent`, and the `ljos` directory inside it.
 ///
 /// Dropping this removes both. The name is not `ljos-no-home-<uid>`.
@@ -19854,21 +19990,43 @@ pub(crate) struct EphemeralState {
 
 impl EphemeralState {
     fn create(parent: &Path) -> Result<Self, String> {
+        Self::create_for(parent, euid())
+    }
+
+    fn create_for(parent: &Path, owner: u32) -> Result<Self, String> {
         if !parent.is_absolute() {
             return Err(no_home_message(
                 "the temporary directory is not an absolute path",
             ));
         }
+        let (parent, dir) = open_trusted_dir(parent, owner)?;
+        Self::create_in(&dir, &parent, owner)
+    }
+
+    /// Make the state root and `ljos` under `dir`, which `parent` named
+    /// when it was checked.
+    ///
+    /// Both are made relative to the held descriptors. The paths the rest
+    /// of ljos uses are then checked to name those same directories.
+    fn create_in(dir: &std::fs::File, parent: &Path, owner: u32) -> Result<Self, String> {
+        let ljos_name = std::ffi::OsStr::new("ljos");
         for _ in 0..8 {
-            let root = parent.join(random_state_name());
-            match claim_new_private_dir(&root) {
-                Ok(()) => {}
+            let name = random_state_name();
+            let name = std::ffi::OsStr::new(&name);
+            let root_dir = match claim_new_private_dir_at(dir, name, owner) {
+                Ok(held) => held,
                 Err(err) if err.contains("pre-existing") => continue,
                 Err(err) => return Err(err),
-            }
-            let ljos = root.join("ljos");
-            if let Err(err) = claim_new_private_dir(&ljos) {
-                let _ = std::fs::remove_dir(&root);
+            };
+            let root = parent.join(name);
+            let ljos = root.join(ljos_name);
+            let made = claim_new_private_dir_at(&root_dir, ljos_name, owner).and_then(|ljos_dir| {
+                still_at(&root_dir, &root)?;
+                still_at(&ljos_dir, &ljos)
+            });
+            if let Err(err) = made {
+                exe_publish::remove_dir_at(&root_dir, ljos_name);
+                exe_publish::remove_dir_at(dir, name);
                 return Err(err);
             }
             show_ephemeral_warning();
@@ -19964,8 +20122,8 @@ fn isolated_state_dir() -> PathBuf {
 #[cfg(test)]
 mod ephemeral_state_tests {
     use super::{
-        claim_new_private_dir, created_dir_is_private, created_dir_is_private_for, log_recall_in,
-        EphemeralState, EPHEMERAL_STATE_WARNING, EPHEMERAL_WARNINGS,
+        claim_new_private_dir_at, created_dir_is_private_for, log_recall_in, open_trusted_dir,
+        still_at, trusted_dir_mode, EphemeralState, EPHEMERAL_STATE_WARNING, EPHEMERAL_WARNINGS,
     };
     use std::os::unix::fs::MetadataExt as _;
     use std::path::Path;
@@ -19974,15 +20132,19 @@ mod ephemeral_state_tests {
         std::fs::symlink_metadata(path).unwrap().mode() & 0o777
     }
 
+    fn held(path: &Path) -> std::fs::File {
+        std::fs::File::open(path).unwrap()
+    }
+
     #[test]
     fn a_precreated_fallback_directory_is_refused() {
         let parent = tempfile::tempdir().unwrap();
-        let planted = parent
-            .path()
-            .join(format!("ljos-no-home-{}", super::euid()));
+        let name = format!("ljos-no-home-{}", super::euid());
+        let planted = parent.path().join(&name);
         std::fs::create_dir(&planted).unwrap();
         crate::write_file(planted.join("marker"), b"planted").unwrap();
-        let err = claim_new_private_dir(&planted).unwrap_err();
+        let err = claim_new_private_dir_at(&held(parent.path()), name.as_ref(), super::euid())
+            .unwrap_err();
         assert!(err.contains("pre-existing"), "{err}");
         assert!(err.contains("HOME"), "{err}");
         assert!(err.contains("XDG_STATE_HOME"), "{err}");
@@ -20005,8 +20167,10 @@ mod ephemeral_state_tests {
             reason = "a test plants a symlink to prove the state directory refuses it"
         )]
         std::os::unix::fs::symlink(&outside, &link).unwrap();
-        let err = claim_new_private_dir(&link).unwrap_err();
-        assert!(err.contains("symlink"), "{err}");
+        let err =
+            claim_new_private_dir_at(&held(parent.path()), "linked-state".as_ref(), super::euid())
+                .unwrap_err();
+        assert!(err.contains("pre-existing"), "{err}");
         assert!(err.contains("HOME"), "{err}");
         assert!(err.contains("XDG_STATE_HOME"), "{err}");
         assert_eq!(std::fs::read(outside.join("marker")).unwrap(), b"outside");
@@ -20028,8 +20192,9 @@ mod ephemeral_state_tests {
             reason = "a test plants a symlink to exercise the post-create check"
         )]
         std::os::unix::fs::symlink(&outside, &link).unwrap();
-        let err = created_dir_is_private(&link).unwrap_err();
-        assert!(err.contains("symlink"), "{err}");
+        let err = still_at(&held(&outside), &link).unwrap_err();
+        assert!(err.contains("moved"), "{err}");
+        assert_eq!(still_at(&held(&outside), &outside), Ok(()));
     }
 
     #[test]
@@ -20039,8 +20204,12 @@ mod ephemeral_state_tests {
         std::fs::create_dir(&private).unwrap();
         crate::change_mode(&private, 0o700).unwrap();
         let another_owner = super::euid().wrapping_add(1);
-        let err = created_dir_is_private_for(&private, another_owner).unwrap_err();
+        let err = created_dir_is_private_for(&held(&private), another_owner).unwrap_err();
         assert!(err.contains("owner"), "{err}");
+        let err = claim_new_private_dir_at(&held(parent.path()), "fresh".as_ref(), another_owner)
+            .unwrap_err();
+        assert!(err.contains("owner"), "{err}");
+        assert!(!parent.path().join("fresh").exists());
     }
 
     #[test]
@@ -20049,10 +20218,46 @@ mod ephemeral_state_tests {
         let wide = parent.path().join("wide");
         std::fs::create_dir(&wide).unwrap();
         crate::change_mode(&wide, 0o755).unwrap();
-        let err = created_dir_is_private(&wide).unwrap_err();
+        let err = created_dir_is_private_for(&held(&wide), super::euid()).unwrap_err();
         assert!(err.contains("mode"), "{err}");
         assert!(err.contains("HOME"), "{err}");
         assert!(err.contains("XDG_STATE_HOME"), "{err}");
+    }
+
+    #[test]
+    fn a_new_state_dir_is_0700_whatever_the_umask() {
+        let parent = tempfile::tempdir().unwrap();
+        let made = claim_new_private_dir_at(&held(parent.path()), "fresh".as_ref(), super::euid())
+            .unwrap();
+        assert_eq!(mode_of(&parent.path().join("fresh")), 0o700);
+        assert_eq!(still_at(&made, &parent.path().join("fresh")), Ok(()));
+    }
+
+    #[test]
+    fn a_parent_swapped_after_the_check_gets_nothing() {
+        let top = tempfile::tempdir().unwrap();
+        let parent = top.path().join("parent");
+        let moved = top.path().join("moved");
+        std::fs::create_dir(&parent).unwrap();
+        crate::change_mode(&parent, 0o700).unwrap();
+        let (real, dir) = open_trusted_dir(&parent, super::euid()).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test swaps the temporary directory after it was checked"
+        )]
+        std::fs::rename(&parent, &moved).unwrap();
+        std::fs::create_dir(&parent).unwrap();
+        crate::change_mode(&parent, 0o700).unwrap();
+        let Err(err) = EphemeralState::create_in(&dir, &real, super::euid()) else {
+            panic!("a state root was made under a parent that was swapped after the check");
+        };
+        assert!(err.contains("moved"), "{err}");
+        assert_eq!(
+            std::fs::read_dir(&parent).unwrap().count(),
+            0,
+            "swapped-in parent"
+        );
+        assert_eq!(std::fs::read_dir(&moved).unwrap().count(), 0, "held parent");
     }
 
     #[test]
@@ -20082,6 +20287,153 @@ mod ephemeral_state_tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[test]
+    fn a_world_writable_parent_without_the_sticky_bit_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        crate::change_mode(parent.path(), 0o777).unwrap();
+        let Err(err) = EphemeralState::create(parent.path()) else {
+            panic!("a world-writable parent with no sticky bit was used");
+        };
+        assert!(err.contains("sticky"), "{err}");
+        assert!(err.contains("HOME"), "{err}");
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_sticky_world_writable_parent_is_used() {
+        let parent = tempfile::tempdir().unwrap();
+        crate::change_mode(parent.path(), 0o1777).unwrap();
+        let state = EphemeralState::create(parent.path()).unwrap();
+        assert_eq!(mode_of(state.path()), 0o700);
+    }
+
+    #[test]
+    fn a_temporary_directory_needs_a_trusted_owner_and_no_open_write() {
+        let me = 1000;
+        assert_eq!(trusted_dir_mode(0, 0o1777, me), Ok(()));
+        assert_eq!(trusted_dir_mode(me, 0o700, me), Ok(()));
+        assert_eq!(trusted_dir_mode(me, 0o1770, me), Ok(()));
+        assert_eq!(trusted_dir_mode(0, 0o755, me), Ok(()));
+        for (uid, mode) in [(1001, 0o1777), (1001, 0o700), (1001, 0o755)] {
+            let err = trusted_dir_mode(uid, mode, me).unwrap_err();
+            assert!(err.contains("another user owns"), "{uid} {mode:o}: {err}");
+        }
+        for mode in [0o770, 0o720, 0o777, 0o702] {
+            let err = trusted_dir_mode(me, mode, me).unwrap_err();
+            assert!(err.contains("sticky"), "{mode:o}: {err}");
+            let err = trusted_dir_mode(0, mode, me).unwrap_err();
+            assert!(err.contains("sticky"), "root {mode:o}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_group_writable_parent_without_the_sticky_bit_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        crate::change_mode(parent.path(), 0o770).unwrap();
+        let Err(err) = EphemeralState::create(parent.path()) else {
+            panic!("a group-writable parent with no sticky bit was used");
+        };
+        assert!(err.contains("sticky"), "{err}");
+        assert!(err.contains("HOME"), "{err}");
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_parent_under_a_world_writable_directory_is_refused() {
+        let top = tempfile::tempdir().unwrap();
+        let parent = top.path().join("private");
+        std::fs::create_dir(&parent).unwrap();
+        crate::change_mode(&parent, 0o700).unwrap();
+        crate::change_mode(top.path(), 0o777).unwrap();
+        let Err(err) = EphemeralState::create(&parent) else {
+            panic!("a parent under a world-writable directory was used");
+        };
+        assert!(err.contains("sticky"), "{err}");
+        assert!(err.contains(&top.path().display().to_string()), "{err}");
+        assert_eq!(std::fs::read_dir(&parent).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_sticky_parent_another_user_owns_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        crate::change_mode(parent.path(), 0o1777).unwrap();
+        let someone_else = super::euid().wrapping_add(1);
+        let Err(err) = EphemeralState::create_for(parent.path(), someone_else) else {
+            panic!("a sticky parent another user owns was used");
+        };
+        assert!(err.contains("another user owns"), "{err}");
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_symlinked_parent_is_resolved_before_it_is_checked() {
+        let top = tempfile::tempdir().unwrap();
+        let real = top.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        crate::change_mode(&real, 0o700).unwrap();
+        let link = top.path().join("link");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test plants a symlinked TMPDIR"
+        )]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let state = EphemeralState::create(&link).unwrap();
+        let real = std::fs::canonicalize(&real).unwrap();
+        assert!(
+            state.path().starts_with(&real),
+            "{}",
+            state.path().display()
+        );
+        assert!(
+            !state.path().starts_with(&link),
+            "{}",
+            state.path().display()
+        );
+    }
+
+    #[test]
+    fn a_symlinked_parent_into_an_open_directory_is_refused() {
+        let open = tempfile::tempdir().unwrap();
+        crate::change_mode(open.path(), 0o777).unwrap();
+        let top = tempfile::tempdir().unwrap();
+        let link = top.path().join("link");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test plants a symlinked TMPDIR"
+        )]
+        std::os::unix::fs::symlink(open.path(), &link).unwrap();
+        let Err(err) = EphemeralState::create(&link) else {
+            panic!("a symlink into a world-writable directory was used");
+        };
+        assert!(err.contains("sticky"), "{err}");
+        assert_eq!(std::fs::read_dir(open.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_private_parent_this_user_owns_is_used() {
+        let parent = tempfile::tempdir().unwrap();
+        crate::change_mode(parent.path(), 0o700).unwrap();
+        let state = EphemeralState::create(parent.path()).unwrap();
+        assert_eq!(mode_of(state.path()), 0o700);
+        assert_eq!(
+            std::fs::symlink_metadata(state.path()).unwrap().uid(),
+            super::euid()
+        );
+    }
+
+    #[test]
+    fn a_root_owned_sticky_tmp_is_used() {
+        let tmp = std::fs::canonicalize("/tmp").unwrap();
+        let meta = std::fs::symlink_metadata(&tmp).unwrap();
+        assert!(
+            meta.is_dir() && meta.uid() == 0 && meta.mode() & 0o7777 == 0o1777,
+            "this host's /tmp is not a root-owned 01777 directory"
+        );
+        let state = EphemeralState::create(Path::new("/tmp")).unwrap();
+        assert!(state.path().starts_with(&tmp), "{}", state.path().display());
+        assert_eq!(mode_of(state.path()), 0o700);
     }
 
     #[test]
@@ -23747,6 +24099,12 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
             add_entities(&mut atom, [format!("project:{project}")]);
         }
     }
+    if kind == "lesson" && lesson_is_public() {
+        add_entities(&mut atom, [PUBLIC_ENTITY.to_string()]);
+    }
+    if kind == "preference" || kind == "rule" {
+        add_entities(&mut atom, active_policy_entities());
+    }
     atom
 }
 
@@ -23831,8 +24189,38 @@ fn url_at_start(text: &str) -> bool {
 pub const VALID_FROM: &str = "valid_from:";
 pub const VALID_TO: &str = "valid_to:";
 
+/// The entity that marks a lesson, a preference or a rule as one the person
+/// chose to publish. `ljos handbook` exports only rows that carry it.
+pub const PUBLIC_ENTITY: &str = "visibility:public";
+
 thread_local! {
     static REMEMBER_PROJECT: std::cell::Cell<Option<String>> = const { std::cell::Cell::new(None) };
+    static REMEMBER_PUBLIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks lessons written while this guard is alive as public. Dropping it
+/// restores the previous setting.
+#[must_use = "lessons are marked public until this guard drops"]
+pub struct RememberPublic {
+    prev: bool,
+}
+
+impl RememberPublic {
+    /// Mark each lesson written before this guard drops when `public` is set.
+    pub fn set(public: bool) -> Self {
+        let prev = REMEMBER_PUBLIC.with(|cell| cell.replace(public));
+        Self { prev }
+    }
+}
+
+impl Drop for RememberPublic {
+    fn drop(&mut self) {
+        REMEMBER_PUBLIC.with(|cell| cell.set(self.prev));
+    }
+}
+
+fn lesson_is_public() -> bool {
+    REMEMBER_PUBLIC.with(std::cell::Cell::get)
 }
 
 /// The project `ljos remember -p` records on lessons written while this
@@ -23864,6 +24252,125 @@ fn lesson_project_entity() -> Option<String> {
         cell.set(current);
         out
     })
+}
+
+thread_local! {
+    static POLICY_SCOPE: std::cell::RefCell<Option<PolicyScope>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[derive(Clone, Debug, Default)]
+struct PolicyScope {
+    project: Option<String>,
+    tags: Vec<String>,
+    public: bool,
+}
+
+/// Restores the previous project and tag scope when dropped.
+pub struct PolicyScopeGuard {
+    previous: Option<PolicyScope>,
+}
+
+impl Drop for PolicyScopeGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        POLICY_SCOPE.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// The project and tags recorded on preferences and rules written while
+/// this value is alive.
+pub struct PolicyHold {
+    _guard: PolicyScopeGuard,
+}
+
+/// The refusal every `--public` path gives a runner: marking an item public
+/// is the person's to give.
+///
+/// # Errors
+///
+/// `public` is set and a runner is the caller.
+pub fn refuse_public_under_a_runner(command: &str, public: bool) -> Result<()> {
+    if public && under_a_runner() {
+        bail!(
+            "{command}: --public is the person's to give, so run it from a terminal with no runner"
+        );
+    }
+    Ok(())
+}
+
+/// Record `project` and `tags` on preferences and rules written before the
+/// returned value drops, and mark them public when `public` is set. An
+/// explicit project must be one the tracker knows. An empty tag is refused.
+/// A tag or the public mark given with no project records the checkout's
+/// project when one resolves. With none of the three, nothing is recorded,
+/// so a preference or rule written without these flags is unchanged.
+///
+/// # Errors
+///
+/// A tag is empty, an explicit project is not on the tracker, or `public` is
+/// set and no project resolves.
+pub fn policy_hold(
+    command: &str,
+    project: Option<String>,
+    tags: Vec<String>,
+    public: bool,
+) -> Result<PolicyHold> {
+    refuse_public_under_a_runner(command, public)?;
+    if tags.iter().any(|tag| tag.trim().is_empty()) {
+        bail!("{command}: --tag needs a name");
+    }
+    let scope = if project.is_none() && tags.is_empty() && !public {
+        None
+    } else {
+        let project = match project {
+            Some(name) => Some(require_known_project(&name)?),
+            None => seat_tracker_project(),
+        };
+        if public && project.is_none() {
+            bail!("{command}: --public needs a project, so pass -p");
+        }
+        Some(PolicyScope {
+            project,
+            tags,
+            public,
+        })
+    };
+    let previous = POLICY_SCOPE.with(|slot| slot.replace(scope));
+    Ok(PolicyHold {
+        _guard: PolicyScopeGuard { previous },
+    })
+}
+
+pub(crate) fn active_policy_entities() -> Vec<String> {
+    POLICY_SCOPE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|scope| {
+                let mut list = policy_entity_list(scope.project.as_deref(), &scope.tags);
+                if scope.public {
+                    list.push(PUBLIC_ENTITY.to_string());
+                }
+                list
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// `project:` and `tag:` entities for a preference or a rule.
+#[must_use]
+pub fn policy_entity_list(project: Option<&str>, tags: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(project) = project.map(str::trim).filter(|name| !name.is_empty()) {
+        out.push(format!("project:{project}"));
+    }
+    for tag in tags {
+        let tag = tag.trim();
+        if !tag.is_empty() {
+            out.push(format!("tag:{tag}"));
+        }
+    }
+    out
 }
 
 static VALIDITY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
@@ -23979,7 +24486,7 @@ pub fn atom_source() -> Value {
     if let Some(node) = mesh::joined_node() {
         source["mesh"] = serde_json::json!({"node": node, "seat": seat.seat});
     }
-    let turn = std::env::vars()
+    let turn = env_vars()
         .filter(|(k, v)| k.ends_with("_TURN_ID") && !v.trim().is_empty())
         .map(|(_, v)| v.trim().to_string())
         .next();
@@ -24098,9 +24605,13 @@ fn post_claim_horizon(
     Ok(posted)
 }
 
-/// Post a new lesson, or reinforce the live memory it says again
-/// ([`memories::reinforce_held`]).
+/// Post a new lesson, mark a private repeat public, or reinforce the live
+/// memory it says again ([`memories::publish_repeat`],
+/// [`memories::reinforce_held`]).
 fn post_or_reinforce(client: &PacksetClient, atom: &Value, prefix: &str) -> Result<Value> {
+    if let Some(marked) = memories::publish_repeat(client, atom)? {
+        return Ok(marked);
+    }
     if let Some(held) = memories::reinforce_held(client, atom) {
         return Ok(held);
     }
@@ -24143,6 +24654,9 @@ pub fn packset_write_agent(
     if let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) {
         add_entities(&mut atom, [persona_entity(name)]);
         atom["set"] = Value::String(persona_set(name));
+    }
+    if let Some(marked) = memories::publish_repeat(&client, &atom)? {
+        return Ok(marked);
     }
     if let Some(held) = memories::reinforce_held(&client, &atom) {
         return Ok(held);
@@ -24300,9 +24814,12 @@ pub fn packset_write_mcp(
     let prefix = format!("{label}: POST /v1/atoms failed");
     let posted = match basis {
         Basis::Person => post_or_reinforce(&client, &atom, &prefix)?,
-        Basis::Agent => match memories::reinforce_held(&client, &atom) {
-            Some(held) => held,
-            None => store_agent_atom(&client, atom, &prefix)?,
+        Basis::Agent => match memories::publish_repeat(&client, &atom)? {
+            Some(marked) => marked,
+            None => match memories::reinforce_held(&client, &atom) {
+                Some(held) => held,
+                None => store_agent_atom(&client, atom, &prefix)?,
+            },
         },
     };
     admit::satisfy_text(text.trim());
@@ -24407,8 +24924,9 @@ fn store_agent_atom(client: &PacksetClient, atom: Value, prefix: &str) -> Result
     }
 }
 
-/// Queue a lesson the writer did not take. A refusal is not queued. The
-/// error keeps the words that say the copy is waiting.
+/// Queue a lesson the writer did not take. A refusal is not queued, and
+/// neither is a public lesson. The error keeps the words that say the copy
+/// is waiting.
 fn queue_waiting_lesson(atom: &Value, err: anyhow::Error, prefix: &str) -> anyhow::Error {
     // A busy pack did not take the lesson. Remember says so and exits.
     // Queueing it would store a copy the command says was not stored.
@@ -24420,7 +24938,7 @@ fn queue_waiting_lesson(atom: &Value, err: anyhow::Error, prefix: &str) -> anyho
     } else {
         with_post_failure(prefix, err)
     };
-    if atom["kind"].as_str() != Some("lesson") || !note_can_wait(&err) {
+    if atom["kind"].as_str() != Some("lesson") || lesson_is_public() || !note_can_wait(&err) {
         return err;
     }
     if let Some(line) = sandbox_memory_off() {
@@ -24453,8 +24971,9 @@ fn with_queue_outcome(err: anyhow::Error, queued: Result<Option<bool>>) -> anyho
     }
 }
 
-/// The pack client, or a queued lesson when the pack is off. `supersedes`
-/// is the atoms that lesson closes. A note passes none.
+/// The pack client, or a queued lesson when the pack is off. A public
+/// lesson is not queued. `supersedes` is the atoms that lesson closes. A
+/// note passes none.
 fn client_or_queue(
     prefix: &str,
     kind: &str,
@@ -24464,7 +24983,7 @@ fn client_or_queue(
 ) -> Result<PacksetClient> {
     match pack() {
         Ok(client) => Ok(client),
-        Err(e) if kind == "lesson" && note_can_wait(&e) => {
+        Err(e) if kind == "lesson" && !lesson_is_public() && note_can_wait(&e) => {
             if let Some(line) = sandbox_memory_off() {
                 return Err(anyhow::Error::msg(line));
             }
@@ -25272,6 +25791,10 @@ pub fn user_fault_for(err: &anyhow::Error, again: &str) -> String {
             .unwrap_or("pack busy, try again")
             .to_string();
     }
+    // A file the person named with `--out` is not the store.
+    if top.contains("--out ") {
+        return top;
+    }
     if let Some(line) = storage_line(err, again) {
         return line;
     }
@@ -25628,6 +26151,11 @@ pub fn remember_with_retry(text: &str, mut post: impl FnMut() -> Result<Value>) 
             Err(err) if is_reported_busy(&err) => Err(anyhow::Error::msg(REMEMBER_NOT_STORED_LINE)),
             Err(err) if is_memory_starting(&err) => Err(err),
             Err(err) if pack_turned_off(&err) => Err(err),
+            Err(err) if lesson_is_public() && remember_should_queue(&err) => {
+                Err(anyhow::Error::msg(
+                    "remember: the pack did not take it, and a public lesson is not queued. Run `ljos remember --public` again.",
+                ))
+            }
             Err(err) if remember_should_queue(&err) => {
                 // A sandbox home does not queue a lesson nobody will send.
                 // The line says why memory is off and which HOME to use.
@@ -27089,9 +27617,11 @@ pub fn latest_note_value(v: &Value, prefix: &str) -> Option<String> {
         dated.push((ts, live));
     }
     if dated.iter().any(|(ts, _)| !ts.is_empty()) {
+        // The logbook lists the newest note first. A shared minute keeps that
+        // first note. A greater timestamp replaces it.
         dated
             .into_iter()
-            .max_by_key(|(ts, _)| ts.clone())
+            .reduce(|best, next| if next.0 > best.0 { next } else { best })
             .and_then(|(_, n)| n)
     } else {
         dated.into_iter().next().and_then(|(_, n)| n)
@@ -27731,8 +28261,23 @@ pub(crate) fn workflow_child(
 /// An unknown workflow, a parent under another workflow, or the tracker
 /// refusing a write.
 pub fn workflow_start(parent: &str, name: &str, width: Width) -> Result<String> {
+    let parent = parent.trim();
     let name = parse_workflow_name(name)?;
     let v = tracker_show_json(parent)?;
+    if let Some(have) = workflow_skel::bound_skeleton(&v) {
+        return Err(policy_label::labelled(
+            "workflow-warning",
+            format!("workflow: {parent} already runs the {have} skeleton; nothing was written"),
+        ));
+    }
+    let _lock = workflow_skel::acquire_run_lock(parent)?;
+    let v = tracker_show_json(parent)?;
+    if let Some(have) = workflow_skel::bound_skeleton(&v) {
+        return Err(policy_label::labelled(
+            "workflow-warning",
+            format!("workflow: {parent} already runs the {have} skeleton; nothing was written"),
+        ));
+    }
     let mut out = String::new();
     match workflow_name_from_issue(&v) {
         Some(have) if have != name => {
@@ -29520,7 +30065,15 @@ fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
     // under. While the pack still shows that stamp nothing in it has
     // moved, so the kept rules and preferences are what a listing would
     // say: one status read stands in for two listings.
-    let stamp = with_pack_timeout(HOOK_PACK_MS, || pack_stamp(&client));
+    let Ok(stamp) = with_pack_timeout(HOOK_PACK_MS, || pack_stamp(&client)) else {
+        let _ = std::fs::create_dir_all(runtime_dir());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "writes a file that is not a git hook"
+        )]
+        let _ = std::fs::write(pack_slow_mark(), b"");
+        return kept_only(kept);
+    };
     if let (Some(path), Some(stamp)) = (&kept, stamp.as_deref()) {
         if gate_kept_under(path, stamp) {
             #[expect(
@@ -29576,16 +30129,19 @@ fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
 /// seat's client drops the mark at once ([`forget_gate_fresh`]).
 const GATE_FRESH: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// The pack's last-write stamp, from one status read; None when the
-/// pack does not answer or has no stamp yet.
-fn pack_stamp(client: &PacksetClient) -> Option<String> {
-    client
-        .status(None)
-        .ok()?
-        .get("last_write_ts")?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+/// The pack's last-write stamp, from one status read. `Ok(None)` when the
+/// pack answers with no stamp yet or with an error that is not a timeout.
+/// `Err` when the read ran out of time, so the caller can stop asking.
+fn pack_stamp(client: &PacksetClient) -> Result<Option<String>, ()> {
+    match client.status(None) {
+        Ok(status) => Ok(status
+            .get("last_write_ts")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)),
+        Err(err) if pack_link::error_is_timeout(&err) => Err(()),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Whether the kept rules and preferences were read under `stamp`: the
@@ -35603,15 +36159,25 @@ pub fn doctor() -> Vec<Habitat> {
 /// Whether git can name the author and committer of a tracker commit.
 ///
 /// The question is asked in the tracker checkout, so a `user.name` set only
-/// there counts, and git answers it the way a commit would: config, the
-/// `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables, and the account name. With
-/// no identity a tracker write stays on disk and the commit is refused, so
-/// the row is a warning that names the two commands. A git that cannot be
-/// asked leaves the row out.
+/// there counts, and git answers it the way a tracker commit would: from
+/// config and the account name, with the identity the environment exports
+/// dropped as [`seat_git_child`] drops it. With no identity a tracker write
+/// stays on disk and the commit is refused, so the row is a warning that
+/// names the two commands. A git that cannot be asked leaves the row out.
 fn git_identity_row() -> Option<Habitat> {
     let dir = git_identity_dir();
     for var in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
-        let out = git_in(&dir, &["var", var])?;
+        let mut cmd = git_at(&dir);
+        cmd.args(["var", var]).stdin(std::process::Stdio::null());
+        git_hooks::hook_child_env(&mut cmd);
+        if let Err(why) = seat_git_child(&mut cmd) {
+            return Some(Habitat {
+                name: "git identity",
+                state: format!("{why}, so tracker writes stay uncommitted"),
+                ok: false,
+            });
+        }
+        let out = bounded_output(&mut cmd).ok()?;
         if out.status.success() {
             continue;
         }
@@ -36770,7 +37336,7 @@ fn registry_skipped_row() -> Option<Habitat> {
     }
     (misses > 0 && hits == 0).then(|| Habitat {
         name: "crates.io",
-        state: "did not answer, so the version check was skipped".to_string(),
+        state: "did not answer, so the version check was skipped; run `ljos doctor` again once it answers.".to_string(),
         ok: false,
     })
 }
@@ -40949,7 +41515,7 @@ pub fn habits() -> Result<Vec<Reading>> {
 
 /// Take a reading: write it as a claim that supersedes the habit's earlier
 /// reading, carrying that reading as `was`, with its review due one
-/// cadence from now. Returns the pack's answer and the reading it closed.
+/// cadence from now. Returns the pack's answer and the reading it supersedes.
 pub fn habit(
     name: &str,
     value: f64,
@@ -41008,6 +41574,33 @@ pub fn format_change(r: &Reading, now: &str) -> String {
             )
         }
         None => "first reading".to_string(),
+    }
+}
+
+/// `ljos habit NAME VALUE`: the line after the write, the reading before
+/// and the one stored, or `first reading` and the one stored. The habit
+/// stays open, so the line never says the reading closed.
+#[must_use]
+pub fn format_reading_ack(
+    name: &str,
+    value: f64,
+    unit: &str,
+    prev: Option<&Reading>,
+    now: &str,
+) -> String {
+    let with_unit = |v: f64, u: &str| {
+        let u = u.trim();
+        format!("{}{}{u}", trim_num(v), if u.is_empty() { "" } else { " " })
+    };
+    let name = name.trim();
+    let new = with_unit(value, unit);
+    match prev {
+        Some(p) => format!(
+            "{name}: was {} ({}), now {new}",
+            with_unit(p.value, &p.unit),
+            age_of(p.ts.as_deref(), now)
+        ),
+        None => format!("{name}: first reading, {new}"),
     }
 }
 
@@ -42678,17 +43271,51 @@ pub fn claim_next(assignee: &str, role: Option<&str>, slack: Option<usize>) -> R
 }
 
 /// Whether a refusal means the graph moved since the listing.
+///
+/// The claim's own refusals are read from the top error only, so a deeper
+/// cause that happens to say "status claimed" is not passed over. The mint
+/// collision arrives as a cause under the upsert's context, so that one
+/// line is read from the whole chain.
 fn taken_first(err: &anyhow::Error) -> bool {
-    let text = format!("{err:#}");
-    [
+    let top = err.to_string();
+    let refused = [
         "held by another",
         "status claimed",
         "status running",
         "deps unsatisfied",
-        "upsert: node is claimed; use completeWork",
     ]
     .iter()
-    .any(|said| text.contains(said))
+    .any(|said| top.contains(said));
+    refused || format!("{err:#}").contains("upsert: node is claimed; use completeWork")
+}
+
+#[cfg(test)]
+mod taken_first_tests {
+    use super::taken_first;
+    use anyhow::Context as _;
+
+    #[test]
+    fn a_top_refusal_and_a_mint_collision_are_passed_over() {
+        assert!(taken_first(&anyhow::anyhow!(
+            "claim: demo-aa01 is held by another seat"
+        )));
+        let minted: anyhow::Result<()> = Err(anyhow::anyhow!(
+            "claimdag: upsert: node is claimed; use completeWork"
+        ));
+        let minted = minted
+            .context("claim: could not mint a node for demo-aa01")
+            .unwrap_err();
+        assert!(taken_first(&minted), "{minted:#}");
+    }
+
+    #[test]
+    fn a_refusal_word_in_a_deeper_cause_is_not_passed_over() {
+        let deep: anyhow::Result<()> = Err(anyhow::anyhow!("tracker: status claimed"));
+        let deep = deep
+            .context("claim: could not write the tracker")
+            .unwrap_err();
+        assert!(!taken_first(&deep), "{deep:#}");
+    }
 }
 
 /// The claim graph stopped at the wall armed for this claim: a claimdag
@@ -47831,6 +48458,51 @@ fn sitting_limited_listing(client: &PacksetClient) -> Result<Vec<Value>> {
     Ok(atoms)
 }
 
+#[cfg(test)]
+thread_local! {
+    static PLANTED_BRIEF_ATOMS: std::cell::RefCell<Option<Vec<Value>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn plant_brief_atoms(atoms: Option<Vec<Value>>) {
+    PLANTED_BRIEF_ATOMS.with(|slot| *slot.borrow_mut() = atoms);
+}
+
+/// Atoms the start recall would hand a search for the brief-rules lesson.
+///
+/// A sitting that already listed the pack contributes those rows. The kept
+/// listing and a bounded pack search for the lesson title are the same
+/// reads the sitting recall makes. A test may plant the atoms the recall
+/// would have returned.
+pub(crate) fn recall_brief_atoms() -> Vec<Value> {
+    #[cfg(test)]
+    if let Some(planted) = PLANTED_BRIEF_ATOMS.with(|slot| slot.borrow().clone()) {
+        return planted;
+    }
+    let mut atoms = Vec::new();
+    if let Some(listing) = sitting_listing() {
+        atoms.extend(listing.atoms.iter().cloned());
+    }
+    atoms.extend(local_store_rows().into_iter().filter_map(row_as_atom));
+    atoms.extend(pack_brief_atoms());
+    atoms
+}
+
+fn row_as_atom(row: Row) -> Option<Value> {
+    serde_json::to_value(row).ok()
+}
+
+fn pack_brief_atoms() -> Vec<Value> {
+    let Ok(client) = pack() else {
+        return Vec::new();
+    };
+    let _section = pack_link::PackSection::enter(SITTING_PACK_READ);
+    sitting_pack_read(&client, brief_rules::PHRASE)
+        .map(|(hits, _)| hits)
+        .unwrap_or_default()
+}
+
 impl Drop for SittingListingGuard {
     fn drop(&mut self) {
         SITTING_LISTING.with(|slot| *slot.borrow_mut() = None);
@@ -48165,6 +48837,10 @@ pub fn sitting_stream_started(
     }
     let decision = tracker_show_json(issue).is_ok_and(|v| is_decision(&v));
     if decision {
+        // The memory clock started with the listing, and doctor, sync and
+        // the tracker reads since then spend it as wall time. The panel is
+        // what a decision's sitting is for, so its reads get a call's budget.
+        let _panel_clock = pack_link::PackSection::enter(pack_call_budget());
         let mut piece = String::new();
         sections.heading(&mut piece, "panel");
         let dir = runtime_dir().join(format!("panel-{issue}"));
@@ -48700,6 +49376,10 @@ pub fn complete(
     if node.trim().is_empty() {
         bail!("complete: the id is empty; pass a tracker id, or a 32-hex claim-graph id");
     }
+    // A signoff step stays open until the run, its blockers, a ship
+    // consensus and any required deed are in place. A claim id that is
+    // not a ticket is left to the claim graph.
+    workflow_skel::signoff_block(node)?;
     complete_as(node, status, assignee, gen, false)
 }
 
@@ -49741,6 +50421,9 @@ pub fn finish(
     verbose: bool,
     width: Width,
 ) -> Result<String> {
+    // A signoff step stays open until its workflow gates pass, even when it
+    // is also a checklist item.
+    workflow_skel::signoff_block(issue)?;
     if let Some(mut ticked) = plan::tick_checklist(issue, width)? {
         if let Some(text) = lesson.map(str::trim).filter(|text| !text.is_empty()) {
             for claim in lesson_claims(text) {
@@ -50278,6 +50961,51 @@ impl CommitLock {
             }
             if std::time::Instant::now() >= deadline {
                 return None;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            std::thread::sleep(flock_pause(pause, left));
+            pause = pause.saturating_mul(2).min(MAX_PAUSE);
+        }
+    }
+
+    /// [`Self::acquire_by`] for a caller that must not go on without the
+    /// lock.
+    ///
+    /// `Ok(Some)` carries the file. `Ok(None)` means another holder still had
+    /// it at `deadline`. `Err` means the file could not be opened, or
+    /// `flock` failed for a reason other than a busy lock, where
+    /// [`Self::acquire_by`] returns a lock that owns nothing.
+    pub fn try_acquire_by(
+        path: &std::path::Path,
+        mut deadline: std::time::Instant,
+    ) -> std::io::Result<Option<Self>> {
+        use std::os::unix::io::AsRawFd;
+        if let Some(wall) = wall_deadline() {
+            deadline = deadline.min(wall);
+        }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a path that is not a git hook"
+        )]
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        let mut pause = std::time::Duration::from_millis(10);
+        const MAX_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
+        loop {
+            // SAFETY: flock on a descriptor this function owns.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                admit::note_list_lock();
+                return Ok(Some(Self(Some(file))));
+            }
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::EWOULDBLOCK | libc::EINTR) => {}
+                _ => return Err(err),
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
             }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             std::thread::sleep(flock_pause(pause, left));
@@ -51541,7 +52269,7 @@ fn commit_paths_now(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         clear_git_repo_env(&mut cmd);
         apply_git_command_env(&mut cmd);
         git_hooks::hook_child_env(&mut cmd);
-        seat_git_child(&mut cmd);
+        seat_git_child(&mut cmd)?;
         bounded_output(&mut cmd)
     };
     // `Err` is a busy index, with what git said.
@@ -53971,6 +54699,35 @@ pub fn format_search_stored_with_flags(
     extra_flags: &[String],
     width: Width,
 ) -> String {
+    format_search_stored_with_flags_and_claims(
+        hits,
+        matched,
+        capped,
+        explain,
+        query,
+        seat_ahead,
+        store,
+        extra_flags,
+        None,
+        width,
+    )
+}
+
+/// [`format_search_stored_with_flags`] with claim facts loaded by ticket search.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn format_search_stored_with_flags_and_claims(
+    hits: &[Hit],
+    matched: usize,
+    capped: bool,
+    explain: bool,
+    query: &str,
+    seat_ahead: bool,
+    store: &[String],
+    extra_flags: &[String],
+    claims: Option<&ticket_search::LoadedClaims>,
+    width: Width,
+) -> String {
     let now = now_utc();
     let mine = seat_name();
     let reading = search_reading(hits.len(), seat_ahead);
@@ -54008,7 +54765,7 @@ pub fn format_search_stored_with_flags(
         )
         .collect();
     let refs: Vec<&str> = store.iter().map(String::as_str).collect();
-    let top_hint = search_finish_hint(hits);
+    let top_hint = search_finish_hint_with_claims(hits, claims);
     scan::search_page_with_flags(
         &scan::SearchPage {
             rows: &rows,
@@ -54030,6 +54787,15 @@ pub fn format_search_stored_with_flags(
 /// When the first search row is a ticket this seat claimed, name finish with a lesson.
 #[must_use]
 pub fn search_finish_hint(hits: &[Hit]) -> Option<String> {
+    search_finish_hint_with_claims(hits, None)
+}
+
+/// [`search_finish_hint`] using claim facts from this search's corpus load.
+#[must_use]
+pub fn search_finish_hint_with_claims(
+    hits: &[Hit],
+    claims: Option<&ticket_search::LoadedClaims>,
+) -> Option<String> {
     let hit = hits.first()?;
     if hit.kind != "ticket" {
         return None;
@@ -54038,8 +54804,23 @@ pub fn search_finish_hint(hits: &[Hit]) -> Option<String> {
     if id.is_empty() {
         return None;
     }
-    let held = held_issue();
-    if held.as_deref() != Some(id) && !ticket_claimed_by_seat(id) {
+    let sitting = recorded_sitting();
+    let seat = seat_name();
+    let ours = if sitting.as_deref() == Some(id) {
+        true
+    } else {
+        match claims.and_then(|loaded| loaded.claim(id, &seat)) {
+            Some(ticket_search::LoadedClaim::Seat) => true,
+            Some(ticket_search::LoadedClaim::Free) => false,
+            // Only this row's heading counts. `held_issue` also matches
+            // another heading that repeats the id.
+            Some(ticket_search::LoadedClaim::Other { holder, started }) => {
+                started && conversation_holders().iter().any(|own| own == holder)
+            }
+            None => held_issue().as_deref() == Some(id) || ticket_claimed_by_seat(id),
+        }
+    };
+    if !ours {
         return None;
     }
     Some(format!(
@@ -59695,28 +60476,73 @@ mod tests {
 
     /// A directory this test creates, outside the temp roots, mode `0o755`.
     /// A temp home is not a seat, so a proof that the guard runs cannot
-    /// live in `tempfile`.
-    struct SeatDir(std::path::PathBuf);
+    /// live in the system temp directory. The root can be a cache under
+    /// `HOME`, and another test sets `HOME` to its own `SeatDir` under the
+    /// env lock, so the root is read under that lock. Otherwise this
+    /// directory could land inside the other test's, which removes it.
+    /// The name is random, so no other `SeatDir` takes the same path.
+    struct SeatDir(tempfile::TempDir);
 
     impl SeatDir {
         fn new(name: &str) -> Self {
-            let dir = crate::test_seat_root::seat_root(crate::bookkeep::path_is_temp)
-                .join(format!("ljos-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            crate::change_mode(&dir, 0o755).unwrap();
+            let seat_root = || crate::test_seat_root::seat_root(crate::bookkeep::path_is_temp);
+            let root = if crate::ENV_LOCK_HELD.with(std::cell::Cell::get) {
+                seat_root()
+            } else {
+                let _env = crate::test_env_lock();
+                seat_root()
+            };
+            std::fs::create_dir_all(&root).unwrap();
+            let dir = tempfile::Builder::new()
+                .prefix(&format!("ljos-{name}-"))
+                .tempdir_in(&root)
+                .unwrap();
+            crate::change_mode(dir.path(), 0o755).unwrap();
             Self(dir)
         }
 
         fn path(&self) -> &std::path::Path {
-            &self.0
+            self.0.path()
         }
     }
 
-    impl Drop for SeatDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    #[test]
+    fn two_seat_dirs_of_one_name_are_apart() {
+        let first = SeatDir::new("same-name");
+        let marker = first.path().join("marker");
+        crate::write_file(&marker, b"first").unwrap();
+        let second = SeatDir::new("same-name");
+        assert_ne!(first.path(), second.path());
+        assert_eq!(std::fs::read(&marker).unwrap(), b"first");
+        let gone = second.path().to_path_buf();
+        drop(second);
+        assert!(!gone.exists(), "{}", gone.display());
+        assert!(marker.exists(), "{}", marker.display());
+    }
+
+    #[test]
+    fn a_seat_dir_waits_out_a_home_another_test_set() {
+        let other = SeatDir::new("other-home");
+        let home = other.path().to_path_buf();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _env = crate::test_env_lock();
+            crate::with_env_mutation(|| {
+                // SAFETY: test_env_lock is held and puts HOME back.
+                unsafe { std::env::set_var("HOME", &home) };
+            });
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+        ready_rx.recv().unwrap();
+        let mine = SeatDir::new("waits-out");
+        holder.join().unwrap();
+        assert!(
+            !mine.path().starts_with(other.path()),
+            "{} is inside {}",
+            mine.path().display(),
+            other.path().display()
+        );
     }
 
     /// A checkout under a temp root still gets seat homes the guard does
@@ -59742,6 +60568,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_guard_shim_steps_aside_for_a_temp_home_and_ljos_off_only() {
+        // Another test points TMPDIR at a directory it deletes. Under the
+        // lock, these directories are made under the TMPDIR the suite has.
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let guard = dir.path().join("guard-bin");
         let fake = dir.path().join("fake");
@@ -59776,7 +60605,13 @@ mod tests {
             for (k, v) in env {
                 cmd.env(k, v);
             }
-            cmd.output().unwrap()
+            cmd.output().unwrap_or_else(|err| {
+                panic!(
+                    "git in {}: {err}; the directory exists: {}",
+                    cwd.display(),
+                    cwd.exists()
+                )
+            })
         };
         // A home under /tmp, not under TMPDIR. The shim drops TMPDIR and
         // still treats /tmp as temporary. A TMPDIR that lives under the
@@ -65441,14 +66276,14 @@ mod tests {
 
         let registry = super::Habitat {
             name: "crates.io",
-            state: "did not answer, so the version check was skipped".into(),
+            state: "did not answer, so the version check was skipped; run `ljos doctor` again once it answers.".into(),
             ok: false,
         };
         assert_eq!(super::doctor_word(&registry), "warn");
         assert!(super::healthy(std::slice::from_ref(&registry)));
         let short = super::format_doctor_short(&[registry]);
         assert!(
-            short.contains("warn\tcrates.io\tdid not answer, so the version check was skipped\n"),
+            short.contains("warn\tcrates.io\tdid not answer, so the version check was skipped; run `ljos doctor` again once it answers.\n"),
             "{short}"
         );
     }
@@ -67077,6 +67912,33 @@ mod tests {
         let late = readings_of(&[first]);
         assert!(format_readings(&late, now).contains("next reading late (yesterday)"));
         assert_eq!(format_change(&late[0], now), "first reading");
+    }
+
+    #[test]
+    fn a_reading_ack_says_was_and_now_not_closed() {
+        let first = serde_json::json!({
+            "id": "a1", "kind": "habit", "ts": "2026-09-12T10:00:00.000Z",
+            "due_at": "2026-09-19T10:00:00.000Z",
+            "habit": {"name": "mab cr all", "value": 0.535, "unit": "acc", "source": "example-0000", "every_s": 604800}
+        });
+        let second = serde_json::json!({
+            "id": "a2", "kind": "habit", "ts": "2026-09-19T10:00:00.000Z",
+            "supersedes": ["a1"],
+            "habit": {"name": "mab cr all", "value": 0.579, "unit": "acc", "source": "example-0001", "every_s": 604800,
+                       "was": 0.535, "was_ts": "2026-09-12T10:00:00.000Z"}
+        });
+        let prev = readings_of(std::slice::from_ref(&first));
+        let now = "2026-09-20T09:00:00.000Z";
+        let ack = format_reading_ack("mab cr all", 0.579, "acc", Some(&prev[0]), now);
+        assert_eq!(ack, "mab cr all: was 0.535 acc (8 days ago), now 0.579 acc");
+        assert!(!ack.contains("closed"), "{ack}");
+        let ack = format_reading_ack("mab cr all", 0.579, "", None, now);
+        assert_eq!(ack, "mab cr all: first reading, 0.579");
+        assert!(!ack.contains("closed"), "{ack}");
+        // The habit stays open: one live reading for the name, the new one.
+        let rows = readings_of(&[first, second]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.as_deref(), Some("a2"));
     }
 
     #[test]
@@ -72426,6 +73288,18 @@ mod tests {
         assert_eq!(
             playbook_name_from_issue(&playbook_only).as_deref(),
             Some("feature")
+        );
+    }
+
+    #[test]
+    fn the_newest_note_wins_when_the_minute_matches() {
+        let v = serde_json::json!({"logbook": [
+            {"note": "playbook: release", "timestamp": "[2026-11-19 Wed 12:00]"},
+            {"note": "playbook: feature", "timestamp": "[2026-11-19 Wed 12:00]"}
+        ]});
+        assert_eq!(
+            latest_note_value(&v, PLAYBOOK_NOTE_PREFIX).as_deref(),
+            Some("release")
         );
     }
 
@@ -92136,6 +93010,53 @@ lesson, due yesterday, seat ada
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_read_only_out_file_is_named_not_the_store() {
+        let err =
+            anyhow::anyhow!("workflow: cannot write --out /mnt/ro/page.org: Read-only file system");
+        assert_eq!(
+            super::user_fault_for(&err, "ljos workflow render"),
+            "workflow: cannot write --out /mnt/ro/page.org: Read-only file system"
+        );
+    }
+
+    #[test]
+    fn a_public_lesson_a_reachable_pack_did_not_take_is_not_queued() {
+        let _lock = super::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let _env = HoldEnv::set(&[
+            ("HOME", dir.path().to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ("PACKSET_URL", "http://127.0.0.1:9"),
+        ]);
+        let queue = state.join("ljos/note-queue.jsonl");
+        let atom = |text: &str| serde_json::json!({"kind": "lesson", "text": text, "issue": "", "workspace": "hand"});
+        let down = || anyhow::anyhow!("connection refused");
+        {
+            let _public = super::RememberPublic::set(true);
+            let err = super::queue_waiting_lesson(
+                &atom("Oil the east hinge every week."),
+                down(),
+                "remember",
+            );
+            assert!(!format!("{err:#}").contains("queued"), "{err:#}");
+        }
+        let rows = std::fs::read_to_string(&queue).unwrap_or_default();
+        assert!(
+            !rows.contains("east hinge"),
+            "a public lesson was queued:\n{rows}"
+        );
+        let err =
+            super::queue_waiting_lesson(&atom("Sweep the west bench daily."), down(), "remember");
+        assert!(format!("{err:#}").contains("queued"), "{err:#}");
+        let rows = std::fs::read_to_string(&queue).unwrap_or_default();
+        assert!(
+            rows.contains("west bench"),
+            "the private control was not queued:\n{rows}"
+        );
     }
 
     /// A proposal row as an older ljos wrote it to `proposals.jsonl`.

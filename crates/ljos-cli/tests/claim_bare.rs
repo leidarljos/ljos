@@ -13,8 +13,10 @@ mod sibling;
 use std::ffi::CString;
 use std::io::Read as _;
 use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 const NO_READY_TICKET: &str =
     "claim: no ticket is ready on this seat, so file one with `ljos file \"TITLE\" -p PROJECT`";
@@ -161,8 +163,226 @@ fn fifo(path: &Path) {
     );
 }
 
+/// How long the whole race test may take, from its start.
+const RACE_DEADLINE: Duration = Duration::from_secs(60);
+
+/// How long a seat killed at the deadline gets to be reaped, and how long
+/// its pipes get to close after the deadline.
+const REAP_GRACE: Duration = Duration::from_secs(5);
+
+/// Kill `child` and everything it started. Each seat runs in a process
+/// group of its own, so the gated claimdag shim goes with it. Call it only
+/// before `child` is reaped, while its pid still names that group.
+fn kill_group(child: &Child) {
+    let group = libc::pid_t::try_from(child.id()).unwrap();
+    // SAFETY: a negative pid names the process group the child leads.
+    unsafe {
+        libc::kill(-group, libc::SIGKILL);
+    }
+}
+
+/// `child`'s status once it is reaped, or `None` when it is still not
+/// reaped at `by`.
+fn reap_by(child: &mut Child, by: Instant) -> Option<std::process::ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(status);
+        }
+        if Instant::now() >= by {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A seat's stdout and stderr, read on threads that send what they read.
+struct Pipes {
+    said: std::sync::mpsc::Receiver<(bool, Vec<u8>)>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl Pipes {
+    fn take(child: &mut Child) -> Self {
+        let (tx, said) = std::sync::mpsc::channel();
+        let drain = |pipe: Box<dyn std::io::Read + Send>, err: bool| {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut pipe = pipe;
+                let mut chunk = [0u8; 8192];
+                while let Ok(n @ 1..) = pipe.read(&mut chunk) {
+                    if tx.send((err, chunk[..n].to_vec())).is_err() {
+                        break;
+                    }
+                }
+            });
+        };
+        if let Some(pipe) = child.stdout.take() {
+            drain(Box::new(pipe), false);
+        }
+        if let Some(pipe) = child.stderr.take() {
+            drain(Box::new(pipe), true);
+        }
+        Self {
+            said,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+
+    /// Read until both pipes close or `by` passes. True when both closed.
+    fn drain_by(&mut self, by: Instant) -> bool {
+        loop {
+            let left = by.saturating_duration_since(Instant::now());
+            match self.said.recv_timeout(left) {
+                Ok((false, bytes)) => self.stdout.extend(bytes),
+                Ok((true, bytes)) => self.stderr.extend(bytes),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return true,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return false,
+            }
+        }
+    }
+
+    fn text(&self) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&self.stdout),
+            String::from_utf8_lossy(&self.stderr)
+        )
+    }
+}
+
+/// The output of `child`, or a failure naming `what` when it has not
+/// exited and closed its pipes by `deadline`.
+///
+/// Nothing here waits past `deadline` plus [`REAP_GRACE`]: a seat still
+/// running at the deadline is killed with its group and reaped within the
+/// grace, and a pipe some escaped process still holds is given up on.
+fn finish(mut child: Child, deadline: Instant, what: &str) -> Output {
+    let mut pipes = Pipes::take(&mut child);
+    let status = match reap_by(&mut child, deadline) {
+        Some(status) => status,
+        None => {
+            kill_group(&child);
+            let reaped = reap_by(&mut child, Instant::now() + REAP_GRACE);
+            pipes.drain_by(Instant::now() + REAP_GRACE);
+            match reaped {
+                Some(_) => panic!(
+                    "{what} did not exit within {RACE_DEADLINE:?}:\n{}",
+                    pipes.text()
+                ),
+                None => panic!(
+                    "{what} was not reaped {REAP_GRACE:?} after it was killed:\n{}",
+                    pipes.text()
+                ),
+            }
+        }
+    };
+    if !pipes.drain_by(deadline.max(Instant::now()) + REAP_GRACE) {
+        panic!(
+            "{what} exited but its pipes stayed open past the deadline:\n{}",
+            pipes.text()
+        );
+    }
+    Output {
+        status,
+        stdout: pipes.stdout,
+        stderr: pipes.stderr,
+    }
+}
+
+/// Run `finish` on a thread, and fail when it has not returned in `limit`.
+/// The panic message `finish` gave, if any, is returned.
+fn finish_returns_within(child: Child, deadline: Instant, limit: Duration) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            finish(child, deadline, "the probe")
+        }));
+        let _ = tx.send(caught.err().map(|err| {
+            err.downcast_ref::<String>()
+                .cloned()
+                .or_else(|| err.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .unwrap_or_default()
+        }));
+    });
+    rx.recv_timeout(limit)
+        .unwrap_or_else(|_| panic!("finish did not return within {limit:?}"))
+}
+
+fn sh(script: &str) -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a shell probe for the race test's deadline"
+    )]
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-c", script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd
+}
+
+fn kill_pid(pid: u32) {
+    let pid = libc::pid_t::try_from(pid).unwrap();
+    // SAFETY: kill with a positive pid signals only that process.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+}
+
+#[test]
+fn the_race_deadline_gives_up_on_a_pipe_an_escaped_process_holds() {
+    let child = sh("setsid sleep 300 & echo \"held $!\"; exit 0")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let failed = finish_returns_within(
+        child,
+        Instant::now() + Duration::from_millis(200),
+        Duration::from_secs(30),
+    )
+    .expect("finish passed with a pipe still held");
+    if let Some(pid) = failed
+        .split_whitespace()
+        .skip_while(|word| *word != "held")
+        .nth(1)
+        .and_then(|pid| pid.parse().ok())
+    {
+        kill_pid(pid);
+    }
+    assert!(failed.contains("pipes stayed open"), "{failed}");
+    assert!(
+        started.elapsed() < REAP_GRACE * 2,
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn the_race_deadline_does_not_wait_forever_on_a_seat_the_kill_missed() {
+    let child = sh("exec sleep 300").spawn().unwrap();
+    let pid = child.id();
+    let started = Instant::now();
+    let failed = finish_returns_within(
+        child,
+        Instant::now() + Duration::from_millis(200),
+        Duration::from_secs(30),
+    );
+    kill_pid(pid);
+    let failed = failed.expect("finish passed with the seat still running");
+    assert!(failed.contains("not reaped"), "{failed}");
+    assert!(
+        started.elapsed() < REAP_GRACE * 3,
+        "{:?}",
+        started.elapsed()
+    );
+}
+
 #[test]
 fn simultaneous_bare_claims_pass_over_a_node_claimed_during_mint() {
+    let deadline = Instant::now() + RACE_DEADLINE;
     let world = World::new(&[("demo-aa01", None), ("demo-bb02", None)]);
     let gate = tempfile::tempdir().unwrap();
     let waiting_fifo = gate.path().join("waiting");
@@ -202,6 +422,7 @@ exit "$rc"
             .env("RACE_NODE", &race_node)
             .env("WAITING_FIFO", &waiting_fifo)
             .env("RELEASE_FIFO", &release_fifo)
+            .process_group(0)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
     };
@@ -217,15 +438,39 @@ exit "$rc"
         .unwrap();
     let mut slow_cmd = world.cmd(Path::new(env!("CARGO_BIN_EXE_ljos")), "seat0");
     configure(&mut slow_cmd);
-    let slow = slow_cmd.spawn().unwrap();
-    let mut signal = [0u8; 1];
-    waiting.read_exact(&mut signal).unwrap();
+    let mut slow = slow_cmd.spawn().unwrap();
+    let (gate_tx, gate_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut signal = [0u8; 1];
+        let _ = gate_tx.send(waiting.read_exact(&mut signal));
+    });
+    loop {
+        match gate_rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(read) => {
+                read.unwrap();
+                break;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(err) => panic!("the gate reader stopped: {err}"),
+        }
+        if slow.try_wait().unwrap().is_some() {
+            let out = finish(slow, deadline, "seat0");
+            panic!(
+                "seat0 exited before it reached the upsert gate:\n{}",
+                said(&out)
+            );
+        }
+        if Instant::now() >= deadline {
+            let out = finish(slow, deadline, "seat0 waiting for the upsert gate");
+            panic!("seat0 exited at the deadline:\n{}", said(&out));
+        }
+    }
 
     let mut fast_cmd = world.cmd(Path::new(env!("CARGO_BIN_EXE_ljos")), "seat1");
     configure(&mut fast_cmd);
     let fast = fast_cmd.spawn().unwrap();
-    let fast = fast.wait_with_output().unwrap();
-    let slow = slow.wait_with_output().unwrap();
+    let fast = finish(fast, deadline, "seat1");
+    let slow = finish(slow, deadline, "seat0");
     assert_eq!(claimed(&fast), "demo-aa01", "{}", said(&fast));
     assert_eq!(claimed(&slow), "demo-bb02", "{}", said(&slow));
 }

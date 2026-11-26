@@ -7,24 +7,24 @@ mod help_groups;
 mod shell_complete;
 use ljos_cli::output_wrap::Width;
 use ljos_cli::{
-    age_of, begin_sitting_preclaim, brief, bump_plan, calibrate, cards, claim, claim_next,
-    cli_assignee, compact_sitting_block, complete, conflicts, consensus_steps_for, copy_playbook,
-    due_report, finish, forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
-    format_findings, format_hubs, format_island, format_playbooks, format_readings,
-    format_remembered, format_seat_command, format_steps, graded, habit, habits, handover_scoped,
-    healthy, hook_note, island_entities, join, learn_anchors, learn_and_write, learn_reading,
-    learn_shared, mark_seen, now_utc, on_path, onboard_to, packset_consolidate, packset_forget,
-    packset_hubs, packset_island_as, packset_search_as_of, packset_write_as, panel, panel_steps,
-    parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout,
-    predictions_of, prompt_hook_stdout, protocol_brief, protocol_text, read_campaign, receive,
-    release, remember_findings, reopen, rows_about, run, run_as, run_captured, settle_discount,
-    sitting_close, sitting_stream_started, stop_hook_stdout, timeline, topic_words,
-    tracker_show_json, trim_num, trust_from_pack, uncite_deed, with_discount, write_outcome,
-    write_persona_as, write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading,
-    Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
+    begin_sitting_preclaim, brief, bump_plan, calibrate, cards, claim, claim_next, cli_assignee,
+    compact_sitting_block, complete, conflicts, consensus_steps_for, copy_playbook, due_report,
+    finish, forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
+    format_findings, format_hubs, format_island, format_playbooks, format_reading_ack,
+    format_readings, format_remembered, format_seat_command, format_steps, graded, habit, habits,
+    handover_scoped, healthy, hook_note, island_entities, join, learn_anchors, learn_and_write,
+    learn_reading, learn_shared, mark_seen, now_utc, on_path, onboard_to, packset_consolidate,
+    packset_forget, packset_hubs, packset_island_as, packset_search_as_of, packset_write_as, panel,
+    panel_steps, parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory,
+    post_hook_stdout, predictions_of, prompt_hook_stdout, protocol_brief, protocol_text,
+    read_campaign, receive, release, remember_findings, reopen, rows_about, run, run_as,
+    run_captured, settle_discount, sitting_close, sitting_stream_started, stop_hook_stdout,
+    timeline, topic_words, tracker_show_json, trust_from_pack, uncite_deed, with_discount,
+    write_outcome, write_persona_as, write_prediction, write_rule, write_trust, Persona,
+    PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
 };
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -151,6 +151,12 @@ enum MemCmd {
         /// Replacement text for `--edit`, or the text of the merged memory for `--merge`.
         #[arg(long)]
         text: Option<String>,
+        /// Mark this lesson or preference public, so `ljos handbook` may export it. The text is written again with its project and tags. Repeatable. A runner cannot.
+        #[arg(long, value_name = "ID")]
+        public: Vec<String>,
+        /// Project recorded on a memory that names none, with `--public`.
+        #[arg(short = 'p', long, value_name = "PROJECT")]
+        project: Option<String>,
     },
     /// Browse, filter by seat or date, and prune memories in a terminal viewer.
     ///
@@ -285,16 +291,34 @@ fn memories_cmd(cmd: MemCmd) -> Result<()> {
             edit,
             merge,
             text,
+            public,
+            project,
         } => {
+            if project.is_some() && public.is_empty() {
+                anyhow::bail!("memories: -p belongs with --public");
+            }
+            if !public.is_empty() {
+                ljos_cli::refuse_public_under_a_runner("memories", true)?;
+            }
+            let project = match project {
+                Some(name) => Some(ljos_cli::require_known_project(&name)?),
+                None => None,
+            };
             let all = mem::list(&mem::live_atoms()?, &mem::reviews(), &everything);
-            let scripted =
-                !keep.is_empty() || !drop_ids.is_empty() || edit.is_some() || !merge.is_empty();
+            let scripted = !keep.is_empty()
+                || !drop_ids.is_empty()
+                || edit.is_some()
+                || !merge.is_empty()
+                || !public.is_empty();
             if scripted {
                 for id in &keep {
                     ljos_cli::tell_raw!("{}", mem::keep(id, &all)?);
                 }
                 for id in &drop_ids {
                     ljos_cli::tell_raw!("{}", mem::drop_memory(id, &all)?);
+                }
+                for id in &public {
+                    ljos_cli::tell_raw!("{}", mem::mark_public(id, &all, project.as_deref())?);
                 }
                 if let Some(id) = edit {
                     let text = text
@@ -604,6 +628,56 @@ struct ReadyArgs {
     all: bool,
 }
 
+/// `ljos workflow` subcommands for a stored skeleton.
+#[derive(Subcommand)]
+enum WorkflowCmd {
+    /// Check an Org skeleton and store its bytes with the sha256 and the version.
+    ///
+    /// The same bytes are a no-op. A changed body needs a higher `#+version`. A deed is the stored copy of that file.
+    ///
+    /// Example: `ljos workflow define docs/examples/workflows/release.org`
+    Define {
+        /// The Org file. Its file name is the skeleton name.
+        file: PathBuf,
+    },
+    /// Gather a run into a proposal, or store the next skeleton version.
+    ///
+    /// A run is gathered with `--from PARENT`, which files a decision whose options are keep and revise. The next version is stored with `--apply FILE` after consensus settles revise.
+    ///
+    /// Example: `ljos workflow revise release --from proj-1a2b`
+    Revise {
+        /// The skeleton name.
+        name: String,
+        /// The parent ticket of the run to read.
+        #[arg(long, value_name = "PARENT", conflicts_with = "apply")]
+        from: Option<String>,
+        /// The Org file to store as the next version.
+        #[arg(long, value_name = "FILE", conflicts_with = "from")]
+        apply: Option<PathBuf>,
+    },
+    /// Write the public Org page for a skeleton, steps in dependency order.
+    ///
+    /// Author text is written unchanged. Render refuses the page when a detection copy finds a secret, a private path, an address, a private host, an email, an invisible character, a declared seat name, or a product or tool name. Each hit names the source line and the class, and nothing is written. `--check` exits 1 when `--out` differs from a fresh render or the file has a hit.
+    ///
+    /// Example: `ljos workflow render release --out page.org`
+    Render {
+        /// The skeleton name.
+        name: String,
+        /// Read this file instead of the stored skeleton or `.ljos/workflows/NAME.org`.
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// Write the page here. With `--check`, this is the committed file to compare.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// Exit 1 when `--out` differs from a fresh render or the file has a public-text hit.
+        #[arg(long)]
+        check: bool,
+        /// Fill `{{key}}` before rendering. Repeat for each variable.
+        #[arg(long = "var", value_name = "KEY=VALUE")]
+        var: Vec<String>,
+    },
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Remember one lesson, stored as written.
@@ -668,6 +742,11 @@ enum Cmd {
         /// An unknown name exits 1 and names the projects.
         #[arg(short = 'p', long, value_name = "PROJECT")]
         project: Option<String>,
+        /// Mark this lesson public, so `ljos handbook` may export it. The default is private. A runner cannot.
+        /// It records the project, from `-p` or the checkout, and exits 1 when none resolves.
+        /// A pack that does not take it is not queued: run it again.
+        #[arg(long)]
+        public: bool,
     },
     /// Save one standing preference for how work should be done.
     ///
@@ -728,6 +807,15 @@ enum Cmd {
         /// unverified. Pass with `--review`.
         #[arg(long, value_name = "ID", requires = "review")]
         keep: Option<String>,
+        /// Record this project on the preference. With `--tag` and no project, the checkout's project is recorded when one resolves. With neither flag nothing is recorded.
+        #[arg(short = 'p', long, value_name = "PROJECT")]
+        project: Option<String>,
+        /// Record this tag on the preference. Repeatable.
+        #[arg(long, value_name = "TAG")]
+        tag: Vec<String>,
+        /// Mark this preference public, so `ljos handbook` may export it. The default is private. It records the project, from `-p` or the checkout. A runner cannot.
+        #[arg(long)]
+        public: bool,
     },
     /// Write this seat's memories to a file. The same as `ljos memory export`.
     ///
@@ -756,6 +844,57 @@ enum Cmd {
     Memories {
         #[command(subcommand)]
         cmd: MemCmd,
+    },
+    /// Write the lessons, preferences, rules, tickets and workflows marked public as an Org document.
+    ///
+    /// Nothing leaves unless it is marked. A lesson, preference or rule is
+    /// marked with `--public` on `ljos remember`, `ljos prefer` and `ljos rule`,
+    /// or `ljos memories review --public ID`. A ticket is marked with the tag
+    /// `public`. A workflow file is marked with the exact line `#+public: yes` in its header. The export
+    /// is limited to this project. Repeated `--tag` values narrow it: every
+    /// tag must be present. Each repeated `--tree` follows marked blockers
+    /// inside the project. A parent link nests a ticket and does not order it.
+    /// When a marked item still matches a private pattern, the export is
+    /// refused: the item and the kind of match are named, nothing is written
+    /// and the exit status is non-zero.
+    ///
+    /// Example: `ljos handbook --project Software --tag release --tree Software-8tkn --out release.org`
+    Handbook {
+        /// Project scope for memories and the handbook's empty-project message.
+        #[arg(short = 'p', long)]
+        project: String,
+        /// Also require this tag. Repeatable. The project still has to match.
+        #[arg(long, value_name = "TAG")]
+        tag: Vec<String>,
+        /// Follow blockers of this ticket inside the project. Repeatable. A parent link is nesting only.
+        #[arg(long, value_name = "TICKET")]
+        tree: Vec<String>,
+        /// Keep rows whose text contains this query.
+        #[arg(long)]
+        query: Option<String>,
+        /// Org document title. The default is `Project handbook`. A title that matches a private pattern refuses the export.
+        #[arg(long)]
+        title: Option<String>,
+        /// Write the Org document here. `-` or `/dev/stdout` writes stdout. A symbolic link or a read-only file is refused.
+        #[arg(long, default_value = "-")]
+        out: PathBuf,
+        /// Write each lesson and policy as a heading with an `:ID:` property, and give each ticket one.
+        /// A list item has no id. An id that matches a private pattern is not written.
+        #[arg(long)]
+        ids: bool,
+        /// Include memories and policies that have not been accepted or kept in review.
+        #[arg(long)]
+        include_unreviewed: bool,
+        /// Read Org workflows from this directory.
+        /// When omitted, `.ljos/workflows` is read when it exists.
+        #[arg(long, value_name = "DIR")]
+        workflows: Option<PathBuf>,
+        /// Add this date to the Org preamble. No date is written by default.
+        #[arg(long, value_name = "DATE")]
+        date: Option<String>,
+        /// Regenerate the file and fail when the bytes differ or a line is unsafe.
+        #[arg(long)]
+        check: bool,
     },
     /// List lesson proposals waiting on a review.
     ///
@@ -1893,20 +2032,31 @@ enum Cmd {
     ///
     /// Example: `ljos playbooks`
     Playbooks,
-    /// Show where a parent ticket's workflow stands, and the next step.
+    /// Show a parent ticket's workflow, or run a versioned skeleton.
     ///
-    /// `--start` puts the parent under a workflow and files its design child. `--round` files the next panel round or a blocking fix. A round count does not close the parent.
+    /// The feature workflow files its design child with `--start feature`, and the next panel round with `--round`. A round count does not close the parent. Running `--start feature` again files nothing new.
+    ///
+    /// `define FILE` checks an Org skeleton and stores its bytes. A deed is a stored file of the skeleton. `--start NAME` files one ticket per step under the parent. `revise` gathers notes from a run into a proposal, and `--apply` stores the next version after consensus settles revise. `render` writes a public Org page.
     ///
     /// Example: `ljos workflow proj-1a2b`
+    #[command(subcommand_negates_reqs = true)]
     Workflow {
+        #[command(subcommand)]
+        action: Option<WorkflowCmd>,
         /// The tracker id of the parent issue.
-        issue: String,
-        /// Put the parent under this workflow (feature) and file its design child. Running it again files nothing new.
+        issue: Option<String>,
+        /// Put the parent under this workflow. `feature` files the design child. Any other name files the stored skeleton's steps. Running it again files nothing new.
         #[arg(long, value_name = "NAME", conflicts_with = "round")]
         start: Option<String>,
-        /// File the next panel round, or one `fix:` for a blocking finding. A nit stays a note. The parent stays open. A person closes it.
+        /// File the next panel round of the feature workflow, or one `fix:` for a blocking finding. A nit stays a note. The parent stays open. A person closes it.
         #[arg(long)]
         round: bool,
+        /// Fill `{{key}}` in the skeleton. Repeat for each variable.
+        #[arg(long = "var", value_name = "KEY=VALUE")]
+        var: Vec<String>,
+        /// Read the skeleton from this file. The stored copy is used when this is absent.
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
     },
     /// Take a ticket so this seat is the one working on it.
     ///
@@ -2053,6 +2203,15 @@ enum Cmd {
         /// Write the rule into the user config, shared by every seat, instead of this seat's memories.
         #[arg(long)]
         user: bool,
+        /// Record this project on the rule. With `--tag` and no project, the checkout's project is recorded when one resolves. With neither flag nothing is recorded.
+        #[arg(short = 'p', long, value_name = "PROJECT")]
+        project: Option<String>,
+        /// Record this tag on the rule. Repeatable.
+        #[arg(long, value_name = "TAG")]
+        tag: Vec<String>,
+        /// Mark this rule public, so `ljos handbook` may export it. The default is private. It records the project, from `-p` or the checkout. A runner cannot.
+        #[arg(long)]
+        public: bool,
     },
     /// List the command guard's rules: verdict, pattern and reason, one a line.
     ///
@@ -2461,7 +2620,7 @@ enum Cmd {
     },
     /// Record a number you measure again later, or list the ones you keep.
     ///
-    /// A habit is that number. `ljos habit NAME VALUE` stores a reading and closes the one before. `ljos habit NAME` shows one. `ljos habit` lists them, the change since the last reading, and when the next is due.
+    /// A habit is that number. `ljos habit NAME VALUE` stores a reading; the one before is kept as what it was. `ljos habit NAME` shows one. `ljos habit` lists them, the change since the last reading, and when the next is due.
     ///
     /// Example: `ljos habit`
     Habit {
@@ -2809,46 +2968,22 @@ fn recall_words_sentence(args: &[String]) -> String {
     let split = args.iter().position(|arg| arg == "--");
     let before = command_words_rest(&args[..split.unwrap_or(args.len())]);
     let after = split.map_or(&[][..], |at| &args[at + 1..]);
-    let words: Vec<&str> = before
-        .iter()
-        .skip(1)
-        .chain(after)
-        .map(String::as_str)
-        .collect();
-    match words.first() {
+    let first = before.iter().skip(1).chain(after).next();
+    match first {
         Some(first) if !first.starts_with('-') && looks_like_ticket_id(first) => {
-            format!("ljos: recall takes one ticket id, so run `ljos recall {first}`.")
+            "ljos: recall takes one ticket id, so run `ljos recall <id>`.".to_string()
         }
-        _ => {
-            let search = recall_search_command(&words.join(" "));
-            if search.contains('`') {
-                format!("ljos: recall takes one ticket id, so run {search} to look up words.")
-            } else {
-                format!("ljos: recall takes one ticket id, so run `{search}` to look up words.")
-            }
-        }
+        _ => "ljos: recall takes one ticket id, so run `ljos search \"<words>\"` to look up words."
+            .to_string(),
     }
 }
 
 /// The three verbs for a lessons word, each as a line that runs.
 ///
-/// Words typed straight after it are the query: `ljos lessons kiln` is
-/// `ljos search kiln`. A flag ends them.
-fn lessons_sentence(typed: &str, args: &[String]) -> String {
-    let after: Vec<&String> = args
-        .iter()
-        .skip_while(|arg| arg.as_str() != typed)
-        .skip(1)
-        .take_while(|arg| !arg.starts_with('-'))
-        .collect();
-    let search = if after.is_empty() {
-        "ljos search \"lexical default\"".to_string()
-    } else {
-        let words: Vec<&str> = after.iter().map(|word| word.as_str()).collect();
-        recall_search_command(&words.join(" "))
-    };
+/// The words after it are not repeated, since they may be private.
+fn lessons_sentence(typed: &str) -> String {
     format!(
-        "ljos: no command {typed}. To find lessons run `{search}`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`."
+        "ljos: no command {typed}. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`."
     )
 }
 
@@ -2947,7 +3082,7 @@ fn command_sentence(typed: &str, args: &[String]) -> String {
         return line;
     }
     if here.at.is_empty() && lessons_topic(typed) {
-        return lessons_sentence(typed, args);
+        return lessons_sentence(typed);
     }
     let picked = if here.at.is_empty() {
         root_synonym(typed).map(str::to_string)
@@ -2957,8 +3092,9 @@ fn command_sentence(typed: &str, args: &[String]) -> String {
     let picked = picked.or_else(|| pick_verb(typed, &here.commands));
     match picked {
         Some(name) => {
-            let rewritten = rewrite_arg(args, typed, &name);
-            format!("ljos: no command {typed}, and the closest is {name}, so run `{rewritten}`.")
+            let rewritten = rewrite_arg(args, typed, &name, &here.at);
+            let word = shown_word(typed).map_or(String::new(), |word| format!(" {word}"));
+            format!("ljos: no command{word}, and the closest is {name}, so run `{rewritten}`.")
         }
         None => {
             let help = if here.at.is_empty() {
@@ -2966,7 +3102,7 @@ fn command_sentence(typed: &str, args: &[String]) -> String {
             } else {
                 format!("ljos {} --help", here.at.join(" "))
             };
-            format!("ljos: no command {typed}, so run `{help}`.")
+            format!("ljos: that is not a command, so run `{help}`.")
         }
     }
 }
@@ -2974,7 +3110,7 @@ fn command_sentence(typed: &str, args: &[String]) -> String {
 fn flag_sentence(typed: &str, args: &[String]) -> String {
     let path = command_words(args, typed);
     let here = words_at(&path);
-    let bare = typed.trim_start_matches('-');
+    let bare = flag_name(typed).trim_start_matches('-').to_string();
     let names = flag_names(&here.flags);
     let where_ = if here.at.is_empty() {
         "ljos".to_string()
@@ -2994,12 +3130,13 @@ fn flag_sentence(typed: &str, args: &[String]) -> String {
             );
         }
     }
-    match closest(bare, &names) {
+    let shown = flag_shown(typed);
+    match closest(&bare, &names) {
         Some(name) => {
             let flag = flag_text(typed, name, &here.flags);
-            let rewritten = rewrite_arg(args, typed, flag);
+            let rewritten = rewrite_arg(args, typed, flag, &here.at);
             format!(
-                "ljos: {where_} has no flag {typed}, and the closest is {flag}, so run `{rewritten}`."
+                "ljos: {where_} has no flag {shown}, and the closest is {flag}, so run `{rewritten}`."
             )
         }
         None => {
@@ -3008,7 +3145,7 @@ fn flag_sentence(typed: &str, args: &[String]) -> String {
             } else {
                 format!("ljos {} --help", here.at.join(" "))
             };
-            format!("ljos: {where_} has no flag {typed}, so run `{help}`.")
+            format!("ljos: {where_} has no flag {shown}, so run `{help}`.")
         }
     }
 }
@@ -3039,12 +3176,13 @@ fn value_sentence(err: &clap::Error, args: &[String]) -> Option<String> {
         .or_else(|| closest(&typed, &options).map(str::to_string));
     let line = match picked {
         Some(name) => {
-            let rewritten = rewrite_arg(args, &typed, &name);
-            format!("ljos: no shell {typed}, and the closest is {name}, so run `{rewritten}`.")
+            let rewritten = rewrite_arg(args, &typed, &name, &path);
+            let word = shown_word(&typed).map_or(String::new(), |word| format!(" {word}"));
+            format!("ljos: no shell{word}, and the closest is {name}, so run `{rewritten}`.")
         }
         None => {
-            let rewritten = rewrite_arg(args, &typed, "bash");
-            format!("ljos: no shell {typed}, so run `{rewritten}`.")
+            let rewritten = rewrite_arg(args, &typed, "bash", &path);
+            format!("ljos: that is not a shell, so run `{rewritten}`.")
         }
     };
     Some(line)
@@ -3052,7 +3190,7 @@ fn value_sentence(err: &clap::Error, args: &[String]) -> Option<String> {
 
 fn bad_value(err: &clap::Error, args: &[String]) -> Option<String> {
     use clap::error::ContextKind;
-    let value = context_one(err, ContextKind::InvalidValue)?;
+    context_one(err, ContextKind::InvalidValue)?;
     let flag = context_one(err, ContextKind::InvalidArg).unwrap_or_default();
     let flag = flag.split_whitespace().next().unwrap_or(flag.as_str());
     let flag = if flag.is_empty() {
@@ -3065,7 +3203,7 @@ fn bad_value(err: &clap::Error, args: &[String]) -> Option<String> {
     let cmd = command_path_head(args);
     let help = help_of(&cmd);
     Some(format!(
-        "{cmd}: {flag} does not accept {value}. The values it takes are in `{help}`."
+        "{cmd}: {flag} does not accept that value. The values it takes are in `{help}`."
     ))
 }
 
@@ -3170,7 +3308,20 @@ fn missing_shell(args: &[String]) -> Option<String> {
         return None;
     }
     let mut line = vec!["ljos".to_string()];
-    line.extend(args.iter().map(|arg| shell_word(arg)));
+    for arg in args {
+        if arg == "completions" {
+            line.push(arg.clone());
+        } else if arg.starts_with('-') {
+            let name = flag_shown(arg);
+            line.push(if arg.contains('=') {
+                format!("{name}=<value>")
+            } else {
+                name
+            });
+        } else {
+            push_value(&mut line);
+        }
+    }
     line.push("bash".to_string());
     Some(format!(
         "ljos: completions needs a shell, so run `{}`.",
@@ -3502,21 +3653,93 @@ fn command_words_until(args: &[String], stop: Option<&str>) -> Vec<String> {
     words
 }
 
-fn rewrite_arg(args: &[String], from: &str, to: &str) -> String {
+/// The command with `from` swapped for `to`. Every other word the person
+/// typed is kept only when it is a command word or a flag name. A value
+/// stays out of the line, since it may be private.
+fn rewrite_arg(args: &[String], from: &str, to: &str, known: &[String]) -> String {
     let mut words = vec!["ljos".to_string()];
     let mut replaced = false;
+    let mut literal = false;
     for arg in args {
-        if !replaced && arg == from {
-            words.push(shell_word(to));
+        let same = arg == from || (from.starts_with('-') && flag_name(arg) == from);
+        if !replaced && same {
+            let value = arg.starts_with('-') && arg.contains('=');
+            words.push(shell_word(to) + if value { "=<value>" } else { "" });
             replaced = true;
-        } else {
+        } else if literal {
+            push_value(&mut words);
+        } else if arg == "--" {
+            literal = true;
+            words.push(arg.clone());
+        } else if arg.starts_with('-') {
+            let name = flag_shown(arg);
+            let value = arg.contains('=');
+            words.push(if value {
+                format!("{name}=<value>")
+            } else {
+                name
+            });
+        } else if known.contains(arg) || arg == to {
             words.push(shell_word(arg));
+        } else {
+            push_value(&mut words);
         }
     }
     if !replaced {
         words.push(shell_word(to));
     }
     words.join(" ")
+}
+
+fn push_value(words: &mut Vec<String>) {
+    if words.last().map(String::as_str) != Some("<value>") {
+        words.push("<value>".to_string());
+    }
+}
+
+/// A word of the person's that is safe to repeat: letters only, short, and
+/// nothing the public-text screen refuses. A value is never one.
+fn shown_word(word: &str) -> Option<&str> {
+    let plain = !word.is_empty()
+        && word.len() <= 24
+        && word
+            .chars()
+            .all(|ch| ch.is_ascii_alphabetic() || matches!(ch, '-' | '_'));
+    (plain && !ljos_cli::public_text::refuses(word, &ljos_cli::public_text::Screen::default()))
+        .then_some(word)
+}
+
+/// The flag without any `=value` or glued short value.
+fn flag_name(typed: &str) -> &str {
+    let name = typed.split('=').next().unwrap_or(typed);
+    if name.starts_with("--") {
+        name
+    } else if name.starts_with('-') {
+        let end = name
+            .char_indices()
+            .nth(2)
+            .map_or(name.len(), |(index, _)| index);
+        &name[..end]
+    } else {
+        name
+    }
+}
+
+/// A flag name to repeat. The name only, never its value.
+fn flag_shown(typed: &str) -> String {
+    let name = flag_name(typed);
+    let body = name.trim_start_matches('-');
+    let plain = !body.is_empty()
+        && body.len() <= 32
+        && body
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'));
+    let clean = !ljos_cli::public_text::refuses(body, &ljos_cli::public_text::Screen::default());
+    if plain && clean {
+        name.to_string()
+    } else {
+        "<flag>".to_string()
+    }
 }
 
 fn shell_word(word: &str) -> String {
@@ -3676,13 +3899,11 @@ fn block_usage_line(cmd: &Cmd) -> Option<String> {
     }
     let word = also.iter().find(|word| !vissue_id(word))?;
     if ticket_like(word) {
-        return Some(format!(
-            "block: {word} looks like a ticket id, so run `ljos block ISSUE --on {word}`."
-        ));
+        return Some(
+            "block: that looks like a ticket id, so run `ljos block ISSUE --on ID`.".to_string(),
+        );
     }
-    Some(format!(
-        "ljos: no command {word}, so run `ljos block --help`."
-    ))
+    Some("ljos: that is not a command, so run `ljos block --help`.".to_string())
 }
 
 /// `ljos sitting TITLE` without `--plan`, when TITLE is not a ticket id.
@@ -3703,11 +3924,10 @@ fn sitting_plan_line(cmd: &Cmd) -> Option<String> {
     if issue.is_empty() || vissue_id(issue) {
         return None;
     }
-    let shown = issue.replace('`', "'");
-    let quoted = format!("\"{}\"", shown.replace('\\', "\\\\").replace('"', "\\\""));
-    Some(format!(
-        "ljos: {shown} is not a ticket id, so run `ljos sitting --plan {quoted} -- \"measure the files\"`."
-    ))
+    Some(
+        "ljos: that is not a ticket id, so run `ljos sitting --plan \"<title>\" -- \"measure the files\"`."
+            .to_string(),
+    )
 }
 
 /// An empty or whitespace id on `note` or `finish`.
@@ -3802,32 +4022,6 @@ fn looks_like_ticket_id(raw: &str) -> bool {
         }) && !suffix.is_empty();
     }
     ticket_like(trimmed)
-}
-
-fn recall_search_command(text: &str) -> String {
-    let arg = if text
-        .chars()
-        .any(|ch| ch.is_control() || matches!(ch, '"' | '\\' | '$' | '`' | '!'))
-    {
-        if text.chars().any(char::is_control) {
-            let escaped = text
-                .replace('\\', "\\\\")
-                .replace('\'', "\\'")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r")
-                .replace('\t', "\\t");
-            format!("$'{escaped}'")
-        } else {
-            format!("'{}'", text.replace('\'', "'\\''"))
-        }
-    } else {
-        format!("\"{text}\"")
-    };
-    if text.starts_with('-') {
-        format!("ljos search -- {arg}")
-    } else {
-        format!("ljos search {arg}")
-    }
 }
 
 /// A node named on the command line. A blank one is an error at once,
@@ -3961,8 +4155,9 @@ fn main() {
             // A seat that was not resolved or is not on the roster, and
             // an unseen mail recipient, are failed commands. 2 is the
             // status a bad invocation already uses, so a script that
-            // checks the status sees the failure. Other labels are notes
-            // and still exit 0.
+            // checks the status sees the failure. Every workflow warning,
+            // a passed round and a Hold included, wrote nothing and exits
+            // 1. Other labels are notes and still exit 0.
             if matches!(
                 label.label,
                 "seat-unresolved" | "seat-unlisted" | "recipient-unseen"
@@ -3970,6 +4165,9 @@ fn main() {
                 && label.detail.contains("name different seats"))
             {
                 std::process::exit(USAGE_STATUS);
+            }
+            if label.label == "workflow-warning" {
+                std::process::exit(1);
             }
             return;
         }
@@ -4191,7 +4389,7 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
             std::process::exit(USAGE_STATUS);
         }
         if current.get_name() == "ljos" && lessons_topic(name) {
-            ljos_cli::say!("{}", lessons_sentence(name, &[]));
+            ljos_cli::say!("{}", lessons_sentence(name));
             std::process::exit(USAGE_STATUS);
         }
         let verb: Vec<String> = topic[..i].to_vec();
@@ -4208,14 +4406,15 @@ fn show_help(all: bool, topic: &[String]) -> Result<()> {
         let picked = picked.or_else(|| pick_verb(name, &names));
         let line = match picked {
             Some(real) => {
-                let mut fixed: Vec<&str> = topic.iter().map(String::as_str).collect();
-                fixed[i] = &real;
+                let mut fixed: Vec<&str> = topic[..i].iter().map(String::as_str).collect();
+                fixed.push(&real);
+                let word = shown_word(name).map_or(String::new(), |word| format!(" {word}"));
                 format!(
-                    "ljos: no command {name}, and the closest is {real}, so run `ljos help {}`.",
+                    "ljos: no command{word}, and the closest is {real}, so run `ljos help {}`.",
                     fixed.join(" ")
                 )
             }
-            None => format!("ljos: no command {name}, so run `ljos help`."),
+            None => "ljos: that is not a command, so run `ljos help`.".to_string(),
         };
         ljos_cli::say!("{line}");
         std::process::exit(USAGE_STATUS);
@@ -4270,6 +4469,7 @@ fn queued_lesson_may_go(cmd: &Cmd) -> bool {
         cmd,
         Cmd::Memory { .. }
             | Cmd::Export { .. }
+            | Cmd::Handbook { .. }
             | Cmd::Mesh {
                 cmd: MeshCmd::Pull { .. },
             }
@@ -5334,8 +5534,10 @@ fn run_command() -> Result<()> {
             valid_to,
             json,
             project,
+            public,
         } => {
             ljos_cli::config_diag::emit();
+            ljos_cli::refuse_public_under_a_runner("remember", public)?;
             if transient && standing {
                 ljos_cli::say!("remember: pass --transient or --standing, not both.");
                 std::process::exit(USAGE_STATUS);
@@ -5355,9 +5557,14 @@ fn run_command() -> Result<()> {
             }
             let project = match project {
                 Some(name) => Some(ljos_cli::require_known_project(&name)?),
+                None if public => Some(
+                    ljos_cli::seat_tracker_project()
+                        .context("remember: --public needs a project, so pass -p")?,
+                ),
                 None => None,
             };
             let _remember_project = ljos_cli::RememberProject::set(project);
+            let _remember_public = ljos_cli::RememberPublic::set(public);
             if let Err(err) = ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref()) {
                 ljos_cli::say!("{err}");
                 std::process::exit(USAGE_STATUS);
@@ -5467,7 +5674,11 @@ fn run_command() -> Result<()> {
             sync,
             review,
             keep,
+            project,
+            tag,
+            public,
         } => {
+            ljos_cli::refuse_public_under_a_runner("prefer", public)?;
             // A person-side prefer records the user-rule cutoff. Under a
             // runner it does not, so a hook cannot decide which old rows
             // are new.
@@ -5485,6 +5696,9 @@ fn run_command() -> Result<()> {
                     || !deny_name.is_empty()
                     || !deny_reply_to.is_empty()
                     || !deny_reply_name.is_empty()
+                    || project.is_some()
+                    || !tag.is_empty()
+                    || public
                 {
                     bail!(
                         "prefer: --user --review lists older user rules and takes none of the other flags"
@@ -5511,6 +5725,9 @@ fn run_command() -> Result<()> {
                     || !deny_name.is_empty()
                     || !deny_reply_to.is_empty()
                     || !deny_reply_name.is_empty()
+                    || project.is_some()
+                    || !tag.is_empty()
+                    || public
                 {
                     bail!(
                         "prefer: --review lists older preferences and takes none of the other flags"
@@ -5536,6 +5753,9 @@ fn run_command() -> Result<()> {
                         || !deny_name.is_empty()
                         || !deny_reply_to.is_empty()
                         || !deny_reply_name.is_empty()
+                        || project.is_some()
+                        || !tag.is_empty()
+                        || public
                     {
                         bail!("prefer: --sync pulls and pushes user rules, and takes none of the other flags");
                     }
@@ -5552,13 +5772,19 @@ fn run_command() -> Result<()> {
                     bail!("prefer: a user rule is this user's, not one persona's. Drop --as");
                 }
                 if let Some(id) = forget {
-                    if !text.is_empty() || promote.is_some() {
-                        bail!("prefer: --forget takes the id, not the words or --promote");
+                    if !text.is_empty()
+                        || promote.is_some()
+                        || project.is_some()
+                        || !tag.is_empty()
+                        || public
+                    {
+                        bail!("prefer: --forget takes the id, not the words, --promote, --project, --tag or --public");
                     }
                     let rule = ljos_cli::user_rules::forget(&id)?;
                     ljos_cli::tell!("{}", ljos_cli::user_rules::ack(&rule));
                     return Ok(());
                 }
+                let _hold = ljos_cli::policy_hold("prefer", project, tag, public)?;
                 let why = why.as_deref().unwrap_or("");
                 let mention = ljos_cli::user_rules::People {
                     handles: deny_mention,
@@ -5599,6 +5825,7 @@ fn run_command() -> Result<()> {
                     "prefer: --why, --promote, --forget, --sync and the mention flags write a user rule. Pass --user"
                 );
             }
+            let _hold = ljos_cli::policy_hold("prefer", project, tag, public)?;
             let text = join(&text);
             if text.trim().is_empty() {
                 ljos_cli::say!("prefer: the text is empty, so run `ljos prefer \"TEXT\"`.");
@@ -5700,6 +5927,38 @@ fn run_command() -> Result<()> {
         Cmd::Export { out, machine, json } => export_memories(&out, machine.as_deref(), json)?,
         Cmd::Memory { cmd } => memory_cmd(cmd)?,
         Cmd::Memories { cmd } => memories_cmd(cmd)?,
+        Cmd::Handbook {
+            project,
+            tag,
+            tree,
+            query,
+            title,
+            out,
+            ids,
+            include_unreviewed,
+            workflows,
+            date,
+            check,
+        } => {
+            ljos_cli::handbook::run(
+                &ljos_cli::handbook::Options {
+                    project,
+                    tags: tag,
+                    trees: tree,
+                    query,
+                    title,
+                    ids,
+                    include_unreviewed,
+                    workflows,
+                    date,
+                    seats: Vec::new(),
+                    projects: Vec::new(),
+                    id_lengths: Vec::new(),
+                },
+                &out,
+                check,
+            )?;
+        }
         Cmd::RetireNotes => ljos_cli::tell_raw!("{}", ljos_cli::note_retire::sweep()?),
         Cmd::Forget { id, why, json } => {
             let body = packset_forget(&id, why.as_deref())?;
@@ -6052,9 +6311,8 @@ fn run_command() -> Result<()> {
             // `capped` is the pack's page, counted before tickets are added.
             // A full pack page can still have more memories past `fetch`.
             let capped = fetch > 0 && hits.len() == usize::try_from(fetch).unwrap_or(usize::MAX);
-            if !dated && !filter.active() {
-                ljos_cli::ticket_search::merge(&mut hits, &asked);
-            }
+            let ticket_claims = (!dated && !filter.active())
+                .then(|| ljos_cli::ticket_search::merge(&mut hits, &asked));
             let receipt_rows = ljos_cli::search_receipt_rows(&hits);
             // After the pack, the slot merge and the ticket merge. A
             // receipt, a mail row and the other bookkeeping kinds are not
@@ -6156,7 +6414,7 @@ fn run_command() -> Result<()> {
                     ljos_cli::tell_raw!("{}", ljos_cli::NOTHING_RELEVANT);
                 } else {
                     let page = ljos_cli::without_raw_rows(&ljos_cli::scan::for_reader(
-                        &ljos_cli::format_search_stored_with_flags(
+                        &ljos_cli::format_search_stored_with_flags_and_claims(
                             &hits,
                             matched,
                             capped,
@@ -6165,6 +6423,7 @@ fn run_command() -> Result<()> {
                             ranking.mode != "lexical",
                             &id_space,
                             &rerun_flags,
+                            ticket_claims.as_ref(),
                             Width::stdout(),
                         ),
                         human_color(),
@@ -6829,14 +7088,9 @@ fn run_command() -> Result<()> {
                 std::process::exit(USAGE_STATUS);
             }
             if !looks_like_ticket_id(trimmed) {
-                let search_cmd = recall_search_command(trimmed);
-                if search_cmd.contains('`') {
-                    ljos_cli::say!("recall: that text is not a ticket id, so run {search_cmd}.");
-                } else {
-                    let shown =
-                        format!("\"{}\"", trimmed.replace('\\', "\\\\").replace('"', "\\\""));
-                    ljos_cli::say!("recall: {shown} is not a ticket id, so run `{search_cmd}`.");
-                }
+                ljos_cli::say!(
+                    "recall: that text is not a ticket id, so run `ljos search \"<words>\"`."
+                );
                 std::process::exit(USAGE_STATUS);
             }
             stop_ticket(&issue);
@@ -7196,29 +7450,13 @@ fn run_command() -> Result<()> {
             ljos_cli::tell_raw!("{}", format_playbooks(&playbooks_from_pack()?));
         }
         Cmd::Workflow {
+            action,
             issue,
             start,
             round,
-        } => {
-            if let Some(name) = start {
-                ljos_cli::emit_raw!(
-                    "{}",
-                    ljos_cli::workflow_start(&issue, &name, Width::stdout())?
-                );
-            } else if round {
-                ljos_cli::emit_raw!("{}", ljos_cli::workflow_round(&issue, Width::stdout())?);
-            } else {
-                match ljos_cli::workflow_status(&issue, Width::stdout())? {
-                    Some(s) => ljos_cli::emit_raw!(
-                        "{}",
-                        ljos_cli::format_workflow_status(&s, Width::stdout())
-                    ),
-                    None => bail!(
-                        "workflow: {issue} carries no workflow; `ljos workflow {issue} --start feature` starts one"
-                    ),
-                }
-            }
-        }
+            var,
+            file,
+        } => run_workflow(action, issue, start, round, var, file)?,
         Cmd::Claim {
             node,
             takeover,
@@ -7375,7 +7613,11 @@ fn run_command() -> Result<()> {
             why,
             json,
             user,
+            project,
+            tag,
+            public,
         } => {
+            let _hold = ljos_cli::policy_hold("rule", project, tag, public)?;
             if user {
                 let basis = if verdict == "allow" {
                     ljos_cli::allow_basis()?
@@ -7937,15 +8179,10 @@ fn run_command() -> Result<()> {
                 let every_s = parse_every(&every)?;
                 let (body, prev) = habit(&name, value, &unit, every_s, &source)?;
                 ljos_cli::tell!("{}", write_ack(&body, false));
-                if let Some(p) = prev {
-                    ljos_cli::say!(
-                        "was {}{}{} ({}), now closed",
-                        trim_num(p.value),
-                        if p.unit.is_empty() { "" } else { " " },
-                        p.unit,
-                        age_of(p.ts.as_deref(), &now_utc())
-                    );
-                }
+                ljos_cli::say!(
+                    "{}",
+                    format_reading_ack(&name, value, &unit, prev.as_ref(), &now_utc())
+                );
             }
             (None, Some(_)) => {
                 anyhow::bail!("habit: a reading needs a name; `ljos habit NAME VALUE`")
@@ -7989,6 +8226,14 @@ fn run_command() -> Result<()> {
             let mut shown = String::new();
             let mut opened_next = None;
             let detail = git_detail(verbose);
+            let planned = plan.as_deref().map(|title| {
+                let mut task = title.to_string();
+                for item in &items {
+                    task.push(' ');
+                    task.push_str(item);
+                }
+                task
+            });
             let issue = if let Some(title) = plan {
                 let opened = ljos_cli::plan::open_plan(project.as_deref(), &title, &items, top)?;
                 let quiet_plan = ljos_cli::without_routine_git(&opened.text);
@@ -8060,6 +8305,8 @@ fn run_command() -> Result<()> {
                 }
                 std::process::exit(ljos_cli::user_fault_exit(&e, &line));
             }
+            let task = planned.unwrap_or_else(|| ljos_cli::brief_rules::issue_task(&issue));
+            let rules = ljos_cli::brief_rules::for_task(&task).unwrap_or_default();
             if !detail {
                 let mut tail = String::new();
                 if !memories.is_empty() {
@@ -8069,10 +8316,18 @@ fn run_command() -> Result<()> {
                     }
                 }
                 tail.push_str(&sitting_close(&issue));
+                tail.push_str(&rules);
                 if json {
                     shown.push_str(&tail);
                 } else {
                     ljos_cli::emit_raw!("{tail}");
+                    let _ = ljos_cli::output::flush_stdout();
+                }
+            } else if !rules.is_empty() {
+                if json {
+                    full.push_str(&rules);
+                } else {
+                    ljos_cli::emit_raw!("{rules}");
                     let _ = ljos_cli::output::flush_stdout();
                 }
             }
@@ -8255,7 +8510,181 @@ fn issue_topic_and_tags(id: &str) -> (Vec<String>, Vec<String>) {
     (topic, tags)
 }
 
-/// The verb of a command that writes the tracker under this seat. Listing
+/// Whether a workflow command writes the tracker under this seat.
+fn workflow_writes(action: &Option<WorkflowCmd>, start: &Option<String>, round: bool) -> bool {
+    match action {
+        Some(WorkflowCmd::Define { .. } | WorkflowCmd::Revise { .. }) => true,
+        Some(WorkflowCmd::Render { .. }) => false,
+        None => start.is_some() || round,
+    }
+}
+
+fn run_workflow(
+    action: Option<WorkflowCmd>,
+    issue: Option<String>,
+    start: Option<String>,
+    round: bool,
+    var: Vec<String>,
+    file: Option<PathBuf>,
+) -> Result<()> {
+    if let Some(action) = action {
+        return run_workflow_cmd(action);
+    }
+    let Some(issue) = issue.filter(|id| !id.trim().is_empty()) else {
+        bail!("workflow: pass a parent ticket, or one of `define`, `revise` and `render`");
+    };
+    if let Some(name) = start {
+        if name == "feature" {
+            if !var.is_empty() {
+                bail!(
+                    "workflow: `--var` fills a skeleton; the feature workflow has no placeholders"
+                );
+            }
+            ljos_cli::emit_raw!(
+                "{}",
+                ljos_cli::workflow_start(&issue, &name, Width::stdout())?
+            );
+            return Ok(());
+        }
+        let vars = ljos_cli::workflow_skel::parse_vars(&var)?;
+        ljos_cli::emit_raw!(
+            "{}",
+            ljos_cli::workflow_skel::start_run(&issue, &name, &vars, file.as_deref())?
+        );
+        return Ok(());
+    }
+    if round {
+        let skeleton = ljos_cli::workflow_status(&issue, Width::stdout())?.is_none()
+            && ljos_cli::workflow_skel::status_report(&issue)
+                .ok()
+                .flatten()
+                .is_some();
+        if skeleton {
+            bail!(
+                "workflow: {issue} runs a skeleton, and `--round` is only for the feature workflow"
+            );
+        }
+        ljos_cli::emit_raw!("{}", ljos_cli::workflow_round(&issue, Width::stdout())?);
+        return Ok(());
+    }
+    if !var.is_empty() || file.is_some() {
+        bail!("workflow: `--var` and `--file` belong with `--start` or with `render`");
+    }
+    match ljos_cli::workflow_status(&issue, Width::stdout())? {
+        Some(status) => ljos_cli::emit_raw!(
+            "{}",
+            ljos_cli::format_workflow_status(&status, Width::stdout())
+        ),
+        None => match ljos_cli::workflow_skel::status_report(&issue)? {
+            Some(text) => ljos_cli::emit_raw!("{text}"),
+            None => bail!(
+                "workflow: {issue} carries no workflow; `ljos workflow {issue} --start feature` starts one"
+            ),
+        },
+    }
+    Ok(())
+}
+
+fn run_workflow_cmd(action: WorkflowCmd) -> Result<()> {
+    match action {
+        WorkflowCmd::Define { file } => {
+            ljos_cli::tell_raw!("{}", ljos_cli::workflow_skel::define_file(&file)?);
+        }
+        WorkflowCmd::Revise { name, from, apply } => match (from, apply) {
+            (Some(parent), None) => {
+                ljos_cli::tell_raw!("{}", ljos_cli::workflow_skel::revise_from(&name, &parent)?);
+            }
+            (None, Some(file)) => {
+                ljos_cli::tell_raw!("{}", ljos_cli::workflow_skel::revise_apply(&name, &file)?);
+            }
+            _ => bail!("workflow: `revise` takes `--from PARENT` or `--apply FILE`"),
+        },
+        WorkflowCmd::Render {
+            name,
+            file,
+            out,
+            check,
+            var,
+        } => render_workflow(&name, file.as_deref(), out.as_deref(), check, &var)?,
+    }
+    Ok(())
+}
+
+/// A failed read or write of the `--out` file, naming that file. The line
+/// carries no I/O error, so it is not read as the store being unwritable.
+fn out_error(verb: &str, path: &Path, err: &std::io::Error) -> anyhow::Error {
+    let words = err.to_string();
+    let words = words.split(" (os error ").next().unwrap_or(&words);
+    anyhow::anyhow!("workflow: cannot {verb} --out {}: {words}", path.display())
+}
+
+fn render_workflow(
+    name: &str,
+    file: Option<&Path>,
+    out: Option<&Path>,
+    check: bool,
+    var: &[String],
+) -> Result<()> {
+    let vars = ljos_cli::workflow_skel::parse_vars(var)?;
+    let mut skel = ljos_cli::workflow_skel::load_skeleton(name, file)?;
+    if !vars.is_empty() {
+        skel = ljos_cli::workflow_skel::fill_vars(&skel, &vars)?;
+    }
+    let page = ljos_cli::workflow_skel::render_skeleton(&skel)?;
+    if check {
+        let Some(path) = out else {
+            bail!("workflow: `--check` compares the file named with `--out`");
+        };
+        let have = std::fs::read_to_string(path).map_err(|err| out_error("read", path, &err))?;
+        let mut why = Vec::new();
+        if have != page {
+            why.push("the file differs from a fresh render".to_string());
+        }
+        let have_hits = ljos_cli::scrub::scan_public(&have);
+        if !have_hits.is_empty() {
+            why.push(format!(
+                "the file failed public scan ({})",
+                have_hits.join("; ")
+            ));
+        }
+        if !why.is_empty() {
+            bail!("workflow: {}: {}", path.display(), why.join("; "));
+        }
+        ljos_cli::tell!("{name} matches {}", path.display());
+        return Ok(());
+    }
+    match out {
+        Some(path) => {
+            if let Some(dir) = path.parent() {
+                if !dir.as_os_str().is_empty() {
+                    std::fs::create_dir_all(dir).map_err(|err| out_error("write", path, &err))?;
+                }
+            }
+            match std::fs::symlink_metadata(path) {
+                Ok(meta) if !meta.file_type().is_file() => {
+                    bail!(
+                        "workflow: cannot write --out {}: it is not a regular file",
+                        path.display()
+                    );
+                }
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(out_error("write", path, &err));
+                }
+                _ => {}
+            }
+            ljos_cli::publish(
+                path,
+                ljos_cli::Content::Bytes(page.as_bytes()),
+                ljos_cli::Mode::Exactly(0o644),
+            )
+            .map_err(|err| out_error("write", path, &err))?;
+            ljos_cli::tell!("wrote {}", path.display());
+        }
+        None => ljos_cli::emit_raw!("{page}"),
+    }
+    Ok(())
+}
+
 /// a deed's citations, a workflow's status, a consensus read with
 /// `--no-file`, a dry-run reap and a dry-run bump plan are reads; a slot
 /// names its seat on the line.
@@ -8274,7 +8703,12 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         Cmd::Options { .. } => "options",
         Cmd::Deed { add, remove, .. } if !add.is_empty() || !remove.is_empty() => "deed",
         Cmd::Table { add: Some(_), .. } => "table",
-        Cmd::Workflow { start, round, .. } if start.is_some() || *round => "workflow",
+        Cmd::Workflow {
+            action,
+            start,
+            round,
+            ..
+        } if workflow_writes(action, start, *round) => "workflow",
         Cmd::Consensus {
             no_file, deadline, ..
         } if !no_file || deadline.is_some() => "consensus",
@@ -8529,12 +8963,8 @@ mod usage_hint {
         for word in ["learn", "search", "remember", "lessen"] {
             assert!(!lessons_topic(word), "{word}");
         }
-        let args: Vec<String> = ["lessons", "kiln", "-n", "3"]
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        let line = lessons_sentence("lessons", &args);
-        assert!(line.contains("`ljos search \"kiln\"`"), "{line}");
+        let line = lessons_sentence("lessons");
+        assert!(line.contains("`ljos search \"<words>\"`"), "{line}");
         assert!(line.contains("`ljos remember "), "{line}");
         assert!(line.contains("`ljos proposals`"), "{line}");
     }

@@ -54,6 +54,7 @@ Memory:
   memory       Copy memories to a file, or bring a file from another machine into this seat
   memories     Review the memories agents wrote on their own: list, keep, edit, merge, drop, prune, or browse them in a terminal viewer
   export       Write this seat's memories to a file. The same as `ljos memory export`
+  handbook     Write the lessons, preferences, rules, tickets and workflows marked public as an Org document
   accept       Accept a stored memory or a waiting proposal, so a later search treats it as kept
   forget       Retire one memory by id. The text stays, marked retired
   proposals    List lesson proposals waiting on a review
@@ -82,7 +83,7 @@ Coordination:
   brief        Print the brief a subagent playing a persona starts from
   playbook     Bind a playbook to an issue and copy its recipe into the working set, before personas enter
   playbooks    List the recipes on offer: sit, arena, land, company-panel, overnight, feature
-  workflow     Show where a parent ticket's workflow stands, and the next step
+  workflow     Show a parent ticket's workflow, or run a versioned skeleton
   predict      Forecast how the others will vote on an issue; two or more forecasts let the settle name the surprisingly popular answer
   trust        Record how much one voter counts another's view
   calibrate    Estimate how often each voter has been right, from the project's past votes

@@ -6,10 +6,10 @@
 =ljos doctor --all= prints every row, including the optional =landscape=
 program used by =ljos conflicts=. Its missing row links to the source.
 # [[[cog import ljos_version as v; v.lines("The block is the =ljos= row from that command on a scratch seat, taken from ljos {version}.")]]]
-The block is the =ljos= row from that command on a scratch seat, taken from ljos 0.45.4.
+The block is the =ljos= row from that command on a scratch seat, taken from ljos 0.46.0.
 # [[[end]]]
 # [[[cog import ljos_version as v; v.lines("=ljos --version= printed =ljos {version}=.")]]]
-=ljos --version= printed =ljos 0.45.4=.
+=ljos --version= printed =ljos 0.46.0=.
 # [[[end]]]
 The scratch seat's day cache already holds that version, so the row says =crates.io (cached)= and neither =behind= nor =ahead of=.
 The path stands in for the binary.
@@ -25,9 +25,9 @@ runner above the shell it says the person's git is not gated.
 # BEGIN ljos-sample doctor
 #+begin_src text
 $ ljos --version
-ljos 0.45.4
+ljos 0.46.0
 $ ljos doctor --all
-ok	ljos	/path/to/ljos  0.45.4  crates.io (cached) 0.45.4
+ok	ljos	/path/to/ljos  0.46.0  crates.io (cached) 0.46.0
 #+end_src
 # END ljos-sample doctor
 
@@ -41,7 +41,7 @@ seats pushing to two remotes each read only their own writes. A sitting's own tr
 every remote that carries the branch. A missing
 claim graph is reported and is not a failure: the first claim creates it.
 A seat nobody named is a warning. The =seat source= row says to set one with =--seat NAME= or =export LJOS_SEAT=NAME=. It does not by itself exit 1.
-Git with no author name or email is a warning too. The =git identity= row names =git config --global user.name "Your Name"= and =git config --global user.email "you@example.com"=, because the tracker commit is refused until git has both. The row is asked in the tracker checkout, so a name set only there counts.
+Git with no author name or email is a warning too. The =git identity= row names =git config --global user.name "Your Name"= and =git config --global user.email "you@example.com"=, because the tracker commit is refused until git has both. The row is asked in the tracker checkout, so a name set only there counts. A name or email the environment exports, such as =GIT_AUTHOR_NAME= or =git -c user.name=, does not count, because a tracker commit does not take it.
 A damaged note queue is a =no= row and fails: it holds lessons the pack has not taken.
 An empty or missing log of either is whole.
 The rows for a missing writer, seat, tracker, binary, Model Context Protocol entry and a registry that did not answer are on [[file:howto-troubleshoot.org][Troubleshoot doctor]].
