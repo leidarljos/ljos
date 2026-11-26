@@ -981,20 +981,23 @@ fn is_sep(c: char) -> bool {
 }
 
 /// Asked of every part of every word a search reads, so the list is kept as
-/// sorted integers rather than compared as strings.
+/// sorted integers rather than compared as strings. A stop word is at most
+/// six bytes. Seven still fit under the sentinel bit; a longer word is not
+/// on the list.
 fn is_stop(word: &str) -> bool {
     static KEYS: std::sync::LazyLock<Vec<u64>> = std::sync::LazyLock::new(|| {
         let mut keys: Vec<u64> = STOP.iter().map(|word| stop_key(word)).collect();
         keys.sort_unstable();
         keys
     });
-    word.len() <= 8 && KEYS.binary_search(&stop_key(word)).is_ok()
+    word.len() <= 7 && KEYS.binary_search(&stop_key(word)).is_ok()
 }
 
-/// The bytes of a word of eight bytes or fewer, as one number. A word holds
-/// no NUL, so two words share a key only when they are equal.
+/// The bytes of a word of at most seven, with a sentinel bit just above
+/// them. The sentinel keeps a leading NUL, so `\0the` is not `the`.
 fn stop_key(word: &str) -> u64 {
-    word.bytes().fold(0, |key, byte| key << 8 | u64::from(byte))
+    word.bytes()
+        .fold(1u64, |key, byte| key << 8 | u64::from(byte))
 }
 
 fn stem(word: &str) -> String {
@@ -1945,6 +1948,22 @@ mod tests {
         ] {
             assert_eq!(is_stop(word), STOP.contains(&word), "{word}");
         }
+    }
+
+    /// A leading NUL used to pack as the stop word after it, so `brine_\0the`
+    /// dropped that piece and paired `brine` with the next word.
+    #[test]
+    fn a_leading_nul_does_not_make_a_stop_word() {
+        assert!(is_stop("the"));
+        assert!(!is_stop("\0the"));
+        assert!(!is_stop("\0and"));
+        assert!(!is_stop("\0please"));
+        let text = "brine_\0the foo";
+        let got = bag(text);
+        assert!(got.contains("\0the"), "{got:?}");
+        assert!(got.contains("\0thefoo"), "{got:?}");
+        let old = with_old_terms(|| bag(text));
+        assert_eq!(got, old);
     }
 
     /// One whitespace-free run is read in one pass, and the buffers a
