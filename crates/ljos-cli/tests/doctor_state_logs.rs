@@ -257,32 +257,27 @@ const KEPT_THEN_UNFINISHED: &[u8] = concat!(
 .as_bytes();
 
 /// Doctor reads the note queue and writes none of it. A last row
-/// without its newline, touched a moment ago or dated ahead of the
-/// clock, is not taken for one being written and then lost to a rewrite
-/// of the rows that parse. Touched a moment ago it may be one being
-/// written; a year ahead it is not, and doctor calls the queue damaged.
+/// without its newline, dated ahead of the clock, is not a live write,
+/// and doctor calls the queue damaged. A stamp inside the grace is the
+/// in-process check of `doctor_state_read`, not a doctor process racing
+/// the clock.
 #[test]
 fn doctor_keeps_every_byte_of_the_note_queue() {
-    for (when, at, word) in [
-        ("just now", SystemTime::now(), "ok"),
-        ("ahead", ahead(), "no"),
-    ] {
-        let home = Home::new();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "writes a file that is not a git hook"
-        )]
-        std::fs::write(home.queue(), KEPT_THEN_UNFINISHED).expect("queue");
-        set_mtime(&home.queue(), at);
-        let before = home.tree();
-        let (_, out) = home
-            .doctor(&["--all"])
-            .unwrap_or_else(|| panic!("doctor hung on a queue touched {when}"));
-        assert_eq!(home.tree(), before, "touched {when}:\n{out}");
-        assert_eq!(std::fs::read(home.queue()).unwrap(), KEPT_THEN_UNFINISHED);
-        let line = row(&out, "note queue").unwrap_or_else(|| panic!("no queue row:\n{out}"));
-        assert!(line.starts_with(&format!("{word}\t")), "{when}: {line}");
-    }
+    let home = Home::new();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(home.queue(), KEPT_THEN_UNFINISHED).expect("queue");
+    set_mtime(&home.queue(), ahead());
+    let before = home.tree();
+    let (_, out) = home
+        .doctor(&["--all"])
+        .unwrap_or_else(|| panic!("doctor hung on a queue dated ahead"));
+    assert_eq!(home.tree(), before, "{out}");
+    assert_eq!(std::fs::read(home.queue()).unwrap(), KEPT_THEN_UNFINISHED);
+    let line = row(&out, "note queue").unwrap_or_else(|| panic!("no queue row:\n{out}"));
+    assert!(line.starts_with("no\t"), "{line}");
 }
 
 /// A row cut short and then ended with a newline, which is what a writer
