@@ -86,22 +86,39 @@ def _skip_prose_line(line: str) -> bool:
     return False
 
 
+# A description stays near 220 characters. A sentence that names the ljos
+# version is the point of the line, so it stays even when that makes the
+# description longer. Getting started is the page that hits this.
+_LJOS_VERSION = re.compile(r"\bljos[ \t]+(?:\{version\}|v?\d+\.\d+\.\d+)\b")
+_LJOS_NAMED_VERSION = re.compile(r"\bljos[ \t]+v?(\d+\.\d+\.\d+)\b")
+
+
+def _names_ljos_version(text: str) -> bool:
+    return _LJOS_VERSION.search(text) is not None
+
+
 def _sentences(prose: str, limit: int = 220) -> str:
     parts = re.split(r"(?<=[.!?])\s+", prose.strip())
     kept: list[str] = []
+    version_tail: list[str] = []
     for part in parts:
         part = part.strip().rstrip(":")
         if not part:
             continue
-        trial = " ".join([*kept, part])
+        trial = " ".join([*kept, *version_tail, part])
         if len(trial) <= limit:
+            kept.extend(version_tail)
+            version_tail.clear()
             kept.append(part)
             continue
-        if kept:
+        if _names_ljos_version(part):
+            version_tail.append(part)
+            continue
+        if kept or version_tail:
             break
         cut = part[:limit].rsplit(" ", 1)[0].rstrip(",;:")
         return cut or part[:limit].rstrip()
-    return " ".join(kept)
+    return " ".join([*kept, *version_tail])
 
 
 def _description(text: str, title: str) -> str:
@@ -146,11 +163,85 @@ def _description(text: str, title: str) -> str:
     return _sentences(prose)
 
 
+_ORG_VERSION_COG = re.compile(
+    r'# \[\[\[cog import ljos_version as v; v\.lines\("((?:[^"\\]|\\.)*)"\)\]\]\]'
+)
+_RST_DESC_ARG = re.compile(r'(:description: )(.*?)(", ":cover: )')
+
+
+def _crate_version() -> str:
+    root = Path(__file__).resolve().parents[2]
+    scripts = str(root / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import ljos_version
+
+    return ljos_version.version()
+
+
+def _org_inline_to_rst(text: str) -> str:
+    text = re.sub(r"=([^=\n]+)=", r"``\1``", text)
+    text = re.sub(r"~([^~\n]+)~", r"``\1``", text)
+    return text
+
+
+def _opening_version_template(org: str) -> str | None:
+    """The version cog before the first heading, as the rst template."""
+    head = org.split("\n* ", 1)[0]
+    found = _ORG_VERSION_COG.search(head)
+    if found is None or "{version}" not in found.group(1):
+        return None
+    return _org_inline_to_rst(found.group(1))
+
+
+def _refresh_leading_cog(body: str, org: str) -> str | None:
+    """Rewrite a leading version cog's description from the org template.
+
+    The description argument keeps ``{version}``. A rendered number in that
+    argument stays at whatever release wrote it, and cog will not move it.
+    Returns None when the page has no such cog.
+    """
+    if not body.startswith(".. [[[cog import ljos_version as v; v.lines("):
+        return None
+    template = _opening_version_template(org)
+    if template is None or '"' in template:
+        return None
+    first, sep, rest = body.partition("\n")
+    if ":description:" not in first or '", ":cover:' not in first:
+        return None
+    new_first, count = _RST_DESC_ARG.subn(
+        lambda match: match.group(1) + template + match.group(3),
+        first,
+        count=1,
+    )
+    if count != 1:
+        return body
+    rendered = template.format(version=_crate_version())
+    lines = (new_first + sep + rest).splitlines(keepends=True)
+    replaced = False
+    out: list[str] = []
+    for line in lines:
+        if not replaced and line.startswith(":description:"):
+            out.append(f":description: {rendered}\n")
+            replaced = True
+            continue
+        out.append(line)
+    return "".join(out)
+
+
 def promote_page(rst: Path, org: Path) -> None:
     """The page description, as docinfo. Headings stay as the org file wrote them."""
     source = org.read_text(encoding="utf-8")
     title = _org_title(source)
     body = rst.read_text(encoding="utf-8")
+    refreshed = _refresh_leading_cog(body, source)
+    if refreshed is not None:
+        if refreshed != body:
+            rst.write_text(refreshed, encoding="utf-8")
+            print(f"{rst.name}: description refreshed from org")
+        else:
+            print(f"{rst.name}: description already written")
+        return
     if body.startswith(":description:") or body.startswith(".. meta::\n"):
         print(f"{rst.name}: description already written")
         return
@@ -158,6 +249,41 @@ def promote_page(rst: Path, org: Path) -> None:
     header = f":description: {description}\n:cover: {_COVER}\n\n"
     rst.write_text(header + body.lstrip("\n"), encoding="utf-8")
     print(f"{rst.name}: description written")
+
+
+def mismatched_ljos_versions(root: Path) -> list[str]:
+    """Rst and org lines that name an ljos version other than the crate."""
+    want = _crate_version()
+    found: list[str] = []
+    for folder in ("docs/orgmode", "docs/source"):
+        base = root / folder
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            if path.suffix not in {".org", ".rst"}:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for number, line in enumerate(text.splitlines(), 1):
+                for match in _LJOS_NAMED_VERSION.finditer(line):
+                    have = match.group(1)
+                    if have != want:
+                        rel = path.relative_to(root)
+                        found.append(f"{rel}:{number}: ljos {have}, crate is {want}")
+    return found
+
+
+def check_versions(root: Path) -> int:
+    bad = mismatched_ljos_versions(root)
+    if bad:
+        print(
+            "check_docs_export: a doc names an ljos version other than the crate",
+            file=sys.stderr,
+        )
+        for line in bad:
+            print(line, file=sys.stderr)
+        return 1
+    print(f"check_docs_export: doc versions match {_crate_version()}")
+    return 0
 
 
 def restore_toctree(index: Path) -> None:
@@ -192,6 +318,9 @@ def bracket_leading_lines(path: Path) -> list[tuple[int, str]]:
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "--check-versions":
+        root = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(".")
+        return check_versions(root)
     source = Path("docs/source")
     index = source / "index.rst"
     if not index.is_file():

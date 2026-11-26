@@ -38,6 +38,9 @@ The script needs `git`, the Rust toolchain in `rust-toolchain.toml`, and the pac
 `apt-get install age` installs that package on Ubuntu 24.04, and `brew install age` installs it on macOS.
 The script does not build them.
 `source scripts/sibling-tools.sh` builds the pinned `vissue` 0.25.0 and `packsetd` 0.18.2 and puts them on `PATH`.
+The release test is `LJOS_TEST_REQUIRE_TOOLS=1 cargo test --locked -p ljos`.
+Run that source line first. It reads `.github/sibling-pin` and installs `vissue` the same way the cargo test job does.
+A test that runs `vissue` and does not check for the binary first fails when `vissue` is missing.
 A test that needs `age-keygen`, `emacs`, `packsetd` or that `vissue` checks for the tool first.
 `emacs` 29.3 with Org comes from the `emacs-nox` package: `apt-get install emacs-nox` on Ubuntu 24.04, `brew install emacs` on macOS.
 The handbook and workflow render tests run `org-lint` in the `emacs` they find on `PATH`.
