@@ -37235,6 +37235,7 @@ mod doctor_state_grace {
 
     #[test]
     fn an_unfinished_row_inside_the_grace_is_kept() {
+        let _hold = crate::test_env_read_lock();
         let bytes = b"{\"a\":1}\n{\"b\":2}".to_vec();
         let path = Path::new("note-queue");
         let read = |at: SystemTime| Ok((bytes.clone(), Some(at)));
