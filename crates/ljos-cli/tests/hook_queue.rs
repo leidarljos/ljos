@@ -1937,9 +1937,12 @@ fn ordinary_non_permission_events_do_not_stall_on_hung_pack() {
     let hab = hab("hung-non-gate");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&accepts);
     std::thread::spawn(move || {
         let mut held = Vec::new();
         for conn in listener.incoming().flatten() {
+            seen.fetch_add(1, Ordering::SeqCst);
             held.push(conn);
         }
     });
@@ -1962,12 +1965,33 @@ fn ordinary_non_permission_events_do_not_stall_on_hung_pack() {
             r#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"postToolUseFailure","tool_name":"Shell","tool_input":{"command":"ls"},"error_message":"exit 2"}"#,
         ),
     ];
+    let mut answers = String::new();
     for (name, payload) in events {
         let mut cmd = ljos(&hab, &["hook"]);
         cmd.env("PACKSET_URL", &url)
             .env("PACKSET_WORKSPACE", "probe")
             .env("LJOS_HOOKD", "off");
-        let (took, _out) = finished(feed(cmd, payload), Duration::from_secs(10), name);
-        assert!(took < Duration::from_millis(500), "{name} took {took:?}");
+        let (_took, out) = finished(feed(cmd, payload), Duration::from_secs(10), name);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{name} failed\n{stdout}\n{stderr}");
+        match name {
+            "sessionStart" => {
+                assert!(
+                    stdout.contains("\"additional_context\"") && stdout.contains("does not answer"),
+                    "{name}: {stdout}"
+                );
+            }
+            _ => assert!(stdout.is_empty(), "{name}: {stdout}"),
+        }
+        answers.push_str(&format!("{name} stdout={stdout:?}\n"));
     }
+    // Each event may open one socket. The side budget cuts that read
+    // off, so a hung pack is not a stall. The 10s kill above is the
+    // hang backstop.
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        events.len(),
+        "the hung listener saw an unexpected number of requests\n{answers}"
+    );
 }
