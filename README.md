@@ -3,7 +3,7 @@
 ljos gives coding agents a memory that outlives the session and a ticket queue they share, both kept as plain files on your machine.
 
 [//]: # ([[[cog import ljos_version as v; v.lines("These notes describe ljos {version}.")]]])
-These notes describe ljos 0.45.4.
+These notes describe ljos 0.46.0.
 [//]: # ([[[end]]])
 
 ## What you get in five minutes
