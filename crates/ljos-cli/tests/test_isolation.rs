@@ -1,6 +1,9 @@
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use std::path::{Path, PathBuf};
 use syn::visit::Visit;
+// `ToTokens` prints a move body, including each macro's tokens. syn only
+// re-exports the trait here.
+use syn::__private::ToTokens;
 
 fn rust_files(root: &Path, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<_> = std::fs::read_dir(root)
@@ -298,8 +301,10 @@ fn pattern_binds(pat: &syn::Pat, name: &str) -> bool {
 
 /// Statement indices of top-level `let` bindings whose name is used by
 /// value after the let, in a scope that still sees that binding. A `move`
-/// closure or `async move` block that mentions the name counts. A use
-/// before the let, or under a later binding of the same name, does not.
+/// closure or `async move` block that names the guard, even inside a
+/// macro, counts. A closure parameter or a leading `let` of that name
+/// does not. A use before the let, or under a later binding of the same
+/// name, does not.
 fn ended_bindings(stmts: &[syn::Stmt]) -> Vec<usize> {
     let mut ended = Vec::new();
     for (at, stmt) in stmts.iter().enumerate() {
@@ -357,24 +362,51 @@ fn block_uses(block: &syn::Block, name: &str, how: Use, live: bool) -> bool {
 enum Use {
     Value,
     Place,
-    /// A `move` capture takes the name even when the body only borrows it.
-    Name,
-}
-
-fn under(how: Use, next: Use) -> Use {
-    if how == Use::Name {
-        Use::Name
-    } else {
-        next
-    }
 }
 
 fn names_place(expr: &syn::Expr, name: &str, how: Use) -> bool {
-    match how {
-        Use::Place => false,
-        Use::Value => value_name(expr).as_deref() == Some(name),
-        Use::Name => path_leaf(expr).as_deref() == Some(name),
+    how == Use::Value && value_name(expr).as_deref() == Some(name)
+}
+
+/// An ident equal to `name` anywhere in `stream`, including inside a
+/// macro's token tree. Groups are opened, so a nested macro counts.
+fn tokens_mention(stream: TokenStream, name: &str) -> bool {
+    let trees: Vec<TokenTree> = stream.into_iter().collect();
+    tokens_mention_at(&trees, name)
+}
+
+fn tokens_mention_at(trees: &[TokenTree], name: &str) -> bool {
+    trees.iter().any(|tree| match tree {
+        TokenTree::Ident(ident) => ident == name,
+        TokenTree::Group(group) => tokens_mention(group.stream(), name),
+        _ => false,
+    })
+}
+
+/// A `move` body captures `name` when any ident in it matches. A `let`
+/// of that name at the top of a block hides the rest of the block; the
+/// initializer can still capture the outer guard.
+fn move_expr_captures(expr: &syn::Expr, name: &str) -> bool {
+    if let syn::Expr::Block(block) = expr {
+        move_block_captures(&block.block, name)
+    } else {
+        tokens_mention(expr.to_token_stream(), name)
     }
+}
+
+fn move_block_captures(block: &syn::Block, name: &str) -> bool {
+    if let Some(syn::Stmt::Local(local)) = block.stmts.first() {
+        if pattern_binds(&local.pat, name) {
+            return local.init.as_ref().is_some_and(|init| {
+                tokens_mention(init.expr.to_token_stream(), name)
+                    || init
+                        .diverge
+                        .as_ref()
+                        .is_some_and(|(_, expr)| tokens_mention(expr.to_token_stream(), name))
+            });
+        }
+    }
+    tokens_mention(block.to_token_stream(), name)
 }
 
 fn compound_assign(op: &syn::BinOp) -> bool {
@@ -403,13 +435,13 @@ fn expr_uses(expr: &syn::Expr, name: &str, how: Use, live: bool) -> bool {
     match expr {
         syn::Expr::Paren(inner) => expr_uses(&inner.expr, name, how, live),
         syn::Expr::Group(inner) => expr_uses(&inner.expr, name, how, live),
-        syn::Expr::Reference(inner) => expr_uses(&inner.expr, name, under(how, Use::Place), live),
-        syn::Expr::RawAddr(inner) => expr_uses(&inner.expr, name, under(how, Use::Place), live),
+        syn::Expr::Reference(inner) => expr_uses(&inner.expr, name, Use::Place, live),
+        syn::Expr::RawAddr(inner) => expr_uses(&inner.expr, name, Use::Place, live),
         syn::Expr::Path(_) => false,
-        syn::Expr::Field(field) => expr_uses(&field.base, name, under(how, Use::Place), live),
+        syn::Expr::Field(field) => expr_uses(&field.base, name, Use::Place, live),
         syn::Expr::Index(index) => {
-            expr_uses(&index.expr, name, under(how, Use::Place), live)
-                || expr_uses(&index.index, name, under(how, Use::Value), live)
+            expr_uses(&index.expr, name, Use::Place, live)
+                || expr_uses(&index.index, name, Use::Value, live)
         }
         syn::Expr::Unary(unary) => {
             let next = if matches!(unary.op, syn::UnOp::Deref(_)) {
@@ -417,26 +449,26 @@ fn expr_uses(expr: &syn::Expr, name: &str, how: Use, live: bool) -> bool {
             } else {
                 Use::Value
             };
-            expr_uses(&unary.expr, name, under(how, next), live)
+            expr_uses(&unary.expr, name, next, live)
         }
         syn::Expr::MethodCall(call) => {
-            expr_uses(&call.receiver, name, under(how, Use::Place), live)
+            expr_uses(&call.receiver, name, Use::Place, live)
                 || call
                     .args
                     .iter()
-                    .any(|arg| expr_uses(arg, name, under(how, Use::Value), live))
+                    .any(|arg| expr_uses(arg, name, Use::Value, live))
         }
         syn::Expr::Call(call) => {
-            expr_uses(&call.func, name, under(how, Use::Value), live)
+            expr_uses(&call.func, name, Use::Value, live)
                 || call
                     .args
                     .iter()
-                    .any(|arg| expr_uses(arg, name, under(how, Use::Value), live))
+                    .any(|arg| expr_uses(arg, name, Use::Value, live))
         }
         syn::Expr::Assign(assign) => {
             value_name(&assign.left).as_deref() == Some(name)
-                || expr_uses(&assign.left, name, under(how, Use::Place), live)
-                || expr_uses(&assign.right, name, under(how, Use::Value), live)
+                || expr_uses(&assign.left, name, Use::Place, live)
+                || expr_uses(&assign.right, name, Use::Value, live)
         }
         syn::Expr::Binary(bin) => {
             let left = if compound_assign(&bin.op) {
@@ -444,69 +476,65 @@ fn expr_uses(expr: &syn::Expr, name: &str, how: Use, live: bool) -> bool {
             } else {
                 Use::Value
             };
-            expr_uses(&bin.left, name, under(how, left), live)
-                || expr_uses(&bin.right, name, under(how, Use::Value), live)
+            expr_uses(&bin.left, name, left, live) || expr_uses(&bin.right, name, Use::Value, live)
         }
         syn::Expr::Array(array) => array
             .elems
             .iter()
-            .any(|elem| expr_uses(elem, name, under(how, Use::Value), live)),
+            .any(|elem| expr_uses(elem, name, Use::Value, live)),
         syn::Expr::Tuple(tuple) => tuple
             .elems
             .iter()
-            .any(|elem| expr_uses(elem, name, under(how, Use::Value), live)),
+            .any(|elem| expr_uses(elem, name, Use::Value, live)),
         syn::Expr::Repeat(repeat) => {
-            expr_uses(&repeat.expr, name, under(how, Use::Value), live)
-                || expr_uses(&repeat.len, name, under(how, Use::Value), live)
+            expr_uses(&repeat.expr, name, Use::Value, live)
+                || expr_uses(&repeat.len, name, Use::Value, live)
         }
         syn::Expr::Struct(expr) => {
             expr.fields
                 .iter()
-                .any(|field| expr_uses(&field.expr, name, under(how, Use::Value), live))
+                .any(|field| expr_uses(&field.expr, name, Use::Value, live))
                 || expr
                     .rest
                     .as_ref()
-                    .is_some_and(|rest| expr_uses(rest, name, under(how, Use::Value), live))
+                    .is_some_and(|rest| expr_uses(rest, name, Use::Value, live))
         }
         syn::Expr::Range(range) => {
             range
                 .start
                 .as_ref()
-                .is_some_and(|start| expr_uses(start, name, under(how, Use::Value), live))
+                .is_some_and(|start| expr_uses(start, name, Use::Value, live))
                 || range
                     .end
                     .as_ref()
-                    .is_some_and(|end| expr_uses(end, name, under(how, Use::Value), live))
+                    .is_some_and(|end| expr_uses(end, name, Use::Value, live))
         }
-        syn::Expr::Cast(cast) => expr_uses(&cast.expr, name, under(how, Use::Value), live),
-        syn::Expr::Try(try_expr) => expr_uses(&try_expr.expr, name, under(how, Use::Value), live),
-        syn::Expr::Await(await_expr) => {
-            expr_uses(&await_expr.base, name, under(how, Use::Value), live)
-        }
-        syn::Expr::Let(let_expr) => expr_uses(&let_expr.expr, name, under(how, Use::Value), live),
+        syn::Expr::Cast(cast) => expr_uses(&cast.expr, name, Use::Value, live),
+        syn::Expr::Try(try_expr) => expr_uses(&try_expr.expr, name, Use::Value, live),
+        syn::Expr::Await(await_expr) => expr_uses(&await_expr.base, name, Use::Value, live),
+        syn::Expr::Let(let_expr) => expr_uses(&let_expr.expr, name, Use::Value, live),
         syn::Expr::Return(ret) => ret
             .expr
             .as_ref()
-            .is_some_and(|expr| expr_uses(expr, name, under(how, Use::Value), live)),
+            .is_some_and(|expr| expr_uses(expr, name, Use::Value, live)),
         syn::Expr::Break(brk) => brk
             .expr
             .as_ref()
-            .is_some_and(|expr| expr_uses(expr, name, under(how, Use::Value), live)),
+            .is_some_and(|expr| expr_uses(expr, name, Use::Value, live)),
         syn::Expr::Yield(yield_expr) => yield_expr
             .expr
             .as_ref()
-            .is_some_and(|expr| expr_uses(expr, name, under(how, Use::Value), live)),
+            .is_some_and(|expr| expr_uses(expr, name, Use::Value, live)),
         syn::Expr::Block(block) => block_uses(&block.block, name, how, live),
         syn::Expr::Unsafe(block) => block_uses(&block.block, name, how, live),
         syn::Expr::Loop(block) => block_uses(&block.body, name, how, live),
         syn::Expr::TryBlock(block) => block_uses(&block.block, name, how, live),
         syn::Expr::Async(block) => {
-            let body_how = if block.capture.is_some() {
-                Use::Name
+            if block.capture.is_some() {
+                move_block_captures(&block.block, name)
             } else {
-                under(how, Use::Value)
-            };
-            block_uses(&block.block, name, body_how, live)
+                block_uses(&block.block, name, Use::Value, live)
+            }
         }
         syn::Expr::Const(_) | syn::Expr::Continue(_) | syn::Expr::Infer(_) | syn::Expr::Lit(_) => {
             false
@@ -515,7 +543,7 @@ fn expr_uses(expr: &syn::Expr, name: &str, how: Use, live: bool) -> bool {
         syn::Expr::If(expr) => if_uses(expr, name, how, live),
         syn::Expr::While(expr) => while_uses(expr, name, how, live),
         syn::Expr::ForLoop(expr) => {
-            expr_uses(&expr.expr, name, under(how, Use::Value), live)
+            expr_uses(&expr.expr, name, Use::Value, live)
                 || block_uses(
                     &expr.body,
                     name,
@@ -523,15 +551,14 @@ fn expr_uses(expr: &syn::Expr, name: &str, how: Use, live: bool) -> bool {
                     live && !pattern_binds(&expr.pat, name),
                 )
         }
-        syn::Expr::Match(expr) => match_uses(expr, name, how, live),
+        syn::Expr::Match(expr) => match_uses(expr, name, live),
         syn::Expr::Closure(expr) => {
             let body_live = live && !expr.inputs.iter().any(|pat| pattern_binds(pat, name));
-            let body_how = if expr.capture.is_some() {
-                Use::Name
+            if expr.capture.is_some() {
+                body_live && move_expr_captures(&expr.body, name)
             } else {
-                under(how, Use::Value)
-            };
-            expr_uses(&expr.body, name, body_how, body_live)
+                expr_uses(&expr.body, name, Use::Value, body_live)
+            }
         }
         _ => false,
     }
@@ -540,48 +567,47 @@ fn expr_uses(expr: &syn::Expr, name: &str, how: Use, live: bool) -> bool {
 /// A let chain binds from left to right. A pattern hides that name from
 /// later `&&` operands. The pair is whether the outer name was used, and
 /// whether a pattern bound it.
-fn cond_chain(expr: &syn::Expr, name: &str, how: Use, live: bool) -> (bool, bool) {
+fn cond_chain(expr: &syn::Expr, name: &str, live: bool) -> (bool, bool) {
     match expr {
-        syn::Expr::Paren(inner) => cond_chain(&inner.expr, name, how, live),
-        syn::Expr::Group(inner) => cond_chain(&inner.expr, name, how, live),
+        syn::Expr::Paren(inner) => cond_chain(&inner.expr, name, live),
+        syn::Expr::Group(inner) => cond_chain(&inner.expr, name, live),
         syn::Expr::Binary(bin) if matches!(bin.op, syn::BinOp::And(_)) => {
-            let (left_used, left_shadow) = cond_chain(&bin.left, name, how, live);
-            let (right_used, right_shadow) =
-                cond_chain(&bin.right, name, how, live && !left_shadow);
+            let (left_used, left_shadow) = cond_chain(&bin.left, name, live);
+            let (right_used, right_shadow) = cond_chain(&bin.right, name, live && !left_shadow);
             (left_used || right_used, left_shadow || right_shadow)
         }
         syn::Expr::Let(let_expr) => (
-            expr_uses(&let_expr.expr, name, under(how, Use::Value), live),
+            expr_uses(&let_expr.expr, name, Use::Value, live),
             pattern_binds(&let_expr.pat, name),
         ),
-        other => (expr_uses(other, name, under(how, Use::Value), live), false),
+        other => (expr_uses(other, name, Use::Value, live), false),
     }
 }
 
 fn if_uses(expr: &syn::ExprIf, name: &str, how: Use, live: bool) -> bool {
-    let (used, shadowed) = cond_chain(&expr.cond, name, how, live);
+    let (used, shadowed) = cond_chain(&expr.cond, name, live);
     used || block_uses(&expr.then_branch, name, how, live && !shadowed)
         || expr
             .else_branch
             .as_ref()
-            .is_some_and(|(_, else_expr)| expr_uses(else_expr, name, under(how, Use::Value), live))
+            .is_some_and(|(_, else_expr)| expr_uses(else_expr, name, Use::Value, live))
 }
 
 fn while_uses(expr: &syn::ExprWhile, name: &str, how: Use, live: bool) -> bool {
-    let (used, shadowed) = cond_chain(&expr.cond, name, how, live);
+    let (used, shadowed) = cond_chain(&expr.cond, name, live);
     used || block_uses(&expr.body, name, how, live && !shadowed)
 }
 
-fn match_uses(expr: &syn::ExprMatch, name: &str, how: Use, live: bool) -> bool {
-    if expr_uses(&expr.expr, name, under(how, Use::Value), live) {
+fn match_uses(expr: &syn::ExprMatch, name: &str, live: bool) -> bool {
+    if expr_uses(&expr.expr, name, Use::Value, live) {
         return true;
     }
     expr.arms.iter().any(|arm| {
         let arm_live = live && !pattern_binds(&arm.pat, name);
         arm.guard
             .as_ref()
-            .is_some_and(|(_, cond)| cond_chain(cond, name, how, arm_live).0)
-            || expr_uses(&arm.body, name, under(how, Use::Value), arm_live)
+            .is_some_and(|(_, cond)| cond_chain(cond, name, arm_live).0)
+            || expr_uses(&arm.body, name, Use::Value, arm_live)
     })
 }
 
@@ -743,9 +769,95 @@ fn statement_moves(trees: &[TokenTree], name: &str) -> bool {
     walk_tokens(trees, name)
 }
 
+enum Step {
+    Hit,
+    Next(usize),
+}
+
+fn is_pipe(tree: Option<&TokenTree>) -> bool {
+    matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == '|')
+}
+
+fn keyword_move(trees: &[TokenTree], index: usize) -> bool {
+    matches!(trees.get(index), Some(TokenTree::Ident(word)) if word == "move")
+        && !matches!(
+            index.checked_sub(1).and_then(|at| trees.get(at)),
+            Some(TokenTree::Punct(punct)) if matches!(punct.as_char(), '.' | ':')
+        )
+}
+
+/// A `move` closure or `async move` block. The body runs up to a comma.
+/// A parameter named `name`, or a leading `let` of that name in a brace
+/// body, hides the outer guard. Anything else that names it captures it.
+fn move_step(trees: &[TokenTree], index: usize, name: &str) -> Option<Step> {
+    if !keyword_move(trees, index) {
+        return None;
+    }
+    let mut at = index + 1;
+    let mut shadowed = false;
+    if is_pipe(trees.get(at)) {
+        at += 1;
+        let start = at;
+        while at < trees.len() && !is_pipe(trees.get(at)) {
+            at += 1;
+        }
+        if at >= trees.len() {
+            return None;
+        }
+        shadowed = pattern_shadows(&trees[start..at], name);
+        at += 1;
+    } else if !matches!(
+        trees.get(at),
+        Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace
+    ) {
+        return None;
+    }
+    let end = trees[at..]
+        .iter()
+        .position(|tree| matches!(tree, TokenTree::Punct(punct) if punct.as_char() == ','))
+        .map_or(trees.len(), |rel| at + rel);
+    if shadowed {
+        return Some(Step::Next(end));
+    }
+    let captures = if let Some(TokenTree::Group(group)) = trees.get(at) {
+        if end == at + 1 && group.delimiter() == Delimiter::Brace {
+            let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+            brace_captures(&inner, name)
+        } else {
+            tokens_mention_at(&trees[at..end], name)
+        }
+    } else {
+        tokens_mention_at(&trees[at..end], name)
+    };
+    Some(if captures { Step::Hit } else { Step::Next(end) })
+}
+
+fn brace_captures(trees: &[TokenTree], name: &str) -> bool {
+    let Some(first) = trees.split(is_semi).next() else {
+        return false;
+    };
+    if statement_shadows(first, name) {
+        return first
+            .iter()
+            .position(is_eq)
+            .is_some_and(|eq| tokens_mention_at(&first[eq + 1..], name));
+    }
+    tokens_mention_at(trees, name)
+}
+
 fn walk_tokens(trees: &[TokenTree], name: &str) -> bool {
-    for (index, tree) in trees.iter().enumerate() {
-        match tree {
+    let mut index = 0;
+    while index < trees.len() {
+        if let Some(step) = move_step(trees, index, name) {
+            match step {
+                Step::Hit => return true,
+                Step::Next(next) => {
+                    index = next;
+                    continue;
+                }
+            }
+        }
+        match &trees[index] {
             TokenTree::Group(group) => {
                 let inner: Vec<TokenTree> = group.stream().into_iter().collect();
                 let moved = if group.delimiter() == Delimiter::Brace {
@@ -766,6 +878,7 @@ fn walk_tokens(trees: &[TokenTree], name: &str) -> bool {
             }
             _ => {}
         }
+        index += 1;
     }
     false
 }
@@ -1266,6 +1379,11 @@ fn a_move_capture_ends_the_guard() {
     for body in [
         "let guard = test_env_lock();\n    let release = move || helper(&guard);\n    drop(release);",
         "let guard = test_env_lock();\n    let release = async move { helper(&guard) };\n    drop(release);",
+        "let guard = test_env_lock();\n    let release = move || assert!(guard.ready());",
+        "let guard = test_env_lock();\n    let release = move || format!(\"{}\", guard);",
+        "let guard = test_env_lock();\n    let release = move || (outer!(inner!(guard)));",
+        "let guard = test_env_lock();\n    let release = move || vec![guard];",
+        "let guard = test_env_lock();\n    let release = async move { assert!(guard.ready()) };",
     ] {
         assert_eq!(
             unguarded(&probe(body), path, LIB_GUARDS),
@@ -1277,11 +1395,37 @@ fn a_move_capture_ends_the_guard() {
         "let guard = test_env_lock();\n    let release = || helper(&guard);\n    drop(release);",
         "let guard = test_env_lock();\n    let release = move || helper(&other);",
         "let guard = test_env_lock();\n    let release = move |guard| helper(&guard);",
+        "let guard = test_env_lock();\n    let release = move |guard| assert!(guard.ready());",
         "let guard = test_env_lock();\n    let release = move || { let guard = 1;\n        helper(&guard) };",
+        "let guard = test_env_lock();\n    let release = move || { let guard = 1;\n        assert!(guard.ready()) };",
         "let guard = test_env_lock();\n    let release = async { helper(&guard) };",
+        "let guard = test_env_lock();\n    let release = async move { let guard = 1;\n        format!(\"{}\", guard) };",
     ] {
         assert!(
             unguarded(&probe(body), path, LIB_GUARDS).is_empty(),
+            "{body}"
+        );
+    }
+    for body in [
+        "let guard = test_env_lock(); let release = move || assert!(guard.ready());",
+        "let guard = test_env_lock(); let release = move || format!(\"{}\", guard);",
+        "let guard = test_env_lock(); let release = move || (outer!(inner!(guard)));",
+        "let guard = test_env_lock(); let release = move || vec![guard];",
+        "let guard = test_env_lock(); let release = async move { assert!(guard.ready()) };",
+    ] {
+        assert_eq!(
+            unguarded(&cell(body), path, LIB_GUARDS),
+            ["$name"],
+            "{body}"
+        );
+    }
+    for body in [
+        "let guard = test_env_lock(); let release = move |guard| assert!(guard.ready());",
+        "let guard = test_env_lock(); let release = move || { let guard = 1; assert!(guard.ready()) };",
+        "let guard = test_env_lock(); let release = move || helper(&other);",
+    ] {
+        assert!(
+            unguarded(&cell(body), path, LIB_GUARDS).is_empty(),
             "{body}"
         );
     }
