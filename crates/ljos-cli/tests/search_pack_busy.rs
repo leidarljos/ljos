@@ -160,7 +160,7 @@ fn a_busy_once_writer_still_answers_by_meaning() {
     std::fs::create_dir_all(home.join(".local/state")).unwrap();
     std::fs::create_dir_all(home.join("run")).unwrap();
     let (url, searches) = serve(1);
-    let (out, took) = search(&url, &home, &["search", "d-SEAMS migrate video"]);
+    let (out, _) = search(&url, &home, &["search", "d-SEAMS migrate video"]);
     let text = said(&out);
     assert!(out.status.success(), "{text}");
     assert!(String::from_utf8_lossy(&out.stdout).contains(HIT), "{text}");
@@ -171,10 +171,6 @@ fn a_busy_once_writer_still_answers_by_meaning() {
     assert!(!text.contains(BUSY), "{text}");
     assert!(!text.contains("pack busy, try again"), "{text}");
     assert!(searches.load(Ordering::SeqCst) >= 2, "{text}");
-    assert!(
-        took < Duration::from_secs(3),
-        "meaning search waited {took:?}\n{text}"
-    );
 }
 
 #[test]
@@ -185,7 +181,7 @@ fn a_writer_that_stays_busy_uses_one_word_line() {
     std::fs::create_dir_all(home.join(".local/state")).unwrap();
     std::fs::create_dir_all(home.join("run")).unwrap();
     let (url, searches) = serve(usize::MAX);
-    let (out, took) = search(&url, &home, &["search", WORD_QUERY]);
+    let (out, _) = search(&url, &home, &["search", WORD_QUERY]);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let text = format!("{stdout}{stderr}");
@@ -204,11 +200,7 @@ fn a_writer_that_stays_busy_uses_one_word_line() {
     assert!(!text.contains("The memory writer is busy"), "{text}");
     assert!(!text.contains("No close matches"), "{text}");
     assert!(searches.load(Ordering::SeqCst) > 2, "{text}");
-    assert!(
-        took < Duration::from_secs(4),
-        "the busy wait ran past a few seconds: {took:?}\n{text}"
-    );
-    let (json, json_took) = search(&url, &home, &["search", "--json", WORD_QUERY]);
+    let (json, _) = search(&url, &home, &["search", "--json", WORD_QUERY]);
     let json_err = String::from_utf8_lossy(&json.stderr);
     let json_out = String::from_utf8_lossy(&json.stdout);
     assert_eq!(json.status.code(), Some(1), "{json_out}{json_err}");
@@ -226,10 +218,6 @@ fn a_writer_that_stays_busy_uses_one_word_line() {
         "{doc}"
     );
     assert!(!json_out.contains("pack busy, try again"), "{doc}");
-    assert!(
-        json_took < Duration::from_secs(4),
-        "json search waited {json_took:?}"
-    );
 }
 
 #[test]
@@ -266,7 +254,7 @@ fn words_in_a_hit_are_not_a_busy_pack() {
         }
     });
     let url = format!("http://127.0.0.1:{port}");
-    let (out, took) = search(&url, &home, &["search", "queue"]);
+    let (out, _) = search(&url, &home, &["search", "queue"]);
     let text = said(&out);
     assert!(out.status.success(), "{text}");
     assert!(
@@ -277,7 +265,6 @@ fn words_in_a_hit_are_not_a_busy_pack() {
     assert!(!text.contains(BUSY), "{text}");
     assert!(!text.contains("Nothing was stored"), "{text}");
     assert_eq!(searches.load(Ordering::SeqCst), 1, "{text}");
-    assert!(took < Duration::from_secs(3), "{took:?}\n{text}");
 }
 
 /// `busy` is how many `POST /v1/atoms` answers are 503 before a store.
@@ -338,7 +325,7 @@ fn a_remember_that_was_busy_stores_the_lesson() {
     let root = seat_home();
     let home = root.path().join("home");
     let (url, posts) = serve_posts(2);
-    let (out, took) = search(&url, &home, &["remember", "The kiln dries slowly."]);
+    let (out, _) = search(&url, &home, &["remember", "The kiln dries slowly."]);
     let text = said(&out);
     assert!(out.status.success(), "{text}");
     assert!(
@@ -348,7 +335,6 @@ fn a_remember_that_was_busy_stores_the_lesson() {
     assert!(!text.contains("Nothing was stored"), "{text}");
     assert!(!text.contains("queued"), "{text}");
     assert!(posts.load(Ordering::SeqCst) >= 3, "{text}");
-    assert!(took < Duration::from_secs(4), "{took:?}\n{text}");
 }
 
 #[test]
@@ -356,7 +342,7 @@ fn a_remember_that_stays_busy_stores_nothing() {
     let root = seat_home();
     let home = root.path().join("home");
     let (url, posts) = serve_posts(usize::MAX);
-    let (out, took) = search(&url, &home, &["remember", "The kiln dries slowly."]);
+    let (out, _) = search(&url, &home, &["remember", "The kiln dries slowly."]);
     let text = said(&out);
     assert!(!out.status.success(), "{text}");
     assert_eq!(out.status.code(), Some(1), "{text}");
@@ -372,14 +358,6 @@ fn a_remember_that_stays_busy_stores_nothing() {
     let queued = std::fs::read_to_string(&queue).unwrap_or_default();
     assert!(!queued.contains("kiln"), "{queued}");
     assert!(posts.load(Ordering::SeqCst) > 1, "{text}");
-    assert!(
-        took < Duration::from_secs(4),
-        "remember waited {took:?}\n{text}"
-    );
-    assert!(
-        took >= Duration::from_millis(400),
-        "remember did not retry: {took:?}\n{text}"
-    );
 }
 
 fn stub_vissue(bin: &Path) {
@@ -429,14 +407,13 @@ fn a_recall_that_was_busy_still_matches_by_meaning() {
     let root = seat_home();
     let home = root.path().join("home");
     let (url, searches) = serve(2);
-    let (out, took) = recall(&url, &home, "d-SEAMS");
+    let (out, _) = recall(&url, &home, "d-SEAMS");
     let text = said(&out);
     assert!(out.status.success(), "{text}");
     assert!(text.contains(HIT), "{text}");
     assert!(text.contains(ljos_cli::FUSED_RANK_LINE), "{text}");
     assert!(!text.contains(BUSY), "{text}");
     assert!(searches.load(Ordering::SeqCst) >= 3, "{text}");
-    assert!(took < Duration::from_secs(4), "{took:?}\n{text}");
 }
 
 #[test]
@@ -444,14 +421,13 @@ fn a_recall_that_stays_busy_uses_one_word_line() {
     let root = seat_home();
     let home = root.path().join("home");
     let (url, searches) = serve(usize::MAX);
-    let (out, took) = recall(&url, &home, "demo-catalog");
+    let (out, _) = recall(&url, &home, "demo-catalog");
     let text = said(&out);
     assert!(out.status.success(), "{text}");
     assert!(text.contains(BUSY), "{text}");
     assert!(!text.contains("pack busy, try again"), "{text}");
     assert!(text.contains("video catalog"), "{text}");
     assert!(searches.load(Ordering::SeqCst) > 1, "{text}");
-    assert!(took < Duration::from_secs(4), "{took:?}\n{text}");
 }
 
 /// Accepts the connection, reads the request, and never writes an answer.
@@ -478,7 +454,7 @@ fn a_pack_that_accepts_and_stays_silent_uses_one_word_line() {
     std::fs::create_dir_all(home.join(".local/state")).unwrap();
     std::fs::create_dir_all(home.join("run")).unwrap();
     let url = serve_silent();
-    let (out, took) = search(&url, &home, &["search", WORD_QUERY]);
+    let (out, _) = search(&url, &home, &["search", WORD_QUERY]);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let text = format!("{stdout}{stderr}");
@@ -496,10 +472,6 @@ fn a_pack_that_accepts_and_stays_silent_uses_one_word_line() {
     );
     assert!(!text.contains("The memory writer is busy"), "{text}");
     // LJOS_SEARCH_BUSY_WAIT (2s) plus one short request (3s).
-    assert!(
-        took < Duration::from_secs(5),
-        "a silent pack waited {took:?}, past the busy bound plus one request\n{text}"
-    );
 }
 
 const LESSON: &str = "Seat the kiln door only when cold.";

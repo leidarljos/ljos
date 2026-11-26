@@ -93,10 +93,19 @@ fn serve_scripted(
                 let req = read_http(&mut stream);
                 let path = req.lines().next().unwrap_or("");
                 let (status, payload) = match script(&req) {
-                    Some(answer) => {
-                        thread::sleep(answer.after);
-                        (answer.status, answer.body.to_string())
+                    Some(answer) if !answer.after.is_zero() => {
+                        // Hold the socket until the client closes. A body
+                        // written after a sleep can still land inside the
+                        // client's by-id bound when the machine is slow.
+                        let mut buf = [0u8; 64];
+                        loop {
+                            match stream.read(&mut buf) {
+                                Ok(0) | Err(_) => return,
+                                Ok(_) => {}
+                            }
+                        }
                     }
+                    Some(answer) => (answer.status, answer.body.to_string()),
                     None if path.starts_with("GET /health") || authorized(&req) => {
                         answer(&atoms, path)
                     }
@@ -697,9 +706,9 @@ fn a_slow_or_hung_lesson_read_does_not_state_the_rule() {
     let gone = serde_json::json!({"error": "no atom"});
     for (reply, stated) in [
         (Reply::now("200 OK", lesson.clone()), true),
-        (Reply::after(800, "200 OK", lesson.clone()), false),
-        (Reply::after(800, "404 Not Found", gone.clone()), false),
-        (Reply::after(3000, "404 Not Found", gone.clone()), false),
+        (Reply::now("404 Not Found", gone.clone()), false),
+        (Reply::after(1, "200 OK", lesson.clone()), false),
+        (Reply::after(1, "404 Not Found", gone.clone()), false),
     ] {
         let (after, status) = (reply.after, reply.status);
         let seat = Seat::on(serve_scripted(vec![], move |req| {
