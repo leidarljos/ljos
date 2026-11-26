@@ -597,6 +597,7 @@ mod tests {
 
     #[test]
     fn head_is_read_from_the_git_files_as_git_reads_it() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
         git(repo, &["init", "-q", "-b", "main"]);

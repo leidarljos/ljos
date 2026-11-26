@@ -264,6 +264,7 @@ mod tests {
 
     #[test]
     fn a_matching_hash_is_owned_and_a_different_file_is_a_hand_edit() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("SKILL.md");
         let old = old_skill();
@@ -305,6 +306,7 @@ mod tests {
 
     #[test]
     fn install_refreshes_a_stale_copy_and_leaves_a_hand_edit() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("SKILL.md");
         let old = old_skill();

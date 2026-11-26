@@ -170,6 +170,7 @@ fn hits_body() -> &'static str {
 
 #[test]
 fn a_search_waits_out_not_ready_and_then_prints_the_hit() {
+    let _process = ljos_test_boot::env_lock();
     let seat = serve(Some(Duration::from_millis(400)), hits_body());
     let (out, elapsed) = run(
         &seat,
@@ -187,6 +188,7 @@ fn a_search_waits_out_not_ready_and_then_prints_the_hit() {
 
 #[test]
 fn a_real_miss_after_the_pack_answers_uses_the_miss_line() {
+    let _process = ljos_test_boot::env_lock();
     let seat = serve(
         Some(Duration::from_millis(200)),
         r#"{"hits":[],"rank":"relevance"}"#,
@@ -205,6 +207,7 @@ fn a_real_miss_after_the_pack_answers_uses_the_miss_line() {
 
 #[test]
 fn a_search_that_stays_not_ready_ranks_by_words() {
+    let _process = ljos_test_boot::env_lock();
     let seat = serve(None, hits_body());
     let (out, elapsed) = run(
         &seat,
@@ -222,6 +225,7 @@ fn a_search_that_stays_not_ready_ranks_by_words() {
 
 #[test]
 fn a_warmup_wait_of_zero_does_not_wait_on_a_starting_pack() {
+    let _process = ljos_test_boot::env_lock();
     let seat = serve(Some(Duration::from_secs(30)), hits_body());
     let (out, elapsed) = run(
         &seat,
@@ -237,6 +241,7 @@ fn a_warmup_wait_of_zero_does_not_wait_on_a_starting_pack() {
 
 #[test]
 fn remember_waits_for_the_pack_to_open() {
+    let _process = ljos_test_boot::env_lock();
     let seat = serve(Some(Duration::from_millis(300)), hits_body());
     let (out, elapsed) = run(
         &seat,
@@ -252,6 +257,7 @@ fn remember_waits_for_the_pack_to_open() {
 
 #[test]
 fn remember_names_a_pack_that_stays_not_ready() {
+    let _process = ljos_test_boot::env_lock();
     let seat = serve(None, hits_body());
     let (out, _) = run(
         &seat,
@@ -266,6 +272,7 @@ fn remember_names_a_pack_that_stays_not_ready() {
 
 #[test]
 fn the_mcp_search_returns_the_starting_sentence() {
+    let _process = ljos_test_boot::env_lock();
     let seat = serve(None, hits_body());
     let home = seat.home.path();
     std::env::set_var("PACKSET_URL", &seat.url);
@@ -423,6 +430,7 @@ fn open_pack(kind: Open) -> Seat {
 
 #[test]
 fn a_query_that_names_the_busy_words_is_not_a_starting_pack() {
+    let _process = ljos_test_boot::env_lock();
     let seat = open_pack(Open::Echo);
     let (out, elapsed) = run(
         &seat,
@@ -439,6 +447,7 @@ fn a_query_that_names_the_busy_words_is_not_a_starting_pack() {
 
 #[test]
 fn a_query_that_says_starting_is_not_a_starting_pack() {
+    let _process = ljos_test_boot::env_lock();
     let seat = open_pack(Open::Echo);
     let (out, elapsed) = run(
         &seat,
@@ -455,6 +464,7 @@ fn a_query_that_says_starting_is_not_a_starting_pack() {
 
 #[test]
 fn an_error_string_that_quotes_the_query_is_busy_not_starting() {
+    let _process = ljos_test_boot::env_lock();
     let seat = open_pack(Open::Phrase);
     let (out, elapsed) = run(
         &seat,
@@ -477,6 +487,7 @@ fn an_error_string_that_quotes_the_query_is_busy_not_starting() {
 
 #[test]
 fn a_starting_code_ranks_by_words() {
+    let _process = ljos_test_boot::env_lock();
     let seat = open_pack(Open::Code);
     let (out, elapsed) = run(
         &seat,
@@ -493,6 +504,7 @@ fn a_starting_code_ranks_by_words() {
 
 #[test]
 fn remember_keeps_a_lesson_that_names_the_busy_words() {
+    let _process = ljos_test_boot::env_lock();
     let seat = open_pack(Open::Echo);
     let lesson = format!("{TRIP} not ready busy loading starting");
     let (out, elapsed) = run(

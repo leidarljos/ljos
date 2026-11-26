@@ -738,6 +738,7 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[test]
 fn workspace_source_lint_catches_common_publication_mistakes() {
+    let _env_read = crate::test_env_read_lock();
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     #[expect(
         clippy::disallowed_methods,
@@ -844,6 +845,7 @@ mod tests {
     /// and the call wrapped over more lines than the scanner looked ahead.
     #[test]
     fn a_write_then_a_descriptor_chmod_is_refused_however_it_is_wrapped() {
+        let _env_read = crate::test_env_read_lock();
         let wrapped = r##"
 fn stub(bin: &Path) {
     crate::write_file(bin.join("a"), "#!/bin/sh\n").unwrap();
@@ -869,6 +871,7 @@ fn stub(bin: &Path) {
 
     #[test]
     fn a_mode_that_may_hold_an_execute_bit_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let src = r#"
 fn f(path: &Path, mode: u32, file: &File) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -890,6 +893,7 @@ fn f(path: &Path, mode: u32, file: &File) {
 
     #[test]
     fn a_mode_without_an_execute_bit_is_let_through() {
+        let _env_read = crate::test_env_read_lock();
         let src = r#"
 // std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
 /// `chmod 755` in a doc comment
@@ -921,6 +925,7 @@ fn f(path: &Path, mode: u32, meta: &Metadata) {
 
     #[test]
     fn a_name_that_hides_a_mode_change_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let src = r#"
 use std::fs::set_permissions as sp;
 use std::fs::{copy as c, write};
@@ -946,6 +951,7 @@ fn i() { unsafe { libc::chmod(p, 0o644); libc::openat(dir, name, flags, 0o755); 
 
     #[test]
     fn rustix_open_and_openat_with_an_execute_bit_are_refused() {
+        let _env_read = crate::test_env_read_lock();
         let src = r#"
 fn plant(dir: &File) {
     rustix::fs::openat(dir, "pre-commit", flags, 0o755.into());
@@ -959,6 +965,7 @@ fn plant(dir: &File) {
 
     #[test]
     fn nonliteral_programs_and_shells_are_refused() {
+        let _env_read = crate::test_env_read_lock();
         let src = r#"
 fn command(program: &str) {
     std::process::Command::new(program);

@@ -565,6 +565,8 @@ mod tests {
 
     #[test]
     fn hide_closes_the_overlay_window() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         assert_eq!(overlay_action(false, true), OverlayAction::Close);
         assert_eq!(overlay_action(true, false), OverlayAction::Open);
         assert_eq!(overlay_action(true, true), OverlayAction::Place);
@@ -594,6 +596,8 @@ mod tests {
 
     #[test]
     fn tick_is_chrome_not_a_snapshot_load() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let src = include_str!("app.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(prod.contains("self.now = ljos_cli::now_utc()"));
@@ -613,6 +617,8 @@ mod tests {
 
     #[test]
     fn activation_applied_true_clears_token() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let mut app = empty_app();
         app.pending_activation_token = Some("tok".into());
         let _ = app.update(Message::ActivationApplied(false));
@@ -623,6 +629,8 @@ mod tests {
 
     #[test]
     fn hide_clears_pending_token() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let mut app = empty_app();
         app.pending_activation_token = Some("tok".into());
         let _ = app.hide();
@@ -632,6 +640,8 @@ mod tests {
 
     #[test]
     fn pop_out_takes_the_overlay_down_and_its_close_hides_the_hud() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let mut app = empty_app();
         let id = window::Id::unique();
         app.opening = Some(id);
@@ -650,6 +660,8 @@ mod tests {
 
     #[test]
     fn summon_show_keeps_token_hide_drops_it() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let mut app = empty_app();
         app.visible = false;
         let _ = app.on_summon(SummonRequest {
@@ -663,6 +675,8 @@ mod tests {
 
     #[test]
     fn visible_boot_stashes_env_token() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let _guard = crate::env_lock();
         #[allow(unused_unsafe)]
         unsafe {
@@ -677,6 +691,8 @@ mod tests {
 
     #[test]
     fn hidden_boot_unsets_token_without_stashing() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let _guard = crate::env_lock();
         #[allow(unused_unsafe)]
         unsafe {
@@ -692,6 +708,8 @@ mod tests {
 
     #[test]
     fn overlay_closed_hides() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let mut app = empty_app();
         let id = window::Id::unique();
         app.opening = Some(id);
@@ -707,6 +725,8 @@ mod tests {
 
     #[test]
     fn overlay_closed_during_pop_out_keeps_visible() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let mut app = empty_app();
         let overlay = window::Id::unique();
         app.opening = Some(overlay);
@@ -721,6 +741,8 @@ mod tests {
 
     #[test]
     fn skip_chip_focuses_the_graph_and_j_walks_nodes() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         use crate::graph::GraphLayout;
         use ljos_cli::{Persona, Trust};
         let mut app = empty_app();
@@ -761,6 +783,8 @@ mod tests {
 
     #[test]
     fn number_keys_reach_island_and_deeds() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let mut app = empty_app();
         let _ = app.update(Message::Key(Key::Character("4".into())));
         assert_eq!(app.pane, Pane::Island);
@@ -772,6 +796,8 @@ mod tests {
 
     #[test]
     fn cue_activate_is_a_read() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let mut app = empty_app();
         assert!(app.cue.is_empty());
         assert!(app.snap.cue.is_empty());

@@ -1549,6 +1549,7 @@ mod tests {
 
     #[test]
     fn a_digest_ticket_line_keeps_the_title() {
+        let _env_read = crate::test_env_read_lock();
         let title = "guard: tmux by full path, renamed binary, -L or -S bypasses send-keys checks";
         let row = Row::new(
             1_700_000_000,
@@ -1583,6 +1584,7 @@ mod tests {
 
     #[test]
     fn a_digest_ticket_line_wraps_its_title_to_the_terminal() {
+        let _env_read = crate::test_env_read_lock();
         let title = "guard: tmux by full path, renamed binary, -L or -S bypasses send-keys checks";
         let row = Row::new(
             1_700_000_000,
@@ -1691,6 +1693,7 @@ mod tests {
 
     #[test]
     fn digest_groups_seats_newest_first() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = tracker(dir.path());
@@ -1895,6 +1898,7 @@ mod tests {
 
     #[test]
     fn equal_instants_do_not_follow_insertion_order() {
+        let _env_read = crate::test_env_read_lock();
         let rows_of = |order: &[(&'static str, &'static str)]| -> Vec<Row> {
             order
                 .iter()
@@ -1962,6 +1966,7 @@ mod tests {
 
     #[test]
     fn digest_order_holds_in_another_zone_when_deedar_is_slow() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         // POSIX `XXX-16` is sixteen hours east of UTC. Read as a local
         // wall time, alice's 09:14 is older than bob's 18:00Z, and bob
@@ -2038,6 +2043,7 @@ mod tests {
 
     #[test]
     fn last_remembers_the_previous_run() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = tracker(dir.path());
@@ -2073,6 +2079,7 @@ mod tests {
 
     #[test]
     fn a_guard_row_is_one_json_line() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
@@ -2097,6 +2104,7 @@ mod tests {
 
     #[test]
     fn guard_rotation_stays_inside_the_append_lock() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = std::sync::Arc::new(dir.path().join("guard.jsonl"));
         let mut writers = Vec::new();
@@ -2138,6 +2146,7 @@ mod tests {
 
     #[test]
     fn digest_answers_a_thousand_tickets() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = tracker(dir.path());
@@ -2232,6 +2241,7 @@ mod tests {
 
     #[test]
     fn review_repro_a_plain_or_json_digest_moves_the_last_marker() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let _ = review_filed_tracker(dir.path());
@@ -2242,6 +2252,7 @@ mod tests {
 
     #[test]
     fn review_repro_a_rebased_commit_comes_back_in_last() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, _) = review_filed_tracker(dir.path());
@@ -2266,6 +2277,7 @@ mod tests {
 
     #[test]
     fn review_repro_last_drops_an_org_event_in_the_marker_minute() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, home) = review_filed_tracker(dir.path());
@@ -2296,6 +2308,7 @@ mod tests {
 
     #[test]
     fn review_repro_history_keeps_git_time_one_seat_and_the_filer() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = tracker(dir.path());
@@ -2428,6 +2441,7 @@ mod tests {
 
     #[test]
     fn review_repro_guard_redacts_tokens_rotates_and_hides_the_command() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = tracker(dir.path());
@@ -2486,6 +2500,7 @@ mod tests {
 
     #[test]
     fn review_repro_the_tool_does_not_move_the_marker() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (_, home) = review_filed_tracker(dir.path());
@@ -2499,6 +2514,7 @@ mod tests {
 
     #[test]
     fn review2_a_second_last_repeats_an_event_in_the_marker_minute() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, home) = review_filed_tracker(dir.path());
@@ -2541,6 +2557,7 @@ mod tests {
 
     #[test]
     fn review2_a_commit_authored_before_the_marker_never_shows_in_last() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, home) = review_filed_tracker(dir.path());
@@ -2595,6 +2612,7 @@ mod tests {
 
     #[test]
     fn last_uses_reachability_when_a_late_commit_has_old_dates() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (root, home) = review_filed_tracker(dir.path());
@@ -2629,6 +2647,7 @@ mod tests {
 
     #[test]
     fn review2_redaction_misses_common_secret_shapes() {
+        let _env_read = crate::test_env_read_lock();
         let cases = [
             "curl -u alice:hunter2 https://api.example.com",
             "git clone https://alice:hunter2@github.com/acme/x",
@@ -2665,6 +2684,7 @@ mod tests {
 
     #[test]
     fn identical_acts_are_kept_when_they_are_separate_events() {
+        let _env_read = crate::test_env_read_lock();
         let mut rows = vec![
             Row::new(
                 10,
@@ -2733,6 +2753,7 @@ mod tests {
 
     #[test]
     fn digest_since_keeps_the_introduced_section_and_bounds_the_patch_log() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = tracker(dir.path());
@@ -2852,6 +2873,7 @@ mod tests {
 
     #[test]
     fn last_bounds_the_introduced_patch_log_to_the_marker_range() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = tracker(dir.path());

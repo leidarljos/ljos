@@ -1505,6 +1505,7 @@ mod tests {
     /// the person at a terminal with no variable set may change the key.
     #[test]
     fn only_the_person_without_a_mark_may_change_the_key() {
+        let _env_read = crate::test_env_read_lock();
         use crate::RunnerCause::{Hard, MarkOnly};
         let mark = vec!["CURSOR_AGENT".to_string()];
         for (cause, present, marks) in [
@@ -1529,6 +1530,7 @@ mod tests {
     /// was. The test stands in for the person at a terminal.
     #[test]
     fn a_mark_refuses_set_and_clear_with_or_without_a_key() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let dir = tempfile::tempdir().unwrap();
         let none = dir.path().join("none").join(KEY_NAME);
@@ -1704,6 +1706,7 @@ mod tests {
     /// verifies; echo is back on after, and the terminal never showed it.
     #[test]
     fn set_keeps_a_passphrase_typed_twice() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(KEY_NAME);
         let (master, mut slave) = pty_pair();
@@ -1732,6 +1735,7 @@ mod tests {
 
     #[test]
     fn set_refuses_a_short_or_mismatched_passphrase() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(KEY_NAME);
         for answers in [
@@ -1815,6 +1819,7 @@ mod tests {
 
     #[test]
     fn the_right_passphrase_answers_once_and_clears_the_count() {
+        let _env_read = crate::test_env_read_lock();
         let dir = keyed();
         #[expect(
             clippy::disallowed_methods,
@@ -1844,6 +1849,7 @@ mod tests {
 
     #[test]
     fn a_wrong_passphrase_waits_and_is_counted() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::PermissionsExt as _;
         let dir = keyed();
         let asked = ask_at(dir.path(), Some("correct horse batterz"), 1000);
@@ -1863,6 +1869,7 @@ mod tests {
 
     #[test]
     fn five_wrong_in_the_window_lock_out_without_a_prompt() {
+        let _env_read = crate::test_env_read_lock();
         let dir = keyed();
         let mut pauses = Vec::new();
         for i in 0..5 {
@@ -1900,6 +1907,7 @@ mod tests {
     /// typed is not counted as a wrong answer.
     #[test]
     fn no_key_no_terminal_or_no_answer_refuses() {
+        let _env_read = crate::test_env_read_lock();
         let empty = tempfile::tempdir().unwrap();
         let asked = ask_yes(empty.path(), Some("yes"), 1000);
         assert_eq!(asked.out, Ok(()));
@@ -1935,6 +1943,7 @@ mod tests {
 
     #[test]
     fn status_names_the_key_but_not_its_hash() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(KEY_NAME);
         assert!(status_at(&path).contains("not set"));
@@ -1948,6 +1957,7 @@ mod tests {
 
     #[test]
     fn a_hash_matches_its_passphrase_and_pepper_only() {
+        let _env_read = crate::test_env_read_lock();
         let phc = hash(b"correct horse battery", PEPPER).unwrap();
         assert!(phc.starts_with("$argon2id$"), "{phc}");
         assert!(verify(b"correct horse battery", &phc, PEPPER));
@@ -1964,6 +1974,7 @@ mod tests {
     /// the prompt, and that is not counted as a wrong answer.
     #[test]
     fn the_pepper_is_kept_beside_the_key_and_needed() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::PermissionsExt as _;
         let dir = keyed();
         let at = dir.path().join(PEPPER_NAME);
@@ -1993,6 +2004,7 @@ mod tests {
     /// a key kept before verifies the same way.
     #[test]
     fn a_hash_from_the_hash_crate_verifies() {
+        let _env_read = crate::test_env_read_lock();
         use argon2::password_hash::PasswordHasher as _;
         let salt = SaltString::encode_b64(&[7u8; 16]).unwrap();
         let params = Params::new(M_COST_KIB, T_COST, P_COST, None).unwrap();
@@ -2010,6 +2022,7 @@ mod tests {
     /// says to set the passphrase again.
     #[test]
     fn a_hash_below_the_cost_is_not_a_key() {
+        let _env_read = crate::test_env_read_lock();
         use argon2::password_hash::PasswordHasher as _;
         let phc = hash(b"correct horse battery", PEPPER).unwrap();
         let params = Params::try_from(&parse(&phc).unwrap()).unwrap();
@@ -2040,6 +2053,7 @@ mod tests {
     /// longer line is refused, and its buffer dropped and zeroed.
     #[test]
     fn a_long_line_stays_in_the_buffer_it_started_in() {
+        let _env_read = crate::test_env_read_lock();
         use crate::person_tty::MAX_LINE;
         let long: &'static str = "a".repeat(MAX_LINE).leak();
         for typed in ["x", long] {
@@ -2072,6 +2086,7 @@ mod tests {
 
     #[test]
     fn only_an_argon2id_phc_string_parses() {
+        let _env_read = crate::test_env_read_lock();
         let phc = hash(b"correct horse battery", PEPPER).unwrap();
         let parsed = parse(&phc).unwrap();
         assert_eq!(parsed.algorithm.as_str(), "argon2id");
@@ -2092,6 +2107,7 @@ mod tests {
 
     #[test]
     fn the_stored_key_is_mode_0600_and_reads_back() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ljos").join(KEY_NAME);
@@ -2120,6 +2136,7 @@ mod tests {
 
     #[test]
     fn a_link_in_place_of_the_key_is_not_read() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("elsewhere");
         store(&real, &hash(b"correct horse battery", PEPPER).unwrap()).unwrap();
@@ -2139,6 +2156,7 @@ mod tests {
     /// a link.
     #[test]
     fn a_link_swapped_in_after_the_open_is_not_followed() {
+        let _env_read = crate::test_env_read_lock();
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("ljos");
         let evil = root.path().join("evil");
@@ -2240,6 +2258,7 @@ mod tests {
     /// the key path still names the passwd entry's home.
     #[test]
     fn the_key_path_follows_the_passwd_home() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let own = crate::proc_tree::own_home().expect("a passwd home");
         let tmp = tempfile::tempdir().unwrap();
@@ -2270,6 +2289,7 @@ mod tests {
     /// names the directory beside it when `/tmp` points elsewhere.
     #[test]
     fn cd_through_a_symlink_keeps_the_spelling() {
+        let _env_read = crate::test_env_read_lock();
         let root = tempfile::tempdir().unwrap();
         let real = root.path().join("private/tmp");
         std::fs::create_dir_all(&real).unwrap();

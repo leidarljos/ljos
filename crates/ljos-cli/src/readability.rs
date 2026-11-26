@@ -422,6 +422,7 @@ mod tests {
 
     #[test]
     fn the_aim_is_the_packs_ceiling() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(TARGET, 14.0);
         assert_eq!(MIN_WORDS, 20);
         assert_eq!(SHORT_SENTENCE_WORDS, 20);
@@ -429,6 +430,7 @@ mod tests {
 
     #[test]
     fn a_short_lesson_draws_no_hint() {
+        let _env_read = crate::test_env_read_lock();
         let grade = packset_core::prose::assess(SHORT).grade;
         assert!(grade.is_some_and(|g| g > TARGET), "{grade:?}");
         assert_eq!(reading_line(&warned("abcd1234", SHORT)), None);
@@ -444,6 +446,7 @@ mod tests {
 
     #[test]
     fn paths_ids_and_shas_do_not_raise_the_hint() {
+        let _env_read = crate::test_env_read_lock();
         let prose = "Keep the default and the file holds the key.";
         let noise = " crates/ljos-cli/src/lib.rs ljos-ab12 f3340bce9166923ff769b703939b0c78f74837a8 0.43.1 `packset_core::prose::assess` XDG_DATA_HOME";
         let mut text = String::from("Keep the default and the file holds the key");
@@ -472,6 +475,7 @@ mod tests {
 
     #[test]
     fn a_long_winded_lesson_names_the_sentence_and_starts_with_the_id() {
+        let _env_read = crate::test_env_read_lock();
         let body = warned("abcdef1234567890", LONG_WORDS);
         let line = reading_line(&body).expect("hint");
         assert!(line.starts_with("abcdef12 was saved."), "{line}");
@@ -494,6 +498,7 @@ mod tests {
 
     #[test]
     fn json_carries_the_grade_the_aim_and_the_sentence() {
+        let _env_read = crate::test_env_read_lock();
         let mut body = warned("abcdef1234567890", LONG_WORDS);
         attach(&mut body);
         assert!(body["prose"]["grade"].as_f64().is_some_and(|g| g > TARGET));
@@ -516,6 +521,7 @@ mod tests {
 
     #[test]
     fn a_local_copy_still_says_it_was_saved() {
+        let _env_read = crate::test_env_read_lock();
         let mut body = warned("abcdef1234567890", LONG_WORDS);
         body["kept"] = json!("local");
         let line = reading_line(&body).expect("hint");

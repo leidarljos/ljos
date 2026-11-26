@@ -147,6 +147,7 @@ mod tests {
 
     #[test]
     fn families_rotate_and_a_pair_differs() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(family(0), "grok");
         assert_eq!(family(1), "opus");
         assert_eq!(family(2), "codex");
@@ -156,6 +157,7 @@ mod tests {
 
     #[test]
     fn a_short_run_id_strips_back_to_the_seat_without_one() {
+        let _env_read = crate::test_env_read_lock();
         for run in ["inky-ab1c", "inky-n9o-ab1c"] {
             assert_eq!(crate::seat_for_env(run), "inky", "{run}");
         }
@@ -175,6 +177,7 @@ mod tests {
 
     #[test]
     fn a_prompt_names_the_seat_the_slot_and_the_push_rules() {
+        let _env_read = crate::test_env_read_lock();
         let text = prompt("Ada Rider", "probe-l0g0", "opus");
         assert!(text.contains("You are Ada Rider on probe-l0g0."), "{text}");
         assert!(text.contains("ljos brief Ada Rider probe-l0g0"), "{text}");

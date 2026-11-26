@@ -726,6 +726,7 @@ fn at_home(mine: &str, solo: bool, cwd: bool, home: &[&str]) -> Here {
 
 #[test]
 fn the_page_is_the_page_the_per_call_ranking_built() {
+    let _env_read = crate::test_env_read_lock();
     let mut compared = 0usize;
     let mut moved = 0usize;
     for seed in [7_u64, 1_234, 99_991] {
@@ -766,6 +767,7 @@ fn the_page_is_the_page_the_per_call_ranking_built() {
 
 #[test]
 fn band_reads_the_same_as_the_per_call_band() {
+    let _env_read = crate::test_env_read_lock();
     let records = tracker(42, 100);
     let titles: Vec<&str> = records
         .iter()
@@ -830,6 +832,7 @@ fn analyses_for(query: &str, count: usize, sharing: usize, leads: &[&str]) -> (u
 /// 24,000 tickets. Ten times the tickets is about ten times the work.
 #[test]
 fn shared_title_words_cost_linear_work() {
+    let _env_read = crate::test_env_read_lock();
     let (small, small_titled) = analyses_for("store mount", 2_000, 30, &["Mount"]);
     let (large, large_titled) = analyses_for("store mount", 20_000, 300, &["Mount"]);
     assert_eq!(small_titled, 30);
@@ -848,6 +851,7 @@ fn shared_title_words_cost_linear_work() {
 /// work, and twelve words cost about what two do, per ticket.
 #[test]
 fn long_mixed_queries_cost_work_linear_in_words_and_tickets() {
+    let _env_read = crate::test_env_read_lock();
     const SIX: &str = "anneal 168 restack3 default-on gate";
     const TWELVE: &str =
         "anneal 168 restack3 default-on gate quench 2048 relink9 opt-in latch ramp soak";
@@ -881,6 +885,7 @@ fn long_mixed_queries_cost_work_linear_in_words_and_tickets() {
 /// matches from other repos that miss a word are last.
 #[test]
 fn the_seats_project_comes_before_one_word_matches_from_other_repos() {
+    let _env_read = crate::test_env_read_lock();
     const QUERY: &str = "LTO metatensor link";
     let rows = [
         ("amsel-paper", "amsel-paper-lto", "Link metatensor with LTO"),
@@ -1118,6 +1123,7 @@ fn rough_tracker(seed: u64, n: usize) -> Vec<IssueRec> {
 /// same order. [`crate::word_rank::fuzz_scale`] reads more generated trackers.
 #[test]
 fn the_old_analyzer_and_the_cover_build_the_same_page() {
+    let _env_read = crate::test_env_read_lock();
     let mut compared = 0usize;
     let seeds = (0..3 * crate::word_rank::fuzz_scale())
         .map(|round| [3_u64, 71, 4_099][round % 3] + 7_919 * (round / 3) as u64);
@@ -1158,6 +1164,7 @@ fn the_old_analyzer_and_the_cover_build_the_same_page() {
 /// id the tracker read drops, and an unrelated query add no row.
 #[test]
 fn a_joined_body_word_is_found_and_a_miss_adds_no_row() {
+    let _env_read = crate::test_env_read_lock();
     let path = PathBuf::from(format!("{ROOT}/Software/issues.org"));
     let filed = vec![note("[2026-11-01 Sun 09:00]", "filed by ada")];
     let mut tagged = ticket(
@@ -1212,6 +1219,7 @@ fn a_joined_body_word_is_found_and_a_miss_adds_no_row() {
 /// is found, and a hundred times the filler splits and stems no more words.
 #[test]
 fn a_long_log_is_not_read_word_by_word() {
+    let _env_read = crate::test_env_read_lock();
     let path = PathBuf::from(format!("{ROOT}/Software/issues.org"));
     let filed = vec![note("[2026-11-01 Sun 09:00]", "filed by ada")];
     let read = |filler: &str, times: usize| {

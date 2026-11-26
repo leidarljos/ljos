@@ -1179,6 +1179,7 @@ mod tests {
     /// An older bind, with no such line, still yields its sessions.
     #[test]
     fn the_full_prompt_line_is_not_a_session() {
+        let _env_read = crate::test_env_read_lock();
         let hash = "ab".repeat(32);
         let (sessions, full) = bind_tail(
             format!("sess-1\nfull {hash}\n-")
@@ -1199,6 +1200,7 @@ mod tests {
     /// main thread are.
     #[test]
     fn a_subagent_brief_or_unattended_run_is_not_the_person() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         unsafe { std::env::remove_var("LJOS_UNATTENDED") };
         let root = "019a1b2c-3d4e-7f80-9a1b-2c3d4e5f6a7b";
@@ -1238,6 +1240,7 @@ mod tests {
 
     #[test]
     fn a_rollout_name_gives_its_thread() {
+        let _env_read = crate::test_env_read_lock();
         let id = "019a1b2c-3d4e-7f80-9a1b-2c3d4e5f6a7b";
         assert_eq!(
             rollout_thread(&format!("/x/rollout-2026-10-11T09-30-00-{id}.jsonl")).as_deref(),
@@ -1256,6 +1259,7 @@ mod tests {
 
     #[test]
     fn thirty_stated_choices_are_read() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(SAVES.len(), 30);
         let missed: Vec<&&str> = SAVES
             .iter()
@@ -1269,6 +1273,7 @@ mod tests {
 
     #[test]
     fn thirty_other_prompts_save_nothing() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(SAVES_NOTHING.len(), 30);
         let saved: Vec<(&&str, Stated)> = SAVES_NOTHING
             .iter()
@@ -1279,6 +1284,7 @@ mod tests {
 
     #[test]
     fn the_saved_words_are_the_persons_sentence() {
+        let _env_read = crate::test_env_read_lock();
         let s = stated_preference("From now on always use bun, never yarn, in this repo").unwrap();
         assert_eq!(s.kind, "preference");
         assert_eq!(
@@ -1297,6 +1303,7 @@ mod tests {
 
     #[test]
     fn the_mode_reads_ljos_capture() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let prev = std::env::var_os("LJOS_CAPTURE");
         for (v, want) in [
@@ -1317,11 +1324,13 @@ mod tests {
 
     #[test]
     fn words_compare_whatever_the_punctuation() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(words_only("Use bun,  never   yarn!"), "use bun never yarn");
     }
 
     #[test]
     fn a_typographic_apostrophe_still_turns_the_clause_around() {
+        let _env_read = crate::test_env_read_lock();
         let cut = "always paste the release key into the deploy form";
         for apostrophe in ['\u{2019}', '\u{02bc}', '\u{ff07}'] {
             let prompt = format!(
@@ -1344,6 +1353,7 @@ mod tests {
 
     #[test]
     fn a_dangling_negation_is_joined_before_the_rule_is_read() {
+        let _env_read = crate::test_env_read_lock();
         assert!(stated_preference("Do not\nalways use npm").is_none());
         assert!(stated_preference("Do not do this:\nalways use npm").is_none());
         for prompt in ["Don\u{2019}t\nalways use npm", "Don't\nalways use npm"] {
@@ -1368,6 +1378,7 @@ mod tests {
 
     #[test]
     fn a_negation_on_the_line_before_still_governs_the_quote() {
+        let _env_read = crate::test_env_read_lock();
         let cut = "always paste the release key into the deploy form";
         for prompt in [
             "Do not\nalways paste the release key into the deploy form.",
@@ -1434,6 +1445,7 @@ mod tests {
 
     #[test]
     fn the_shared_matcher_refuses_every_word_the_excerpt_refused_before() {
+        let _env_read = crate::test_env_read_lock();
         let heads = ["", "my", "api_", "X-", "(", "\"", "AWS_SECRET_"];
         let marks = [
             "key=",

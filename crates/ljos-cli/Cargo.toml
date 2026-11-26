@@ -78,6 +78,8 @@ html-escape = "0.2"
 ed25519-dalek = { version = "2", features = ["hazmat"] }
 # Lexes the sources for the mode check in src/exe_publish/mode_check.rs.
 proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }
+# Parses the sources for the process-state guard in tests/test_isolation.rs.
+syn = { version = "2", features = ["full", "visit"] }
 vissue-core.workspace = true
 # Not used by the binary. ureq 2 reaches webpki-roots 1 through the 0.26
 # shim, and this floor keeps the lock off a 1.0 release that still trusts

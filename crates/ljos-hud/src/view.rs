@@ -562,6 +562,7 @@ mod tests {
 
     #[test]
     fn pane_cycles() {
+        let _process_read = ljos_test_boot::env_read_lock();
         assert_eq!(Pane::Due.next(), Pane::Claims);
         assert_eq!(Pane::Trust.next(), Pane::Island);
         assert_eq!(Pane::Deeds.next(), Pane::Due);
@@ -571,6 +572,7 @@ mod tests {
 
     #[test]
     fn skip_chips_live_in_layout() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let src = include_str!("view.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(prod.contains("widget::chip"));
@@ -599,6 +601,7 @@ mod tests {
 
     #[test]
     fn grade_chips_are_display_only() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let src = include_str!("view.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(prod.contains("fn grade_chip"));
@@ -609,6 +612,7 @@ mod tests {
 
     #[test]
     fn habitat_down_canvas_stays_empty() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let snap = Snapshot::banner_only("pack: down".into());
         assert!(!snap.pack_ok);
         assert!(snap.graph.is_empty());
@@ -618,6 +622,7 @@ mod tests {
 
     #[test]
     fn pack_down_and_honest_empty_differ() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let down = Snapshot::banner_only("pack: down".into());
         assert_eq!(graph_instrument(&down), GraphInstrument::PackDown);
 
@@ -638,6 +643,7 @@ mod tests {
 
     #[test]
     fn graph_pane_readout_follows_the_walk() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let layout = GraphLayout::from_pack(
             &[Persona {
                 runner: None,

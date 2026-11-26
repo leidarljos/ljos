@@ -89,6 +89,7 @@ mod tests {
     /// memories about a disk audit and stored credentials.
     #[test]
     fn a_sitting_keeps_the_rows_about_its_own_task() {
+        let _env_read = crate::test_env_read_lock();
         let rows = [
             row("The seat guard refuses a read of seats.toml, so adding a seat needs a hand edit."),
             row("The disk audit found 40 GB of old encoder downloads under the cache."),
@@ -104,6 +105,7 @@ mod tests {
 
     #[test]
     fn nothing_is_said_when_every_row_bears_on_the_task() {
+        let _env_read = crate::test_env_read_lock();
         let rows = [row("The tracker writes go to the configured tracker root.")];
         let (kept, left_out) = on_task(&rows, "tracker root configured for writes");
         assert_eq!(kept.len(), 1);
@@ -113,6 +115,7 @@ mod tests {
 
     #[test]
     fn a_backlog_prints_its_count_and_no_rows() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(due_rows_shown(9549, 8), 0);
         let line = backlog_line(9549, 8);
         assert!(line.contains("9549 reviews are due"), "{line}");
@@ -121,6 +124,7 @@ mod tests {
 
     #[test]
     fn a_short_list_is_still_printed_to_grade() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(due_rows_shown(3, 8), 3);
         assert_eq!(due_rows_shown(12, 8), 8);
         assert_eq!(backlog_line(3, 8), "");

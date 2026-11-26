@@ -4,6 +4,7 @@ ljos_test_boot::harness!();
 
 #[test]
 fn a_consensus_reading_does_not_pick_the_whole_history() {
+    let _process = ljos_test_boot::env_lock();
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("git.log");
     let git = dir.path().join("git");

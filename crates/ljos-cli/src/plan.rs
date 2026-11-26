@@ -523,6 +523,7 @@ mod tests {
 
     #[test]
     fn an_old_hold_names_sitting_to_switch_before_a_plan() {
+        let _env_read = crate::test_env_read_lock();
         let line =
             stale_hold_plan_line("old-plan-1a2b", "2026-11-10T00:00:00Z").expect("a stale hold");
         assert!(line.contains("old-plan-1a2b"), "{line}");
@@ -531,6 +532,7 @@ mod tests {
 
     #[test]
     fn a_plan_is_one_commit_and_the_next_item_advances() {
+        let _env_read = crate::test_env_read_lock();
         let _env = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
@@ -660,6 +662,7 @@ mod tests {
 
     #[test]
     fn a_long_plan_title_stays_on_the_line() {
+        let _env_read = crate::test_env_read_lock();
         let title = "guard: tmux by full path, renamed binary, -L or -S bypasses send-keys checks";
         let text = render(
             "day-1",

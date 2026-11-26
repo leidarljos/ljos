@@ -1103,6 +1103,7 @@ mod tests {
 
     #[test]
     fn url_forms_of_one_repository_share_a_key() {
+        let _env_read = crate::test_env_read_lock();
         let want = "github.com/leidarljos/ljos";
         for url in [
             "https://github.com/leidarljos/ljos.git",
@@ -1121,6 +1122,7 @@ mod tests {
 
     #[test]
     fn a_local_path_and_its_file_url_share_a_key() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let origin = dir.path().join("origin.git");
         fs::create_dir(&origin).unwrap();
@@ -1132,6 +1134,7 @@ mod tests {
 
     #[test]
     fn an_at_in_the_path_is_not_userinfo() {
+        let _env_read = crate::test_env_read_lock();
         let url = "git://127.0.0.1:19418/x@/tmp/seat/seat.git";
         let want = "127.0.0.1/x@/tmp/seat/seat";
         assert_eq!(push_repo_key(url), want);
@@ -1140,6 +1143,7 @@ mod tests {
 
     #[test]
     fn a_core_hooks_path_assignment_is_read_from_that_section() {
+        let _env_read = crate::test_env_read_lock();
         let text = "\
 [user]
     name = someone
@@ -1423,6 +1427,7 @@ mod tests {
     /// [`curl_config_files`].
     #[test]
     fn msdos_home_underscore_curlrc_stays_on_the_list() {
+        let _env_read = crate::test_env_read_lock();
         let notes = include_str!("cloud_hook.rs")
             .split("mod tests")
             .next()

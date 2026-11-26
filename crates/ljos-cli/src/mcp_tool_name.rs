@@ -42,6 +42,7 @@ fn alan() {
 /// @ocaisa is the same write as `mcp__github__add_issue_comment`.
 #[test]
 fn a_cursor_mcp_github_write_on_pre_tool_use_meets_the_user_rule() {
+    let _env_read = crate::test_env_read_lock();
     let (_lock, _dir) = review_env();
     alan();
     let payload = |tool: &str| {

@@ -586,6 +586,7 @@ mod tests {
 
     #[test]
     fn an_open_heading_is_an_id_and_a_closed_one_is_not() {
+        let _env_read = crate::test_env_read_lock();
         let text = "\
 #+TODO: TODO STARTED | DONE CANCELLED
 * TODO [#C] Pick a codec
@@ -609,6 +610,7 @@ mod tests {
 
     #[test]
     fn a_word_that_is_not_an_id_is_left_out() {
+        let _env_read = crate::test_env_read_lock();
         assert!(!ticket_id(""));
         assert!(!ticket_id("demo"));
         assert!(!ticket_id("-ab"));

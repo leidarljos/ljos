@@ -60,6 +60,7 @@ const TICKET: &str = "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE 
 
 #[test]
 fn an_untracked_ticket_is_added_and_committed_alone() {
+    let _process = ljos_test_boot::env_lock();
     let repo = tempfile::tempdir().unwrap();
     let run = tempfile::tempdir().unwrap();
     let _env = own_runtime(run.path());
@@ -102,6 +103,7 @@ fn an_untracked_ticket_is_added_and_committed_alone() {
 
 #[test]
 fn a_ticket_reached_through_a_symlinked_checkout_is_committed() {
+    let _process = ljos_test_boot::env_lock();
     let real = tempfile::tempdir().unwrap();
     let run = tempfile::tempdir().unwrap();
     let _env = own_runtime(run.path());

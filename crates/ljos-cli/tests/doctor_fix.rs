@@ -168,6 +168,7 @@ impl Drop for Live {
 
 #[test]
 fn doctor_fix_creates_a_missing_home_and_config() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new("home");
     let (_code, text, _) = seat.run(&["doctor"], &[]);
     let home = row(&text, "ljos home").unwrap_or("");
@@ -222,6 +223,7 @@ fn doctor_fix_creates_a_missing_home_and_config() {
 /// `ljos.toml`. Doctor does not tell the person to create that file.
 #[test]
 fn doctor_after_onboard_does_not_warn_that_the_config_is_missing() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new("after-onboard");
     let (code, onboard, err) = seat.run(&["onboard"], &[]);
     assert!(
@@ -240,6 +242,7 @@ fn doctor_after_onboard_does_not_warn_that_the_config_is_missing() {
 /// cannot be read through it.
 #[test]
 fn doctor_warns_when_the_config_path_is_not_a_file() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new("config-dir");
     std::fs::create_dir_all(seat.state()).unwrap();
     std::fs::create_dir_all(seat.config()).unwrap();
@@ -256,6 +259,7 @@ fn doctor_warns_when_the_config_path_is_not_a_file() {
 
 #[test]
 fn doctor_fix_moves_a_stale_lock_aside_and_leaves_a_live_one() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new("locks");
     std::fs::create_dir_all(seat.state()).unwrap();
     std::fs::create_dir_all(seat.config().parent().unwrap()).unwrap();
@@ -362,6 +366,7 @@ fn doctor_fix_moves_a_stale_lock_aside_and_leaves_a_live_one() {
 
 #[test]
 fn doctor_fix_starts_packsetd_with_packset_ensure() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::outside("pack");
     std::fs::create_dir_all(seat.state()).unwrap();
     std::fs::create_dir_all(seat.config().parent().unwrap()).unwrap();
@@ -446,6 +451,7 @@ const CONFIG_KEEP: &str = "# kept\n";
 
 #[test]
 fn doctor_fix_records_a_runner_session_seat() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new("session");
     std::fs::create_dir_all(seat.state()).unwrap();
     std::fs::create_dir_all(seat.config().parent().unwrap()).unwrap();
@@ -504,6 +510,7 @@ fn doctor_fix_records_a_runner_session_seat() {
 
 #[test]
 fn doctor_fix_leaves_a_missing_packset_with_one_command() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new("nopack");
     std::fs::create_dir_all(seat.state()).unwrap();
     std::fs::create_dir_all(seat.config().parent().unwrap()).unwrap();

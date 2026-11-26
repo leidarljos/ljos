@@ -1892,6 +1892,7 @@ mod tests {
 
     #[test]
     fn a_shell_casts_as_one_session_and_a_harness_as_one_root() {
+        let _env_read = crate::test_env_read_lock();
         let row = TreeRow {
             shell: "b:10:1".into(),
             harness: "b:20:2".into(),
@@ -1930,6 +1931,7 @@ mod tests {
 
     #[test]
     fn a_linked_ballot_folds_into_the_earlier_voice() {
+        let _env_read = crate::test_env_read_lock();
         let k = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
         let first = ballot_sig::sign_bound(&k, "demo-tree", "alice", "ship", "sess-a", "-");
         let second = ballot_sig::sign_linked(
@@ -1991,6 +1993,7 @@ mod tests {
 
     #[test]
     fn one_connection_cannot_cast_again_by_naming_another_seat() {
+        let _env_read = crate::test_env_read_lock();
         let key = ed25519_dalek::SigningKey::from_bytes(&[3; 32]);
         let ballot = ballot_sig::sign_bound(
             &key,
@@ -2061,6 +2064,7 @@ mod tests {
 
     #[test]
     fn a_signature_for_this_issue_on_its_family_still_counts() {
+        let _env_read = crate::test_env_read_lock();
         let key = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
         let on_b = ballot_sig::sign_bound(&key, "demo-b", "saddle", "ship", "sess-one", "-");
         let stray = [("parent-b".to_string(), on_b.clone())];
@@ -2078,6 +2082,7 @@ mod tests {
 
     #[test]
     fn a_parent_cut_for_a_child_issue_is_read_on_the_parent_index() {
+        let _env_read = crate::test_env_read_lock();
         let key = ed25519_dalek::SigningKey::from_bytes(&[6; 32]);
         let issue = "child-a";
         let parent = "parent-1";
@@ -2096,6 +2101,7 @@ mod tests {
 
     #[test]
     fn a_choice_with_a_space_is_still_this_sessions_one_ballot() {
+        let _env_read = crate::test_env_read_lock();
         // The panel eval's unscored case on 7e21d3c: session spaced-1 cast
         // `beside binary` as seat-a, then `xdg home`, and both landed.
         let k = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
@@ -2140,6 +2146,7 @@ mod tests {
 
     #[test]
     fn five_personas_one_sand_session_count_as_the_first_ballot() {
+        let _env_read = crate::test_env_read_lock();
         let session = "sand-subagent-fcdb9c57-9988-7d91-4311-9fc5e42f7529";
         let personas = ["academic", "transit", "safety", "cat-owner", "finance"];
         let mut notes = Vec::new();
@@ -2196,6 +2203,7 @@ mod tests {
 
     #[test]
     fn one_session_that_switches_seats_counts_the_latest_ballot() {
+        let _env_read = crate::test_env_read_lock();
         let session = "sess-switch-0001";
         let notes = vec![
             note_of("bob", "hold", session),
@@ -2226,6 +2234,7 @@ mod tests {
 
     #[test]
     fn three_subagents_of_one_parent_are_one_voice() {
+        let _env_read = crate::test_env_read_lock();
         let parent = "sess-parent-0001";
         let notes = vec![
             note_of("cee", "ship", &format!("{parent}:agent-c")),
@@ -2258,6 +2267,7 @@ mod tests {
 
     #[test]
     fn two_sessions_count_as_two_voices() {
+        let _env_read = crate::test_env_read_lock();
         let notes = vec![
             note_of("bob", "hold", "sess-bob-0001"),
             note_of("alice", "ship", "sess-alice-0001"),
@@ -2278,6 +2288,7 @@ mod tests {
 
     #[test]
     fn one_session_of_n_seats_is_weighed() {
+        let _env_read = crate::test_env_read_lock();
         let ballots = vec![
             seat("carol", "sess-shared-0001"),
             seat("alice", "sess-shared-0001"),
@@ -2288,6 +2299,7 @@ mod tests {
 
     #[test]
     fn n_sessions_settle() {
+        let _env_read = crate::test_env_read_lock();
         let ballots = vec![
             seat("alice", "sess-alice-0001"),
             seat("bob", "sess-bob-0001"),
@@ -2298,6 +2310,7 @@ mod tests {
 
     #[test]
     fn an_author_who_votes_is_refused_even_when_the_other_ballots_are_not_theirs() {
+        let _env_read = crate::test_env_read_lock();
         let ballots = vec![
             seat("alice", "sess-alice-0001"),
             seat("bob", "sess-bob-0001"),
@@ -2319,6 +2332,7 @@ mod tests {
 
     #[test]
     fn a_session_that_read_another_candidate_is_flagged() {
+        let _env_read = crate::test_env_read_lock();
         let reads = vec![
             ("sess-1".into(), "demo-b".into()),
             ("sess-2".into(), "demo-a".into()),
@@ -2336,6 +2350,7 @@ mod tests {
 
     #[test]
     fn a_designer_prompt_is_only_the_brief() {
+        let _env_read = crate::test_env_read_lock();
         let prompt = designer_prompt("demo-1", 1, 3, "Ship the cache.\nKeep the ledger.");
         assert!(prompt.contains("== brief"), "{prompt}");
         assert!(prompt.contains("Ship the cache."), "{prompt}");
@@ -2350,6 +2365,7 @@ mod tests {
 
     #[test]
     fn unbound_ballots_are_left_alone() {
+        let _env_read = crate::test_env_read_lock();
         let ballots = vec![
             BallotTrace {
                 voter: "alice".into(),
@@ -2367,6 +2383,7 @@ mod tests {
 
     #[test]
     fn the_same_nonce_without_a_harness_is_one_session() {
+        let _env_read = crate::test_env_read_lock();
         let ballots = vec![
             BallotTrace {
                 voter: "alice".into(),
@@ -2385,6 +2402,7 @@ mod tests {
 
     #[test]
     fn a_seat_only_session_keeps_the_seat_as_its_key() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             session_key("ljosbot", ballot_sig::SEAT_NONCE),
             session_key("ljosbot", "-")
@@ -2425,6 +2443,7 @@ mod tests {
 
     #[test]
     fn a_siblings_signature_does_not_block_this_issue() {
+        let _env_read = crate::test_env_read_lock();
         let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
         let sibling =
             ballot_sig::sign_bound(&key, "rgpot-9ot3", "saddle", "ship", "sess-saddle", "-");
@@ -2464,6 +2483,7 @@ mod tests {
 
     #[test]
     fn a_withdrawn_ballot_drops_out_of_the_tally_until_its_voter_casts_again() {
+        let _env_read = crate::test_env_read_lock();
         let key = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
         let sig = ballot_sig::sign_bound(&key, "demo-w", "reviewer", "ship", "sess-r", "-");
         let authors = std::collections::BTreeSet::new();
@@ -2502,6 +2522,7 @@ mod tests {
 
     #[test]
     fn a_withdrawn_seat_ballot_does_not_decide_a_push() {
+        let _env_read = crate::test_env_read_lock();
         let key = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
         let ship = ballot_sig::sign_bound(&key, "cite-1", "seat-a", "ship", "sess-a", "-");
         let hold = ballot_sig::sign_bound(&key, "cite-1", "seat-b", "hold", "sess-b", "-");

@@ -139,6 +139,7 @@ impl Drop for Tracker {
 
 #[test]
 fn objections_past_the_child_cap_are_not_dropped() -> Result<(), String> {
+    let _process = ljos_test_boot::env_lock();
     if tools::halt(tools::Tool::Vissue) {
         return Ok(());
     }
@@ -186,6 +187,7 @@ fn objections_past_the_child_cap_are_not_dropped() -> Result<(), String> {
 
 #[test]
 fn the_descendant_limit_pauses_and_does_not_close() -> Result<(), String> {
+    let _process = ljos_test_boot::env_lock();
     if tools::halt(tools::Tool::Vissue) {
         return Ok(());
     }
@@ -228,6 +230,7 @@ fn the_descendant_limit_pauses_and_does_not_close() -> Result<(), String> {
 /// The descendant limit is the whole tree.
 #[test]
 fn a_nested_split_pauses_at_the_descendant_limit() -> Result<(), String> {
+    let _process = ljos_test_boot::env_lock();
     if tools::halt(tools::Tool::Vissue) {
         return Ok(());
     }

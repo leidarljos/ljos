@@ -344,6 +344,7 @@ mod tests {
 
     #[test]
     fn empty_pack_is_empty_canvas() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let g = GraphLayout::from_pack(&[], &[]);
         assert!(g.is_empty());
         assert!(g.paint_ops(0, true, 400.0, 400.0).is_empty());
@@ -352,6 +353,7 @@ mod tests {
 
     #[test]
     fn nodes_are_personas_union_trust_endpoints() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let g = GraphLayout::from_pack(
             &[persona("alpha", 0.2)],
             &[trust("alpha", "beta", 0.8, &[])],
@@ -368,6 +370,7 @@ mod tests {
 
     #[test]
     fn layout_is_independent_of_frame_size() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let g = GraphLayout::from_pack(
             &[persona("a", 0.0), persona("b", 1.0), persona("c", 0.5)],
             &[trust("a", "b", 1.0, &[])],
@@ -411,6 +414,7 @@ mod tests {
 
     #[test]
     fn stroke_grows_with_weight_ring_grows_as_anchor_falls() {
+        let _process_read = ljos_test_boot::env_read_lock();
         assert!(GraphLayout::stroke_width(0.9) > GraphLayout::stroke_width(0.1));
         assert!(GraphLayout::ring_extra(0.0) > GraphLayout::ring_extra(0.5));
         assert_eq!(GraphLayout::ring_extra(1.0), 0.0);
@@ -421,6 +425,7 @@ mod tests {
 
     #[test]
     fn paint_ops_mark_scoped_edges_dashed_and_focus_the_walk() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let g = GraphLayout::from_pack(
             &[persona("a", 0.0), persona("b", 1.0)],
             &[trust("a", "b", 0.9, &["hud"]), trust("b", "a", 0.2, &[])],
@@ -474,6 +479,7 @@ mod tests {
 
     #[test]
     fn keyboard_walk_wraps_and_readout_names_incident_edges() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let g = GraphLayout::from_pack(
             &[persona("a", 0.4), persona("b", 0.6)],
             &[trust("a", "b", 0.5, &["seat"])],
@@ -489,6 +495,7 @@ mod tests {
 
     #[test]
     fn missing_persona_is_hollow_disk() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let g = GraphLayout::from_pack(
             &[persona("alpha", 0.2)],
             &[trust("alpha", "beta", 0.8, &[])],
@@ -517,6 +524,7 @@ mod tests {
 
     #[test]
     fn habitat_down_must_not_invent_nodes() {
+        let _process_read = ljos_test_boot::env_read_lock();
         let g = GraphLayout::empty();
         assert!(g.nodes.is_empty());
         assert!(g.edges.is_empty());

@@ -708,6 +708,7 @@ mod tests {
     /// itself inside a product checkout.
     #[test]
     fn a_tracker_under_a_product_checkout_names_that_checkout() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::TempDir::new().unwrap();
         let product = dir.path().join("myapp");
         repo(&product);
@@ -754,6 +755,7 @@ mod tests {
     /// The accidents that made a product checkout pass for the tracker.
     #[test]
     fn a_product_checkout_is_not_the_tracker_by_accident() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::TempDir::new().unwrap();
         let untracked = dir.path().join("untracked");
@@ -800,6 +802,7 @@ mod tests {
     /// it does for vissue.
     #[test]
     fn a_tracker_under_vissue_prefix_is_the_tracker() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().join("work");
@@ -817,6 +820,7 @@ mod tests {
 
     #[test]
     fn a_tracker_in_no_checkout_at_all_is_nobody_s_files() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().join("share/vissue/tracker");
         std::fs::create_dir_all(&root).unwrap();
@@ -827,6 +831,9 @@ mod tests {
     /// anything there, so the tracker may stay.
     #[test]
     fn a_path_the_checkout_ignores_is_not_its_files() {
+        let _env_read = crate::test_env_read_lock();
+        let _lock = crate::test_env_lock();
+        clear_tracker_env();
         let dir = tempfile::TempDir::new().unwrap();
         let product = dir.path().join("myapp");
         std::fs::create_dir_all(&product).unwrap();
@@ -851,6 +858,7 @@ mod tests {
     /// when nothing names a tracker outside it.
     #[test]
     fn a_verb_in_a_product_checkout_refuses_instead_of_using_it() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::TempDir::new().unwrap();
         let product = dir.path().join("myapp");
@@ -890,6 +898,7 @@ mod tests {
     /// The seat's tracker, outside the checkout, is the one a verb uses.
     #[test]
     fn a_verb_in_a_product_checkout_uses_the_seat_tracker() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::TempDir::new().unwrap();
         let product = dir.path().join("myapp");
@@ -981,6 +990,7 @@ mod tests {
     /// `vissue.toml` and no issue file.
     #[test]
     fn a_checkout_named_by_vissue_root_is_not_a_product() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().join("vault");
@@ -1002,6 +1012,7 @@ mod tests {
     /// when it is its own git checkout and nothing else names it.
     #[test]
     fn the_seat_tracker_directory_is_not_a_product_checkout() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::TempDir::new().unwrap();
         let data = dir.path().join("data");
@@ -1026,6 +1037,7 @@ mod tests {
     /// a clone carries, and that checkout stays a product.
     #[test]
     fn a_checkout_holding_tracker_issues_is_not_a_product() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().join("tracker");
@@ -1092,6 +1104,7 @@ mod tests {
 
     #[test]
     fn a_missing_tracker_is_one_line_that_names_the_how_to() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let saved = (
@@ -1124,6 +1137,7 @@ mod tests {
 
     #[test]
     fn the_root_line_is_the_top_level_one() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             root_line("root = \"/srv/tracker\"\n[routes]\n"),
             Some("root = \"/srv/tracker\"")

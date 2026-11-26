@@ -876,6 +876,7 @@ mod duration_tests {
 
     #[test]
     fn older_than_reads_seconds_and_units() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(parse_older_than("900").unwrap(), 900);
         assert_eq!(parse_older_than("15m").unwrap(), 900);
         assert_eq!(parse_older_than("6h").unwrap(), 21_600);
@@ -888,6 +889,7 @@ mod duration_tests {
 
     #[test]
     fn the_summary_counts_released_and_kept() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             summary_line(12, 3, false),
             "released 12 quiet claims; kept 3 held by running conversations\n"

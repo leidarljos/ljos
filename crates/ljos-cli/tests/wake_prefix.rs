@@ -32,6 +32,7 @@ impl Drop for Guard {
 
 #[test]
 fn a_prefix_wake_matches_longer_run_seats() {
+    let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));

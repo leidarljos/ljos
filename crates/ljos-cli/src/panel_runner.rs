@@ -753,6 +753,7 @@ mod tests {
 
     #[test]
     fn detects_installed_runners_and_picks_in_order() {
+        let _env_read = crate::test_env_read_lock();
         let only_codex = |bin: &str| bin == "codex";
         assert_eq!(installed_runners_with(&only_codex), vec!["codex"]);
         assert_eq!(
@@ -774,6 +775,7 @@ mod tests {
 
     #[test]
     fn fails_loudly_when_no_runner_is_installed() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let prompt_file = dir.path().join("member.prompt");
@@ -805,6 +807,7 @@ mod tests {
 
     #[test]
     fn custom_command_template_supports_any_runner() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let prompt_file = dir.path().join("member.prompt");

@@ -426,6 +426,7 @@ mod tests {
     /// both ways out, and drops the closing sentence a hard runner gets.
     #[test]
     fn a_mark_only_refusal_names_the_variable_and_the_ways_out() {
+        let _env_read = crate::test_env_read_lock();
         let hard = no_sitting("push", "this conversation holds no live sitting");
         assert!(hard.contains(NOT_GATED), "{hard}");
         assert!(hard.ends_with(", so run `ljos sitting ID`."), "{hard}");
@@ -479,6 +480,7 @@ mod tests {
 
     #[test]
     fn an_idle_gate_informs_and_fails_no_doctor() {
+        let _env_read = crate::test_env_read_lock();
         let row = doctor_row(None);
         assert_eq!(crate::doctor_word(&row), "info", "{}", row.state);
         assert!(crate::healthy(&[row]));
@@ -486,6 +488,7 @@ mod tests {
 
     #[test]
     fn two_branches_are_read_with_or() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(super::quoted_list(&[]), "");
         assert_eq!(super::quoted_list(&["develop".into()]), "`develop`");
         assert_eq!(
@@ -500,6 +503,7 @@ mod tests {
 
     #[test]
     fn only_a_history_write_under_a_runner_is_judged() {
+        let _env_read = crate::test_env_read_lock();
         assert!(guard_line("git commit -m x", None).is_none());
         let _posed = Posed::runner();
         for line in [
@@ -553,6 +557,7 @@ mod tests {
     /// is not asked. Two seats: the ordinary quorum still has to be met.
     #[test]
     fn one_active_seat_settles_on_its_own_vote() {
+        let _env_read = crate::test_env_read_lock();
         let one = vec!["ada".to_string()];
         let voted = vec![row("ada", "ship")];
         let none = std::collections::BTreeSet::new();
@@ -566,6 +571,7 @@ mod tests {
 
     #[test]
     fn two_active_seats_keep_the_quorum() {
+        let _env_read = crate::test_env_read_lock();
         let two = vec!["ada".to_string(), "bea".to_string()];
         let only_ada = vec![row("ada", "ship")];
         let none = std::collections::BTreeSet::new();
@@ -595,6 +601,7 @@ mod tests {
     /// A gates file that does not parse asks. The push is not a hard denial.
     #[test]
     fn a_gates_file_that_does_not_parse_asks() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             let out = crate::git_cmd()
@@ -621,6 +628,7 @@ mod tests {
     /// A git alias nest the guard cannot read allows the line and warns.
     #[test]
     fn an_unreadable_git_line_is_allowed() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let out = crate::git_cmd()
             .arg("-C")

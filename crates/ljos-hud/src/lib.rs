@@ -78,6 +78,8 @@ pub(crate) fn env_lock() -> EnvLock {
 mod tests {
     #[test]
     fn dist_targets_are_gnu_and_darwin_only() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let cargo = include_str!("../Cargo.toml");
         assert!(cargo.contains("aarch64-apple-darwin"));
         assert!(cargo.contains("x86_64-unknown-linux-gnu"));
@@ -86,6 +88,8 @@ mod tests {
 
     #[test]
     fn release_yml_ships_hud_on_gnu_and_darwin_only() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let yml = include_str!("../../../.github/workflows/release.yml");
         assert!(yml.contains("-p ljos-hud"));
         assert!(yml.contains("x86_64-unknown-linux-gnu"));
@@ -98,6 +102,8 @@ mod tests {
 
     #[test]
     fn ljos_cli_cargo_has_no_iced() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let cargo = include_str!("../../ljos-cli/Cargo.toml");
         assert!(
             !cargo.contains("iced"),
@@ -115,6 +121,8 @@ mod tests {
 
     #[test]
     fn publish_yml_publishes_hud_after_ljos() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let yml = include_str!("../../../.github/workflows/publish.yml");
         let ljos = yml
             .find("-p ljos\n")
@@ -129,6 +137,8 @@ mod tests {
 
     #[test]
     fn hud_sources_never_call_write_verbs() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let verbs = [
             "graded(",
@@ -172,6 +182,8 @@ mod tests {
 
     #[test]
     fn hud_island_is_fire_false() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let src = include_str!("data.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(prod.contains("packset_island(cue, false)"));

@@ -1773,6 +1773,7 @@ mod tests {
 
     #[test]
     fn a_slot_parses_whole_and_verifies_on_its_issue_only() {
+        let _env_read = crate::test_env_read_lock();
         let note = sign(
             &key(1),
             "t-1",
@@ -1824,6 +1825,7 @@ mod tests {
 
     #[test]
     fn a_family_is_the_model_a_verified_slot_records() {
+        let _env_read = crate::test_env_read_lock();
         let pins: BTreeMap<String, String> = [
             ("ljosbot", public(&key(1))),
             ("review-r1", public(&key(4))),
@@ -1927,6 +1929,7 @@ mod tests {
 
     #[test]
     fn a_run_seat_counts_under_a_slot_from_a_standing_seat() {
+        let _env_read = crate::test_env_read_lock();
         let slot = slotted(1, "d-1", "review-r1", "ljosbot");
         assert!(check(std::slice::from_ref(&slot), None).is_empty());
         let none = check(&[], None);
@@ -1940,6 +1943,7 @@ mod tests {
 
     #[test]
     fn a_slot_that_does_not_stand_does_not_count() {
+        let _env_read = crate::test_env_read_lock();
         let refused = |note: String, late: bool| {
             let p = check(std::slice::from_ref(&note), late.then_some(note.as_str()));
             assert_eq!(p.len(), 1, "{p:?}");
@@ -1972,6 +1976,7 @@ mod tests {
 
     #[test]
     fn a_run_pinned_in_upper_case_hex_counts_under_its_slot() {
+        let _env_read = crate::test_env_read_lock();
         let pins: BTreeMap<String, String> = [
             ("ljosbot".to_string(), public(&key(1))),
             (
@@ -1995,6 +2000,7 @@ mod tests {
 
     #[test]
     fn one_good_slot_beside_a_forged_one_counts() {
+        let _env_read = crate::test_env_read_lock();
         let forged = slotted(3, "d-1", "review-r1", "ljosbot");
         let good = slotted(2, "d-1", "review-r1", "inky");
         assert!(check(&[forged, good], None).is_empty());
@@ -2002,6 +2008,7 @@ mod tests {
 
     #[test]
     fn a_seat_off_the_list_needs_a_slot_when_the_tracker_has_no_clock() {
+        let _env_read = crate::test_env_read_lock();
         let pins: BTreeMap<String, String> = [("review-r1".to_string(), public(&key(4)))].into();
         let p = problems(
             "t-1",
@@ -2020,6 +2027,7 @@ mod tests {
 
     #[test]
     fn the_standing_list_names_those_seats_and_skips_comments() {
+        let _env_read = crate::test_env_read_lock();
         assert!(standing("ljosbot"));
         assert!(standing("inky"));
         assert!(standing("disk-saver"));
@@ -2030,6 +2038,7 @@ mod tests {
 
     #[test]
     fn a_slot_line_in_another_issues_block_is_not_on_this_one() {
+        let _env_read = crate::test_env_read_lock();
         let note = slotted(1, "d-1", "review-r1", "ljosbot");
         let other =
             format!("* TODO other\n:PROPERTIES:\n:ID: d-2\n:END:\n- Note: \"{note}\" [2020]\n");
@@ -2049,12 +2058,14 @@ mod tests {
 
     #[test]
     fn an_issue_id_is_a_literal_in_the_grep() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(ere_escape("a.b*"), r"a\.b\*");
         assert_eq!(ere_escape("probe-slot"), "probe-slot");
     }
 
     #[test]
     fn a_note_that_is_not_a_slot_does_not_parse() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(parse("slot: review model=m run=r ljosbot ab"), None);
         assert_eq!(
             parse("slot: review model=m run=r ljosbot ab cd"),
@@ -2163,6 +2174,7 @@ mod tests {
 
     #[test]
     fn a_shallow_clone_deepens_and_a_seat_pinned_before_slots_stands() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         quiet_git_config(root.path());
@@ -2194,6 +2206,7 @@ mod tests {
     /// answers, the next check deepens.
     #[test]
     fn a_failed_deepen_is_tried_again() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         let origin = root.path().join("origin");
@@ -2226,6 +2239,7 @@ mod tests {
     /// thread's git follows it.
     #[test]
     fn a_git_dir_naming_a_complete_repo_does_not_make_a_shallow_tracker_ready() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         let origin = root.path().join("origin");
@@ -2260,6 +2274,7 @@ mod tests {
     /// no tracker named checks nothing.
     #[test]
     fn history_check_in_a_child() {
+        let _env_read = crate::test_env_read_lock();
         if let Some(root) = std::env::var_os("LJOS_TEST_HISTORY_ROOT") {
             require_tracker_history(Path::new(&root)).unwrap();
         }
@@ -2270,6 +2285,7 @@ mod tests {
     /// upload-pack marks a fetch that starts while another is in flight.
     #[test]
     fn two_checks_of_one_tracker_do_not_deepen_at_once() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         let origin = root.path().join("origin");
@@ -2316,6 +2332,7 @@ mod tests {
     /// fetch would, and then fails this one.
     #[test]
     fn a_checkout_completed_while_the_deepen_failed_is_ready() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         let origin = root.path().join("origin");
@@ -2344,6 +2361,7 @@ mod tests {
     /// brings them, and that fetch makes the checkout ready.
     #[test]
     fn a_partial_clone_names_its_missing_objects_and_not_unshallow() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         let origin = root.path().join("origin");
@@ -2382,6 +2400,7 @@ mod tests {
 
     #[test]
     fn a_shallow_clone_with_no_remote_names_incomplete_history() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         quiet_git_config(root.path());
@@ -2481,6 +2500,7 @@ mod tests {
 
     #[test]
     fn a_replace_ref_does_not_make_a_removed_pin_stand() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         quiet_git_config(root.path());
@@ -2501,6 +2521,7 @@ mod tests {
 
     #[test]
     fn a_grafts_file_does_not_make_a_removed_pin_stand() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         quiet_git_config(root.path());
@@ -2531,6 +2552,7 @@ mod tests {
     /// count: a pin has to be in every one of those parents.
     #[test]
     fn slot_notes_introduced_on_two_branches_are_both_read() {
+        let _env_read = crate::test_env_read_lock();
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("repo");
         init_repo(&repo);
@@ -2626,6 +2648,7 @@ mod tests {
     /// introduction is still in the answer.
     #[test]
     fn a_note_removed_and_added_again_does_not_let_the_later_pin_stand() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
@@ -2686,6 +2709,7 @@ mod tests {
     /// introduction. That introduction is read with the other two.
     #[test]
     fn a_note_merged_through_a_later_fork_is_read() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_STATE_HOME", root.path().join("state"));
@@ -2764,6 +2788,7 @@ mod tests {
     /// stand once the read finishes, and the saved index is kept.
     #[test]
     fn a_partial_read_keeps_progress_and_a_later_pin_does_not_stand() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let _budget = BudgetReset;
         let root = tempfile::tempdir().unwrap();
@@ -2829,6 +2854,7 @@ mod tests {
     /// the caster's label, the answer an unproven name gets.
     #[test]
     fn a_partial_read_records_the_ballot_under_the_protected_label() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let _budget = BudgetReset;
         let root = tempfile::tempdir().unwrap();
@@ -2858,6 +2884,7 @@ mod tests {
     /// included the next time the history is read.
     #[test]
     fn a_cached_answer_gains_an_introduction_brought_by_a_merge() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
@@ -2923,6 +2950,7 @@ mod tests {
     /// and neither is a cache written by the previous format.
     #[test]
     fn an_empty_or_unversioned_cache_is_reread_when_head_holds_the_note() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
@@ -2975,6 +3003,7 @@ mod tests {
     /// be trusted, and the vote is recorded under the protected label.
     #[test]
     fn a_tree_read_failure_yields_partial() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let _budget = BudgetReset;
         let _fail = FailReset;
@@ -3032,6 +3061,7 @@ mod tests {
     /// commit. It does not walk the history from the first row again.
     #[test]
     fn a_commit_between_votes_resumes_the_walk() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let _budget = BudgetReset;
         let root = tempfile::tempdir().unwrap();

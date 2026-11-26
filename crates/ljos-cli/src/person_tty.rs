@@ -252,6 +252,7 @@ mod tests {
     /// canonical ttys that only guarantee 255 bytes.
     #[test]
     fn max_line_fits_the_posix_canonical_floor() {
+        let _env_read = crate::test_env_read_lock();
         let max_line = Secret::new().capacity();
         assert!(max_line + 2 <= 255, "MAX_LINE={max_line}");
     }

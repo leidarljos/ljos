@@ -116,6 +116,7 @@ fn tree_bytes(path: &Path) -> u64 {
 #[cfg(target_os = "linux")]
 #[test]
 fn search_reuses_setup_and_does_not_retain_released_claims() {
+    let _process = ljos_test_boot::env_lock();
     const TICKETS: usize = 512;
     const SETUP_BYTES: usize = 64 * 1024;
 
@@ -206,6 +207,7 @@ fn search_reuses_setup_and_does_not_retain_released_claims() {
 
 #[test]
 fn a_repeated_id_takes_its_claim_from_the_heading_search_kept() {
+    let _process = ljos_test_boot::env_lock();
     let _env = Guard::new();
     let temp = tempfile::tempdir().unwrap();
     sit_on_tracker(
@@ -237,6 +239,7 @@ fn a_repeated_id_takes_its_claim_from_the_heading_search_kept() {
 
 #[test]
 fn a_claim_held_under_ljos_hold_names_finish_for_another_seat_name() {
+    let _process = ljos_test_boot::env_lock();
     let _env = Guard::new();
     let temp = tempfile::tempdir().unwrap();
     sit_on_tracker(
@@ -265,6 +268,7 @@ fn a_claim_held_under_ljos_hold_names_finish_for_another_seat_name() {
 
 #[test]
 fn another_holders_heading_is_not_yours_when_a_later_copy_is_held() {
+    let _process = ljos_test_boot::env_lock();
     let _env = Guard::new();
     // The answer to guard against comes from `vissue claims`.
     if tools::halt(tools::Tool::Vissue) {

@@ -35,6 +35,7 @@ const CHILD_MARK: &str = "PERSON_GATE_CHILD_MARK";
 /// The hook process. Inert unless the parent case started it.
 #[test]
 fn gate_child() {
+    let _process = ljos_test_boot::env_lock();
     let Some(dir) = std::env::var_os(CHILD_DIR) else {
         return;
     };
@@ -233,12 +234,14 @@ fn push_is_labelled(case: &Case, cmd: &mut Command) {
 
 #[test]
 fn the_right_passphrase_on_the_terminal_lets_the_push_through() {
+    let _process = ljos_test_boot::env_lock();
     let case = Case::new(true);
     push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
 }
 
 #[test]
 fn a_wrong_passphrase_is_refused_and_counted() {
+    let _process = ljos_test_boot::env_lock();
     let case = Case::new(true);
     push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
 }
@@ -247,6 +250,7 @@ fn a_wrong_passphrase_is_refused_and_counted() {
 /// asks, so each push is the same label and the failure count stays empty.
 #[test]
 fn five_wrong_passphrases_lock_the_prompt_out() {
+    let _process = ljos_test_boot::env_lock();
     let case = Case::new(true);
     for _ in 0..5 {
         push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
@@ -256,6 +260,7 @@ fn five_wrong_passphrases_lock_the_prompt_out() {
 /// Nothing typed is not a refusal: the push runs with the sitting label.
 #[test]
 fn nothing_typed_is_refused() {
+    let _process = ljos_test_boot::env_lock();
     let case = Case::new(true);
     push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
 }
@@ -264,6 +269,7 @@ fn nothing_typed_is_refused() {
 /// not asked. The push runs with the sitting label.
 #[test]
 fn a_hard_runner_is_never_asked() {
+    let _process = ljos_test_boot::env_lock();
     let case = Case::new(true);
     let installed = runner::install_dir();
     let claude = installed.path().join("claude");
@@ -288,6 +294,7 @@ fn a_hard_runner_is_never_asked() {
 /// With no controlling terminal the push still runs. Nothing is asked.
 #[test]
 fn piped_stdin_without_a_terminal_cannot_answer() {
+    let _process = ljos_test_boot::env_lock();
     use std::os::unix::process::CommandExt as _;
     let case = Case::new(true);
     let mut cmd = case.command(None, Some("CURSOR_AGENT"));
@@ -330,6 +337,7 @@ fn piped_stdin_without_a_terminal_cannot_answer() {
 /// A passphrase on the pipe is not read. The push runs with the label.
 #[test]
 fn piped_stdin_with_a_terminal_cannot_answer() {
+    let _process = ljos_test_boot::env_lock();
     let case = Case::new(true);
     push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
 }
@@ -337,6 +345,7 @@ fn piped_stdin_with_a_terminal_cannot_answer() {
 /// No variable supplies a passphrase, and none is asked. The push runs.
 #[test]
 fn no_variable_supplies_the_passphrase() {
+    let _process = ljos_test_boot::env_lock();
     let case = Case::new(true);
     let mut cmd = case.command(None, Some("CURSOR_AGENT"));
     for name in [
@@ -353,6 +362,7 @@ fn no_variable_supplies_the_passphrase() {
 /// With no key kept, the hook does not ask for a yes. The push runs.
 #[test]
 fn no_key_asks_for_a_yes_and_a_passphrase_is_not_one() {
+    let _process = ljos_test_boot::env_lock();
     let case = Case::new(false);
     push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
 }
@@ -360,6 +370,7 @@ fn no_key_asks_for_a_yes_and_a_passphrase_is_not_one() {
 /// With no key kept, the push runs without a yes at the terminal.
 #[test]
 fn no_key_and_a_yes_at_the_terminal_lets_the_push_through() {
+    let _process = ljos_test_boot::env_lock();
     let case = Case::new(false);
     push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
 }
@@ -367,6 +378,7 @@ fn no_key_and_a_yes_at_the_terminal_lets_the_push_through() {
 /// The hook does not take the terminal, so echo stays on and the push runs.
 #[test]
 fn an_interrupt_at_the_prompt_restores_echo() {
+    let _process = ljos_test_boot::env_lock();
     let case = Case::new(true);
     let term = pty::Pty::open();
     let mut cmd = case.command(None, Some("CURSOR_AGENT"));

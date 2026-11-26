@@ -1187,6 +1187,7 @@ mod tests {
 
     #[test]
     fn a_title_match_outranks_notes_and_an_unrelated_query_misses() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(at(TITLE, TITLE, NOTES), Some(Band::Exact));
         assert_eq!(
             at("gpridge narrated video set", TITLE, NOTES),
@@ -1219,6 +1220,7 @@ mod tests {
     /// more than one, and they do not name the work.
     #[test]
     fn a_single_common_word_is_not_a_title_match() {
+        let _env_read = crate::test_env_read_lock();
         let corpus = [
             "Update the mailbox index",
             "Update the docs site",
@@ -1244,6 +1246,7 @@ mod tests {
 
     #[test]
     fn a_later_note_stamp_sorts_above_an_older_one() {
+        let _env_read = crate::test_env_read_lock();
         assert!(stamp_ord("[2026-11-16 Mon 18:30]") > stamp_ord("[2026-11-01 Sun 09:00]"));
         assert_eq!(stamp_ord("not a stamp"), 0);
         assert_eq!(stamp_ord(""), 0);

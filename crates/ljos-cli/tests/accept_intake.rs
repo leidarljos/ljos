@@ -129,6 +129,7 @@ impl Seat {
 
 #[test]
 fn several_ids_are_accepted_once_and_the_rerun_matches() {
+    let _process = ljos_test_boot::env_lock();
     let seat = Seat::new();
     seat.plant("aaaa1111bbbb2222", KEPT, Some("ada"));
     seat.plant("cccc3333dddd4444", ALSO, None);

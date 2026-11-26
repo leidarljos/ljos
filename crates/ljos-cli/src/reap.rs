@@ -321,6 +321,7 @@ mod tests {
 
     #[test]
     fn a_vote_past_its_deadline_is_due_once() {
+        let _env_read = crate::test_env_read_lock();
         let past = r#"{"id":"d-1","state":"TODO","logbook":[{"note":"quorum: 3 by 2000-01-01T00:00:00Z"}]}"#;
         let future = r#"{"id":"d-2","state":"TODO","logbook":[{"note":"quorum: 3 by 2999-01-01T00:00:00Z"}]}"#;
         let lapsed = r#"{"id":"d-3","state":"TODO","logbook":[{"note":"quorum timed out: 1 of 3"},{"note":"quorum: 3 by 2000-01-01T00:00:00Z"}]}"#;
@@ -336,6 +337,7 @@ mod tests {
 
     #[test]
     fn idle_parses_units() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(parse_idle("6h").unwrap().as_secs(), 21600);
         assert_eq!(parse_idle("90m").unwrap().as_secs(), 5400);
         assert_eq!(parse_idle("2d").unwrap().as_secs(), 172800);
@@ -345,6 +347,7 @@ mod tests {
 
     #[test]
     fn holder_names_its_seat() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(seat_of("eessi@main"), "eessi");
         assert_eq!(seat_of("inky"), "inky");
         assert_eq!(seat_of("inky-n9o"), "inky");
@@ -353,6 +356,7 @@ mod tests {
 
     #[test]
     fn only_old_claims_are_idle() {
+        let _env_read = crate::test_env_read_lock();
         let json = r#"[
           {"id":"a-1","holder":"inky","title":"old","claimed_at":"[2026-10-13 Tue 06:00]"},
           {"id":"a-2","holder":"eessi@main","title":"new","claimed_at":"[2026-10-13 Tue 16:00]"},
@@ -372,6 +376,7 @@ mod tests {
 mod log_tests {
     #[test]
     fn recall_log_appends_one_line_per_call() {
+        let _env_read = crate::test_env_read_lock();
         // Its own directory, not XDG_STATE_HOME: other tests set that env
         // in parallel, and a shared env made this flake.
         let dir = tempfile::tempdir().unwrap();

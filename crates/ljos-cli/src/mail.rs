@@ -1379,6 +1379,7 @@ mod tests {
 
     #[test]
     fn a_long_body_fits_the_pack_and_reads_back_whole() {
+        let _env_read = crate::test_env_read_lock();
         let long = "the aarch64 log says the Highway test times out. ".repeat(40);
         let m = outgoing("msg-1", "saddle", &["inky"], &long);
         let atom = message_atom(&m, "seat");
@@ -1419,6 +1420,7 @@ mod tests {
 
     #[test]
     fn the_same_words_stay_two_messages() {
+        let _env_read = crate::test_env_read_lock();
         let a = outgoing("a", "alice", &["bob"], "ok");
         let b = outgoing("b", "carol", &["bob"], "ok");
         let left = message_text(&a);
@@ -1438,6 +1440,7 @@ mod tests {
 
     #[test]
     fn inbox_is_the_seat_named_and_an_interrupt_leads() {
+        let _env_read = crate::test_env_read_lock();
         let mut late = outgoing("late", "alice", &["bob"], "when you can");
         late.issue = Some("acme-4".into());
         let mut hot = outgoing("hot", "carol", &["bob"], "the build is red");
@@ -1467,6 +1470,7 @@ mod tests {
 
     #[test]
     fn a_receipt_takes_the_message_out_of_the_unread_list() {
+        let _env_read = crate::test_env_read_lock();
         let msg = outgoing("m1", "alice", &["bob"], "look at the log");
         let message = atom(&msg, "2026-10-09T00:00:00Z");
         let receipt = json!({
@@ -1492,6 +1496,7 @@ mod tests {
 
     #[test]
     fn a_reply_keeps_the_issue_and_names_the_sender() {
+        let _env_read = crate::test_env_read_lock();
         let mut parent = outgoing("p", "alice", &["bob"], "the build is red");
         parent.issue = Some("acme-4".into());
         parent.scope = Some("tools".into());
@@ -1518,6 +1523,7 @@ mod tests {
 
     #[test]
     fn a_group_send_reaches_the_other_members() {
+        let _env_read = crate::test_env_read_lock();
         let atoms = [
             json!({
                 "kind": "group",
@@ -1551,6 +1557,7 @@ mod tests {
 
     #[test]
     fn a_prompt_caps_the_note_and_keeps_the_rest_unread() {
+        let _env_read = crate::test_env_read_lock();
         let letters: Vec<Letter> = (0..10)
             .map(|n| Letter {
                 id: format!("m{n}"),
@@ -1579,6 +1586,7 @@ mod tests {
 
     #[test]
     fn two_sessions_of_one_runner_can_mail_each_other() {
+        let _env_read = crate::test_env_read_lock();
         let a = format!(
             "claude-{}",
             super::super::session_tag("0199a1b2-claude-session-one")
@@ -1605,6 +1613,7 @@ mod tests {
 
     #[test]
     fn a_seat_hint_names_a_few_seats_and_no_ids() {
+        let _env_read = crate::test_env_read_lock();
         let known: BTreeSet<String> = [
             "alpha",
             "bravo",
@@ -1646,6 +1655,7 @@ mod tests {
 
     #[test]
     fn a_misspelt_seat_is_answered_with_the_seat_it_meant() {
+        let _env_read = crate::test_env_read_lock();
         let known: BTreeSet<String> = ["ljos-bot", "saddle", "inky"]
             .iter()
             .map(|s| (*s).to_string())
@@ -1662,6 +1672,7 @@ mod tests {
 
     #[test]
     fn a_stop_carries_unread_interrupt_mail_only() {
+        let _env_read = crate::test_env_read_lock();
         let plain = outgoing("plain", "grok", &["claude"], "when you can");
         let mut hot = outgoing("hot", "grok", &["claude"], "take ticket-d9n6 now");
         hot.interrupt = true;
@@ -1690,6 +1701,7 @@ mod tests {
 
     #[test]
     fn an_unknown_kind_is_a_pack_without_mail() {
+        let _env_read = crate::test_env_read_lock();
         let refused =
             "bad response: http://127.0.0.1:8761/v1/atoms: 400: unknown atom kind: message";
         assert_eq!(probe_of(refused), Probe::Refused);

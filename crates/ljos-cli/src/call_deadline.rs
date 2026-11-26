@@ -166,6 +166,7 @@ mod tests {
 
     #[test]
     fn a_note_names_the_tracker_and_the_unwritten_note() {
+        let _env_read = crate::test_env_read_lock();
         let line = stall_line(
             "vissue",
             &["note", "demo", "hello"],
@@ -179,6 +180,7 @@ mod tests {
 
     #[test]
     fn each_part_names_what_it_did_not_write() {
+        let _env_read = crate::test_env_read_lock();
         let secs = Duration::from_secs(60);
         assert_eq!(
             stall_line("git", &["-C", "/tmp/x", "commit", "-m", "n"], secs),

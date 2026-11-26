@@ -248,6 +248,7 @@ mod tests {
 
     #[test]
     fn prose_with_a_hyphen_is_kept() {
+        let _env_read = crate::test_env_read_lock();
         let screen = screen();
         for word in [
             "utf-8",
@@ -278,6 +279,7 @@ mod tests {
 
     #[test]
     fn one_decoded_id_layer_is_replaced_where_it_was_written() {
+        let _env_read = crate::test_env_read_lock();
         let screen = screen();
         assert_eq!(screen.redact("a Kiln%252DQ7ZZ b"), "a Kiln%252DQ7ZZ b");
         assert_eq!(
@@ -314,6 +316,7 @@ mod tests {
 
     #[test]
     fn an_escape_split_by_a_mark_or_written_wide_is_decoded() {
+        let _env_read = crate::test_env_read_lock();
         let screen = IdScreen::new(
             ["software-quiet".to_string()],
             [],

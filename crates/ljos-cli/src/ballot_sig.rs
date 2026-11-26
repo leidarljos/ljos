@@ -1930,6 +1930,7 @@ mod tests {
 
     #[test]
     fn a_caster_persona_voter_names_the_caster_and_the_persona() {
+        let _env_read = crate::test_env_read_lock();
         let id = caster_persona_voter("Saddle", "INKY");
         assert_eq!(id, "persona:saddle:inky");
         assert_eq!(
@@ -1950,6 +1951,7 @@ mod tests {
 
     #[test]
     fn a_signed_pinned_ballot_counts_and_every_forgery_does_not() {
+        let _env_read = crate::test_env_read_lock();
         let alice = key(1);
         let mallory = key(2);
         let pins: BTreeMap<String, String> = [(
@@ -1991,6 +1993,7 @@ mod tests {
 
     #[test]
     fn an_old_unsigned_ballot_is_legacy_and_a_new_one_is_not() {
+        let _env_read = crate::test_env_read_lock();
         let pins = BTreeMap::new();
         let legacy = |v: &str, _: &str| v == "inky";
         let (bad, old) = seat_check(
@@ -2006,6 +2009,7 @@ mod tests {
 
     #[test]
     fn seats_sharing_a_home_get_their_own_keys() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("ljos/seats/inky/ballot.key");
         let b = dir.path().join("ljos/seats/disk-saver/ballot.key");
@@ -2025,6 +2029,7 @@ mod tests {
 
     #[test]
     fn a_folded_dot_seat_names_a_cp_line_with_dash_dash() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let data = tempfile::tempdir().unwrap();
         crate::with_env_mutation(|| {
@@ -2045,6 +2050,7 @@ mod tests {
 
     #[test]
     fn a_key_at_its_folded_name_moves_to_the_seat_file() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let data = tempfile::tempdir().unwrap();
         crate::with_env_mutation(|| {
@@ -2069,6 +2075,7 @@ mod tests {
 
     #[test]
     fn the_newest_signature_wins() {
+        let _env_read = crate::test_env_read_lock();
         let a = key(3);
         let pins: BTreeMap<String, String> =
             [("a".to_string(), hex::encode(a.verifying_key().to_bytes()))].into();
@@ -2079,6 +2086,7 @@ mod tests {
 
     #[test]
     fn a_choice_with_a_space_parses_whole_and_verifies() {
+        let _env_read = crate::test_env_read_lock();
         // The panel eval's unscored case: session spaced-1 cast
         // `beside binary` as seat-a, then `xdg home`.
         let k = key(5);
@@ -2120,6 +2128,7 @@ mod tests {
 
     #[test]
     fn a_linked_note_keeps_a_six_field_note_and_verifies() {
+        let _env_read = crate::test_env_read_lock();
         let k = key(8);
         let old = sign_bound(&k, "demo-link", "alice", "ship", "sess-a", "-");
         let parsed = parse_note(&old).unwrap();
@@ -2156,6 +2165,7 @@ mod tests {
 
     #[test]
     fn a_note_that_does_not_parse_still_names_its_session() {
+        let _env_read = crate::test_env_read_lock();
         let odd = "ballot-sig: seat-a beside binary ab cd spaced-1 -";
         assert_eq!(parse_note(odd), None);
         assert_eq!(
@@ -2168,6 +2178,7 @@ mod tests {
 
     #[test]
     fn a_withdrawn_note_is_three_fields() {
+        let _env_read = crate::test_env_read_lock();
         let line = withdrawn_line("seat a", "sess-1", "-");
         assert_eq!(line, "ballot-withdrawn: seat_a sess-1 -");
         let parsed = parse_withdrawn(&line).unwrap();
@@ -2185,6 +2196,7 @@ mod tests {
 
     #[test]
     fn a_session_binding_is_signed_and_a_changed_session_is_not() {
+        let _env_read = crate::test_env_read_lock();
         let alice = key(4);
         let note = sign_bound(&alice, "d-1", "alice", "ship", "sess-alice-0001", "nonce-1");
         let parsed = parse_note(&note).unwrap();
@@ -2207,6 +2219,7 @@ mod tests {
 
     #[test]
     fn a_legacy_ballot_is_read_on_its_own_issue() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("issues.org");
@@ -2253,6 +2266,7 @@ mod tests {
 
     #[test]
     fn seat_check_accepts_the_same_key_in_uppercase_hex() {
+        let _env_read = crate::test_env_read_lock();
         let alice = key(8);
         let note = sign_with(&alice, "d-1", "alice", "ship");
         let pins: BTreeMap<String, String> = [(
@@ -2268,6 +2282,7 @@ mod tests {
     /// parent's.
     #[tokio::test]
     async fn an_mcp_call_from_a_subagent_is_a_session_of_its_own() {
+        let _env_read = crate::test_env_read_lock();
         let call = |agent: Option<&str>| {
             scope_session(
                 Some("sess-mcp-0001".into()),

@@ -1660,6 +1660,7 @@ mod tests {
 
     #[test]
     fn provenance_is_read_from_the_source() {
+        let _env_read = crate::test_env_read_lock();
         let m = Memory::of(&atom(
             "a1aaaaaaaaaaaaaa",
             "t",
@@ -1690,6 +1691,7 @@ mod tests {
 
     #[test]
     fn the_listing_is_newest_first_agents_only_by_default_and_hides_reviewed() {
+        let _env_read = crate::test_env_read_lock();
         let atoms: Vec<Value> = vec![
             atom(
                 "a1aaaaaaaaaaaaaa",
@@ -1742,6 +1744,7 @@ mod tests {
 
     #[test]
     fn keep_records_a_verdict_and_an_ambiguous_id_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let dir = tempfile::tempdir().unwrap();
         let old = std::env::var_os("XDG_STATE_HOME");
@@ -1765,6 +1768,7 @@ mod tests {
 
     #[test]
     fn stale_names_duplicates_and_old_never_recalled_ones_but_not_kept_ones() {
+        let _env_read = crate::test_env_read_lock();
         // sample() counts recalls from the state dir. Another test bumps
         // the same atom id, so this one keeps its own directory.
         let _env = crate::test_env_lock();
@@ -1796,6 +1800,7 @@ mod tests {
 
     #[test]
     fn the_viewer_frame_shows_rows_cursor_marks_and_provenance() {
+        let _env_read = crate::test_env_read_lock();
         let mut view = View::new(sample());
         let frame = render(&view, 90, 14);
         assert_eq!(frame.len(), 14);
@@ -1843,6 +1848,7 @@ mod tests {
 
     #[test]
     fn a_prompt_excerpt_redacts_keys() {
+        let _env_read = crate::test_env_read_lock();
         let got = crate::capture::excerpt_of(
             "from now on use key=abc and sk-live123 then ghp_AAAAAAAAAAAAAAAAAAAAAAA1 ok",
         );
@@ -1858,6 +1864,7 @@ mod tests {
     /// file whose last verdict is still being written.
     #[test]
     fn a_torn_review_line_keeps_the_verdicts_after_it() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_STATE_HOME", dir.path());
@@ -1881,6 +1888,7 @@ mod tests {
     /// split that line across write calls, so a later read dropped it.
     #[test]
     fn concurrent_review_rows_each_parse() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::PermissionsExt;
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
@@ -1922,6 +1930,7 @@ mod tests {
     /// waits the lock out and records it.
     #[test]
     fn a_durable_verdict_waits_for_a_held_lock() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::io::AsRawFd;
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
@@ -1955,6 +1964,7 @@ mod tests {
     /// still on disk, not lost with the failed pack change.
     #[test]
     fn a_drop_records_the_verdict_before_the_pack_change() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_STATE_HOME", dir.path());
@@ -1974,6 +1984,7 @@ mod tests {
     /// `measurements/lesson-duplicates.txt` reports.
     #[test]
     fn the_fixture_merges_no_two_different_lessons() {
+        let _env_read = crate::test_env_read_lock();
         let text = include_str!("../tests/fixtures/lesson-duplicates.txt");
         let (mut found, mut pairs, mut wrong) = (0, 0, Vec::new());
         for block in text.split("\n\n") {
@@ -2001,6 +2012,7 @@ mod tests {
 
     #[test]
     fn a_recall_bumps_the_count_the_list_shows() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_STATE_HOME", dir.path());
@@ -2043,6 +2055,7 @@ mod tests {
 
     #[test]
     fn the_review_lays_a_memory_out_at_the_width_it_is_given() {
+        let _env_read = crate::test_env_read_lock();
         let text = "The kiln holds a long lesson about the glaze log that the morning firing left behind on the shelf by the door.";
         let m = Memory {
             id: "c3cccccccccccccc".into(),
@@ -2079,6 +2092,7 @@ mod tests {
 
     #[test]
     fn a_failed_public_restore_reports_both_pack_failures() {
+        let _env_read = crate::test_env_read_lock();
         let mut calls = 0;
         let err = post_mark_with_restore(Value::Null, Value::Null, |_| {
             calls += 1;
@@ -2097,6 +2111,7 @@ mod tests {
 
     #[test]
     fn the_row_written_back_after_a_refused_mark_is_not_public() {
+        let _env_read = crate::test_env_read_lock();
         let stored = serde_json::json!({
             "id": "abcd1234",
             "kind": "lesson",
@@ -2140,6 +2155,7 @@ mod tests {
 
     #[test]
     fn public_fields_keep_a_persona_set_and_validity() {
+        let _env_read = crate::test_env_read_lock();
         let stored = serde_json::json!({
             "id": "abcd1234",
             "kind": "lesson",

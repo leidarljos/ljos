@@ -26,6 +26,11 @@ use ljos_cli::{
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+fn test_env_read_lock() -> ljos_test_boot::EnvReadGuard {
+    ljos_test_boot::env_read_lock()
+}
+
 #[derive(Parser)]
 #[command(
     name = "ljos",
@@ -9044,6 +9049,7 @@ mod help_list {
 
     #[test]
     fn every_command_is_in_one_group() {
+        let _env_read = crate::test_env_read_lock();
         // A test thread's stack is 2 MiB. Building this command tree needs
         // the 8 MiB a normal `ljos` process gets.
         let ran = std::thread::Builder::new()
@@ -9108,6 +9114,7 @@ mod usage_hint {
 
     #[test]
     fn statusline_at_a_terminal_names_the_pipe() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             statusline_tty_hint(),
             "ljos: statusline reads the runner's status JSON on stdin, so pipe that JSON to it."
@@ -9116,6 +9123,7 @@ mod usage_hint {
 
     #[test]
     fn edits_count_a_missing_letter_and_a_swap() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(edits("serch", "search"), 1);
         assert_eq!(edits("serach", "search"), 2);
         assert_eq!(edits("finsh", "finish"), 1);
@@ -9129,6 +9137,7 @@ mod usage_hint {
 
     #[test]
     fn a_one_letter_flag_is_not_guessed() {
+        let _env_read = crate::test_env_read_lock();
         let flags = vec!["json".into(), "limit".into(), "n".into(), "h".into()];
         assert_eq!(closest("josn", &flags), Some("json"));
         assert_eq!(closest("limt", &flags), Some("limit"));
@@ -9138,6 +9147,7 @@ mod usage_hint {
 
     #[test]
     fn find_add_and_note_add_name_real_commands() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(root_synonym("find"), Some("search"));
         assert_eq!(root_synonym("FIND"), Some("search"));
         assert_eq!(root_synonym("add"), Some("remember"));
@@ -9167,6 +9177,7 @@ mod usage_hint {
 
     #[test]
     fn a_verb_with_an_ending_or_a_start_is_picked() {
+        let _env_read = crate::test_env_read_lock();
         let here = words_at(&[]);
         let pick = |word: &str| pick_verb(word, &here.commands);
         assert_eq!(pick("prop").as_deref(), Some("proposals"));
@@ -9182,6 +9193,7 @@ mod usage_hint {
 
     #[test]
     fn lessons_words_are_a_topic_and_other_words_are_not() {
+        let _env_read = crate::test_env_read_lock();
         for word in ["lessons", "Lesson", "learnings", "LORE"] {
             assert!(lessons_topic(word), "{word}");
         }

@@ -996,14 +996,12 @@ fn ready_row(row: &ReadyRow, width: Width) -> String {
 }
 
 #[cfg(test)]
-static COLOR_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn ready_at_eighty_columns_names_the_title_and_the_count() {
+        let _env_read = crate::test_env_read_lock();
         let kiln = format!(
             "{:<22} {:<9} [#{}]  {}",
             "ufuv-kiln", "TODO", "B", "Kiln damper schedule"
@@ -1037,6 +1035,7 @@ mod tests {
 
     #[test]
     fn ready_tty_keeps_zwj_cluster_together() {
+        let _env_read = crate::test_env_read_lock();
         let raw = format!(
             "{:<22} {:<9} [#{}]  {}\n",
             "demo-uqy6",
@@ -1051,6 +1050,7 @@ mod tests {
 
     #[test]
     fn ready_tty_with_prefix_at_or_past_cols_falls_back() {
+        let _env_read = crate::test_env_read_lock();
         let raw = format!(
             "{:<22} {:<9} [#{}]  {}\n",
             "demo-uqy6", "STARTED", "C", "This title wraps"
@@ -1063,6 +1063,7 @@ mod tests {
 
     #[test]
     fn ready_tty_empty_title_shows_no_title() {
+        let _env_read = crate::test_env_read_lock();
         let raw = format!("{:<22} {:<9} [#{}]  \n", "demo-uqy6", "STARTED", "C");
         let text = ready_page(&raw, None, Width::columns(40));
         assert!(text.contains("(no title)"), "{text}");
@@ -1070,6 +1071,7 @@ mod tests {
 
     #[test]
     fn ready_tty_loose_lines_keep_backticks_and_urls_whole() {
+        let _env_read = crate::test_env_read_lock();
         let raw = "open and not waiting on an open ticket, so run `ljos show ID`.\nhttps://example.com/a/very/long/path\n";
         let text = ready_page(raw, Some(2), Width::columns(28));
         assert!(!text.contains("`ljos show\n ID`"), "{text}");
@@ -1081,6 +1083,7 @@ mod tests {
 
     #[test]
     fn a_short_ready_page_names_how_to_see_more_or_narrow() {
+        let _env_read = crate::test_env_read_lock();
         let mut raw = String::new();
         for n in 0..3 {
             raw.push_str(&format!(
@@ -1121,6 +1124,7 @@ mod tests {
     /// outside ASCII stays one column.
     #[test]
     fn a_long_title_stays_on_the_ready_line() {
+        let _env_read = crate::test_env_read_lock();
         let shapes = [
             (
                 "ljos-633g",
@@ -1175,6 +1179,7 @@ mod tests {
 
     #[test]
     fn wrap_keeps_every_line_inside_eighty_columns() {
+        let _env_read = crate::test_env_read_lock();
         let long = "Score is how the scorers ranked this query. The fraction is how many of them named the hit. Neither is whether the claim is true.";
         let wrapped = wrap(long, COLS);
         assert!(wrapped.lines().all(|line| line.chars().count() <= COLS));
@@ -1198,6 +1203,7 @@ mod tests {
 
     #[test]
     fn a_search_page_is_one_legend_line_and_does_not_print_the_score() {
+        let _env_read = crate::test_env_read_lock();
         let row = |place: usize, score: f64, id: &'static str| SearchRow {
             label: "lesson",
             age: "today",
@@ -1258,6 +1264,7 @@ mod tests {
 
     #[test]
     fn a_capped_search_page_names_a_runnable_command_without_wrapping_it() {
+        let _env_read = crate::test_env_read_lock();
         let row = SearchRow {
             label: "lesson",
             age: "today",
@@ -1357,6 +1364,7 @@ mod tests {
 
     #[test]
     fn a_shown_prefix_is_eight_hex_digits_and_unique_in_the_store() {
+        let _env_read = crate::test_env_read_lock();
         let shared = format!("45{}", "a".repeat(40));
         let local_a = format!("local:{shared}1111111111111111111111");
         let local_b = format!("local:{shared}2222222222222222222222");
@@ -1399,6 +1407,7 @@ mod tests {
 
     #[test]
     fn a_miss_names_a_shorter_query_without_splitting_the_command() {
+        let _env_read = crate::test_env_read_lock();
         let short = nothing_matched_page("which fusion", crate::output_wrap::Width::FIXED);
         assert_eq!(
             short,
@@ -1442,7 +1451,7 @@ mod tests {
 
     #[test]
     fn no_color_strips_ansi_and_a_tty_without_it_keeps_color() {
-        let _guard = COLOR_ENV.lock().unwrap_or_else(|err| err.into_inner());
+        let _env = crate::test_env_lock();
         std::env::set_var("NO_COLOR", "1");
         assert!(!color_allowed(true));
         std::env::remove_var("NO_COLOR");

@@ -190,6 +190,7 @@ mod tests {
 
     #[test]
     fn a_secret_is_locked_until_dropped_and_works_without_a_lock() {
+        let _env_read = crate::test_env_read_lock();
         if std::env::var_os(CHILD).is_some() {
             child();
             return;
@@ -217,6 +218,7 @@ mod tests {
 
     #[test]
     fn a_full_buffer_refuses_a_byte_and_keeps_its_place() {
+        let _env_read = crate::test_env_read_lock();
         let mut s = Locked::with_capacity(2);
         let at = s.as_ptr();
         assert!(s.push(1) && s.push(2));

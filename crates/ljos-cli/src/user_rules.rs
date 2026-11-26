@@ -1887,6 +1887,7 @@ mod tests {
     /// them an agent's, so each is run again in a child that carries them.
     #[test]
     fn the_user_rule_tests_pass_under_a_runner_environment() {
+        let _env_read = crate::test_env_read_lock();
         let runner: &[(&str, &str)] = &[
             ("CURSOR_CONVERSATION_ID", "0199a1b2-c3d4-e5f6-runner"),
             ("CURSOR_AGENT", "1"),
@@ -1921,6 +1922,7 @@ mod tests {
 
     #[test]
     fn a_user_rule_is_surfaced_in_a_second_seat() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, dir) = isolated();
         let written = alan();
         assert_eq!(written.author, "rohit");
@@ -1979,6 +1981,7 @@ mod tests {
 
     #[test]
     fn a_user_rule_does_not_decay_after_simulated_time() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         let written = alan();
         let later = "2099-01-01T00:00:00Z";
@@ -2028,6 +2031,7 @@ mod tests {
 
     #[test]
     fn the_preface_stays_inside_its_budget_and_keeps_the_first_rule() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         let first = "a".repeat(80);
         write_preference(&first, "first", &People::default(), &People::default()).unwrap();
@@ -2047,6 +2051,7 @@ mod tests {
 
     #[test]
     fn the_guard_warns_on_a_mention_and_a_reply_and_allows_another_comment() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         write_preference(
             "never post or reply to Alan (ocaisa)",
@@ -2129,6 +2134,7 @@ mod tests {
     /// over the cap fail at once, without reading the bytes.
     #[test]
     fn a_rules_file_must_be_a_small_regular_file() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         let path = rules_file();
         let _ = std::fs::remove_file(&path);
@@ -2175,6 +2181,7 @@ mod tests {
     /// names the path. A missing file and a real empty list are not.
     #[test]
     fn an_empty_rules_file_and_a_dangling_link_warn_on_a_github_write() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
         let read_tool = r#"{"tool_name":"list_issues","mcp_server_name":"github","tool_input":{"owner":"org"}}"#;
@@ -2251,6 +2258,7 @@ mod tests {
     /// last whole copy. A benign GitHub write is not warned on.
     #[test]
     fn a_rules_file_caught_empty_keeps_the_last_good_copy() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         let path = rules_file();
         let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
@@ -2292,6 +2300,7 @@ mod tests {
     /// the rules cover, and leaves reads and other MCP calls alone.
     #[test]
     fn a_bad_rules_file_warns_on_github_writes_and_allows_other_calls() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
         let note = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"ljos_note","mcp_server_name":"ljos","command":"ljos-mcp","tool_input":{"text":"x"}}"#;
@@ -2379,6 +2388,7 @@ mod tests {
     /// kept to stand in for the pack. A rule written as words still is.
     #[test]
     fn no_promoted_lesson_is_stated_without_a_pack() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         let lesson = |id: &str, text: &str, origin: &str| {
             let basis = if origin == "user-declared" {
@@ -2503,6 +2513,7 @@ mod tests {
 
     #[test]
     fn a_deleted_lesson_is_not_stated_by_a_long_lived_reader() {
+        let _env_read = crate::test_env_read_lock();
         if !crate::tool_installed("packsetd") {
             say!("skipped: packsetd is not installed");
             return;
@@ -2512,6 +2523,7 @@ mod tests {
 
     #[test]
     fn a_retracted_lesson_is_not_stated_by_a_long_lived_reader() {
+        let _env_read = crate::test_env_read_lock();
         if !crate::tool_installed("packsetd") {
             say!("skipped: packsetd is not installed");
             return;
@@ -2524,6 +2536,7 @@ mod tests {
     /// recorded for the lesson is cleared rather than kept for a label.
     #[test]
     fn a_pack_that_stops_answering_confirms_no_rule() {
+        let _env_read = crate::test_env_read_lock();
         if !crate::tool_installed("packsetd") {
             say!("skipped: packsetd is not installed");
             return;
@@ -2573,6 +2586,7 @@ mod tests {
     /// answering after it.
     #[test]
     fn a_person_read_in_one_workspace_does_not_answer_for_another() {
+        let _env_read = crate::test_env_read_lock();
         if !crate::tool_installed("packsetd") {
             say!("skipped: packsetd is not installed");
             return;
@@ -2619,6 +2633,7 @@ mod tests {
     /// words, another write of the id, or another origin do not.
     #[test]
     fn a_lesson_hash_reads_only_what_makes_the_lesson() {
+        let _env_read = crate::test_env_read_lock();
         let lesson = serde_json::json!({
             "id": "lesson-h", "kind": "lesson", "text": "Keep the form short.",
             "origin": "user-declared", "source": {"basis": "person"},
@@ -2652,6 +2667,7 @@ mod tests {
 
     #[test]
     fn promote_copies_a_lesson_and_refuses_anything_else() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         let atom = serde_json::json!({
             "id": "lesson-ocaisa",
@@ -2705,6 +2721,7 @@ mod tests {
     /// written later with no basis stays out.
     #[test]
     fn a_row_with_no_basis_and_no_lesson_is_held_until_kept() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         let mut row = alan();
         row.basis = None;
@@ -2765,6 +2782,7 @@ mod tests {
     /// still shown rather than dropped.
     #[test]
     fn a_runners_keep_of_a_held_user_rule_is_the_agents() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         let mut row = alan();
         row.basis = None;
@@ -2809,6 +2827,7 @@ mod tests {
 
     #[test]
     fn held_user_rules_warn_and_do_not_fail_the_doctor() {
+        let _env_read = crate::test_env_read_lock();
         let row = super::super::Habitat {
             name: "user rules",
             state: review_sentence(1),
@@ -2821,6 +2840,7 @@ mod tests {
 
     #[test]
     fn an_argv_user_rule_warns_in_the_static_guard() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         write_argv(
             &Rule {
@@ -2847,6 +2867,7 @@ mod tests {
     /// written as words keeps its own reason.
     #[test]
     fn an_unconfirmed_promoted_rule_warns_as_unverified() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         let lesson = serde_json::json!({
             "id": "lesson-status", "kind": "lesson", "text": "Leave git status alone.",
@@ -3113,6 +3134,7 @@ mod tests {
     /// every rule in plaintext on the first write.
     #[test]
     fn a_tracker_with_no_scope_gets_no_user_rules() {
+        let _env_read = crate::test_env_read_lock();
         let homes = Homes::unscoped();
         homes.home(&homes.cfg_a);
         let before = head(&homes.a);
@@ -3134,6 +3156,7 @@ mod tests {
 
     #[test]
     fn user_rules_travel_sealed_to_the_scope() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -3172,6 +3195,7 @@ mod tests {
     /// machine's own is removed from the tracker when it seals.
     #[test]
     fn a_plaintext_rules_file_is_still_read_and_this_hosts_is_replaced() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -3214,6 +3238,7 @@ mod tests {
 
     #[test]
     fn user_rule_sync_follows_tracker_git() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -3264,6 +3289,7 @@ mod tests {
 
     #[test]
     fn two_homes_with_different_rules_converge() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -3307,6 +3333,7 @@ mod tests {
 
     #[test]
     fn a_newer_edit_wins_and_a_tombstone_beats_an_older_edit() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -3399,6 +3426,7 @@ mod tests {
 
     #[test]
     fn the_hook_shows_local_rules_when_the_tracker_does_not_answer() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, dir) = isolated();
         write_preference(
             "never post or reply to Alan (ocaisa)",

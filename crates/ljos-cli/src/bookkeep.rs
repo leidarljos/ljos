@@ -636,6 +636,7 @@ mod temp_path_tests {
     /// resolves through, is still inside that root.
     #[test]
     fn a_missing_path_under_a_symlinked_temp_is_temporary() {
+        let _env_read = crate::test_env_read_lock();
         let root = tempfile::tempdir().unwrap();
         let real = root.path().join("private/tmp");
         std::fs::create_dir_all(&real).unwrap();
@@ -659,6 +660,7 @@ mod temp_path_tests {
 
     #[test]
     fn guard_off_reason_escapes_home_newlines() {
+        let _env_read = crate::test_env_read_lock();
         let _env = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home\nrun-this");

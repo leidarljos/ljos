@@ -426,6 +426,8 @@ mod tests {
 
     #[test]
     fn parse_command_words() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         assert_eq!(parse_command("show"), Some(SummonAction::Show));
         assert_eq!(parse_command(" HIDE\n"), Some(SummonAction::Hide));
         assert_eq!(parse_command("Toggle"), Some(SummonAction::Toggle));
@@ -434,6 +436,8 @@ mod tests {
 
     #[test]
     fn parse_request_keeps_token_on_show_and_toggle() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         assert_eq!(
             parse_request("toggle abc.def"),
             Some(SummonRequest {
@@ -456,6 +460,8 @@ mod tests {
 
     #[test]
     fn sanitize_token_rejects_empty_newline_and_oversize() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         assert_eq!(sanitize_token("  "), None);
         assert_eq!(sanitize_token("a\nb"), None);
         assert_eq!(sanitize_token("a\rb"), None);
@@ -465,6 +471,8 @@ mod tests {
 
     #[test]
     fn hide_miss_is_done() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let err = SummonError::NotRunning("missing.sock".into());
         assert_eq!(
             plan_summon_cli(SummonAction::Hide, Err(err)).unwrap(),
@@ -487,6 +495,8 @@ mod tests {
 
     #[test]
     fn take_env_token_unsets_activation_vars() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let _guard = crate::env_lock();
         #[allow(unused_unsafe)]
         unsafe {
@@ -501,6 +511,8 @@ mod tests {
 
     #[test]
     fn peek_env_token_leaves_activation_vars() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let _guard = crate::env_lock();
         #[allow(unused_unsafe)]
         unsafe {
@@ -526,6 +538,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn send_command_show_miss_keeps_token() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let _guard = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("miss-show.sock");
@@ -552,6 +566,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn send_command_hide_miss_unsets_token() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let _guard = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("miss-hide.sock");
@@ -573,6 +589,8 @@ mod tests {
 
     #[test]
     fn encode_request_one_line() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         assert_eq!(
             encode_request(&SummonRequest::new(SummonAction::Toggle)),
             "toggle\n"
@@ -595,6 +613,8 @@ mod tests {
 
     #[test]
     fn default_path_ends_with_hud_sock() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let _guard = crate::env_lock();
         #[allow(unused_unsafe)]
         unsafe {
@@ -606,6 +626,8 @@ mod tests {
 
     #[test]
     fn without_a_runtime_dir_the_socket_is_under_home_and_not_the_temp_dir() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let _guard = crate::env_lock();
         #[allow(unused_unsafe)]
         unsafe {

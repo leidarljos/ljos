@@ -107,6 +107,7 @@ mod tests {
 
     #[test]
     fn a_nested_guard_shares_the_deadline_and_the_outer_one_clears_it() {
+        let _env_read = crate::test_env_read_lock();
         let outer = SearchCall::enter();
         arm();
         assert!(armed());
@@ -124,6 +125,7 @@ mod tests {
 
     #[test]
     fn a_new_call_gets_a_fresh_deadline() {
+        let _env_read = crate::test_env_read_lock();
         let first = SearchCall::enter();
         let at = DEADLINE.with(Cell::get).unwrap();
         drop(first);
@@ -138,6 +140,7 @@ mod tests {
 
     #[test]
     fn the_time_before_a_read_is_spent_from_the_deadline() {
+        let _env_read = crate::test_env_read_lock();
         let _call = SearchCall::enter();
         std::thread::sleep(Duration::from_millis(60));
         assert!(
@@ -150,6 +153,7 @@ mod tests {
 
     #[test]
     fn a_panic_unwinds_the_guard() {
+        let _env_read = crate::test_env_read_lock();
         let caught = std::panic::catch_unwind(|| {
             let _call = SearchCall::enter();
             arm();
@@ -162,6 +166,7 @@ mod tests {
 
     #[test]
     fn an_early_return_ends_the_call() {
+        let _env_read = crate::test_env_read_lock();
         fn call(early: bool) -> Option<u32> {
             let _call = SearchCall::enter();
             arm();
@@ -179,6 +184,7 @@ mod tests {
 
     #[test]
     fn a_read_outside_a_call_keeps_no_deadline() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(depth(), 0);
         let whole = left();
         assert!(!armed(), "a read outside a guard arms nothing");
@@ -187,6 +193,7 @@ mod tests {
 
     #[test]
     fn a_guard_on_one_thread_leaves_another_thread_alone() {
+        let _env_read = crate::test_env_read_lock();
         let _call = SearchCall::enter();
         arm();
         let other = std::thread::spawn(|| {

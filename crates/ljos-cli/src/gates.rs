@@ -913,6 +913,7 @@ mod tests {
 
     #[test]
     fn git_calls_follow_dirs_shells_and_aliases() {
+        let _env_read = crate::test_env_read_lock();
         let dir = repo();
         let root = dir.path();
         std::fs::create_dir_all(root.join("sub")).unwrap();
@@ -971,6 +972,7 @@ mod tests {
 
     #[test]
     fn the_person_sets_the_consensus_push_and_a_checkout_only_tightens_it() {
+        let _env_read = crate::test_env_read_lock();
         let dir = repo();
         let cwd = dir.path();
         let home = tempfile::tempdir().unwrap();
@@ -1010,6 +1012,7 @@ mod tests {
 
     #[test]
     fn a_tight_protected_branch_list_keeps_each_name() {
+        let _env_read = crate::test_env_read_lock();
         let dir = repo();
         let home = tempfile::tempdir().unwrap();
         let _layers = layers(home.path(), None);
@@ -1037,6 +1040,7 @@ mod tests {
 
     #[test]
     fn a_push_lands_where_git_would_put_it_and_an_unread_one_is_protected() {
+        let _env_read = crate::test_env_read_lock();
         let dir = repo();
         let cwd = dir.path();
         seed(cwd);

@@ -192,6 +192,7 @@ mod tests {
     /// ends the clock is fresh.
     #[test]
     fn a_call_in_flight_is_not_idle() {
+        let _env_read = crate::test_env_read_lock();
         let limit = Duration::from_secs(1);
         let old = crate::bookkeep::now_secs() - 100;
         assert!(idle_now(crate::bookkeep::now_secs(), old, limit));
@@ -208,6 +209,7 @@ mod tests {
 
     #[test]
     fn a_bare_number_is_seconds_and_off_keeps_everything() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(parse("120"), Some(Duration::from_secs(120)));
         assert_eq!(parse("5m"), Some(Duration::from_secs(300)));
         assert_eq!(parse("0"), None);
@@ -217,6 +219,7 @@ mod tests {
 
     #[test]
     fn orphan_idle_is_seconds_and_off_leaves_the_server() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(parse_orphan("30"), Some(Duration::from_secs(30)));
         assert_eq!(parse_orphan("5m"), Some(Duration::from_secs(300)));
         assert_eq!(parse_orphan("0"), None);
@@ -226,6 +229,7 @@ mod tests {
 
     #[test]
     fn ljos_toml_sets_orphan_idle_under_mcp() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("ljos.toml");
         #[expect(
@@ -253,6 +257,7 @@ mod tests {
 
     #[test]
     fn ljos_toml_sets_the_window_under_mcp() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("ljos.toml");
         #[expect(

@@ -186,6 +186,7 @@ fn live_with(base: &str, text: &str) -> Vec<Value> {
 
 #[test]
 fn an_agent_lesson_is_live_at_once_and_accept_raises_it() {
+    let _process = ljos_test_boot::env_lock();
     if !ljos_cli::tool_installed("packsetd") {
         eprintln!("skipped: packsetd is not installed");
         return;
@@ -222,6 +223,7 @@ fn an_agent_lesson_is_live_at_once_and_accept_raises_it() {
 
 #[test]
 fn a_writer_that_holds_agent_writes_still_stores_the_lesson_as_the_agents() {
+    let _process = ljos_test_boot::env_lock();
     if !ljos_cli::tool_installed("packsetd") {
         eprintln!("skipped: packsetd is not installed");
         return;
@@ -245,6 +247,7 @@ fn a_writer_that_holds_agent_writes_still_stores_the_lesson_as_the_agents() {
 
 #[test]
 fn a_proposal_an_older_ljos_left_open_is_stored_once() {
+    let _process = ljos_test_boot::env_lock();
     if !ljos_cli::tool_installed("packsetd") {
         eprintln!("skipped: packsetd is not installed");
         return;

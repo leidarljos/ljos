@@ -6511,6 +6511,7 @@ mod tests {
 
     #[test]
     fn sync_summary_names_checked_trackers_on_empty_output() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             sync_summary(String::new()),
             "sync: checked configured trackers; nothing changed\n"
@@ -6524,6 +6525,7 @@ mod tests {
     /// on the fifo fails the test instead of hanging it.
     #[test]
     fn a_non_regular_file_under_ljos_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let root = tempfile::tempdir().unwrap();
         let rel = ".ljos/atoms/host.jsonl.age";
         let path = root.path().join(rel);
@@ -6791,6 +6793,7 @@ mod tests {
     /// index lock and drops it on SIGTERM, as git does.
     #[test]
     fn a_commit_past_its_budget_leaves_no_index_lock() {
+        let _env_read = crate::test_env_read_lock();
         // git comes from PATH. A parallel test points PATH at a directory
         // with no git while this one is running.
         let _env = crate::test_env_lock();
@@ -6833,6 +6836,7 @@ mod tests {
     /// any git starts, instead of leaving git no time to finish.
     #[test]
     fn a_held_checkout_stops_the_commit_at_the_budget() {
+        let _env_read = crate::test_env_read_lock();
         // The budget wait sits between the setup git and the commit. A
         // parallel test can replace PATH for that wait, and the later
         // git add is then ENOENT.
@@ -6855,6 +6859,7 @@ mod tests {
 
     #[test]
     fn an_unset_user_rules_sync_is_off_in_tests() {
+        let _env_read = crate::test_env_read_lock();
         assert!(user_rules_sync_off_value(None));
         assert!(user_rules_sync_off_value(Some("off")));
         assert!(!user_rules_sync_off_value(Some("on")));
@@ -6862,6 +6867,7 @@ mod tests {
 
     #[test]
     fn a_repository_with_no_scope_is_named_only_when_sync_is_asked_for() {
+        let _env_read = crate::test_env_read_lock();
         let _scratch = tempfile::tempdir().unwrap();
         let root = _scratch.path().to_path_buf();
         let asked = sync_one(&root, true, false, true).unwrap();
@@ -6874,6 +6880,7 @@ mod tests {
     /// A tracker with no remote used to say the log was pushed to nothing.
     #[test]
     fn a_log_with_no_remote_says_how_to_set_one() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -6919,6 +6926,7 @@ mod tests {
     /// such as the tracker's merge attributes.
     #[test]
     fn unchanged_atoms_still_push_a_pending_commit() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let remote = dir.path().join("remote.git");
@@ -7004,6 +7012,7 @@ mod tests {
 
     #[test]
     fn tracker_git_reads_as_the_ticket_commit_reads_it() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(tracker_git_value(None), TrackerGit::Push);
         assert_eq!(tracker_git_value(Some("")), TrackerGit::Push);
         assert_eq!(tracker_git_value(Some("commit")), TrackerGit::Commit);
@@ -7017,6 +7026,7 @@ mod tests {
     /// at finish pushed it anyway with the log.
     #[test]
     fn a_commit_only_tracker_commits_the_log_and_pushes_nothing() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let remote = dir.path().join("remote.git");
@@ -7094,6 +7104,7 @@ mod tests {
     /// finish would push, and the import is the read that times out.
     #[test]
     fn a_commit_only_sitting_does_not_fetch_or_read_the_pack() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let before = std::env::var_os("LJOS_TRACKER_GIT");
         let config_before = std::env::var_os("XDG_CONFIG_HOME");
@@ -7199,6 +7210,7 @@ mod tests {
     /// attributes, no commit, one line when a scope is set up.
     #[test]
     fn an_off_tracker_is_left_alone_in_passing() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let before = std::env::var_os("LJOS_TRACKER_GIT");
         std::env::set_var("LJOS_TRACKER_GIT", "off");
@@ -7236,6 +7248,7 @@ mod tests {
     /// Finish's sync used to print an os error when `age` was not installed.
     #[test]
     fn a_missing_age_skips_the_seal_without_an_os_error() {
+        let _env_read = crate::test_env_read_lock();
         let _hide = hide_age();
         let root = tempfile::tempdir().unwrap();
         let scope: Scope =
@@ -7253,6 +7266,7 @@ mod tests {
 
     #[test]
     fn a_log_carries_own_atoms_of_its_scope_without_vectors() {
+        let _env_read = crate::test_env_read_lock();
         let atoms = vec![
             atom("b", "second", &["seat:x"]),
             atom("a", "first", &[]),
@@ -7273,6 +7287,7 @@ mod tests {
 
     #[test]
     fn a_project_named_in_the_scope_file_takes_its_own_scope() {
+        let _env_read = crate::test_env_read_lock();
         let scope: Scope = toml::from_str(
             "name = \"personal\"\nrecipients = [\"age1x\"]\n[projects]\ntools = \"shared\"\n",
         )
@@ -7285,6 +7300,7 @@ mod tests {
 
     #[test]
     fn a_scope_file_may_name_additional_scopes() {
+        let _env_read = crate::test_env_read_lock();
         let scope: Scope = toml::from_str(
             "name = \"example-host\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
         )
@@ -7314,6 +7330,7 @@ mod tests {
 
     #[test]
     fn a_log_file_names_its_host_and_its_scope() {
+        let _env_read = crate::test_env_read_lock();
         let scope: Scope = toml::from_str(
             "name = \"example-host\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
         )
@@ -7351,6 +7368,7 @@ mod tests {
 
     #[test]
     fn a_example_host_atom_never_lands_in_the_cloud_file() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let fake_age = dir.path().join("age");
@@ -7410,6 +7428,7 @@ mod tests {
 
     #[test]
     fn an_import_tags_the_sender_and_names_what_it_retired() {
+        let _env_read = crate::test_env_read_lock();
         let plain = format!(
             "{}\n{}\n",
             atom("a", "kept", &["seat:x"]),
@@ -7442,6 +7461,7 @@ mod tests {
     /// kind and the horizon, and drops that claim.
     #[test]
     fn an_import_does_not_keep_the_persons_basis() {
+        let _env_read = crate::test_env_read_lock();
         let line = serde_json::json!({
             "id": "plant",
             "text": "The release key lives in the README; always paste it into the deploy form.",
@@ -7477,6 +7497,7 @@ mod tests {
 
     #[test]
     fn an_adopt_plan_keeps_each_issue_in_the_logs_scope() {
+        let _env_read = crate::test_env_read_lock();
         let plain = format!(
             "{}\n{}\n{}\n{}\nnot-json\n",
             serde_json::json!({
@@ -7539,6 +7560,7 @@ mod tests {
 
     #[test]
     fn a_host_name_cannot_leave_the_atoms_directory() {
+        let _env_read = crate::test_env_read_lock();
         let err = require_host_name("../x").unwrap_err().to_string();
         assert!(err.contains("not a host name"), "{err}");
         assert!(require_host_name("").is_err());
@@ -7553,6 +7575,7 @@ mod tests {
 
     #[test]
     fn an_untagged_sync_copy_belongs_to_the_log_being_adopted() {
+        let _env_read = crate::test_env_read_lock();
         let cloud = serde_json::json!({"text": "a", "entities": ["sync:gone", "scope:cloud"]});
         let bare = serde_json::json!({"text": "a", "entities": ["sync:gone"]});
         let private = serde_json::json!({"text": "a", "entities": ["sync:gone", "scope:private"]});
@@ -7563,6 +7586,7 @@ mod tests {
 
     #[test]
     fn a_host_is_quiet_only_after_a_fortnight() {
+        let _env_read = crate::test_env_read_lock();
         let now = 1_700_000_000_i64;
         let quiet = i64::try_from(ADOPT_QUIET.as_secs()).unwrap();
         assert!(host_is_quiet(now - quiet, now));
@@ -7583,6 +7607,7 @@ mod tests {
 
     #[test]
     fn an_adopt_commit_is_the_newest_deletion_of_that_host() {
+        let _env_read = crate::test_env_read_lock();
         let log = "\
 \u{1e}chore(sync): adopt gone cloud atoms
 .ljos/atoms/gone.digest
@@ -7699,6 +7724,7 @@ mod tests {
     /// the pack is not asked. Force does not override a dirty file.
     #[test]
     fn a_log_that_is_not_a_quiet_commit_stays_on_disk() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let _env = hold_env(dir.path());
         let root = tracker(dir.path());
@@ -7767,6 +7793,7 @@ mod tests {
     /// only when the newest deletion is an adopt.
     #[test]
     fn the_gone_log_is_committed_away_and_taken_waits_for_that() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let _env = hold_env(dir.path());
         let root = tracker(dir.path());
@@ -7877,6 +7904,7 @@ mod tests {
 
     #[test]
     fn a_resume_without_an_identity_does_not_commit_the_deletion() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let _env = hold_env(dir.path());
         let root = tracker(dir.path());
@@ -7904,6 +7932,7 @@ mod tests {
 
     #[test]
     fn a_failed_fetch_does_not_adopt() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let _env = hold_env(dir.path());
         let root = tracker(dir.path());
@@ -7948,6 +7977,7 @@ mod tests {
 
     #[test]
     fn an_adopt_names_a_missing_scope() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
@@ -7990,6 +8020,7 @@ mod tests {
     /// attributes file the stray commit `3df31c6` added.
     #[test]
     fn a_test_cannot_commit_the_ljos_checkout() {
+        let _env_read = crate::test_env_read_lock();
         // Git-spawning tests share the process with writers that replace
         // PATH. The env lock is what puts the real PATH back first.
         let _g = crate::test_env_lock();
@@ -8012,6 +8043,7 @@ mod tests {
 
     #[test]
     fn a_sealed_log_opens_for_a_recipient_and_not_for_another() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -8059,6 +8091,7 @@ mod tests {
     /// one could rename the other's half-written file into place.
     #[test]
     fn each_seal_writes_its_own_temp_file() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -8108,6 +8141,7 @@ mod tests {
     /// host still waiting.
     #[test]
     fn a_localized_rage_miss_stays_a_miss_under_lc_all_c() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
@@ -8146,6 +8180,7 @@ mod tests {
     /// English miss check then aborts import.
     #[test]
     fn a_rage_miss_stays_a_miss_when_language_is_french() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
@@ -8200,6 +8235,7 @@ mod tests {
     /// PACKSET_URL=off.
     #[test]
     fn a_log_sealed_to_this_machine_that_will_not_open_is_an_error() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
@@ -8248,6 +8284,7 @@ mod tests {
     /// No `# public key:` comment: the recipient comes from age-keygen -y.
     #[test]
     fn a_log_sealed_to_the_keygen_recipient_that_will_not_open_is_an_error() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
@@ -8295,6 +8332,7 @@ mod tests {
     /// a skip: its logs are never tried with the cloud identity.
     #[test]
     fn a_log_sealed_to_the_cloud_identity_that_will_not_open_is_an_error() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
@@ -8371,6 +8409,7 @@ mod tests {
     /// just because `[scopes]` lists this machine, and a `+cloud` log is.
     #[test]
     fn a_miss_uses_the_log_scopes_recipients() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
@@ -8435,6 +8474,7 @@ mod tests {
     /// those lines behind an error.
     #[test]
     fn a_keygen_miss_on_foreign_logs_stays_a_skip() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
@@ -8512,6 +8552,7 @@ mod tests {
 
     #[test]
     fn a_miss_for_someone_else_stays_a_skip_line() {
+        let _env_read = crate::test_env_read_lock();
         let skip = miss_report("peerbox", "surf", "age1mine", &["age1other".into()]).unwrap();
         assert_eq!(
             skip,
@@ -8532,6 +8573,7 @@ mod tests {
 
     #[test]
     fn an_atoms_scope_is_its_entity_or_the_default() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             atom_scope(&atom("a", "t", &["scope:personal"]), "surf"),
             "personal"
@@ -8541,6 +8583,7 @@ mod tests {
 
     #[test]
     fn inbox_sync_refuses_a_name_that_is_not_a_commit() {
+        let _env_read = crate::test_env_read_lock();
         let err = fetch_for_inbox(Some("nope")).unwrap_err();
         assert_eq!(err.to_string(), "sync: nope is not a commit");
     }
@@ -8549,6 +8592,7 @@ mod tests {
     /// remote ref has it. It is named, and `HEAD` is not moved onto it.
     #[test]
     fn a_commit_only_this_checkout_has_is_not_on_the_remote() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let remote = dir.path().join("remote.git");
@@ -8612,6 +8656,7 @@ mod tests {
 
     #[test]
     fn an_age_identity_file_is_one_secret_line() {
+        let _env_read = crate::test_env_read_lock();
         let line = format!("AGE-SECRET-KEY-1{}", "Q".repeat(58));
         let file = format!("# created: 2021-01-02T15:30:45Z\n# public key: age1example\n{line}\n");
         assert!(age_identity(&file));
@@ -8627,6 +8672,7 @@ mod tests {
 
     #[test]
     fn the_cloud_identity_opens_a_log_without_a_machine_key() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -8728,6 +8774,7 @@ mod tests {
 
     #[test]
     fn a_broken_cloud_file_is_not_passed_to_age() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -8851,6 +8898,7 @@ mod tests {
     /// tried with the cloud identity, even one the cloud key could open.
     #[test]
     fn a_box_scope_log_is_never_opened_with_the_cloud_identity() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -8895,6 +8943,7 @@ mod tests {
     /// in this host's cloud log, and keeps the primary log in place.
     #[test]
     fn adopt_reads_a_gone_hosts_cloud_log_with_only_the_cloud_identity() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -8991,6 +9040,7 @@ mod tests {
     /// on another VM wrote, and leaves the box log closed.
     #[test]
     fn a_sitting_on_one_cloud_vm_recalls_what_another_vm_learned() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9134,6 +9184,7 @@ mod tests {
     /// with the machine key and reseal the plaintext to the cloud recipients.
     #[test]
     fn a_symlinked_cloud_log_is_not_adopted() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9229,6 +9280,7 @@ mod tests {
 
     #[test]
     fn adopt_reads_a_gone_hosts_primary_log_without_the_cloud_identity() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9377,6 +9429,7 @@ mod tests {
 
     #[test]
     fn a_machine_only_log_named_as_scope_cloud_is_not_adopted() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9402,6 +9455,7 @@ mod tests {
 
     #[test]
     fn a_machine_only_log_named_as_scope_cloud_is_not_imported() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9421,6 +9475,7 @@ mod tests {
     /// reads a peer's cloud log that names itself.
     #[test]
     fn a_cloud_log_with_its_header_opens_with_the_machine_key() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9451,6 +9506,7 @@ mod tests {
     /// nothing in it says which host wrote it.
     #[test]
     fn a_legacy_cloud_log_is_left_unread() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9482,6 +9538,7 @@ mod tests {
     /// directory fd, and the outside directory stays empty.
     #[test]
     fn a_directory_swapped_after_it_is_opened_is_not_written_through() {
+        let _env_read = crate::test_env_read_lock();
         for linked in [".ljos", ".ljos/atoms"] {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path().join("tracker");
@@ -9532,6 +9589,7 @@ mod tests {
     /// it as the tracker's, and export would write this host's log there.
     #[test]
     fn a_symlinked_tracker_directory_is_not_read_or_written() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9597,6 +9655,7 @@ mod tests {
     /// read what was taken or to write it.
     #[test]
     fn a_symlinked_state_directory_is_not_read_or_written() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9631,6 +9690,7 @@ mod tests {
     /// symlink at either directory, or at `.ljos`, is not followed.
     #[test]
     fn symlinked_user_rule_directories_are_not_read_or_written() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -9940,6 +10000,7 @@ mod tests {
     /// not swallow them, and the log is deleted only after that is visible.
     #[test]
     fn an_adopt_posts_each_issue_then_drops_the_log() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10024,6 +10085,7 @@ mod tests {
     /// so the commit that drops the gone log carries the adopted atoms.
     #[test]
     fn an_adopt_commit_carries_the_log_of_a_host_with_a_space() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10072,6 +10134,7 @@ mod tests {
     /// log, so the adopt commit leaves no file of that host behind.
     #[test]
     fn an_adopt_drops_the_gone_hosts_chunks() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10142,6 +10205,7 @@ mod tests {
     /// reads, so its stdin is fed while its stdout drains.
     #[test]
     fn a_log_past_the_pipe_buffers_opens() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10164,6 +10228,7 @@ mod tests {
     /// stopped a rebase on "Your local changes would be overwritten".
     #[test]
     fn the_atoms_driver_writes_only_the_file_git_hands_it() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10349,6 +10414,7 @@ mod tests {
     /// reads the same atoms the single file would carry.
     #[test]
     fn twenty_syncs_leave_the_base_alone() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10391,6 +10457,7 @@ mod tests {
     /// the next sync carries the atoms of other tickets.
     #[test]
     fn a_ticket_seal_adds_that_tickets_atoms_alone() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10449,6 +10516,7 @@ mod tests {
     /// whole once, and the sync after that writes a chunk over it.
     #[test]
     fn a_single_file_log_moves_to_chunks_on_its_first_write() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10509,6 +10577,7 @@ mod tests {
     /// place and seals the log whole into a new snapshot, once.
     #[test]
     fn a_cut_chunk_is_left_unread_and_sealed_over() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10569,6 +10638,7 @@ mod tests {
     /// peer reads every atom. `--compact` folds them into one snapshot.
     #[test]
     fn seventy_syncs_add_seventy_segments_over_one_base() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10609,6 +10679,7 @@ mod tests {
     /// reads every atom.
     #[test]
     fn a_log_at_sixty_four_segments_takes_a_sixty_fifth() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10655,6 +10726,7 @@ mod tests {
     /// instead. The next small change is a chunk over that new base.
     #[test]
     fn chunks_past_half_the_base_seal_the_log_whole() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10711,6 +10783,7 @@ mod tests {
     /// after it, and a gap ends the chunks.
     #[test]
     fn a_log_reads_as_its_base_and_chunks() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10776,6 +10849,7 @@ mod tests {
 
     #[test]
     fn a_refused_post_keeps_the_log_and_its_sync_copies() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10810,6 +10884,7 @@ mod tests {
 
     #[test]
     fn an_echoed_sync_atom_is_not_treated_as_adopted() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10837,6 +10912,7 @@ mod tests {
 
     #[test]
     fn a_dry_run_prints_the_plan_and_writes_nothing() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10864,6 +10940,7 @@ mod tests {
 
     #[test]
     fn a_young_log_needs_force_and_a_dry_run_still_writes_nothing() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10896,6 +10973,7 @@ mod tests {
     /// again: the deletion already started.
     #[test]
     fn a_missing_log_is_resumed_from_head() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10947,6 +11025,7 @@ mod tests {
 
     #[test]
     fn an_import_retires_an_adopted_host_without_its_log() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -10996,6 +11075,7 @@ mod tests {
 
     #[test]
     fn a_readded_log_is_imported_instead_of_retired() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -11042,6 +11122,7 @@ mod tests {
 
     #[test]
     fn an_import_with_nothing_to_retire_still_says_there_are_no_logs() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -11083,6 +11164,7 @@ mod tests {
     /// dropped is retired.
     #[test]
     fn an_import_keys_each_text_by_its_ticket() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -11120,6 +11202,7 @@ mod tests {
     /// text the host dropped, and rewrites the file by memory.
     #[test]
     fn an_import_reads_a_taken_file_of_texts() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -11131,6 +11214,7 @@ mod tests {
     /// it goes once the tracker's own is written.
     #[test]
     fn an_import_reads_the_taken_file_trackers_shared() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -11193,6 +11277,7 @@ mod tests {
     /// tracker, and the next import does not read the shared path again.
     #[test]
     fn an_upgraded_tracker_retires_what_the_peer_dropped() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -11241,6 +11326,7 @@ mod tests {
     /// The shared file goes only after the tracker's own is written.
     #[test]
     fn a_failed_taken_write_keeps_the_shared_file() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -11272,6 +11358,7 @@ mod tests {
     /// the tracker's directory; host `..` named a sender of `sync:..`.
     #[test]
     fn an_import_skips_a_log_named_outside_host_and_scope_names() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -11392,6 +11479,7 @@ mod tests {
 
     #[test]
     fn an_adopt_takes_every_scope_log_of_the_host() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -11478,6 +11566,7 @@ mod tests {
 
     #[test]
     fn a_refused_extra_scope_keeps_every_log() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -11504,6 +11593,7 @@ mod tests {
     /// The bad file stays; the one that opens is adopted.
     #[test]
     fn a_bad_ciphertext_keeps_that_scope_and_adopts_the_other() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -11540,6 +11630,7 @@ mod tests {
     /// named as adopted. An empty cloud log opens and still has no atoms.
     #[test]
     fn adopt_summary_names_only_scopes_that_post() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -11582,6 +11673,7 @@ mod tests {
 
     #[test]
     fn a_young_extra_scope_blocks_the_adopt() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -11649,6 +11741,7 @@ mod tests {
     /// would put that lesson, and every unscoped atom, on the shared log.
     #[test]
     fn a_primary_scope_named_cloud_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join(".ljos")).unwrap();
@@ -11690,6 +11783,7 @@ mod tests {
 
     #[test]
     fn vm_memory_lands_in_the_cloud_log_and_box_memory_does_not() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
@@ -11766,6 +11860,7 @@ mod tests {
 
     #[test]
     fn a_scope_name_is_lowercase_words_and_digits() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join(".ljos")).unwrap();
@@ -11810,6 +11905,7 @@ mod tests {
     /// "cloud"` sealed an unscoped box atom into `<host>+cloud`.
     #[test]
     fn an_unscoped_atom_is_not_sealed_into_an_extra_scope() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config");
@@ -11851,6 +11947,7 @@ mod tests {
     /// a machine that is not a recipient writes nothing and says why.
     #[test]
     fn a_log_replaced_under_the_same_atoms_is_read_again() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let _env = hold_env(dir.path());
         let scope: Scope =
@@ -11903,6 +12000,7 @@ mod tests {
 
     #[test]
     fn a_default_scope_naming_an_extra_scope_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config");
@@ -11937,6 +12035,7 @@ mod tests {
 
     #[test]
     fn a_bad_scope_name_seals_nothing() {
+        let _env_read = crate::test_env_read_lock();
         let err = handover_recipients("Not A Scope").unwrap_err();
         assert_eq!(
             crate::policy_label::as_policy(&err).expect("label").label,
@@ -11951,6 +12050,7 @@ mod tests {
 
     #[test]
     fn an_export_deletes_a_log_for_a_removed_scope() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config");
@@ -11993,6 +12093,7 @@ mod tests {
     /// log was sealed, so `sync_one` never reached the commit.
     #[test]
     fn an_empty_extra_scope_is_skipped_and_the_primary_still_commits() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config");
@@ -12054,6 +12155,7 @@ mod tests {
 
     #[test]
     fn an_empty_primary_scope_still_refuses_to_export() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -12082,6 +12184,7 @@ mod tests {
 
     #[test]
     fn commit_logs_commits_each_scope_and_drops_a_removed_one() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -12159,6 +12262,7 @@ mod tests {
     /// it along with its log and digest, on disk and in the commit.
     #[test]
     fn a_removed_scope_takes_its_chunks_with_it() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let _env = begin(dir.path());
         let root = tracker(dir.path());
@@ -12199,6 +12303,7 @@ mod tests {
 
     #[test]
     fn a_removed_scope_log_is_not_imported() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
@@ -12226,6 +12331,7 @@ mod tests {
 
     #[test]
     fn an_import_retires_atoms_when_the_extra_scope_is_gone() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -12319,6 +12425,7 @@ mod tests {
 
     #[test]
     fn taken_files_are_keyed_by_tracker_as_well_as_scope() {
+        let _env_read = crate::test_env_read_lock();
         let a = taken_path(Path::new("/tmp/tracker-a"), "example-host", "peer");
         let b = taken_path(Path::new("/tmp/tracker-b"), "example-host", "peer");
         assert_ne!(a, b, "two trackers shared one taken file");
@@ -12334,6 +12441,7 @@ mod tests {
     /// `+` is before `.`. Import has to read the primary log first.
     #[test]
     fn import_jobs_reads_the_primary_log_before_an_extra_scope() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -12390,6 +12498,7 @@ mod tests {
     /// scope afterwards deleted that claim.
     #[test]
     fn a_text_moved_between_scopes_is_kept() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -12506,6 +12615,7 @@ mod tests {
     /// primary sender.
     #[test]
     fn an_extra_scope_log_is_imported_under_its_sender() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -12574,6 +12684,7 @@ mod tests {
     /// is taken. The primary log, sealed to someone else, is not.
     #[test]
     fn a_vm_import_with_only_the_cloud_key_takes_the_cloud_log() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -12652,6 +12763,7 @@ mod tests {
     /// `scope:` entity is cloud. A example-host atom and an unscoped atom stay out.
     #[test]
     fn the_merge_driver_reexports_an_extra_scope_without_primary_atoms() {
+        let _env_read = crate::test_env_read_lock();
         if !crate::tool_installed("packsetd") {
             say!("skipped: packsetd is not installed");
             return;
@@ -12910,6 +13022,7 @@ mod tests {
     /// another host's name is refused, and the host it names keeps it.
     #[test]
     fn a_headerless_cloud_log_is_not_taken_under_any_name() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -12972,6 +13085,7 @@ mod tests {
     /// removed scope is not a command.
     #[test]
     fn adopt_legacy_ignores_hostile_names_and_binds_the_host_with_equals() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -13044,6 +13158,7 @@ mod tests {
     /// the cloud identity, and retired what the headed log had added.
     #[test]
     fn a_headed_log_put_back_to_its_headerless_blob_retires_nothing() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -13081,6 +13196,7 @@ mod tests {
     /// name, retired what the current log holds and shrank the taken set.
     #[test]
     fn a_primary_log_under_its_plus_alias_retires_nothing() {
+        let _env_read = crate::test_env_read_lock();
         // Another test may have replaced PATH for a moment. The env lock
         // is what puts it back, so the age check has to take that lock.
         let missing = {
@@ -13128,6 +13244,7 @@ mod tests {
     /// no file in the work tree.
     #[test]
     fn the_merge_driver_does_not_copy_a_symlinked_log_into_the_merge() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -13207,6 +13324,7 @@ mod tests {
     /// pinned blob once the box has written a headed log are all refused.
     #[test]
     fn a_legacy_log_is_read_only_as_the_blob_the_reader_pinned() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -13284,6 +13402,7 @@ mod tests {
     /// history and must not offer adoption of a headerless replacement.
     #[test]
     fn a_second_clone_does_not_adopt_a_host_whose_committed_log_was_headed() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -13352,6 +13471,7 @@ mod tests {
     /// clone sees that commit, and so does the shallow one once deepened.
     #[test]
     fn a_clone_missing_history_neither_offers_nor_pins_adopt_legacy() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -13465,6 +13585,7 @@ mod tests {
     /// the `?` branch treats the gap as a whole history and pins the tip.
     #[test]
     fn a_promisor_clone_does_not_fetch_or_adopt_a_missing_headed_blob() {
+        let _env_read = crate::test_env_read_lock();
         // Another test may have replaced PATH for a moment. The env lock
         // is what puts it back, so the age check has to take that lock.
         let missing = {
@@ -13626,6 +13747,7 @@ mod tests {
     /// to adopt the forged blob.
     #[test]
     fn a_headed_log_behind_an_ours_merge_still_counts() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -13673,6 +13795,7 @@ mod tests {
     /// the headed mark, and a scope dropped from the config was still named.
     #[test]
     fn doctor_does_not_record_a_headed_log_or_name_a_removed_scope() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }
@@ -13738,6 +13861,7 @@ mod tests {
     /// reached through a symlinked parent, and a git worktree.
     #[test]
     fn honest_logs_import_through_linked_homes_parents_and_worktrees() {
+        let _env_read = crate::test_env_read_lock();
         if crate::require_tool(crate::test_tools::Tool::AgeKeygen) {
             return;
         }

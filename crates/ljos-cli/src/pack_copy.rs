@@ -248,12 +248,14 @@ mod tests {
 
     #[test]
     fn a_short_sentence_is_one_unchanged_copy() {
+        let _env_read = crate::test_env_read_lock();
         let text = "pin the fuse";
         assert_eq!(pack_copies(text), vec![text.to_string()]);
     }
 
     #[test]
     fn a_long_sentence_is_split_under_the_word_limit() {
+        let _env_read = crate::test_env_read_lock();
         // Two sentences fit in one atom. A sentence longer than that still
         // has to become more than one copy.
         let words = packset_core::prose::VERY_HARD_WORDS * 2 + 5;
@@ -266,6 +268,7 @@ mod tests {
 
     #[test]
     fn three_sentences_are_not_posted_as_one_atom() {
+        let _env_read = crate::test_env_read_lock();
         let text = "The parser kept the hyphen. The test pins it. The release ships it.";
         let copies = assert_copies(text);
         assert!(copies.len() > 1, "{copies:?}");
@@ -274,6 +277,7 @@ mod tests {
 
     #[test]
     fn a_note_past_the_soft_cap_is_cut_into_copies_inside_it() {
+        let _env_read = crate::test_env_read_lock();
         let text = "The cat sat on the mat. ".repeat(40);
         assert!(text.chars().count() > packset_core::record::TEXT_SOFT_CAP);
         let copies = assert_copies(&text);

@@ -129,6 +129,7 @@ mod tests {
     /// minutes ago.
     #[test]
     fn a_claim_minutes_ago_across_the_utc_date_is_minutes() {
+        let _env_read = crate::test_env_read_lock();
         let now = at_offset(2, 2026, 11, 16, 0, 20);
         assert_eq!(
             now.with_timezone(&chrono::Utc).date_naive().to_string(),
@@ -156,6 +157,7 @@ mod tests {
     /// A clock a few minutes ahead must not print a negative age.
     #[test]
     fn a_stamp_a_few_minutes_ahead_is_just_now() {
+        let _env_read = crate::test_env_read_lock();
         let now = at_offset(0, 2026, 11, 16, 12, 0);
         let stamp = "[2026-11-16 Mon 12:03]";
         assert_eq!(at(stamp, now).as_deref(), Some("just now"));
@@ -167,6 +169,7 @@ mod tests {
 
     #[test]
     fn hours_and_days_count_from_the_instants() {
+        let _env_read = crate::test_env_read_lock();
         let now = at_offset(0, 2026, 11, 16, 15, 0);
         assert_eq!(at("[2026-11-16 Mon 12:00]", now).as_deref(), Some("3h"));
         assert_eq!(at("[2026-11-14 Sat 15:00]", now).as_deref(), Some("2d"));
@@ -175,6 +178,7 @@ mod tests {
 
     #[test]
     fn two_writings_of_one_instant_age_the_same() {
+        let _env_read = crate::test_env_read_lock();
         let utc = now_from(Some("2026-11-21T03:15:30+00:00"));
         let east = now_from(Some(" 2026-11-21T05:15:30+02:00 "));
         assert_eq!(utc, east);
@@ -191,6 +195,7 @@ mod tests {
 
     #[test]
     fn an_unparsable_instant_is_the_clock() {
+        let _env_read = crate::test_env_read_lock();
         for raw in [None, Some(""), Some("  "), Some("2026-11-21"), Some("soon")] {
             let before = chrono::Local::now().fixed_offset();
             let now = now_from(raw);

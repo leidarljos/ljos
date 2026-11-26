@@ -1284,6 +1284,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn restoring_a_non_executable_hook_over_a_symlink_leaves_the_target() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::PermissionsExt;
         let mode_of =
             |path: &Path| fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777;
@@ -1312,6 +1313,7 @@ mod tests {
 
     #[test]
     fn a_later_edit_survives_the_reverse_span() {
+        let _env_read = crate::test_env_read_lock();
         let before = b"one\ntwo\n";
         let after = b"one\nljos\ntwo\n";
         let current = b"mine\none\nljos\ntwo\n";
@@ -1323,6 +1325,7 @@ mod tests {
 
     #[test]
     fn removing_a_json_pointer_keeps_the_other_entries() {
+        let _env_read = crate::test_env_read_lock();
         let mut value: Value =
             serde_json::from_str(r#"{"mcpServers":{"mine":{},"ljos":{"command":"ljos-mcp"}}}"#)
                 .unwrap();

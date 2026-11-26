@@ -340,6 +340,7 @@ mod tests {
 
     #[test]
     fn object_phrases_are_damage_and_other_git_errors_are_not() {
+        let _env_read = crate::test_env_read_lock();
         for said in [
             "fatal: bad object HEAD",
             "fatal: bad object refs/heads/master",
@@ -373,6 +374,7 @@ mod tests {
 
     #[test]
     fn a_healthy_checkout_and_an_unborn_branch_say_nothing() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
         seeded(&root);
@@ -395,6 +397,7 @@ mod tests {
 
     #[test]
     fn a_pack_without_an_index_names_the_repair_and_does_not_run_it() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
         seeded(&root);
@@ -421,6 +424,7 @@ mod tests {
 
     #[test]
     fn a_missing_head_commit_names_the_same_repair() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
         seeded(&root);

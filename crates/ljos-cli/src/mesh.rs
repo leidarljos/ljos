@@ -1253,6 +1253,7 @@ mod tests {
     /// the binary, so the link is replaced and its target is not changed.
     #[test]
     fn placing_a_binary_follows_no_link_at_its_name() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("tailscaled");
@@ -1284,6 +1285,7 @@ mod tests {
 
     #[test]
     fn a_daemon_whose_start_time_cannot_be_read_runs_on_and_down_signals_nothing() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::process::CommandExt as _;
         let dir = tempfile::tempdir().unwrap();
         // `cat` on a pipe this test holds runs until it is killed.

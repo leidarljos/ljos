@@ -2149,6 +2149,7 @@ mod tests {
 
     #[test]
     fn an_editor_name_matches_the_file_and_not_a_shell() {
+        let _env_read = crate::test_env_read_lock();
         assert!(is_editor_name("Cursor"));
         assert!(is_editor_name("/Applications/Cursor Helper"));
         assert!(is_editor_name("cursor-agent"));
@@ -2158,6 +2159,7 @@ mod tests {
 
     #[test]
     fn a_runner_is_read_from_the_file_it_runs_from() {
+        let _env_read = crate::test_env_read_lock();
         let roots = install_roots(Some(Path::new("/home/u")));
         for (path, want) in [
             ("/home/u/.local/share/claude/versions/2.1.3", Some("claude")),
@@ -2239,6 +2241,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_install_root_holds_only_what_resolves_inside_it() {
+        let _env_read = crate::test_env_read_lock();
         let base = tempfile::Builder::new()
             .prefix(".ljos-roots-")
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
@@ -2294,6 +2297,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_root_in_a_directory_others_may_write_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let base = tempfile::Builder::new()
             .prefix(".ljos-above-")
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
@@ -2365,6 +2369,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_parent_swapped_after_the_path_resolved_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::MetadataExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-swap-")
@@ -2420,6 +2425,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_executable_that_cannot_be_read_is_no_runner() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::MetadataExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-exe-")
@@ -2445,6 +2451,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_script_names_the_runner_only_for_an_installed_runtime() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::MetadataExt as _;
         let base = tempfile::Builder::new()
             .prefix(".ljos-runtime-")
@@ -2506,6 +2513,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_nix_entry_is_a_runner_only_in_a_store_nix_keeps() {
+        let _env_read = crate::test_env_read_lock();
         let base = tempfile::Builder::new()
             .prefix(".ljos-store-")
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
@@ -2612,6 +2620,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_group_write_counts_only_from_a_group_the_person_has_alone() {
+        let _env_read = crate::test_env_read_lock();
         // SAFETY: getuid takes no arguments and only reads the process
         // identity.
         let uid = unsafe { libc::getuid() };
@@ -2674,6 +2683,7 @@ mod tests {
     /// read whole lists no one rather than fewer.
     #[test]
     fn a_primary_group_is_listed_only_from_a_passwd_file_read_whole() {
+        let _env_read = crate::test_env_read_lock();
         let etc = tempfile::tempdir().unwrap();
         #[expect(
             clippy::disallowed_methods,
@@ -2723,6 +2733,7 @@ mod tests {
     /// members hold the group as well, though a lookup returns the first.
     #[test]
     fn a_group_is_read_only_from_one_line_of_a_group_file_read_whole() {
+        let _env_read = crate::test_env_read_lock();
         let etc = tempfile::tempdir().unwrap();
         #[expect(
             clippy::disallowed_methods,
@@ -2765,6 +2776,7 @@ mod tests {
     /// refuses everything.
     #[test]
     fn a_young_runner_in_a_recorded_tool_call_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let _guard = crate::test_env_lock();
         let home = tempfile::tempdir().unwrap();
         // SAFETY: `test_env_lock` puts HOME back when it drops.
@@ -2805,6 +2817,7 @@ mod tests {
     /// runtime that has recorded no tool call.
     #[test]
     fn a_tool_call_record_is_seen_when_xdg_runtime_dir_differs() {
+        let _env_read = crate::test_env_read_lock();
         let home = tempfile::tempdir().unwrap();
         let writer = tempfile::tempdir().unwrap();
         let reader = tempfile::tempdir().unwrap();
@@ -2876,6 +2889,7 @@ mod tests {
 
     #[test]
     fn a_missing_tool_call_record_names_where_it_was_looked_up() {
+        let _env_read = crate::test_env_read_lock();
         let _guard = crate::test_env_lock();
         let home = tempfile::tempdir().unwrap();
         let run = tempfile::tempdir().unwrap();
@@ -2914,6 +2928,7 @@ mod tests {
 
     #[test]
     fn a_tool_calls_variables_mark_a_runner_started_inside_one() {
+        let _env_read = crate::test_env_read_lock();
         let env = |k: &str, v: &str| vec![(k.to_string(), v.to_string())];
         assert_eq!(tool_call_stamp(&env("CLAUDECODE", "1")), Some("CLAUDECODE"));
         assert_eq!(
@@ -2927,6 +2942,7 @@ mod tests {
 
     #[test]
     fn only_a_bare_hook_command_is_the_runners_hook_shell() {
+        let _env_read = crate::test_env_read_lock();
         for cmd in [
             "ljos hook",
             "/home/u/.cargo/bin/ljos hook --runner codex",
@@ -2955,12 +2971,14 @@ mod tests {
     /// not the person's.
     #[test]
     fn a_hook_this_test_runs_has_no_runner() {
+        let _env_read = crate::test_env_read_lock();
         let why = hook_runner().unwrap_err();
         assert!(why.contains("not a runner's own program"), "{why}");
     }
 
     #[test]
     fn a_prompt_origin_label_names_the_parent_and_says_nothing_is_wrong() {
+        let _env_read = crate::test_env_read_lock();
         let why = "its parent, timeout (pid 9), is not a runner's own program: a shell, an interpreter or ssh ran it, so a tool call may have";
         let line = prompt_origin_label(why);
         assert_eq!(
@@ -2990,6 +3008,7 @@ mod tests {
 
     #[test]
     fn this_process_has_live_ancestors_and_a_dead_pid_does_not_match() {
+        let _env_read = crate::test_env_read_lock();
         let chain = ancestors();
         assert!(!chain.is_empty(), "the test runner is above this process");
         assert!(chain.iter().all(alive));
@@ -3008,6 +3027,7 @@ mod tests {
 
     #[test]
     fn a_reaped_child_is_not_alive() {
+        let _env_read = crate::test_env_read_lock();
         #[expect(
             clippy::disallowed_methods,
             reason = "starts a program outside git hook code"
@@ -3027,6 +3047,7 @@ mod tests {
 
     #[test]
     fn a_child_is_read_with_the_environment_it_was_started_with() {
+        let _env_read = crate::test_env_read_lock();
         #[expect(
             clippy::disallowed_methods,
             reason = "starts a program outside git hook code"
@@ -3058,6 +3079,7 @@ mod tests {
 
     #[test]
     fn the_calling_shell_is_the_outermost_of_a_nested_run() {
+        let _env_read = crate::test_env_read_lock();
         let harness = named(10, "claude");
         let chain = [
             named(3, "timeout"),
@@ -3090,6 +3112,7 @@ mod tests {
 
     #[test]
     fn the_runner_is_above_the_shells_and_wrappers_it_started() {
+        let _env_read = crate::test_env_read_lock();
         let chain = [
             named(4, "sh"),
             named(3, "timeout"),
@@ -3106,6 +3129,7 @@ mod tests {
 
     #[test]
     fn a_session_above_the_hook_is_never_its_runner() {
+        let _env_read = crate::test_env_read_lock();
         for session in ["tmux", "tmux: server", "gnome-terminal-", "systemd", "sshd"] {
             let chain = [named(4, "sh"), named(5, "bash"), named(2, session)];
             assert_eq!(runner(&chain).map(|p| p.pid), Some(5), "{session}");
@@ -3125,6 +3149,7 @@ mod tests {
 
     #[test]
     fn a_harness_outranks_a_runtime_that_only_started_the_hook() {
+        let _env_read = crate::test_env_read_lock();
         let chain = [
             fake(1, "sh"),
             fake(2, "uv"),
@@ -3153,6 +3178,7 @@ mod tests {
 
     #[test]
     fn a_node_harness_with_no_known_harness_above_is_the_runner() {
+        let _env_read = crate::test_env_read_lock();
         let chain = [
             fake(1, "sh"),
             fake(2, "node"),
@@ -3173,6 +3199,7 @@ mod tests {
 
     #[test]
     fn pid_1_is_the_runner_only_as_a_harness() {
+        let _env_read = crate::test_env_read_lock();
         let chain = [fake(1, "sh"), fake(2, "uv"), named(1, "claude")];
         assert_eq!(runner(&chain), Some(&chain[2]), "a container's harness");
         let chain = [fake(1, "sh"), fake(2, "bash"), named(1, "tini")];
@@ -3184,6 +3211,7 @@ mod tests {
 
     #[test]
     fn the_walk_reads_up_to_a_process_with_no_parent() {
+        let _env_read = crate::test_env_read_lock();
         let chain = ancestors();
         let top = chain.last().expect("the test runner is above this process");
         let top = stat(top.pid).expect("the top process was just read");

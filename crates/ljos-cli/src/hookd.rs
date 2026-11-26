@@ -841,6 +841,7 @@ mod tests {
 
     #[test]
     fn only_a_plain_hook_is_admitted() {
+        let _env_read = crate::test_env_read_lock();
         let args = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
         assert!(admitted_command(&args(&["hook"])));
         assert!(admitted_command(&args(&["hook", "--event", "PreToolUse"])));
@@ -859,6 +860,7 @@ mod tests {
 
     #[test]
     fn the_event_flag_reads_both_spellings() {
+        let _env_read = crate::test_env_read_lock();
         let args = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
         assert_eq!(
             flag_value(&args(&["hook", "--event", "Stop"]), "--event").as_deref(),
@@ -873,6 +875,7 @@ mod tests {
 
     #[test]
     fn timings_read_p95_and_waits_from_the_log() {
+        let _env_read = crate::test_env_read_lock();
         let mut text = String::new();
         for ms in 1..=100 {
             text.push_str(&format!("hook 0 {ms} {}\n", ms / 10));
@@ -890,6 +893,7 @@ mod tests {
 
     #[test]
     fn a_full_queue_and_a_late_turn_are_refused_in_order() {
+        let _env_read = crate::test_env_read_lock();
         let gate = Arc::new(Gate {
             turns: Mutex::new(Turns {
                 running: 0,
@@ -938,6 +942,7 @@ mod tests {
 
     #[test]
     fn a_finished_holder_loses_the_flight_lock() {
+        let _env_read = crate::test_env_read_lock();
         let dir = std::env::temp_dir().join(format!("ljos-flight-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

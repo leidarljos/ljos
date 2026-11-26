@@ -1286,6 +1286,7 @@ mod tests {
 
     #[test]
     fn a_signed_entry_verifies() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let entry = sign_as(question_entry(), 7);
         verify_entry(&entry).expect("valid signature");
@@ -1293,6 +1294,7 @@ mod tests {
 
     #[test]
     fn a_record_entry_is_signed_with_the_seat_ballot_key() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let entry = sign_as(question_entry(), 7);
         let path = crate::ballot_sig::seat_key_path("alpha/seat-a").expect("path");
@@ -1306,6 +1308,7 @@ mod tests {
 
     #[test]
     fn each_voter_signs_with_its_own_key_file() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let at = "2026-10-21T10:00:00Z";
         let one = sign_entry(ballot_entry("a/b-c", "accept", at), "a/b-c").expect("a/b-c");
@@ -1356,6 +1359,7 @@ mod tests {
 
     #[test]
     fn an_explicit_seat_key_is_used_as_given() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         let given = root.path().join("seat.key");
@@ -1377,6 +1381,7 @@ mod tests {
 
     #[test]
     fn sign_entry_refuses_a_signer_not_named_on_the_entry() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let err = sign_entry(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
@@ -1392,6 +1397,7 @@ mod tests {
 
     #[test]
     fn sign_entry_refuses_a_voter_id_in_another_spelling() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let at = "2026-10-21T10:00:00Z";
         for (written, canonical) in [
@@ -1436,6 +1442,7 @@ mod tests {
 
     #[test]
     fn a_version_suffix_stays_part_of_the_seat() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let at = "2026-10-21T10:00:00Z";
         let entries = ["alpha/model-5", "alpha/model"].map(|voter| {
@@ -1456,6 +1463,7 @@ mod tests {
 
     #[test]
     fn a_stored_ballot_in_another_spelling_names_its_voter_id() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         // One seed stands in for the key file `Alpha/seat-a` and
         // `alpha/seat-a` share on a case-insensitive volume.
@@ -1483,6 +1491,7 @@ mod tests {
 
     #[test]
     fn a_one_byte_edit_fails_verification() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let mut entry = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
@@ -1504,6 +1513,7 @@ mod tests {
 
     #[test]
     fn a_small_order_key_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let key = format!("01{}", "00".repeat(31));
         let sig = format!("01{}", "00".repeat(63));
@@ -1537,6 +1547,7 @@ mod tests {
 
     #[test]
     fn number_and_unicode_spellings_follow_the_typed_form() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let mut unsigned = ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z");
         let Entry::Ballot(ballot) = &mut unsigned.entry else {
@@ -1577,6 +1588,7 @@ mod tests {
 
     #[test]
     fn the_documented_ballot_id_matches_the_example() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let entry = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
@@ -1592,6 +1604,7 @@ mod tests {
 
     #[test]
     fn docs_name_first_seen_pin_scope() {
+        let _env_read = crate::test_env_read_lock();
         let doc = include_str!("../doc/record-v1.md");
         let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
@@ -1604,6 +1617,7 @@ mod tests {
 
     #[test]
     fn docs_name_the_deleted_withdrawal_limit() {
+        let _env_read = crate::test_env_read_lock();
         let doc = include_str!("../doc/record-v1.md");
         let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
@@ -1614,6 +1628,7 @@ mod tests {
 
     #[test]
     fn docs_name_the_tracker_and_key_minting_limits() {
+        let _env_read = crate::test_env_read_lock();
         let doc = include_str!("../doc/record-v1.md");
         let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
@@ -1628,6 +1643,7 @@ mod tests {
 
     #[test]
     fn docs_name_voter_pin_precedence_and_ambiguity_drop() {
+        let _env_read = crate::test_env_read_lock();
         let doc = include_str!("../doc/record-v1.md");
         let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
@@ -1642,6 +1658,7 @@ mod tests {
 
     #[test]
     fn a_second_key_under_one_run_id_is_a_mismatch() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let first = sign_as(
             ballot_entry("alpha/run-101", "accept", "2026-10-21T10:00:00Z"),
@@ -1659,6 +1676,7 @@ mod tests {
 
     #[test]
     fn a_seat_voter_is_pinned_to_one_key() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let first = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
@@ -1674,6 +1692,7 @@ mod tests {
 
     #[test]
     fn a_question_opener_is_pinned_with_the_voter() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let question = sign_as(question_entry(), 1);
         let ballot = sign_as(
@@ -1686,6 +1705,7 @@ mod tests {
 
     #[test]
     fn a_run_keeps_its_identity_and_one_key() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let err = sign_entry(
             ballot_entry("run/run-101", "accept", "2026-10-21T10:00:00Z"),
@@ -1707,6 +1727,7 @@ mod tests {
 
     #[test]
     fn latest_ballot_per_voter_wins_and_withdrawn_does_not_count() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let a1 = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
@@ -1728,6 +1749,7 @@ mod tests {
 
     #[test]
     fn a_question_id_in_capitals_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let at = "2026-10-21T10:00:00Z";
         let lower = sign_as(ballot_entry("alpha/seat-a", "accept", at), 3);
@@ -1746,6 +1768,7 @@ mod tests {
 
     #[test]
     fn two_unreplaced_ballots_in_one_hour_are_flagged() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let accept = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
@@ -1761,6 +1784,7 @@ mod tests {
 
     #[test]
     fn a_later_ballot_stands_past_a_same_hour_pair() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let cast = |stance: &str, hour: u8| {
             sign_as(
@@ -1789,6 +1813,7 @@ mod tests {
 
     #[test]
     fn a_replayed_ballot_does_not_erase_its_voter() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let cast = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
@@ -1822,6 +1847,7 @@ mod tests {
 
     #[test]
     fn one_key_counts_once_on_a_question() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let entries = [
             sign_as(
@@ -1850,6 +1876,7 @@ mod tests {
 
     #[test]
     fn distinct_persona_seats_with_distinct_keys_count_apart() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let entries = [
             sign_as(
@@ -1868,6 +1895,7 @@ mod tests {
 
     #[test]
     fn key_links_on_another_question_do_not_merge_voters_here() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let entries = [
             sign_as(
@@ -1906,6 +1934,7 @@ mod tests {
 
     #[test]
     fn spellings_of_one_voter_under_one_key_count_once() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let spellings = [
             "alpha/seat-a",
@@ -1937,6 +1966,7 @@ mod tests {
 
     #[test]
     fn one_seat_under_two_keys_counts_under_neither() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let entries = [
             sign_as(
@@ -1976,6 +2006,7 @@ mod tests {
 
     #[test]
     fn a_seat_under_two_keys_reads_the_same_in_every_order() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let entries = [
             sign_as(
@@ -2015,6 +2046,7 @@ mod tests {
 
     #[test]
     fn a_digit_suffix_is_a_seat_of_its_own() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let entries = [
             sign_as(
@@ -2033,6 +2065,7 @@ mod tests {
 
     #[test]
     fn runs_and_judges_keep_their_ids_whole() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         for (one, two) in [
             ("alpha/judge-model-a-120b", "beta/judge-model-a-20b"),
@@ -2057,6 +2090,7 @@ mod tests {
 
     #[test]
     fn one_key_under_two_voters_in_one_hour_is_flagged() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let at = "2026-10-21T10:00:00Z";
         let entries = [
@@ -2071,6 +2105,7 @@ mod tests {
 
     #[test]
     fn a_key_in_capital_hex_is_the_same_key() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let lower = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
@@ -2090,6 +2125,7 @@ mod tests {
 
     #[test]
     fn a_key_with_a_small_order_part_is_the_same_key() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let seed = [3u8; 32];
         let first = sign_as(
@@ -2147,6 +2183,7 @@ mod tests {
 
     #[test]
     fn a_same_hour_withdrawal_does_not_count_in_either_order() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let cast = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
@@ -2207,6 +2244,7 @@ mod tests {
 
     #[test]
     fn replaces_must_target_the_same_voter_and_question() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let missing = sign_as(
             with_replaces(
@@ -2271,6 +2309,7 @@ mod tests {
 
     #[test]
     fn check_dir_reads_and_verifies_json_entries() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let dir = tempfile::tempdir().expect("tempdir");
         let q = sign_as(question_entry(), 5);
@@ -2310,6 +2349,7 @@ mod tests {
 
     #[test]
     fn timestamps_must_be_utc_hours() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         for bad in [
             "2026-10-21T10:00:00+05:30",
@@ -2346,6 +2386,7 @@ mod tests {
 
     #[test]
     fn stance_spelling_must_be_exact_lowercase() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         for bad in ["accept ", "accept\u{200b}", "Accept", "WITHDRAWN"] {
             let err = sign_entry(
@@ -2372,6 +2413,7 @@ mod tests {
     /// on the file, including inside `signature`.
     #[test]
     fn reserved_and_unsigned_fields_are_refused() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let signed = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
@@ -2418,6 +2460,7 @@ mod tests {
 
     #[test]
     fn unknown_signature_fields_are_refused() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let signed = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
@@ -2450,6 +2493,7 @@ mod tests {
 
     #[test]
     fn duplicate_json_keys_are_refused() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let signed = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
@@ -2483,6 +2527,7 @@ mod tests {
 
     #[test]
     fn a_pin_file_rejects_a_different_run_key() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -2512,6 +2557,7 @@ mod tests {
 
     #[test]
     fn unreadable_pin_file_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -2542,6 +2588,7 @@ mod tests {
 
     #[test]
     fn a_dangling_pin_file_link_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -2569,6 +2616,7 @@ mod tests {
 
     #[test]
     fn duplicate_pin_voter_lines_are_refused() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -2594,6 +2642,7 @@ mod tests {
 
     #[test]
     fn a_seat_voter_must_match_the_tracker_seat_pin() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -2620,6 +2669,7 @@ mod tests {
 
     #[test]
     fn a_voter_pin_row_cannot_give_a_seat_a_second_key() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -2653,6 +2703,7 @@ mod tests {
 
     #[test]
     fn a_seat_pin_accepts_same_key_in_capital_hex() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -2680,6 +2731,7 @@ mod tests {
 
     #[test]
     fn a_pin_voter_that_is_not_canonical_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -2721,6 +2773,7 @@ mod tests {
 
     #[test]
     fn holder_judge_and_legacy_pin_rows_hold_their_seat() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -2771,6 +2824,7 @@ mod tests {
 
     #[test]
     fn a_seat_pin_does_not_hold_a_run_or_judge_of_that_name() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -2799,6 +2853,7 @@ mod tests {
 
     #[test]
     fn a_seat_pinned_to_two_keys_under_two_names_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -2845,6 +2900,7 @@ mod tests {
 
     #[test]
     fn a_run_seat_with_a_pin_row_is_held_to_it() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -2876,6 +2932,7 @@ mod tests {
 
     #[test]
     fn a_voter_seat_part_must_match_its_slug() {
+        let _env_read = crate::test_env_read_lock();
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {

@@ -847,6 +847,7 @@ mod tests {
 
     #[test]
     fn a_wake_reads_back_as_written_and_keeps_no_key() {
+        let _env_read = crate::test_env_read_lock();
         let mut table = BTreeMap::new();
         table.insert(
             "grok".to_string(),
@@ -880,6 +881,7 @@ mod tests {
 
     #[test]
     fn a_webhook_gets_the_envelope_and_not_the_body() {
+        let _env_read = crate::test_env_read_lock();
         let event = Event {
             seat: "grok".into(),
             from: "saddle".into(),
@@ -915,6 +917,7 @@ mod tests {
 
     #[test]
     fn http_is_loopback_only_and_an_attacker_suffix_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         for url in [
             "http://localhost.attacker.invalid/hook",
             "http://127.0.0.1.attacker.invalid/hook",
@@ -946,6 +949,7 @@ mod tests {
 
     #[test]
     fn a_wake_that_runs_past_its_timeout_is_stopped() {
+        let _env_read = crate::test_env_read_lock();
         let event = Event {
             seat: "slow".into(),
             ..Event::default()
@@ -971,6 +975,7 @@ mod tests {
 
     #[test]
     fn a_prefix_matches_a_run_and_an_exact_name_wins() {
+        let _env_read = crate::test_env_read_lock();
         let mut table = BTreeMap::new();
         table.insert("inky".into(), hook("https://example.test/inky"));
         table.insert("ljosbot-".into(), hook("https://example.test/ljosbot"));
@@ -1084,6 +1089,7 @@ mod tests {
 
     #[test]
     fn a_webhook_redirect_is_refused_and_not_followed() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         let (target_port, target_rx) = serve_one();
         let redirect = std::net::TcpListener::bind("127.0.0.1:0").expect("redirect bind");
@@ -1124,6 +1130,7 @@ mod tests {
 
     #[test]
     fn concurrent_writers_and_reader_keep_every_entry() {
+        let _env_read = crate::test_env_read_lock();
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::{Arc, Barrier};
 
@@ -1201,6 +1208,7 @@ mod tests {
 
     #[test]
     fn set_webhook_refuses_to_overwrite_a_broken_wake_toml() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         let wake_file = path();
         std::fs::create_dir_all(wake_file.parent().expect("wake dir")).expect("wake dir");
@@ -1224,6 +1232,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn save_atomic_keeps_existing_mode_and_creates_private_files() {
+        let _env_read = crate::test_env_read_lock();
         use std::os::unix::fs::PermissionsExt;
 
         let (_lock, _dir) = isolated();
@@ -1261,6 +1270,7 @@ mod tests {
 
     #[test]
     fn a_prefix_posts_the_run_seat_and_keeps_the_key_out_of_the_file() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         let (review_port, review_rx) = serve_one();
         let (broad_port, broad_rx) = serve_one();
@@ -1398,6 +1408,7 @@ mod tests {
 
     #[test]
     fn clear_names_the_prefix_when_the_seat_has_no_own_wake() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, _dir) = isolated();
         set_webhook("ljosbot-review-", "http://127.0.0.1:9/hook", None, None).expect("set prefix");
         let said = clear("ljosbot-review-abc").expect("clear");
@@ -1411,6 +1422,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_send_starts_the_prefix_wake_for_a_run_seat() {
+        let _env_read = crate::test_env_read_lock();
         let (_lock, dir) = isolated();
         let marker = dir.path().join("spawn.log");
         let script = dir.path().join("record-wake");

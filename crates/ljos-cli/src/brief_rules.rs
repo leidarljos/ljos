@@ -376,6 +376,7 @@ mod tests {
 
     #[test]
     fn a_kit_task_shows_the_default_brief_rules() {
+        let _env_read = crate::test_env_read_lock();
         let _iso = isolated();
         let block = for_task("Ship the kit as a format-patch bundle").expect("kit task");
         assert!(block.starts_with("Cloud-agent brief rules\n"), "{block}");
@@ -391,12 +392,14 @@ mod tests {
 
     #[test]
     fn a_plain_task_leaves_the_brief_rules_out() {
+        let _env_read = crate::test_env_read_lock();
         let _iso = isolated();
         assert!(for_task("Fix the flaky retry test").is_none());
     }
 
     #[test]
     fn a_stored_lesson_overrides_the_default_brief_rules() {
+        let _env_read = crate::test_env_read_lock();
         let _iso = isolated();
         let _plant = plant(serde_json::json!({
             "kind": "lesson",
@@ -433,6 +436,7 @@ mod tests {
 
     #[test]
     fn ordinary_tasks_do_not_show_brief_rules() {
+        let _env_read = crate::test_env_read_lock();
         let _iso = isolated();
         let ordinary = [
             "write the brief for the paper",
@@ -454,6 +458,7 @@ mod tests {
 
     #[test]
     fn clear_phrases_show_brief_rules() {
+        let _env_read = crate::test_env_read_lock();
         let _iso = isolated();
         let phrases = [
             "file it label:cloud",
@@ -480,6 +485,7 @@ mod tests {
 
     #[test]
     fn the_builtin_block_uses_the_handoff_setting() {
+        let _env_read = crate::test_env_read_lock();
         let _iso = isolated();
         let unset = for_task("build the kit").expect("rules");
         assert!(unset.contains("<LJOS_HANDOFF_DIR>/TAG/"), "{unset}");
@@ -506,6 +512,7 @@ mod tests {
 
     #[test]
     fn a_long_lesson_is_cut() {
+        let _env_read = crate::test_env_read_lock();
         let _iso = isolated();
         let mut text = String::from("Stored rule start.\n");
         text.push_str(&"x".repeat(8_000));

@@ -4288,6 +4288,7 @@ mod archive_member_tests {
 
     #[test]
     fn shell_quotes_and_escaping_paths_parse() {
+        let _env_read = crate::test_env_read_lock();
         let mut raw = b"-rw-r--r-- 0/0 3 1970-01-01 00:00:00 'bin/odd '".to_vec();
         raw.extend_from_slice(b"\\''name'\\''\nwith space'\n");
         raw.extend_from_slice(
@@ -4320,6 +4321,7 @@ mod archive_member_tests {
 
     #[test]
     fn a_bsdtar_listing_names_each_member_and_its_kind() {
+        let _env_read = crate::test_env_read_lock();
         let listing = b"drwxr-xr-x  0 runner staff       0 Oct 29 22:00 bin/\n\
 -rwxr-xr-x  0 runner staff    1024 Oct 29 22:00 bin/a file\n\
 lrwxr-xr-x  0 runner staff       0 Oct 29 22:00 bin/packset-embed -> /etc/passwd\n\
@@ -4343,6 +4345,7 @@ hrwxr-xr-x  0 runner staff       0 Oct 29 22:00 bin/b link to bin/a file\n";
 
     #[test]
     fn tar_listing_refuses_a_symlink_member() {
+        let _env_read = crate::test_env_read_lock();
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("tree");
         std::fs::create_dir_all(dir.join("bin")).unwrap();
@@ -4378,6 +4381,7 @@ hrwxr-xr-x  0 runner staff       0 Oct 29 22:00 bin/b link to bin/a file\n";
     /// and its target is not part of the member path.
     #[test]
     fn a_short_tar_listing_names_a_symlink() {
+        let _env_read = crate::test_env_read_lock();
         let raw = b"\
 lrwxr-xr-x  0 0 0 0 Jan  1  1970 bin/packset-embed -> /etc/passwd
 -rw-r--r--  0 0 0 17 Jan  1  1970 bin/real
@@ -4405,6 +4409,7 @@ mod tests {
     /// installed.
     #[test]
     fn a_binary_install_takes_no_side_name_and_follows_no_link() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src-ljos");
         crate::install_executable_mode(&src, "#!/bin/sh\necho new\n", 0o750).unwrap();
@@ -4474,6 +4479,7 @@ mod tests {
     /// its target keeps its bytes and mode.
     #[test]
     fn an_encoder_install_follows_no_link_at_the_binary() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let victim = dir.path().join("victim");
         crate::install_executable_mode(&victim, "keep\n", 0o700).unwrap();
@@ -4506,6 +4512,7 @@ mod tests {
     /// rename and deleted the previous runtime with its stage.
     #[test]
     fn a_failed_sync_after_the_switch_keeps_the_previous_encoder() {
+        let _env_read = crate::test_env_read_lock();
         struct Unset;
         impl Drop for Unset {
             fn drop(&mut self) {
@@ -4550,6 +4557,7 @@ mod tests {
     /// nothing.
     #[test]
     fn encoder_crash_child() {
+        let _env_read = crate::test_env_read_lock();
         let Some(home) = std::env::var_os("LJOS_TEST_ENCODER_HOME") else {
             return;
         };
@@ -4567,6 +4575,7 @@ mod tests {
     /// `cloud up` took that for an installed encoder.
     #[test]
     fn a_crash_while_switching_the_encoder_leaves_a_ready_pair() {
+        let _env_read = crate::test_env_read_lock();
         for (step, want) in [("built", "1"), ("switched", "2")] {
             let dir = tempfile::tempdir().unwrap();
             let bin_dir = dir.path().join("bin");
@@ -4597,6 +4606,7 @@ mod tests {
 
     #[test]
     fn the_old_predictable_identity_temp_name_is_not_used() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cloud.age");
         let outside = dir.path().join("outside");
@@ -4619,6 +4629,7 @@ mod tests {
 
     #[test]
     fn an_old_predictable_temp_file_never_contains_the_identity() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cloud.age");
         let tmp = temp_of(&path);
@@ -4651,6 +4662,7 @@ mod tests {
     /// process's PATH or a login shell's.
     #[test]
     fn a_launchd_app_looks_for_a_bare_server_on_its_own_path() {
+        let _env_read = crate::test_env_read_lock();
         let scratch = tempfile::tempdir().unwrap();
         let bin = scratch.path().join("bin");
         let empty = scratch.path().join("empty");
@@ -4685,6 +4697,7 @@ mod tests {
 
     #[test]
     fn mode_fix_refuses_a_symlink_planted_at_the_target_path() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cloud.age");
         let outside = dir.path().join("outside");
@@ -4723,6 +4736,7 @@ mod tests {
     /// chmod would change the file in the directory the link points at.
     #[test]
     fn mode_fix_refuses_a_symlink_parent() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real");
         fs::create_dir(&real).unwrap();
@@ -4785,6 +4799,7 @@ mod tests {
 
     #[test]
     fn a_renamed_server_key_counts_when_its_command_is_the_seat() {
+        let _env_read = crate::test_env_read_lock();
         let doc = serde_json::json!({
             "mcpServers": {
                 "my__seat": {"command": "/usr/local/bin/ljos-mcp", "args": []},
@@ -4802,6 +4817,7 @@ mod tests {
 
     #[test]
     fn a_toml_server_table_names_the_seat_key() {
+        let _env_read = crate::test_env_read_lock();
         let doc: toml::Value =
             toml::from_str("[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\nargs = []\n").unwrap();
         let keys = toml_seat_keys(&doc);
@@ -4813,6 +4829,7 @@ mod tests {
 
     #[test]
     fn a_yaml_marker_names_the_seat_when_the_command_matches() {
+        let _env_read = crate::test_env_read_lock();
         let text = "extensions:\n  ljos:\n    command: ljos-mcp\n    args: []\n";
         assert_eq!(
             text_marker_key(text, "  ljos:\n    command:"),
@@ -4823,6 +4840,7 @@ mod tests {
 
     #[test]
     fn a_strict_config_that_is_not_a_file_is_ambiguous() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mcp.json");
         fs::create_dir(&path).unwrap();
@@ -4860,6 +4878,7 @@ mod tests {
 
     #[test]
     fn a_payload_command_names_the_seat_server() {
+        let _env_read = crate::test_env_read_lock();
         assert!(payload_command_is_seat("ljos-mcp"));
         assert!(payload_command_is_seat("/opt/ljos/bin/ljos-mcp"));
         assert!(payload_command_is_seat("ljos-plugin ljos-mcp"));
@@ -4871,6 +4890,7 @@ mod tests {
 
     #[test]
     fn a_large_claude_document_yields_only_mcp_servers() {
+        let _env_read = crate::test_env_read_lock();
         let history = "x".repeat(1000);
         let mut body = String::from(
             r#"{"mcpServers":{"ljos.seat":{"command":"ljos-mcp","args":[]}},"projects":{"/w":{"history":["#,
@@ -4892,6 +4912,7 @@ mod tests {
 
     #[test]
     fn a_tracker_clone_failure_line_quotes_the_remote_and_token_name() {
+        let _env_read = crate::test_env_read_lock();
         let line = format!(
             "Set {} to a token that can push to {}",
             crate::tools::sh_word(crate::tracker_attach::TOKEN_VAR),
@@ -4905,12 +4926,14 @@ mod tests {
 
     #[test]
     fn path_export_line_quotes_the_directory() {
+        let _env_read = crate::test_env_read_lock();
         let line = path_export_line(Path::new("/opt/ljos/bin"));
         assert_eq!(line, "export PATH='/opt/ljos/bin':$PATH");
     }
 
     #[test]
     fn wake_lines_quote_variable_names() {
+        let _env_read = crate::test_env_read_lock();
         let _lock = crate::test_env_lock();
         crate::with_env_mutation(|| {
             // SAFETY: this test has the process environment lock.
@@ -4929,6 +4952,7 @@ mod tests {
 
     #[test]
     fn encoder_ships_for_macos_and_linux_on_x86_64_and_aarch64() {
+        let _env_read = crate::test_env_read_lock();
         for (arch, os, want) in [
             ("x86_64", "linux", "x86_64-unknown-linux-gnu"),
             ("aarch64", "linux", "aarch64-unknown-linux-gnu"),

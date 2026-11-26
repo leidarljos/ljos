@@ -112,6 +112,8 @@ mod tests {
 
     #[test]
     fn parse_foreground_and_summon_flags() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let cli = HudCli::parse_from(["ljos-hud", "--foreground", "--toggle"]);
         assert!(cli.foreground);
         assert_eq!(cli.summon_action(), Some(SummonAction::Toggle));
@@ -120,6 +122,8 @@ mod tests {
 
     #[test]
     fn hide_starts_hidden() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let cli = HudCli::parse_from(["ljos-hud", "--hide", "--foreground"]);
         assert!(!cli.initial_visible());
         assert_eq!(cli.summon_action(), Some(SummonAction::Hide));
@@ -127,6 +131,8 @@ mod tests {
 
     #[test]
     fn help_is_in_the_cli() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let help = HudCli::command().render_help().to_string();
         assert!(help.contains("--foreground"));
         assert!(help.contains("--toggle"));
@@ -137,6 +143,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn hide_without_socket_is_zero() {
+        let _process_read = ljos_test_boot::env_read_lock();
+        let _process = ljos_test_boot::env_lock();
         let _guard = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("none.sock");

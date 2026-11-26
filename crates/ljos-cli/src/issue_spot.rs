@@ -636,6 +636,7 @@ Body.\n\n\
 
     #[test]
     fn the_project_is_the_text_before_the_last_dash() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(project_of("ebstack-vdjv"), Some("ebstack"));
         assert_eq!(project_of("example-project-w3bv"), Some("example-project"));
         assert_eq!(
@@ -651,6 +652,7 @@ Body.\n\n\
     /// leading segment removed name the same heading.
     #[test]
     fn a_nested_project_path_is_found_by_both_ids() {
+        let _env_read = crate::test_env_read_lock();
         let tmp = tempfile::tempdir().unwrap();
         let board = tmp.path().join("Software/Software/hle-mm");
         std::fs::create_dir_all(&board).unwrap();
@@ -685,6 +687,7 @@ Body.\n\n\
 
     #[test]
     fn the_card_matches_the_tracker_crate() {
+        let _env_read = crate::test_env_read_lock();
         let tmp = tempfile::tempdir().unwrap();
         let layout = layout_with_board(tmp.path());
         for id in ["demo-aaaa", "demo-bbbb"] {
@@ -702,6 +705,7 @@ Body.\n\n\
     /// own project does not.
     #[test]
     fn a_lookup_reads_one_project_only() {
+        let _env_read = crate::test_env_read_lock();
         let tmp = tempfile::tempdir().unwrap();
         let layout = layout_with_board(tmp.path());
         std::fs::create_dir_all(tmp.path().join("Issues/broken")).unwrap();
@@ -723,6 +727,7 @@ Body.\n\n\
     /// it changes, so a write between two reads is seen.
     #[test]
     fn a_kept_parse_follows_the_file() {
+        let _env_read = crate::test_env_read_lock();
         let tmp = tempfile::tempdir().unwrap();
         let layout = layout_with_board(tmp.path());
         let first = in_layout(&layout, "demo-bbbb").expect("found");
@@ -744,6 +749,7 @@ Body.\n\n\
     /// signature, and any other tracker command drops every kept read.
     #[test]
     fn a_kept_read_lasts_while_the_files_do() {
+        let _env_read = crate::test_env_read_lock();
         let tmp = tempfile::tempdir().unwrap();
         let layout = layout_with_board(tmp.path());
         let file = layout.project_issues_path("demo");
@@ -773,6 +779,7 @@ Body.\n\n\
 
     #[test]
     fn only_a_verb_on_an_issue_is_pointed_at_a_layout() {
+        let _env_read = crate::test_env_read_lock();
         assert!(route_env(&["q", "-p", "demo", "title"]).is_empty());
         assert!(route_env(&["vote", "--json"]).is_empty());
         assert!(route_env(&["create", "demo-aaaa"]).is_empty());
@@ -785,6 +792,7 @@ Body.\n\n\
     /// drawer has no ballots.
     #[test]
     fn ballots_match_the_tracker_crate() {
+        let _env_read = crate::test_env_read_lock();
         let tmp = tempfile::tempdir().unwrap();
         let board = BOARD.replace(
             "[2026-10-30 Fri 09:00] inky@box: land used=none confidence=0.9\n",
@@ -815,6 +823,7 @@ Body.\n\n\
     /// of the same layout is listed, as the tracker lists it.
     #[test]
     fn children_match_the_tracker_crate() {
+        let _env_read = crate::test_env_read_lock();
         let tmp = tempfile::tempdir().unwrap();
         let layout = layout_with_board(tmp.path());
         std::fs::create_dir_all(tmp.path().join("Issues/other")).unwrap();

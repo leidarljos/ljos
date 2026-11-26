@@ -1775,6 +1775,7 @@ mod tests {
     /// The seat that filed a proposal is on the row and in the listing.
     #[test]
     fn a_proposal_names_the_seat_that_filed_it() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe {
@@ -1796,6 +1797,7 @@ mod tests {
     /// written whole, like the other state logs.
     #[test]
     fn concurrent_proposal_rows_each_parse_and_stay_private() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("XDG_STATE_HOME", dir.path()) };
@@ -1832,6 +1834,7 @@ mod tests {
     /// before it are.
     #[test]
     fn a_torn_last_proposal_leaves_the_others() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("XDG_STATE_HOME", dir.path()) };
@@ -1851,6 +1854,7 @@ mod tests {
     /// A proposals file swapped for a symlink is not written through.
     #[test]
     fn a_symlinked_proposals_file_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("XDG_STATE_HOME", dir.path()) };
@@ -1937,6 +1941,9 @@ mod tests {
     }
 
     fn read_req(stream: &mut std::net::TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
         let mut buf = [0u8; 8192];
         let n = std::io::Read::read(stream, &mut buf).unwrap_or(0);
         String::from_utf8_lossy(&buf[..n])
@@ -2098,6 +2105,7 @@ mod tests {
     /// The list used to read every atom before it could say the queue was empty.
     #[test]
     fn an_empty_queue_does_not_scan_or_lock() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let (url, seen) = serve_corpus(40);
@@ -2142,6 +2150,7 @@ mod tests {
     /// One open row is one filtered search. The corpus is not fetched.
     #[test]
     fn an_open_row_is_a_filtered_search_not_a_pack_scan() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let text = "Pin the north fuse before the dusk firing.";
@@ -2173,6 +2182,7 @@ mod tests {
     /// A lesson the index already holds is not asked of a silent service.
     #[test]
     fn the_lesson_index_answers_without_another_pack_call() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let text = "Pin the north fuse before the dusk firing.";
@@ -2209,6 +2219,7 @@ mod tests {
     /// A silent service does not hold the list. The line names the snapshot.
     #[test]
     fn a_busy_service_lists_from_the_snapshot_within_the_timeout() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let slow = SlowPack::start();

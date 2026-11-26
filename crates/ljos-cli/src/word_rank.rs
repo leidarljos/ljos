@@ -1864,6 +1864,7 @@ mod tests {
     /// with punctuation, control characters, Unicode case and odd spaces.
     #[test]
     fn the_terms_are_the_terms_the_old_analyzer_read() {
+        let _env_read = crate::test_env_read_lock();
         let mut rng = Lcg(17);
         for round in 0..20_000 * fuzz_scale() {
             let text = rough_text(&mut rng, 1, 12);
@@ -1881,6 +1882,7 @@ mod tests {
     /// order, is read from these answers alone.
     #[test]
     fn a_cover_marks_what_a_bag_of_the_text_holds() {
+        let _env_read = crate::test_env_read_lock();
         let abc = "ABc".repeat(1_000);
         let cases = [
             ("brinefoo", "ordinary b+rine_foo"),
@@ -1942,6 +1944,7 @@ mod tests {
 
     #[test]
     fn a_stop_word_is_one_of_the_list() {
+        let _env_read = crate::test_env_read_lock();
         assert!(STOP.iter().all(|word| is_stop(word)));
         for word in [
             "", "qx", "ann", "the1", "thee", "pleases", "yours", "\u{e9}",
@@ -1954,6 +1957,7 @@ mod tests {
     /// dropped that piece and paired `brine` with the next word.
     #[test]
     fn a_leading_nul_does_not_make_a_stop_word() {
+        let _env_read = crate::test_env_read_lock();
         assert!(is_stop("the"));
         assert!(!is_stop("\0the"));
         assert!(!is_stop("\0and"));
@@ -1970,6 +1974,7 @@ mod tests {
     /// cover keeps between texts stay the size of the query, not the run.
     #[test]
     fn a_long_run_is_read_once_into_small_buffers() {
+        let _env_read = crate::test_env_read_lock();
         let terms = QueryTerms::of("brine zorbulax");
         let mut cover = Cover::of(&[&terms]);
         let mut tokens = Vec::new();
@@ -2003,6 +2008,7 @@ mod tests {
     }
     #[test]
     fn an_identifier_matches_its_words_its_digits_and_its_stem() {
+        let _env_read = crate::test_env_read_lock();
         let scans = bag("escapees list_scans returns uppercase keys");
         let words = bag("list scans");
         assert!(
@@ -2074,6 +2080,7 @@ mod tests {
 
     #[test]
     fn a_partial_title_outranks_one_shared_word() {
+        let _env_read = crate::test_env_read_lock();
         let ticket = Doc {
             id: "Software-6mrw",
             own: true,
@@ -2107,6 +2114,7 @@ mod tests {
 
     #[test]
     fn a_broader_query_names_a_term_that_occurs() {
+        let _env_read = crate::test_env_read_lock();
         let docs: Vec<Doc<'_>> = (0..COMMON_ROWS)
             .map(|_| Doc {
                 id: "tape",
@@ -2127,6 +2135,7 @@ mod tests {
 
     #[test]
     fn two_lessons_keep_a_single_shared_word() {
+        let _env_read = crate::test_env_read_lock();
         let kiln = Doc {
             id: "kiln",
             own: true,
@@ -2156,6 +2165,7 @@ mod tests {
     /// The doc samples print these scores for a one-row word search.
     #[test]
     fn one_stored_lesson_scores_what_the_docs_print() {
+        let _env_read = crate::test_env_read_lock();
         let score = |body: &str, query: &str| -> f64 {
             let docs = [Doc {
                 id: "a",
@@ -2200,6 +2210,7 @@ mod tests {
 
     #[test]
     fn no_close_line_names_the_query_and_a_broader_command() {
+        let _env_read = crate::test_env_read_lock();
         let line = no_close_line("escapees list_scans uppercase keys");
         assert!(
             line.starts_with("No close matches for \"escapees list_scans uppercase keys\"."),
@@ -2213,6 +2224,7 @@ mod tests {
 
     #[test]
     fn a_shorter_search_keeps_the_longest_content_word() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(
             shorter_search("usability friction confusing error").as_deref(),
             Some("ljos search usability")
@@ -2673,6 +2685,7 @@ mod tests {
 
     #[test]
     fn the_fixture_puts_the_named_memory_first() {
+        let _env_read = crate::test_env_read_lock();
         let rows = corpus();
         assert!(
             (50..=200).contains(&rows.len()),
@@ -2767,6 +2780,7 @@ mod tests {
 
     #[test]
     fn weak_words_stay_sorted_for_the_lookup() {
+        let _env_read = crate::test_env_read_lock();
         let mut sorted = WEAK.to_vec();
         sorted.sort_unstable();
         assert_eq!(WEAK, sorted.as_slice());
@@ -2774,6 +2788,7 @@ mod tests {
 
     #[test]
     fn an_off_topic_lesson_at_the_reported_score_is_dropped() {
+        let _env_read = crate::test_env_read_lock();
         let score = overlap_score(JOSS, RIDLEY);
         assert!(
             (score - 0.33).abs() < 0.01,
@@ -2801,6 +2816,7 @@ mod tests {
 
     #[test]
     fn min_score_zero_keeps_the_off_topic_row() {
+        let _env_read = crate::test_env_read_lock();
         let mut hits = vec![lesson(JOSS, overlap_score(JOSS, RIDLEY))];
         assert!(!apply_relevance_floor(&mut hits, RIDLEY, 0.0));
         assert_eq!(hits.len(), 1);
@@ -2808,6 +2824,7 @@ mod tests {
 
     #[test]
     fn exact_stemmed_and_partial_overlap_stay() {
+        let _env_read = crate::test_env_read_lock();
         let mut hits = vec![lesson(NARRATED, overlap_score(NARRATED, NARRATED))];
         assert!(!apply_relevance_floor(
             &mut hits,
@@ -2846,6 +2863,7 @@ mod tests {
 
     #[test]
     fn a_stemmed_hit_does_not_outrank_the_exact_word() {
+        let _env_read = crate::test_env_read_lock();
         let score = |body: &str, query: &str| {
             let docs = [Doc {
                 id: "a",
@@ -2867,6 +2885,7 @@ mod tests {
 
     #[test]
     fn a_real_landing_lesson_stays_and_the_joss_note_does_not() {
+        let _env_read = crate::test_env_read_lock();
         let mut hits = vec![
             lesson(JOSS, overlap_score(JOSS, RIDLEY)),
             lesson(RIDLEY_LESSON, overlap_score(RIDLEY_LESSON, RIDLEY)),
@@ -2878,6 +2897,7 @@ mod tests {
 
     #[test]
     fn a_stopword_or_a_single_weak_word_is_not_a_match() {
+        let _env_read = crate::test_env_read_lock();
         let stop = "The notes are on the desk by the window.";
         let weak = "Please review the glossary before the talk.";
         let mut hits = vec![
@@ -2909,6 +2929,7 @@ mod tests {
 
     #[test]
     fn a_low_meaning_score_drops_and_a_high_one_stays() {
+        let _env_read = crate::test_env_read_lock();
         let mut low = lesson("A ferry timetable for the docks.", 0.2);
         low.entities.push("cosine:0.20".into());
         let mut high = lesson("Oak Tree on Nov 23 is the morning plan.", 0.91);
@@ -2951,6 +2972,7 @@ mod tests {
     /// webdav, drain, or delete.
     #[test]
     fn a_cross_seat_meaning_hit_needs_a_distinctive_term_or_a_high_cosine() {
+        let _env_read = crate::test_env_read_lock();
         let _env = crate::test_env_lock();
         unsafe { std::env::set_var("LJOS_SEAT", "ada") };
         let query = "webdav drain delete safety";

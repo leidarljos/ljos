@@ -690,6 +690,7 @@ mod tests {
 
     #[test]
     fn the_fixture_names_the_apache_origin() {
+        let _env_read = crate::test_env_read_lock();
         let text = std::fs::read_to_string(fixture_path()).unwrap();
         assert!(text.starts_with("//"), "{text}");
         assert!(text.contains("Apache-2.0"), "{text}");
@@ -702,6 +703,7 @@ mod tests {
 
     #[test]
     fn the_fixture_is_schema_major_one() {
+        let _env_read = crate::test_env_read_lock();
         let graph = fixture();
         assert_eq!(graph.schema_major, 1);
         assert_eq!(graph.graphify_version.as_deref(), Some("0.9.108"));
@@ -735,6 +737,7 @@ mod tests {
 
     #[test]
     fn a_section_lists_file_line_and_confidence_tags() {
+        let _env_read = crate::test_env_read_lock();
         let graph = fixture();
         let text = section(
             &graph,
@@ -760,6 +763,7 @@ mod tests {
 
     #[test]
     fn schema_major_two_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let err =
             parse_graph(r#"{"graph":{"schema_version":2},"nodes":[],"links":[]}"#).unwrap_err();
         assert!(err.contains("schema major 2 is not supported"), "{err}");
@@ -768,6 +772,7 @@ mod tests {
 
     #[test]
     fn a_missing_schema_version_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let err = parse_graph(r#"{"graph":{},"nodes":[],"links":[]}"#).unwrap_err();
         assert!(err.contains("has no graph.schema_version"), "{err}");
         assert!(err.contains("this ljos reads major 1"), "{err}");
@@ -775,6 +780,7 @@ mod tests {
 
     #[test]
     fn a_string_major_one_is_accepted_and_major_two_is_not() {
+        let _env_read = crate::test_env_read_lock();
         let ok = parse_graph(
             r#"{"graph":{"schema_version":"1.2.0","graphify_version":"0.9.108"},"nodes":[{"id":"a","label":"Alpha","source_file":"a.rs","source_location":"L3"}],"edges":[{"source":"a","target":"a","relation":"calls","confidence":"EXTRACTED","confidence_score":1.0}]}"#,
         )
@@ -791,6 +797,7 @@ mod tests {
 
     #[test]
     fn a_non_integer_schema_version_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let err = parse_graph(r#"{"graph":{"schema_version":1.5},"nodes":[]}"#).unwrap_err();
         assert!(err.contains("is not supported"), "{err}");
         assert!(err.contains("this ljos reads major 1"), "{err}");
@@ -798,6 +805,7 @@ mod tests {
 
     #[test]
     fn a_refusal_is_laid_out_at_the_page_width() {
+        let _env_read = crate::test_env_read_lock();
         let err = anyhow::anyhow!(
             parse_graph(r#"{"graph":{"schema_version":"2.0"},"nodes":[]}"#).unwrap_err()
         );
@@ -821,6 +829,7 @@ mod tests {
 
     #[test]
     fn three_edges_are_kept_and_extracted_ranks_first() {
+        let _env_read = crate::test_env_read_lock();
         let graph = parse_graph(
             r#"{"graph":{"schema_version":1},"nodes":[
                 {"id":"hub","label":"Hub","source_file":"hub.rs","source_location":"L1"},
@@ -865,6 +874,7 @@ mod tests {
 
     #[test]
     fn the_default_search_stops_at_the_repository_root() {
+        let _env_read = crate::test_env_read_lock();
         let outer = tempfile::tempdir().unwrap();
         let outer_out = outer.path().join("graphify-out");
         std::fs::create_dir(&outer_out).unwrap();
@@ -891,6 +901,7 @@ mod tests {
 
     #[test]
     fn a_graphify_key_resolves_against_its_file() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let toml = dir.path().join("ljos.toml");
         #[expect(

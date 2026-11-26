@@ -10,6 +10,129 @@ pub use packsetd::{reap_listener, Builder, Packsetd};
 
 use std::ffi::c_char;
 
+static PROCESS_STATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+type ReadLock = std::sync::RwLockReadGuard<'static, ()>;
+type ReadSlot = std::cell::RefCell<Option<ReadLock>>;
+type ReadHandle = std::rc::Rc<ReadSlot>;
+type WeakReadHandle = std::rc::Weak<ReadSlot>;
+
+/// Shared access to process-global state for a test that only reads it.
+#[must_use = "hold the guard for every process-global read"]
+pub struct EnvReadGuard {
+    held: ReadHandle,
+}
+
+/// Exclusive access to process-global state for a test that changes it.
+#[must_use = "hold the guard until process-global state is restored"]
+pub struct EnvWriteGuard {
+    held: Option<std::sync::RwLockWriteGuard<'static, ()>>,
+    restore: Option<WeakReadHandle>,
+}
+
+thread_local! {
+    static TEST_READER: std::cell::RefCell<Option<WeakReadHandle>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Hold process environment, current directory and other process-global
+/// paths still while a test reads them.
+pub fn env_read_lock() -> EnvReadGuard {
+    let held = std::rc::Rc::new(std::cell::RefCell::new(Some(
+        PROCESS_STATE
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )));
+    TEST_READER.with(|slot| *slot.borrow_mut() = Some(std::rc::Rc::downgrade(&held)));
+    EnvReadGuard { held }
+}
+
+/// Exclude every process-global reader while a test changes process state.
+pub fn env_write_lock() -> EnvWriteGuard {
+    let restore = TEST_READER.with(|slot| slot.borrow().clone());
+    if let Some(held) = restore.as_ref().and_then(std::rc::Weak::upgrade) {
+        drop(held.borrow_mut().take());
+    }
+    EnvWriteGuard {
+        held: Some(
+            PROCESS_STATE
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        ),
+        restore,
+    }
+}
+
+impl Drop for EnvReadGuard {
+    fn drop(&mut self) {
+        TEST_READER.with(|slot| {
+            let ours = slot
+                .borrow()
+                .as_ref()
+                .and_then(std::rc::Weak::upgrade)
+                .is_some_and(|held| std::rc::Rc::ptr_eq(&held, &self.held));
+            if ours {
+                slot.borrow_mut().take();
+            }
+        });
+    }
+}
+
+impl Drop for EnvWriteGuard {
+    fn drop(&mut self) {
+        drop(self.held.take());
+        if let Some(held) = self.restore.as_ref().and_then(std::rc::Weak::upgrade) {
+            *held.borrow_mut() = Some(
+                PROCESS_STATE
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+        }
+    }
+}
+
+/// An exclusive test environment restored before another test can enter.
+#[must_use = "dropping the guard restores the environment and cwd"]
+pub struct TestEnv {
+    _guard: EnvWriteGuard,
+    vars: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    cwd: Option<std::path::PathBuf>,
+}
+
+/// Snapshot and exclusively hold the process environment and current
+/// directory. Integration tests use this instead of file-local mutexes.
+pub fn env_lock() -> TestEnv {
+    let guard = env_write_lock();
+    let vars = std::env::vars_os().collect();
+    let cwd = std::env::current_dir().ok();
+    TestEnv {
+        _guard: guard,
+        vars,
+        cwd,
+    }
+}
+
+impl Drop for TestEnv {
+    fn drop(&mut self) {
+        let keep: std::collections::HashSet<_> =
+            self.vars.iter().map(|(key, _)| key.clone()).collect();
+        for (key, value) in &self.vars {
+            // SAFETY: TestEnv holds the process-global writer lock.
+            unsafe { std::env::set_var(key, value) };
+        }
+        let added: Vec<_> = std::env::vars_os()
+            .map(|(key, _)| key)
+            .filter(|key| !keep.contains(key))
+            .collect();
+        for key in added {
+            // SAFETY: TestEnv holds the process-global writer lock.
+            unsafe { std::env::remove_var(key) };
+        }
+        if let Some(cwd) = &self.cwd {
+            let _ = std::env::set_current_dir(cwd);
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 extern "C" {
     pub fn ljos_test_enter_cgroup(dir: *const c_char) -> i32;

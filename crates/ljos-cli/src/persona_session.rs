@@ -455,6 +455,7 @@ mod tests {
 
     #[test]
     fn actor_message_serializes_and_deserializes() {
+        let _env_read = crate::test_env_read_lock();
         let msg = ActorMessage::Cast {
             caller: "lead-architect".into(),
             task: "Verify consensus bounds".into(),
@@ -478,11 +479,13 @@ mod tests {
 
     #[test]
     fn herdr_name_formats_consistently() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(herdr_name("reviewer"), "persona-reviewer");
     }
 
     #[test]
     fn a_runner_starts_fresh_then_resumes_its_home_session() {
+        let _env_read = crate::test_env_read_lock();
         let all: crate::Harnesses = toml::from_str(concat!(
             "[[harness]]\nname = \"grok\"\nresume = [\"grok\", \"--continue\"]\n",
             "[[harness]]\nname = \"plain\"\nstart = [\"plain-cli\", \"--tui\"]\n",
@@ -503,6 +506,7 @@ mod tests {
 
     #[test]
     fn the_pane_runs_the_runner_as_the_persona_and_stays_open() {
+        let _env_read = crate::test_env_read_lock();
         let s = pane_script(
             "buildengineer",
             &["grok".into(), "--continue".into()],
@@ -518,6 +522,7 @@ mod tests {
     /// that exits 0 is not run again. Neither leaves a pid file behind.
     #[test]
     fn the_pane_resumes_a_failing_runner_a_bounded_number_of_times() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let count = dir.path().join("runs");
         let fail = vec![
@@ -568,6 +573,7 @@ mod tests {
 
     #[test]
     fn a_pane_record_round_trips_and_names_the_pane() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         write_record(dir.path(), "herdr", "w1:p2").unwrap();
         assert_eq!(

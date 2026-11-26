@@ -475,6 +475,7 @@ mod tests {
 
     #[test]
     fn the_line_uses_words_and_names_the_next_pull() {
+        let _env_read = crate::test_env_read_lock();
         let dir = Path::new("/srv/handoff");
         let said = os_words(libc::ENOTCONN);
         let err = share(dir).fail(dir, IoError::from_raw_os_error(libc::ENOTCONN));
@@ -491,6 +492,7 @@ mod tests {
 
     #[test]
     fn a_write_lands_by_rename_and_leaves_no_temporary_file() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("seed.jsonl");
         share(dir.path()).write_atomic(&path, b"whole\n").unwrap();
@@ -506,6 +508,7 @@ mod tests {
 
     #[test]
     fn a_failed_rename_keeps_the_previous_seed() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("seed.jsonl");
         let place = share(dir.path());
@@ -528,6 +531,7 @@ mod tests {
 
     #[test]
     fn an_injected_transport_error_does_not_replace_the_file() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("seed.jsonl");
         #[expect(

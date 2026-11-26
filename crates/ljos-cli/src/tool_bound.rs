@@ -218,6 +218,7 @@ mod tests {
 
     #[test]
     fn the_tool_budget_is_thirty_seconds_unless_configured() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         unsafe {
             std::env::remove_var("LJOS_MCP_TIMEOUT");
@@ -233,6 +234,7 @@ mod tests {
     /// A writer that accepts and then says nothing used to hold the call.
     #[test]
     fn a_silent_packsetd_stops_inside_the_tool_budget() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let home = tempfile::tempdir().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -271,6 +273,7 @@ mod tests {
     /// A habitat child that never exits, and a git-shaped child, both stop.
     #[test]
     fn a_hung_subprocess_stops_inside_the_tool_budget() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let _bound = arm(Duration::from_millis(400));
         let started = Instant::now();
@@ -302,6 +305,7 @@ mod tests {
     /// An exclusive lock another holder keeps is given up at the bound.
     #[test]
     fn a_held_lock_stops_inside_the_tool_budget() {
+        let _env_read = crate::test_env_read_lock();
         let _g = crate::tests::env_guard();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("held.lock");

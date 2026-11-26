@@ -358,6 +358,7 @@ mod tests {
 
     #[test]
     fn a_missing_env_is_not_called_stale() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("example_host.env");
         let (ok, state) = doctor_env("example_host", &path);
@@ -368,6 +369,7 @@ mod tests {
 
     #[test]
     fn install_records_the_bytes_and_a_dry_run_writes_nothing() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("example_host.env");
         assert!(install(&path, "example_host", true)
@@ -387,6 +389,7 @@ mod tests {
 
     #[test]
     fn a_current_file_with_no_record_is_marked_and_not_rewritten() {
+        let _env_read = crate::test_env_read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("example_host.env");
         let text = crate::seat_env_text("example_host");

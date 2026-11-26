@@ -123,6 +123,7 @@ mod tests {
 
     #[test]
     fn missing_bin_is_127() {
+        let _env_read = crate::test_env_read_lock();
         let _env = hud_env();
         let missing = missing_hud();
         #[allow(unused_unsafe)]
@@ -139,6 +140,7 @@ mod tests {
 
     #[test]
     fn hide_without_binary_is_zero() {
+        let _env_read = crate::test_env_read_lock();
         let _env = hud_env();
         let missing = missing_hud();
         #[allow(unused_unsafe)]
@@ -154,6 +156,7 @@ mod tests {
 
     #[test]
     fn launcher_lives_in_the_cli() {
+        let _env_read = crate::test_env_read_lock();
         let src = include_str!("main.rs");
         assert!(src.contains("Cmd::Hud"));
         assert!(src.contains("ljos-hud"));
@@ -166,6 +169,7 @@ mod tests {
 
     #[test]
     fn resolve_honors_override() {
+        let _env_read = crate::test_env_read_lock();
         let _env = hud_env();
         let path = missing_hud();
         #[allow(unused_unsafe)]

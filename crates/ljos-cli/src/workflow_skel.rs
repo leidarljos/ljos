@@ -3177,6 +3177,7 @@ Options: ship, hold
 
     #[test]
     fn a_name_like_src_dir_renders_and_inline_babel_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let prose = OK.replace(
             "Notes for {{version}}.",
             "Set the src_dir option and keep my_src_file{x} as it is.",
@@ -3200,6 +3201,7 @@ Options: ship, hold
 
     #[test]
     fn babel_written_in_another_case_or_encoded_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let screen = fixed_public_screen();
         for line in [
             "#+BEGIN_SRC sh",
@@ -3221,6 +3223,7 @@ Options: ship, hold
 
     #[test]
     fn fixed_roster_is_checked_in_each_render_field_and_the_page() {
+        let _env_read = crate::test_env_read_lock();
         fn assert_refused(skel: &Skeleton, screen: &crate::public_text::Screen, line: usize) {
             assert_eq!(
                 public_hits_with_screen(skel, screen),
@@ -3258,6 +3261,7 @@ Options: ship, hold
 
     #[test]
     fn a_secret_split_between_a_step_heading_and_body_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let screen = fixed_public_screen();
         let (title, body) = ("Set the api_key", "= Zq8vRt3wPx9Lm2Kd");
         for alone in [title, body] {
@@ -3275,6 +3279,7 @@ Options: ship, hold
 
     #[test]
     fn a_valid_skeleton_parses_and_fills() {
+        let _env_read = crate::test_env_read_lock();
         let parsed = skel(OK).unwrap();
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.steps.len(), 3);
@@ -3299,6 +3304,7 @@ Options: ship, hold
 
     #[test]
     fn a_title_only_placeholder_is_filled() {
+        let _env_read = crate::test_env_read_lock();
         let titled = OK.replace("{{version}}", "the release").replacen(
             "#+title: ",
             "#+title: {{version}} ",
@@ -3317,6 +3323,7 @@ Options: ship, hold
 
     #[test]
     fn errors_name_the_line() {
+        let _env_read = crate::test_env_read_lock();
         let dup = OK.replace(":STEP: version", ":STEP: changelog");
         let err = skel(&dup).unwrap_err().to_string();
         assert!(err.contains("sample.org:"), "{err}");
@@ -3414,6 +3421,7 @@ Options: ship, hold
 
     #[test]
     fn render_is_stable_and_refuses_private_text() {
+        let _env_read = crate::test_env_read_lock();
         let text = OK.replace("Notes for {{version}}.", "Keep this prose byte for byte.");
         let parsed = skel(&text).unwrap();
         let once = render_skeleton(&parsed).unwrap();
@@ -3440,6 +3448,7 @@ Options: ship, hold
 
     #[test]
     fn a_var_that_is_not_a_pair_does_not_echo_the_argument() {
+        let _env_read = crate::test_env_read_lock();
         let err = parse_vars(&["hunter2".into()]).unwrap_err().to_string();
         assert!(err.contains("key=value"), "{err}");
         assert!(!err.contains("hunter2"), "{err}");
@@ -3450,6 +3459,7 @@ Options: ship, hold
 
     #[test]
     fn var_errors_never_echo_a_typed_key_or_value() {
+        let _env_read = crate::test_env_read_lock();
         for pair in [
             "bad-key=hunter2",
             "k\u{1b}[31mRED=hunter2",
@@ -3487,6 +3497,7 @@ Options: ship, hold
 
     #[test]
     fn a_dependency_listed_twice_is_refused() {
+        let _env_read = crate::test_env_read_lock();
         let text = "\
 #+title: Build
 #+version: 1
@@ -3511,6 +3522,7 @@ Options: ship, hold
 
     #[test]
     fn step_identity_comes_from_its_first_note_and_attributes_come_from_tags() {
+        let _env_read = crate::test_env_read_lock();
         let tagged = serde_json::json!({
             "tags": ["step-signoff", "kind-signoff", "kind-do", "quorum-1", "quorum-3", "deed-yes", "depends-Build"],
             "logbook": [
@@ -3533,6 +3545,7 @@ Options: ship, hold
 
     #[test]
     fn a_duplicate_filing_refusal_names_the_tag_every_child_and_the_recovery() {
+        let _env_read = crate::test_env_read_lock();
         let tag = format!("{FILING_TAG}0123456789abcdef");
         let err = duplicate_filing_refusal(
             "demo-p1",
@@ -3554,6 +3567,7 @@ Options: ship, hold
 
     #[test]
     fn a_duplicate_filing_refusal_names_two_children() {
+        let _env_read = crate::test_env_read_lock();
         let err =
             duplicate_filing_refusal("demo-p1", "changelog", "filing-feed", &["demo-a", "demo-b"]);
         assert!(err.contains("2 children filed for step changelog"), "{err}");
