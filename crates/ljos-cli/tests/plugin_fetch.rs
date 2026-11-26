@@ -318,7 +318,21 @@ fn two_launchers_over_one_dead_lock_both_start_the_server() {
             .unwrap()
     };
     let first = spawn();
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let held = std::fs::read_to_string(&lock).unwrap_or_default();
+        let pid = held.trim();
+        let live = !pid.is_empty()
+            && pid != "4194303"
+            && std::path::Path::new(&format!("/proc/{pid}")).is_dir();
+        if live {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("the first launcher did not take the dead lock; lock is {held:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let second = spawn();
     for (i, child) in [first, second].into_iter().enumerate() {
         let out = child.wait_with_output().unwrap();
