@@ -237,60 +237,42 @@ fn a_missing_claim_program_names_the_install_and_exits_1() {
 }
 
 #[test]
-fn an_unknown_ticket_on_a_sitting_names_search_and_exits_1() {
-    let home = Home::new();
-    let out = home.run(&["sitting", "demo-gone"], &[("LJOS_SEAT", "alice")]);
-    let said = text(&out);
-    assert_eq!(out.status.code(), Some(1), "{said}");
-    assert_eq!(
-        one_line(&out.stderr),
-        "issue demo-gone not found. `ljos search` finds a ticket."
-    );
-}
-
-#[test]
-fn an_unknown_ticket_on_a_timeline_names_ready_and_exits_1() {
-    let home = Home::new();
-    let out = home.run(&["timeline", "demo-gone"], &[("LJOS_SEAT", "alice")]);
-    let said = text(&out);
-    assert_eq!(out.status.code(), Some(1), "{said}");
-    assert_eq!(
-        one_line(&out.stderr),
-        "issue demo-gone not found. `ljos ready` lists the open tickets."
-    );
-}
-
-#[test]
 fn an_unknown_ticket_on_tracker_verbs_names_ready_and_exits_1() {
     let home = Home::new();
     let bag = home.root.join("bag");
     let bag_str = bag.to_string_lossy().into_owned();
-    let cases: [&[&str]; 14] = [
-        &["claim", "demo-gone"],
-        &["release", "demo-gone"],
-        &["complete", "demo-gone"],
-        &["playbook", "demo-gone", "sit"],
-        &["note", "demo-gone", "still cold"],
-        &["vote", "demo-gone", "--for", "keep", "--used", "none"],
-        &["consensus", "demo-gone"],
-        &["deed", "demo-gone"],
-        &["options", "demo-gone", "keep,drop"],
-        &["block", "demo-gone", "demo-kiln"],
-        &["withdraw", "demo-gone"],
-        &["learn", "demo-gone", "--outcome", "keep"],
-        &["handover", "--out", &bag_str, "--issue", "demo-gone"],
-        &["predict", "demo-gone", "--expect", "keep"],
+    let ready = "issue demo-gone not found. `ljos ready` lists the open tickets.";
+    let search = "issue demo-gone not found. `ljos search` finds a ticket.";
+    let cases: [(&[&str], &str); 16] = [
+        (&["sitting", "demo-gone"], search),
+        (&["timeline", "demo-gone"], ready),
+        (&["claim", "demo-gone"], ready),
+        (&["release", "demo-gone"], ready),
+        (&["complete", "demo-gone"], ready),
+        (&["playbook", "demo-gone", "sit"], ready),
+        (&["note", "demo-gone", "still cold"], ready),
+        (
+            &["vote", "demo-gone", "--for", "keep", "--used", "none"],
+            ready,
+        ),
+        (&["consensus", "demo-gone"], ready),
+        (&["deed", "demo-gone"], ready),
+        (&["options", "demo-gone", "keep,drop"], ready),
+        (&["block", "demo-gone", "demo-kiln"], ready),
+        (&["withdraw", "demo-gone"], ready),
+        (&["learn", "demo-gone", "--outcome", "keep"], ready),
+        (
+            &["handover", "--out", &bag_str, "--issue", "demo-gone"],
+            ready,
+        ),
+        (&["predict", "demo-gone", "--expect", "keep"], ready),
     ];
-    for args in cases {
+    for (args, want) in cases {
         let out = home.run(args, &[("LJOS_SEAT", "alice")]);
         let said = text(&out);
         assert_eq!(out.status.code(), Some(1), "{args:?}\n{said}");
         assert!(out.stdout.is_empty(), "{args:?}\n{said}");
-        assert_eq!(
-            one_line(&out.stderr),
-            "issue demo-gone not found. `ljos ready` lists the open tickets.",
-            "{args:?}\n{said}"
-        );
+        assert_eq!(one_line(&out.stderr), want, "{args:?}\n{said}");
     }
     let prefix = home.run(&["claim", "demo-ki"], &[("LJOS_SEAT", "alice")]);
     let said = text(&prefix);
