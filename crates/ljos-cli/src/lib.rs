@@ -146,6 +146,7 @@ pub mod idle_drop;
 pub(crate) mod issue_spot;
 pub mod jev;
 mod kept_prompt;
+pub mod long_note;
 pub mod mail;
 pub mod mailbox;
 mod memlock;
@@ -58934,35 +58935,44 @@ pub const NOTE_MAX_BYTES: usize = 4096;
 /// it. An encoded snapshot is one long line.
 pub const NOTE_LINE_MAX_BYTES: usize = 2048;
 
-/// Whether `text` fits a tracker note. A note past either cap is a failed
-/// command, not a policy label: the process exits non-zero and the note is
-/// not written. The line names the size, the cap, and `ljos note ID --file`.
-pub(crate) fn check_note_size(issue: &str, text: &str) -> Result<()> {
-    let remedy = format!("so run `ljos note {issue} --file PATH`. Nothing was noted");
+/// Why `text` does not fit one tracker note, or `None` when it does.
+///
+/// A short note this size is stored as a long note by `ljos note`. This
+/// is the cap, not a refusal of the text.
+#[must_use]
+pub fn note_overflow(text: &str) -> Option<String> {
     if text.len() > NOTE_MAX_BYTES {
-        return Err(policy_label::failed(
-            "oversize",
-            anyhow::anyhow!(
-                "note: the note is {} bytes, past the cap of {NOTE_MAX_BYTES}, {remedy}",
-                text.len()
-            ),
+        return Some(format!(
+            "the note is {} bytes, past the {NOTE_MAX_BYTES}-byte cap for a tracker note",
+            text.len()
         ));
     }
-    if let Some((at, line)) = text
-        .lines()
+    text.lines()
         .enumerate()
         .find(|(_, line)| line.len() > NOTE_LINE_MAX_BYTES)
-    {
-        return Err(policy_label::failed(
-            "oversize",
-            anyhow::anyhow!(
-                "note: line {} of the note is {} bytes, past the cap of {NOTE_LINE_MAX_BYTES}, {remedy}",
+        .map(|(at, line)| {
+            format!(
+                "line {} of the note is {} bytes, past the {NOTE_LINE_MAX_BYTES}-byte cap for a line of a tracker note",
                 at + 1,
                 line.len()
+            )
+        })
+}
+
+/// Whether `text` fits a tracker note. A note past either cap is a failed
+/// command, not a policy label: the process exits non-zero and the note is
+/// not written. `ljos note` stores prose past the cap as a long note before
+/// it gets here. The line names the size, the cap, and `ljos note ID --file`.
+pub(crate) fn check_note_size(issue: &str, text: &str) -> Result<()> {
+    match note_overflow(text) {
+        None => Ok(()),
+        Some(why) => Err(policy_label::failed(
+            "oversize",
+            anyhow::anyhow!(
+                "note: {why}; `ljos note {issue} --file PATH` keeps prose as a long note beside the ticket, and encoded bytes go to `deedar create file`. Nothing was noted"
             ),
-        ));
+        )),
     }
-    Ok(())
 }
 
 /// [`check_note_size`] for a `vissue note ID TEXT...` about to start.

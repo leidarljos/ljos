@@ -46,6 +46,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "parent",
             "deed",
             "table",
+            "notes",
             "evidence",
             "record",
             "current",

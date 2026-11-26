@@ -111,6 +111,23 @@ fn env_tracker() -> Option<PathBuf> {
     None
 }
 
+/// A path the person typed, read from the directory the process started
+/// in. A process that left that directory would otherwise look for a
+/// relative path in the empty one it parked in.
+#[must_use]
+pub(crate) fn from_start(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    let held = SKIP_FROM
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match held.as_ref() {
+        Some(start) => start.join(path),
+        None => path.to_path_buf(),
+    }
+}
+
 fn remember_skip(dir: &Path) {
     *SKIP_FROM
         .lock()

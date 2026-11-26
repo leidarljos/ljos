@@ -168,50 +168,44 @@ fn a_pack_that_is_down_changes_nothing_about_a_note() {
     assert!(!stdout.contains("queued the copy"), "{stdout}");
 }
 
-/// ljos-yjho: a pasted payload is not a note. Every note rewrites the
+/// ljos-yjho: encoded bytes are not a note. Every note rewrites the
 /// ticket's file in git, so a snapshot line of tens of kilobytes was paid
-/// for again on every later write. The command exits non-zero, the note
-/// never reaches the tracker, and the line names the size, the cap, and
-/// `ljos note ID --file`.
+/// for again on every later write. A run past 2,048 bytes with no space
+/// exits 1, says nothing was noted, and names `deedar create file`.
+/// Prose past the caps becomes a long note; `tests/long_notes.rs` covers
+/// that on a real tracker.
 #[test]
 fn a_note_past_the_cap_never_reaches_the_ticket() {
     let hab = Hab::new();
     let payload = format!("snapshot b64z:{}", "QUJD".repeat(5_000));
-    let out = hab.note("http://127.0.0.1:1", &payload);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
-    assert!(
-        !hab.calls().contains("vissue note"),
-        "the payload reached the ticket:\n{}",
-        hab.calls()
-    );
-    let said = format!("{stdout}{stderr}");
-    assert!(
-        said.contains(&payload.len().to_string()) && said.contains("4096"),
-        "the line does not name the size and the cap:\n{said}"
-    );
-    assert!(
-        said.contains("ljos note proj-aaaa --file PATH") && said.contains("Nothing was noted"),
-        "the line does not name the remedy:\n{said}"
-    );
-    assert!(!said.contains("label oversize:"), "{said}");
-    assert!(!stdout.contains("proj-aaaa: noted"), "{stdout}");
-
     let lines = format!("{}\n{}", "short line", "x".repeat(3_000));
-    let out = hab.note("http://127.0.0.1:1", &lines);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
-    assert!(
-        stderr.contains("line 2 of the note") && stderr.contains("2048"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("ljos note proj-aaaa --file PATH"),
-        "{stderr}"
-    );
-    assert!(!hab.calls().contains("vissue note"), "{}", hab.calls());
+    for (text, why) in [
+        (
+            payload.as_str(),
+            "a run of 20,005 bytes with no space on line 1",
+        ),
+        (
+            lines.as_str(),
+            "a run of 3,000 bytes with no space on line 2",
+        ),
+    ] {
+        let out = hab.note("http://127.0.0.1:1", text);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+        assert!(
+            !hab.calls().contains("vissue note"),
+            "the payload reached the ticket:\n{}",
+            hab.calls()
+        );
+        assert!(stderr.contains(why), "{stdout}{stderr}");
+        assert!(
+            stderr.contains("deedar create file") && stderr.contains("Nothing was noted"),
+            "the line does not name the deed route:\n{stderr}"
+        );
+        assert!(!stderr.contains("so it is kept as a long note"), "{stderr}");
+        assert!(!stdout.contains("proj-aaaa: noted"), "{stdout}");
+    }
 }
 
 /// ljos-yjho: MCP reports the same refusal as an error. A policy label used
@@ -276,7 +270,6 @@ fn an_oversize_note_is_an_mcp_error() {
         let _ = Command::new("kill").arg(pid.to_string()).status();
     });
     let payload = format!("snapshot b64z:{}", "QUJD".repeat(5_000));
-    let bytes = payload.len().to_string();
     let mut stdin = child.stdin.take().unwrap();
     for line in [
         serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
@@ -319,14 +312,14 @@ fn an_oversize_note_is_an_mcp_error() {
         .join("\n");
     assert_eq!(answer["result"]["isError"], true, "{answer}");
     assert!(
-        text.contains(&bytes) && text.contains("4096"),
-        "the error did not name the size and the cap:\n{text}"
-    );
-    assert!(
-        text.contains("ljos note proj-aaaa --file PATH"),
-        "the error did not name the remedy:\n{text}"
+        text.contains("a run of 20,005 bytes with no space") && text.contains("deedar create file"),
+        "the error did not name the encoded run:\n{text}"
     );
     assert!(text.contains("Nothing was noted"), "{text}");
+    assert!(
+        !text.contains("so it is kept as a long note"),
+        "an encoded note read as kept:\n{text}"
+    );
     assert!(
         !text.contains("keep going"),
         "a dropped note was told to keep going:\n{text}"

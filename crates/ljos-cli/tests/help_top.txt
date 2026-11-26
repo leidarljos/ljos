@@ -40,6 +40,7 @@ Tracker:
   parent       Move a ticket under another parent ticket
   deed         Name a stored file on a ticket, or list the ones named
   table        Keep a CSV table on a ticket, list its tables, or print one
+  notes        List a ticket's long notes, or import a directory of them
   evidence     Check that a stored file is intact, and that the files it came from are too
   record       Check ballot records
   current      Say whether a stored file is still the latest copy

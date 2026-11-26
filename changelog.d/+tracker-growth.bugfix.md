@@ -2,6 +2,6 @@
 Past 32 MiB, or the bytes `LJOS_TRACKER_GC_BYTES` names, one `git gc` starts in its own session and holds the tracker commit lock and `ljos-gc.flock` until it ends, so a tracker write waits and a gc that cannot take the lock is skipped.
 The gc passes `gc.pruneExpire=2.weeks.ago` and `gc.worktreePruneExpire=3.months.ago`, so a checkout config of `now` does not prune under it.
 The command that started it returns at once, its deadline does not stop the gc, and no second gc starts while one holds the lock.
-A tracker note past 4,096 bytes, or with a line past 2,048 bytes, is a failed command before it reaches the ticket: the process exits non-zero, an MCP `ljos_note` call is an error, and the line names the size, the cap and `ljos note ID --file PATH`.
+A note passed to `vissue note` past 4,096 bytes, or with a line past 2,048 bytes, is a failed command before it reaches the ticket: the process exits non-zero, and the line names the size, the cap and `ljos note ID --file PATH`. It is not a label that exits 0.
 A ticket whose id has a `/`, such as `Software/ljos-3n59` in the nested project `Software/ljos`, gets its per-issue file under the name any other ticket gets, `issues/ljos-3n59.org`, and no longer `issues/Software%2Fljos-3n59.org`.
 A split or a new ticket moves vissue's file to that name before its first commit when the layout name is free, and a file already committed under the old name, or a layout name that already exists, keeps its bytes and is still found.

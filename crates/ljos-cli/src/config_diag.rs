@@ -607,6 +607,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_PANDOC",
+        default: "pandoc on PATH",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_PANEL_BIN",
         default: "unset",
         group: "ljos",
