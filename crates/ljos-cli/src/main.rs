@@ -7,21 +7,21 @@ mod help_groups;
 mod shell_complete;
 use ljos_cli::output_wrap::Width;
 use ljos_cli::{
-    age_of, begin_sitting_preclaim, brief, bump_plan, calibrate, cards, claim, claim_next,
-    cli_assignee, compact_sitting_block, complete, conflicts, consensus_steps_for, copy_playbook,
-    due_report, finish, forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
-    format_findings, format_hubs, format_island, format_playbooks, format_readings,
-    format_remembered, format_seat_command, format_steps, graded, habit, habits, handover_scoped,
-    healthy, hook_note, island_entities, join, learn_anchors, learn_and_write, learn_reading,
-    learn_shared, mark_seen, now_utc, on_path, onboard_to, packset_consolidate, packset_forget,
-    packset_hubs, packset_island_as, packset_search_as_of, packset_write_as, panel, panel_steps,
-    parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout,
-    predictions_of, prompt_hook_stdout, protocol_brief, protocol_text, read_campaign, receive,
-    release, remember_findings, reopen, rows_about, run, run_as, run_captured, settle_discount,
-    sitting_close, sitting_stream_started, stop_hook_stdout, timeline, topic_words,
-    tracker_show_json, trim_num, trust_from_pack, uncite_deed, with_discount, write_outcome,
-    write_persona_as, write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading,
-    Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
+    begin_sitting_preclaim, brief, bump_plan, calibrate, cards, claim, claim_next, cli_assignee,
+    compact_sitting_block, complete, conflicts, consensus_steps_for, copy_playbook, due_report,
+    finish, forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
+    format_findings, format_hubs, format_island, format_playbooks, format_reading_ack,
+    format_readings, format_remembered, format_seat_command, format_steps, graded, habit, habits,
+    handover_scoped, healthy, hook_note, island_entities, join, learn_anchors, learn_and_write,
+    learn_reading, learn_shared, mark_seen, now_utc, on_path, onboard_to, packset_consolidate,
+    packset_forget, packset_hubs, packset_island_as, packset_search_as_of, packset_write_as, panel,
+    panel_steps, parse_every, personas_from_pack, playbooks_from_pack, policy_with_memory,
+    post_hook_stdout, predictions_of, prompt_hook_stdout, protocol_brief, protocol_text,
+    read_campaign, receive, release, remember_findings, reopen, rows_about, run, run_as,
+    run_captured, settle_discount, sitting_close, sitting_stream_started, stop_hook_stdout,
+    timeline, topic_words, tracker_show_json, trust_from_pack, uncite_deed, with_discount,
+    write_outcome, write_persona_as, write_prediction, write_rule, write_trust, Persona,
+    PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
 };
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -2620,7 +2620,7 @@ enum Cmd {
     },
     /// Record a number you measure again later, or list the ones you keep.
     ///
-    /// A habit is that number. `ljos habit NAME VALUE` stores a reading and closes the one before. `ljos habit NAME` shows one. `ljos habit` lists them, the change since the last reading, and when the next is due.
+    /// A habit is that number. `ljos habit NAME VALUE` stores a reading; the one before is kept as what it was. `ljos habit NAME` shows one. `ljos habit` lists them, the change since the last reading, and when the next is due.
     ///
     /// Example: `ljos habit`
     Habit {
@@ -8179,15 +8179,10 @@ fn run_command() -> Result<()> {
                 let every_s = parse_every(&every)?;
                 let (body, prev) = habit(&name, value, &unit, every_s, &source)?;
                 ljos_cli::tell!("{}", write_ack(&body, false));
-                if let Some(p) = prev {
-                    ljos_cli::say!(
-                        "was {}{}{} ({}), now closed",
-                        trim_num(p.value),
-                        if p.unit.is_empty() { "" } else { " " },
-                        p.unit,
-                        age_of(p.ts.as_deref(), &now_utc())
-                    );
-                }
+                ljos_cli::say!(
+                    "{}",
+                    format_reading_ack(&name, value, &unit, prev.as_ref(), &now_utc())
+                );
             }
             (None, Some(_)) => {
                 anyhow::bail!("habit: a reading needs a name; `ljos habit NAME VALUE`")

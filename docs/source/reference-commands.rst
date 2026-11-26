@@ -60,7 +60,7 @@ A word that is not a command names the verb it was reaching for as a line that r
 ``hud [--foreground] [--toggle|--show|--hide] [--install-desktop]``
    Stores: none. Exec sibling ``ljos-hud``. A missing program exits 127. ``--hide`` when that program is not installed exits 0. The musl CLI never links iced.
 ``habit [NAME [VALUE]] [--unit U] [--every 7d] [--source S]``
-   Stores: pack. With a value, take a reading: the earlier reading closes and is kept as what it was, the next is due one cadence on; without, list each habit's latest reading with the change since the one before.
+   Stores: pack. With a value, take a reading: the earlier reading is superseded and kept as what it was, the next is due one cadence on; without, list each habit's latest reading with the change since the one before.
 ``graded ID [--lapsed]``
    Stores: pack. One review graded.
 ``trust FROM TO WEIGHT [--why DEED]... [--about DOMAIN]...``
