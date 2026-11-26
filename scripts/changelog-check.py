@@ -18,6 +18,10 @@ checks:
    the same change twice: the same bullet twice, or the same RUSTSEC, GHSA
    or CVE advisory in two bullets. v0.45.4 said url 2.5.9 twice, once under
    Fixes and once under Miscellaneous, from two fragments for one bump.
+4. `CITATION.cff` `version` and `date-released` match the newest released
+   heading in `CHANGELOG.md`, that heading's version and its date. The
+   newest heading is the highest version. A release that moves the heading
+   and leaves the citation on the previous version or date fails here.
 
 Releases up to and including BASELINE shipped before this check and are not
 held to rule 1. Many of them, 0.45.4 among them, have a Features section
@@ -43,21 +47,25 @@ BASELINE = (0, 45, 4)
 
 MINOR_ONLY = ("Features", "Removals")
 FRAGMENT_MINOR_ONLY = ("feature", "removal")
-HEADING = re.compile(r"^## (\d+)\.(\d+)\.(\d+) \(")
+HEADING = re.compile(r"^## (\d+)\.(\d+)\.(\d+) \(([^)]*)\)")
+CITATION_VERSION = re.compile(r'^version:\s*"([^"]+)"\s*$', re.M)
+CITATION_DATE = re.compile(r"^date-released:\s*(\S+)\s*$", re.M)
 SECTION = re.compile(r"^### (.+?)\s*$")
 ADVISORY = re.compile(r"\b(RUSTSEC-\d{4}-\d{4}|GHSA(?:-[0-9a-z]{4}){3}|CVE-\d{4}-\d{4,})\b", re.I)
 FRAGMENT = re.compile(r"^(?P<issue>.+?)\.(?P<type>[a-z]+)(?:\.\d+)?\.md$")
 
 
 def parse_changelog(text: str):
-    """Releases as (name, (major, minor, patch), {section: [bullet, ...]}), newest first."""
+    """Releases as (name, (major, minor, patch), date, {section: [bullet, ...]}), file order."""
     releases = []
     section = None
     for line in text.splitlines():
         heading = HEADING.match(line)
         if heading:
-            major, minor, patch = heading.groups()
-            releases.append((f"{major}.{minor}.{patch}", (int(major), int(minor), int(patch)), {}))
+            major, minor, patch, date = heading.groups()
+            releases.append(
+                (f"{major}.{minor}.{patch}", (int(major), int(minor), int(patch)), date, {})
+            )
             section = None
             continue
         if not releases:
@@ -65,11 +73,11 @@ def parse_changelog(text: str):
         found = SECTION.match(line)
         if found:
             section = found.group(1)
-            releases[-1][2][section] = []
+            releases[-1][3][section] = []
         elif line.startswith("- ") and section is not None:
-            releases[-1][2][section].append(line[2:])
-        elif line.startswith("  ") and section is not None and releases[-1][2][section]:
-            releases[-1][2][section][-1] += " " + line.strip()
+            releases[-1][3][section].append(line[2:])
+        elif line.startswith("  ") and section is not None and releases[-1][3][section]:
+            releases[-1][3][section][-1] += " " + line.strip()
     return releases
 
 
@@ -106,10 +114,40 @@ def pending(directory: Path):
     return found
 
 
-def check(version: str, changelog: str, fragments) -> list[str]:
+def newest_release(releases):
+    """The highest version in the changelog. That heading is the newest release."""
+    return max(releases, key=lambda release: release[1])
+
+
+def citation_errors(releases, citation: str) -> list[str]:
+    """Fail when CITATION.cff does not name the newest changelog heading."""
+    if not releases:
+        return ["CITATION.cff has no CHANGELOG.md release heading to match"]
+    name, _number, date, _sections = newest_release(releases)
+    version = CITATION_VERSION.search(citation)
+    released = CITATION_DATE.search(citation)
+    errors = []
+    if version is None:
+        errors.append("CITATION.cff has no version")
+    elif version.group(1) != name:
+        errors.append(
+            f"CITATION.cff version is {version.group(1)}; "
+            f"the newest CHANGELOG.md heading is {name}"
+        )
+    if released is None:
+        errors.append("CITATION.cff has no date-released")
+    elif released.group(1) != date:
+        errors.append(
+            f"CITATION.cff date-released is {released.group(1)}; "
+            f"the newest CHANGELOG.md heading {name} is dated {date}"
+        )
+    return errors
+
+
+def check(version: str, changelog: str, fragments, citation: str | None = None) -> list[str]:
     errors = []
     releases = parse_changelog(changelog)
-    for name, number, sections in releases:
+    for name, number, _date, sections in releases:
         if number > BASELINE and number[2] != 0:
             for kind in MINOR_ONLY:
                 if kind in sections:
@@ -122,7 +160,7 @@ def check(version: str, changelog: str, fragments) -> list[str]:
 
     parts = version.split(".")
     patch = int(parts[2]) if len(parts) == 3 and parts[2].isdigit() else 0
-    released = {name for name, _, _ in releases}
+    released = {name for name, _, _, _ in releases}
     if patch != 0 and version not in released:
         for name, kind, _ in fragments:
             if kind in FRAGMENT_MINOR_ONLY:
@@ -131,6 +169,8 @@ def check(version: str, changelog: str, fragments) -> list[str]:
                     "a patch; a feature or a removal needs a minor bump"
                 )
     errors += [f"changelog.d: {message}" for message in duplicates([text for _, _, text in fragments])]
+    if citation is not None:
+        errors += citation_errors(releases, citation)
     return errors
 
 
@@ -144,6 +184,9 @@ def selftest() -> int:
 
     def release(name: str, body: str) -> str:
         return f"## {name} (2026-01-01)\n\n{body}\n"
+
+    def cite(version: str, date: str) -> str:
+        return f'version: "{version}"\ndate-released: {date}\n'
 
     feat = release("1.2.3", "### Features\n\n- A thing.\n\n### Fixes\n\n- A fix.\n")
     clean = release("1.2.3", "### Fixes\n\n- A fix.\n")
@@ -168,11 +211,32 @@ def selftest() -> int:
           ("+b.misc.md", "misc", "Also RUSTSEC-2026-0592.")], 1),
         ("two advisories", "1.3.0",
          top + release("1.3.0", "### Fixes\n\n- RUSTSEC-2026-0592.\n- RUSTSEC-2026-0593.\n"), [], 0),
+        ("citation matches the newest heading", "1.3.0",
+         top + release("1.3.0", "### Fixes\n\n- A.\n"), [], 0,
+         cite("1.3.0", "2026-01-01")),
+        ("citation date drifts", "0.46.0",
+         top + "## 0.46.0 (2026-11-26)\n\n### Fixes\n\n- A.\n\n"
+         "## 0.45.4 (2026-11-24)\n\n### Fixes\n\n- B.\n", [], 1,
+         cite("0.46.0", "2026-11-24")),
+        ("citation version drifts", "0.46.0",
+         top + release("0.46.0", "### Fixes\n\n- A.\n"), [], 1,
+         cite("0.45.4", "2026-01-01")),
+        ("citation version and date drift", "0.46.0",
+         top + release("0.46.0", "### Fixes\n\n- A.\n"), [], 2,
+         cite("0.45.4", "2026-11-24")),
+        ("citation fields missing", "0.46.0",
+         top + release("0.46.0", "### Fixes\n\n- A.\n"), [], 2, "title: ljos\n"),
+        ("citation follows the highest version", "0.46.0",
+         top + "## 0.45.4 (2026-11-24)\n\n### Fixes\n\n- Old.\n\n"
+         "## 0.46.0 (2026-11-26)\n\n### Fixes\n\n- New.\n", [], 1,
+         cite("0.45.4", "2026-11-26")),
     ]
     bad = 0
-    for label, version, text, fragments, want in cases:
-        got = len(check(version, text, fragments))
-        mark = "ok" if (got > 0) == (want > 0) else "WRONG"
+    for case in cases:
+        label, version, text, fragments, want = case[:5]
+        citation = case[5] if len(case) > 5 else None
+        got = len(check(version, text, fragments, citation))
+        mark = "ok" if got == want else "WRONG"
         bad += mark == "WRONG"
         print(f"selftest {mark}: {label}: {got} problem(s)")
     return 1 if bad else 0
@@ -189,6 +253,7 @@ def main() -> int:
         version,
         (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"),
         pending(ROOT / "changelog.d"),
+        (ROOT / "CITATION.cff").read_text(encoding="utf-8"),
     )
     for error in errors:
         print(f"changelog-check: {error}", file=sys.stderr)

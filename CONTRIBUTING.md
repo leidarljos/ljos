@@ -16,6 +16,7 @@ A `feature` or `removal` fragment needs a minor bump, because towncrier files ev
 `scripts/changelog-check.py` fails when `Cargo.toml` names a patch version that has no section in `CHANGELOG.md` yet and a `feature` or `removal` fragment is waiting, and when a release after 0.45.4 has a Features or Removals section under a patch number.
 Move the fragment to the next minor release or give it another type.
 The same script fails when one release, or the waiting fragments, state a change twice: the same entry, or one RUSTSEC, GHSA or CVE advisory in two entries.
+The same script fails when `CITATION.cff` `version` or `date-released` differs from the newest released heading in `CHANGELOG.md`.
 One change is one fragment, also when it lands on two branches.
 The CI `changelog fragments` job runs it, and `--selftest` runs its own cases.
 
