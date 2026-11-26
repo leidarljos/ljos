@@ -37227,6 +37227,28 @@ fn doctor_state_read(
     }
 }
 
+#[cfg(test)]
+mod doctor_state_grace {
+    use super::doctor_state_read;
+    use std::path::Path;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn an_unfinished_row_inside_the_grace_is_kept() {
+        let bytes = b"{\"a\":1}\n{\"b\":2}".to_vec();
+        let path = Path::new("note-queue");
+        let read = |at: SystemTime| Ok((bytes.clone(), Some(at)));
+        let kept = doctor_state_read("note queue", path, read(SystemTime::now())).unwrap();
+        assert_eq!(kept, bytes);
+        let recent = SystemTime::now() - Duration::from_secs(1);
+        let kept = doctor_state_read("note queue", path, read(recent)).unwrap();
+        assert_eq!(kept, bytes);
+        let old = SystemTime::now() - Duration::from_secs(6);
+        let err = doctor_state_read("note queue", path, read(old)).unwrap_err();
+        assert!(err.contains("unfinished"), "{err}");
+    }
+}
+
 /// [`bypass_row`]'s text from the log's rows.
 #[must_use]
 pub fn bypass_summary(bytes: &[u8], path: &str) -> String {
@@ -73410,12 +73432,40 @@ mod tests {
         );
     }
 
+    /// chrono keeps the local zone for a second. The guard waits that out
+    /// on the way in and on the way out, so a later call on this thread
+    /// does not keep the zone this one set.
+    struct ZoneGuard {
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl ZoneGuard {
+        fn set(tz: &str) -> Self {
+            let prev = std::env::var_os("TZ");
+            unsafe { std::env::set_var("TZ", tz) };
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            Self { prev }
+        }
+    }
+
+    impl Drop for ZoneGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.prev.take() {
+                    Some(value) => std::env::set_var("TZ", value),
+                    None => std::env::remove_var("TZ"),
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+        }
+    }
+
     #[test]
     fn a_timeline_reads_every_store_on_the_local_day() {
         let _env_read = crate::test_env_read_lock();
         let _g = env_guard();
-        let before = std::env::var("TZ").ok();
-        unsafe { std::env::set_var("TZ", "CET-1CEST,M3.5.0,M10.5.0/3") };
+        let _primed = chrono::Local::now();
+        let _zone = ZoneGuard::set("CET-1CEST,M3.5.0,M10.5.0/3");
         // 22:28 UTC on the 26th is 00:28 on the 27th in Amsterdam, the day
         // the tracker stamps an issue created then.
         assert_eq!(local_stamp("2026-09-26T22:28:12.170Z"), "2026-09-27T00:28");
@@ -73427,12 +73477,6 @@ mod tests {
         events.push(deed);
         let text = format_events(&events, "2026-09-27T00:30:00");
         assert!(text.lines().all(|l| l.contains("\ttoday\t")), "{text}");
-        unsafe {
-            match before {
-                Some(tz) => std::env::set_var("TZ", tz),
-                None => std::env::remove_var("TZ"),
-            }
-        }
     }
 
     #[test]
