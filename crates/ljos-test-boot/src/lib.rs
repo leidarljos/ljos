@@ -4,8 +4,10 @@
 //!
 //! [`Packsetd`] starts the pack writer for a test and stops it again.
 
+mod closed_port;
 mod packsetd;
 
+pub use closed_port::ClosedPort;
 pub use packsetd::{reap_listener, Builder, Packsetd};
 
 use std::ffi::c_char;

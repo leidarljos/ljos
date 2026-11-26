@@ -1525,6 +1525,7 @@ int main(int argc, char **argv) {
     int port;
     int fd;
     struct sockaddr_in addr;
+    socklen_t len;
     if (argc < 2) return 2;
     port = atoi(argv[1]);
     fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -1535,6 +1536,12 @@ int main(int argc, char **argv) {
     addr.sin_port = htons((unsigned short)port);
     if (bind(fd, (struct sockaddr *)&addr, sizeof addr) != 0) return 2;
     if (listen(fd, 16) != 0) return 1;
+    if (port == 0) {
+        len = sizeof addr;
+        if (getsockname(fd, (struct sockaddr *)&addr, &len) != 0) return 1;
+        printf("%u\n", (unsigned)ntohs(addr.sin_port));
+        fflush(stdout);
+    }
     for (;;) pause();
 }
 "#;
@@ -1711,24 +1718,27 @@ int main(int argc, char **argv) {
         let bin = foreign_bin(&dir);
         let home = dir.join(format!("home-{}-writer", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
         #[expect(
             clippy::disallowed_methods,
             reason = "starts a program outside git hook code"
         )]
         let mut writer = Command::new(&bin)
-            .arg(port.to_string())
+            .arg("0")
             .env_clear()
             .env("HOME", &home)
             .env("PATH", "/usr/bin:/bin")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
         let pid = writer.id();
+        let stdout = writer.stdout.take().unwrap();
+        let mut line = String::new();
+        let n =
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut line).unwrap();
+        assert!(n > 0, "writer printed no port");
+        let port: u16 = line.trim().parse().expect("port");
         let deadline = Instant::now() + Duration::from_secs(2);
         while super::proc_listen_port(pid) != Some(port) {
             if let Some(status) = writer.try_wait().unwrap() {

@@ -375,9 +375,9 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
         reason = "writes a file that is not a git hook"
     )]
     std::fs::write(seat.config(), CONFIG_KEEP).unwrap();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    let held = ljos_test_boot::ClosedPort::bind().unwrap();
+    let port = held.port();
+    let pack_fd = held.inherit().unwrap().to_string();
     let log = seat.home.join("packset.log");
     let pid = seat.home.join("pack.pid");
     let py = seat.home.join("pack.py");
@@ -412,6 +412,7 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
             .env("PACKSET_TIMEOUT_MS", "400")
             .env("LJOS_HOOKD", "off")
             .env("PACKSET_PORT", port.to_string())
+            .env("LJOS_TEST_PACK_FD", &pack_fd)
             .env("LJOS_TEST_PACK_LOG", &log)
             .env("LJOS_TEST_PACK_PID", &pid)
             .env("LJOS_TEST_PACK_PY", &py)
@@ -519,9 +520,8 @@ fn doctor_fix_leaves_a_missing_packset_with_one_command() {
         reason = "writes a file that is not a git hook"
     )]
     std::fs::write(seat.config(), CONFIG_KEEP).unwrap();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    let held = ljos_test_boot::ClosedPort::bind().unwrap();
+    let port = held.port();
     scrub();
     #[expect(
         clippy::disallowed_methods,
@@ -556,7 +556,7 @@ fn doctor_fix_leaves_a_missing_packset_with_one_command() {
 }
 
 const PACK_PY: &str = concat!(
-    "import os\n",
+    "import os, socket\n",
     "from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n",
     "\n",
     "class Handler(BaseHTTPRequestHandler):\n",
@@ -573,11 +573,21 @@ const PACK_PY: &str = concat!(
     "    def log_message(self, fmt, *args):\n",
     "        return\n",
     "\n",
-    "port = int(os.environ['PACKSET_PORT'])\n",
+    "fd = int(os.environ['LJOS_TEST_PACK_FD'])\n",
+    "sock = socket.socket(fileno=fd)\n",
+    "class Held(ThreadingHTTPServer):\n",
+    "    allow_reuse_address = False\n",
+    "    def server_bind(self):\n",
+    "        fresh = self.socket\n",
+    "        self.socket = sock\n",
+    "        fresh.close()\n",
+    "        self.server_address = self.socket.getsockname()\n",
+    "    def server_activate(self):\n",
+    "        self.socket.listen(128)\n",
     "with open(os.environ['LJOS_TEST_PACK_PID'], 'w') as handle:\n",
     "    handle.write(str(os.getpid()))\n",
     "    handle.flush()\n",
-    "ThreadingHTTPServer(('127.0.0.1', port), Handler).serve_forever()\n",
+    "Held(('127.0.0.1', 0), Handler).serve_forever()\n",
 );
 
 const PACKSET_SH: &str = concat!(

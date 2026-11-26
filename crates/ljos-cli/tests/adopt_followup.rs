@@ -463,10 +463,8 @@ fn a_busy_remember_retries_then_says_nothing_was_stored() {
 #[test]
 fn a_refused_pack_search_is_one_line_and_exits_75() {
     let world = World::new();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let url = format!("http://127.0.0.1:{port}");
+    let held = ljos_test_boot::ClosedPort::bind().unwrap();
+    let url = held.url();
     let out = world.ljos(
         &["search", "glaze"],
         &[

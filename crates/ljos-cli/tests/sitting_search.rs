@@ -597,10 +597,9 @@ fn a_sitting_skips_memory_when_packsetd_answers_503() {
 #[test]
 fn a_sitting_skips_memory_when_packsetd_never_answers() {
     let root = tempfile::tempdir().unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let (ok, said, took) = run_sitting(root.path(), &format!("http://127.0.0.1:{port}"));
+    let held = ljos_test_boot::ClosedPort::bind().unwrap();
+    let url = held.url();
+    let (ok, said, took) = run_sitting(root.path(), &url);
     assert!(
         took < Duration::from_secs(8),
         "a closed pack port held the sitting for {took:?}:\n{said}"

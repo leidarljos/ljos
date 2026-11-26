@@ -489,21 +489,11 @@ fn a_busy_pack_with_a_word_match_is_one_result_line() {
 
 #[test]
 fn a_restarted_writer_is_reached_on_the_next_call() {
-    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
-    let serve = |stop: Arc<std::sync::atomic::AtomicBool>| {
-        let mut waited = 0;
-        let listener = loop {
-            match TcpListener::bind(("127.0.0.1", port)) {
-                Ok(listener) => break listener,
-                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && waited < 100 => {
-                    waited += 1;
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(e) => panic!("bind 127.0.0.1:{port}: {e}"),
-            }
-        };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // One listener for both generations. Dropping it and binding the same
+    // port again lets another test take the port during the retry.
+    let serve = |listener: TcpListener, stop: Arc<std::sync::atomic::AtomicBool>| {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -530,7 +520,7 @@ fn a_restarted_writer_is_reached_on_the_next_call() {
         })
     };
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let first = serve(stop.clone());
+    let first = serve(listener.try_clone().unwrap(), stop.clone());
     let url = format!("http://127.0.0.1:{port}");
     let mut session = Session::open(&[("PACKSET_URL", &url)]);
     let before = call(
@@ -545,7 +535,7 @@ fn a_restarted_writer_is_reached_on_the_next_call() {
     let _ = first.join();
     std::thread::sleep(Duration::from_millis(50));
     let again = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let second = serve(again.clone());
+    let second = serve(listener, again.clone());
     let after = call(
         &mut session,
         3,

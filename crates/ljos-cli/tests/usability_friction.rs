@@ -54,10 +54,8 @@ fn lines(bytes: &[u8]) -> Vec<String> {
 
 #[test]
 fn search_and_remember_say_one_line_when_the_pack_is_down() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let url = format!("http://127.0.0.1:{port}");
+    let held = ljos_test_boot::ClosedPort::bind().unwrap();
+    let url = held.url();
     let pack = [("PACKSET_URL", url.as_str())];
     let search = run(&["search", "fix the broken links on the docs"], &pack);
     let search_err = lines(&search.stderr);

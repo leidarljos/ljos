@@ -2820,6 +2820,9 @@ dependencies = [
 [[package]]
 name = "ljos-test-boot"
 version = "0.0.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "lock_api"

@@ -128,13 +128,14 @@ fn answer(writer: Writer, head: &str) -> (u16, String) {
     }
 }
 
-fn serve(writer: Writer) -> String {
+fn serve(writer: Writer) -> (String, Option<ljos_test_boot::ClosedPort>) {
+    if writer == Writer::Down {
+        let held = ljos_test_boot::ClosedPort::bind().unwrap();
+        let url = held.url();
+        return (url, Some(held));
+    }
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    if writer == Writer::Down {
-        drop(listener);
-        return format!("http://127.0.0.1:{port}");
-    }
     thread::spawn(move || {
         for conn in listener.incoming().flatten() {
             thread::spawn(move || {
@@ -151,7 +152,7 @@ fn serve(writer: Writer) -> String {
             });
         }
     });
-    format!("http://127.0.0.1:{port}")
+    (format!("http://127.0.0.1:{port}"), None)
 }
 
 fn script(dir: &Path, name: &str, body: &str) {
@@ -311,7 +312,7 @@ fn stderr_lines(out: &Output) -> Vec<String> {
 
 fn check(writer: Writer, command: Command_) {
     let seat = seat();
-    let url = serve(writer);
+    let (url, _held) = serve(writer);
     let (out, took) = run(&seat, &url, command);
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let lines = stderr_lines(&out);
@@ -380,7 +381,7 @@ cell!(sitting_down, Writer::Down, Command_::Sitting);
 #[test]
 fn a_recall_stays_inside_one_call_deadline() {
     let seat = seat();
-    let url = serve(Writer::Starting);
+    let (url, _held) = serve(Writer::Starting);
     let (out, took) = run_with(
         &seat,
         &url,
