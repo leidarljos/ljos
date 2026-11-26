@@ -2034,23 +2034,32 @@ impl Seat {
 #[cfg(not(any(test, feature = "test-hooks")))]
 static ANNOUNCED: std::sync::OnceLock<Seat> = std::sync::OnceLock::new();
 
-// Tests run many server lifetimes in one process, so their announcement
-// must end when the process-state guard does. The binaries' unit tests
-// link this library without `cfg(test)`, and get this one through
-// `test-hooks`.
-#[cfg(any(test, feature = "test-hooks"))]
+// A library test reuses its thread, so the seat it announced stays on
+// that thread and the next test clears it. A `test-hooks` binary is one
+// server: every thread of that process sees the seat from connect.
+#[cfg(test)]
 thread_local! {
     static ANNOUNCED: std::cell::RefCell<Option<Seat>> = const { std::cell::RefCell::new(None) };
 }
+
+#[cfg(all(feature = "test-hooks", not(test)))]
+static ANNOUNCED: std::sync::Mutex<Option<Seat>> = std::sync::Mutex::new(None);
 
 fn announced_seat() -> Option<Seat> {
     #[cfg(not(any(test, feature = "test-hooks")))]
     {
         ANNOUNCED.get().cloned()
     }
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(test)]
     {
         ANNOUNCED.with(|slot| slot.borrow().clone())
+    }
+    #[cfg(all(feature = "test-hooks", not(test)))]
+    {
+        ANNOUNCED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -2059,7 +2068,7 @@ fn announce_once(seat: &Seat) {
     {
         let _ = ANNOUNCED.set(seat.clone());
     }
-    #[cfg(any(test, feature = "test-hooks"))]
+    #[cfg(test)]
     {
         ANNOUNCED.with(|slot| {
             let mut announced = slot.borrow_mut();
@@ -2068,14 +2077,33 @@ fn announce_once(seat: &Seat) {
             }
         });
     }
+    #[cfg(all(feature = "test-hooks", not(test)))]
+    {
+        let mut announced = ANNOUNCED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if announced.is_none() {
+            *announced = Some(seat.clone());
+        }
+    }
 }
 
 /// End the seat a test announced. A binary's test guard calls this before
 /// it lets the next test in.
-#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(test)]
 #[doc(hidden)]
 pub fn clear_announced_seat() {
     ANNOUNCED.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// End the seat a test announced. A binary's test guard calls this before
+/// it lets the next test in.
+#[cfg(all(feature = "test-hooks", not(test)))]
+#[doc(hidden)]
+pub fn clear_announced_seat() {
+    *ANNOUNCED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
 /// A name as a seat: lower case, runs of letters and digits joined by one
