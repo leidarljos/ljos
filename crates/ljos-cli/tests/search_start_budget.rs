@@ -10,11 +10,16 @@ ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const OPENS_AFTER: Duration = Duration::from_millis(1200);
+/// `/health` stays `not-ready` for this many polls, then opens.
+/// The client's own pauses during those polls spend part of the one
+/// warmup budget, so the searches that follow are fewer than a second
+/// budget would allow.
+const CLOSED_HEALTHS: usize = 5;
 const BUDGET_SECS: &str = "2";
 
 fn request_path(sock: &mut std::net::TcpStream) -> Option<String> {
@@ -40,9 +45,11 @@ fn the_health_wait_and_the_search_wait_share_one_budget() {
     let began = Instant::now();
     let probes: Arc<Mutex<Vec<(String, Duration)>>> = Arc::default();
     let seen = Arc::clone(&probes);
+    let healths = Arc::new(AtomicUsize::new(0));
     thread::spawn(move || {
         for conn in listener.incoming().flatten() {
             let seen = Arc::clone(&seen);
+            let healths = Arc::clone(&healths);
             thread::spawn(move || {
                 let mut sock = conn;
                 let Some(path) = request_path(&mut sock) else {
@@ -50,11 +57,16 @@ fn the_health_wait_and_the_search_wait_share_one_budget() {
                 };
                 let at = began.elapsed();
                 seen.lock().unwrap().push((path.clone(), at));
+                let open = if path == "/health" {
+                    healths.fetch_add(1, Ordering::SeqCst) >= CLOSED_HEALTHS
+                } else {
+                    healths.load(Ordering::SeqCst) >= CLOSED_HEALTHS
+                };
                 let loading = (
                     503,
                     r#"{"error":"the pack is busy while loading"}"#.to_string(),
                 );
-                let (status, body) = if path == "/v1/search" || at < OPENS_AFTER {
+                let (status, body) = if path == "/v1/search" || !open {
                     if path == "/health" {
                         (200, "not-ready".to_string())
                     } else {
@@ -78,7 +90,7 @@ fn the_health_wait_and_the_search_wait_share_one_budget() {
         clippy::disallowed_methods,
         reason = "starts a program outside git hook code"
     )]
-    let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
         .args(["search", "kiln"])
         .current_dir(root)
         .env_clear()
@@ -99,24 +111,42 @@ fn the_health_wait_and_the_search_wait_share_one_budget() {
         .env("NO_COLOR", "1")
         .env("LJOS_SEAT", "travel")
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    let started = Instant::now();
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the search did not finish within 20s");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_end(&mut stdout);
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_end(&mut stderr);
+    }
     let probes = probes.lock().unwrap().clone();
-    let first = probes.iter().map(|(_, at)| *at).min().unwrap();
-    let last_search = probes
+    let searches = probes
         .iter()
         .filter(|(path, _)| path == "/v1/search")
-        .map(|(_, at)| *at)
-        .max()
-        .unwrap_or_else(|| panic!("the search was never asked; probes: {probes:?}"));
-    let span = last_search - first;
+        .count();
     let said = format!(
         "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
     );
     assert!(
-        span < Duration::from_millis(2700),
-        "the last search came {span:?} after the first probe, with a budget of {BUDGET_SECS}s and /health open at {OPENS_AFTER:?}\nprobes: {probes:?}\n{said}"
+        (1..=8).contains(&searches),
+        "one warmup budget of {BUDGET_SECS}s fits 7 searches after {CLOSED_HEALTHS} closed health polls; saw {searches}\nprobes: {probes:?}\n{said}"
     );
 }
