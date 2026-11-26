@@ -1006,34 +1006,23 @@ fn an_encoder_directory_is_not_already_installed() {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-fn a_ci_job_downloads_no_encoder() {
-    let _process = ljos_test_boot::env_lock();
-    let _g = Guard::new();
-    let root = tempfile::tempdir().unwrap();
-    let (home, _rel) = encoder_machine(root.path());
-    std::env::set_var("GITHUB_ACTIONS", "true");
-    std::env::set_var("GITHUB_RUN_ID", "555001");
-    let said = ljos_cli::cloud::up(false).unwrap();
-    assert!(said.contains("encoder: not a cloud VM"), "{said}");
-    assert!(!home.join(".local/bin/packset-embed").exists());
-    assert!(!home.join(".local/lib/packset-embed").exists());
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[test]
 fn a_generic_ci_job_downloads_no_encoder() {
     let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
-    let root = tempfile::tempdir().unwrap();
-    let (home, _rel) = encoder_machine(root.path());
-    std::env::set_var("CI", "true");
-    let said = ljos_cli::cloud::up(false).unwrap();
-    assert!(
-        said.contains("encoder: not a cloud VM"),
-        "CI=true is not a cloud VM: {said}"
-    );
-    assert!(!home.join(".local/bin/packset-embed").exists());
-    assert!(!home.join(".local/lib/packset-embed").exists());
+    for (key, run_id) in [("CI", false), ("GITHUB_ACTIONS", true)] {
+        let root = tempfile::tempdir().unwrap();
+        let (home, _rel) = encoder_machine(root.path());
+        std::env::set_var(key, "true");
+        if run_id {
+            std::env::set_var("GITHUB_RUN_ID", "555001");
+        }
+        let said = ljos_cli::cloud::up(false).unwrap();
+        assert!(said.contains("encoder: not a cloud VM"), "{key}: {said}");
+        assert!(!home.join(".local/bin/packset-embed").exists());
+        assert!(!home.join(".local/lib/packset-embed").exists());
+        std::env::remove_var(key);
+        std::env::remove_var("GITHUB_RUN_ID");
+    }
 }
 
 #[test]
@@ -2069,22 +2058,13 @@ esac
 HISTCONTROL=ignoreboth
 ";
 
-/// Ubuntu's skel bashrc returns from a `case $-` before any later PATH
-/// export. A non-interactive `bash -c '. ~/.bashrc'` never sees a line
-/// appended after that case.
-#[test]
-fn cloud_up_inserts_path_before_ubuntu_skel_interactive_case() {
-    let _process = ljos_test_boot::env_lock();
-    let _g = Guard::new();
-    assert_path_before_guard(UBUNTU_SKEL_BASHRC, "case $- in");
-}
-
 /// The same guard as an `if` whose test, `return` and `fi` are on lines
 /// of their own.
 #[test]
 fn cloud_up_inserts_path_before_a_multi_line_if_guard() {
     let _process = ljos_test_boot::env_lock();
     let _g = Guard::new();
+    assert_path_before_guard(UBUNTU_SKEL_BASHRC, "case $- in");
     assert_path_before_guard(
         "# rc\nif [ -z \"$PS1\" ]; then\n    return\nfi\necho prompt\n",
         "if [ -z",
@@ -2782,6 +2762,17 @@ fn cloud_guard_refuses_every_push_onto_a_cursor_ref() {
         "git push --all",
         "git push --branches",
         "git push origin --all",
+        "git --attr-source HEAD push origin HEAD:cursor/attr",
+        "git push --recurse-submodules check origin HEAD:cursor/submodule",
+        "git push origin HEAD:heads/cursor/existing",
+        "git push origin HEAD:tags/cursor/probe-tag",
+        "git push --prune origin 'refs/heads/*:refs/heads/*'",
+        "git \"$(echo push)\" origin HEAD:cursor/subcommand",
+        "git $'pu\\163h' origin HEAD:cursor/ansi-c",
+        "printf 'HEAD:cursor/xargs\\n' | xargs git push origin",
+        "git subtree push --prefix . origin cursor/subtree",
+        "git send-pack origin HEAD:refs/heads/cursor/send-pack",
+        "git submodule foreach 'git push origin HEAD:cursor/foreach'",
         "git push --mirror",
     ] {
         refused(line, &develop);
@@ -2831,60 +2822,11 @@ fn cloud_guard_refuses_every_push_onto_a_cursor_ref() {
         "{}",
         all.reason
     );
-}
 
-#[test]
-fn cloud_guard_reads_valued_push_options_before_the_subcommand() {
-    let _process = ljos_test_boot::env_lock();
-    let _g = Guard::new();
-    let root = tempfile::tempdir().unwrap();
-    seat_env(root.path());
-    ljos_cli::cloud::up(false).unwrap();
     let origin = init_bare(root.path());
-    let body = board(&[issue_block("probe-opts", "TODO", "", &[])]);
+    let body = board(&[issue_block("probe-folded", "TODO", "", &[])]);
     seed(root.path(), &origin, &body);
-    let repo = clone_of(root.path(), &origin, "probe");
-
-    for line in [
-        "git --attr-source HEAD push origin HEAD:cursor/attr",
-        "git push --recurse-submodules check origin HEAD:cursor/submodule",
-    ] {
-        refused(line, &repo);
-    }
-}
-
-#[test]
-fn cloud_guard_denies_heads_and_tags_shortcuts_under_cursor() {
-    let _process = ljos_test_boot::env_lock();
-    let _g = Guard::new();
-    let root = tempfile::tempdir().unwrap();
-    seat_env(root.path());
-    ljos_cli::cloud::up(false).unwrap();
-    let origin = init_bare(root.path());
-    let body = board(&[issue_block("probe-short-refs", "TODO", "", &[])]);
-    seed(root.path(), &origin, &body);
-    let repo = clone_of(root.path(), &origin, "probe-short-refs");
-
-    for line in [
-        "git push origin HEAD:heads/cursor/existing",
-        "git push origin HEAD:tags/cursor/probe-tag",
-    ] {
-        refused(line, &repo);
-    }
-}
-
-#[test]
-fn cloud_guard_reads_where_bare_refspecs_land() {
-    let _process = ljos_test_boot::env_lock();
-    let _g = Guard::new();
-    let root = tempfile::tempdir().unwrap();
-    seat_env(root.path());
-    ljos_cli::cloud::up(false).unwrap();
-    let origin = init_bare(root.path());
-    let body = board(&[issue_block("probe-bare-map", "TODO", "", &[])]);
-    seed(root.path(), &origin, &body);
-    let repo = clone_of(root.path(), &origin, "probe-bare-map");
-
+    let repo = clone_of(root.path(), &origin, "probe-folded");
     git(&repo, &["branch", "cursor/existing"]);
     git(
         &repo,
@@ -2909,9 +2851,21 @@ fn cloud_guard_reads_where_bare_refspecs_land() {
             "refs/heads/main:refs/heads/cursor/mapped",
         ],
     );
-
     refused("git push origin fix", &repo);
     refused("git push origin main", &repo);
+
+    let dev = clone_of(root.path(), &origin, "dev");
+    git(&dev, &["branch", "-M", "develop"]);
+    let oncur = clone_of(root.path(), &origin, "oncur");
+    git(&oncur, &["checkout", "-q", "-b", "cursor/probe"]);
+    for line in [
+        "GIT_DIR=../oncur/.git git push origin HEAD",
+        "env -C ../oncur git push origin HEAD",
+        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=HEAD:cursor/from-env git push origin HEAD",
+    ] {
+        refused(line, &dev);
+    }
+    allowed("GIT_DIR=../dev/.git git push origin HEAD", &oncur);
 }
 
 #[test]
@@ -2964,72 +2918,6 @@ fn cloud_guard_refuses_shell_aliases_that_hide_git_push() {
     ] {
         let hit = refused(line, &repo);
         assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
-    }
-}
-
-#[test]
-fn cloud_guard_reads_git_env_and_env_chdir_context() {
-    let _process = ljos_test_boot::env_lock();
-    let _g = Guard::new();
-    let root = tempfile::tempdir().unwrap();
-    seat_env(root.path());
-    ljos_cli::cloud::up(false).unwrap();
-    let origin = init_bare(root.path());
-    let body = board(&[issue_block("probe-git-env", "TODO", "", &[])]);
-    seed(root.path(), &origin, &body);
-    let dev = clone_of(root.path(), &origin, "dev");
-    git(&dev, &["branch", "-M", "develop"]);
-    let oncur = clone_of(root.path(), &origin, "oncur");
-    git(&oncur, &["checkout", "-q", "-b", "cursor/probe"]);
-
-    for line in [
-        "GIT_DIR=../oncur/.git git push origin HEAD",
-        "env -C ../oncur git push origin HEAD",
-        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=HEAD:cursor/from-env git push origin HEAD",
-    ] {
-        refused(line, &dev);
-    }
-
-    allowed("GIT_DIR=../dev/.git git push origin HEAD", &oncur);
-}
-
-#[test]
-fn cloud_guard_refuses_prune_and_mirror_when_they_can_delete_heads() {
-    let _process = ljos_test_boot::env_lock();
-    let _g = Guard::new();
-    let root = tempfile::tempdir().unwrap();
-    seat_env(root.path());
-    ljos_cli::cloud::up(false).unwrap();
-    let origin = init_bare(root.path());
-    let body = board(&[issue_block("probe-prune", "TODO", "", &[])]);
-    seed(root.path(), &origin, &body);
-    let repo = clone_of(root.path(), &origin, "probe-prune");
-
-    refused("git push --prune origin 'refs/heads/*:refs/heads/*'", &repo);
-    refused("git push --mirror origin", &repo);
-}
-
-#[test]
-fn cloud_guard_refuses_shell_trick_push_forms() {
-    let _process = ljos_test_boot::env_lock();
-    let _g = Guard::new();
-    let root = tempfile::tempdir().unwrap();
-    seat_env(root.path());
-    ljos_cli::cloud::up(false).unwrap();
-    let origin = init_bare(root.path());
-    let body = board(&[issue_block("probe-shell-tricks", "TODO", "", &[])]);
-    seed(root.path(), &origin, &body);
-    let repo = clone_of(root.path(), &origin, "probe-shell-tricks");
-
-    for line in [
-        "git \"$(echo push)\" origin HEAD:cursor/subcommand",
-        "git $'pu\\163h' origin HEAD:cursor/ansi-c",
-        "printf 'HEAD:cursor/xargs\\n' | xargs git push origin",
-        "git subtree push --prefix . origin cursor/subtree",
-        "git send-pack origin HEAD:refs/heads/cursor/send-pack",
-        "git submodule foreach 'git push origin HEAD:cursor/foreach'",
-    ] {
-        refused(line, &repo);
     }
 }
 
