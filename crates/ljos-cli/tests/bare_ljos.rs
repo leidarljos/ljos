@@ -198,45 +198,6 @@ fn bare_ljos_names_a_session_seat() {
     );
 }
 
-#[test]
-fn a_mistyped_search_names_search_and_exits_2() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = run(dir.path(), &["serch"], &[]);
-    let said = text(&out);
-    assert_eq!(out.status.code(), Some(2), "{said}");
-    assert!(out.stdout.is_empty(), "{said}");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "ljos: no command serch, and the closest is search, so run `ljos search`.\n"
-    );
-}
-
-#[test]
-fn a_mistyped_remember_names_remember_and_exits_2() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = run(dir.path(), &["remeber"], &[]);
-    let said = text(&out);
-    assert_eq!(out.status.code(), Some(2), "{said}");
-    assert!(out.stdout.is_empty(), "{said}");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "ljos: no command remeber, and the closest is remember, so run `ljos remember`.\n"
-    );
-}
-
-#[test]
-fn a_mistyped_lesson_flag_names_lesson_and_exits_2() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = run(dir.path(), &["finish", "--lesons"], &[]);
-    let said = text(&out);
-    assert_eq!(out.status.code(), Some(2), "{said}");
-    assert!(out.stdout.is_empty(), "{said}");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "ljos: finish has no flag --lesons, and the closest is --lesson, so run `ljos finish --lesson`.\n"
-    );
-}
-
 /// The line a person reads. Stdout stays empty and the status is 2.
 const TYPO_LINES: &[(&[&str], &str)] = &[
     (
@@ -286,6 +247,118 @@ const TYPO_LINES: &[(&[&str], &str)] = &[
     (
         &["completions", "pwsh"],
         "ljos: no shell pwsh, and the closest is powershell, so run `ljos completions powershell`.\n",
+    ),
+    (
+        &["finish", "--lesons"],
+        "ljos: finish has no flag --lesons, and the closest is --lesson, so run `ljos finish --lesson`.\n",
+    ),
+    (
+        &["help", "serch"],
+        "ljos: no command serch, and the closest is search, so run `ljos help search`.\n",
+    ),
+    (
+        &["help", "find"],
+        "ljos: no command find, and the closest is search, so run `ljos help search`.\n",
+    ),
+    (
+        &["close", "demo-4b1s"],
+        "ljos: no command close, and the closest is finish, so run `ljos finish <value>`.\n",
+    ),
+    (
+        &["create", "Pick a codec"],
+        "ljos: no command create, and the closest is file, so run `ljos file <value>`.\n",
+    ),
+    (
+        &["new", "Pick a codec"],
+        "ljos: no command new, and the closest is file, so run `ljos file <value>`.\n",
+    ),
+    (
+        &["delete", "a6ae2751"],
+        "ljos: no command delete, and the closest is forget, so run `ljos forget <value>`.\n",
+    ),
+    (
+        &["rm", "a6ae2751"],
+        "ljos: no command rm, and the closest is forget, so run `ljos forget <value>`.\n",
+    ),
+    (
+        &["status"],
+        "ljos: no command status, and the closest is doctor, so run `ljos doctor`.\n",
+    ),
+    (
+        &["stats"],
+        "ljos: no command stats, and the closest is digest, so run `ljos digest`.\n",
+    ),
+    (
+        &["edit"],
+        "ljos: no command edit, and the closest is memories, so run `ljos memories`.\n",
+    ),
+    (
+        &["help", "close"],
+        "ljos: no command close, and the closest is finish, so run `ljos help finish`.\n",
+    ),
+    (
+        &["lessons"],
+        "ljos: no command lessons. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
+    ),
+    (
+        &["lesson"],
+        "ljos: no command lesson. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
+    ),
+    (
+        &["learnings"],
+        "ljos: no command learnings. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
+    ),
+    (
+        &["Lessons"],
+        "ljos: no command Lessons. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
+    ),
+    (
+        &["help", "lessons"],
+        "ljos: no command lessons. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
+    ),
+    (
+        &["lessons", "kiln"],
+        "ljos: no command lessons. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
+    ),
+    (
+        &["--seat", "ada", "lessons", "cold", "metal", "-p", "demo"],
+        "ljos: no command lessons. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
+    ),
+    (
+        &["lessons", "--json"],
+        "ljos: no command lessons. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
+    ),
+    (
+        &["prop"],
+        "ljos: no command prop, and the closest is proposals, so run `ljos proposals`.\n",
+    ),
+    (
+        &["remembering", "cold metal"],
+        "ljos: no command remembering, and the closest is remember, so run `ljos remember <value>`.\n",
+    ),
+    (
+        &["searches", "kiln"],
+        "ljos: no command searches, and the closest is search, so run `ljos search <value>`.\n",
+    ),
+    (
+        &["search-lessons", "kiln"],
+        "ljos: no command search-lessons, and the closest is search, so run `ljos search <value>`.\n",
+    ),
+    (
+        &["note_add", "the door sticks"],
+        "ljos: no command note_add, and the closest is note, so run `ljos note <value>`.\n",
+    ),
+    (
+        &["memorize", "cold metal"],
+        "ljos: no command memorize, and the closest is remember, so run `ljos remember <value>`.\n",
+    ),
+    (
+        &["review"],
+        "ljos: no command review, and the closest is proposals, so run `ljos proposals`.\n",
+    ),
+    (
+        &["help", "prop"],
+        "ljos: no command prop, and the closest is proposals, so run `ljos help proposals`.\n",
     ),
 ];
 
@@ -374,171 +447,6 @@ fn list_and_ls_are_commands_and_a_capital_names_them() {
             String::from_utf8_lossy(&out.stdout).contains("Usage: ljos list"),
             "{word}\n{said}"
         );
-    }
-}
-
-#[test]
-fn help_for_a_mistyped_command_names_the_real_one() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = run(dir.path(), &["help", "serch"], &[]);
-    let said = text(&out);
-    assert_eq!(out.status.code(), Some(2), "{said}");
-    assert!(out.stdout.is_empty(), "{said}");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "ljos: no command serch, and the closest is search, so run `ljos help search`.\n"
-    );
-    let find = run(dir.path(), &["help", "find"], &[]);
-    assert_eq!(find.status.code(), Some(2), "{}", text(&find));
-    assert_eq!(
-        String::from_utf8_lossy(&find.stderr),
-        "ljos: no command find, and the closest is search, so run `ljos help search`.\n"
-    );
-}
-
-#[test]
-fn close_create_delete_rm_status_and_stats_point_at_real_verbs() {
-    let dir = tempfile::tempdir().unwrap();
-    let cases: [(&[&str], &str); 9] = [
-        (
-            &["close", "demo-4b1s"],
-            "ljos: no command close, and the closest is finish, so run `ljos finish <value>`.\n",
-        ),
-        (
-            &["create", "Pick a codec"],
-            "ljos: no command create, and the closest is file, so run `ljos file <value>`.\n",
-        ),
-        (
-            &["new", "Pick a codec"],
-            "ljos: no command new, and the closest is file, so run `ljos file <value>`.\n",
-        ),
-        (
-            &["delete", "a6ae2751"],
-            "ljos: no command delete, and the closest is forget, so run `ljos forget <value>`.\n",
-        ),
-        (
-            &["rm", "a6ae2751"],
-            "ljos: no command rm, and the closest is forget, so run `ljos forget <value>`.\n",
-        ),
-        (
-            &["status"],
-            "ljos: no command status, and the closest is doctor, so run `ljos doctor`.\n",
-        ),
-        (
-            &["stats"],
-            "ljos: no command stats, and the closest is digest, so run `ljos digest`.\n",
-        ),
-        (
-            &["edit"],
-            "ljos: no command edit, and the closest is memories, so run `ljos memories`.\n",
-        ),
-        (
-            &["help", "close"],
-            "ljos: no command close, and the closest is finish, so run `ljos help finish`.\n",
-        ),
-    ];
-    for (args, want) in cases {
-        let out = run(dir.path(), args, &[]);
-        let said = text(&out);
-        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
-        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
-        assert_eq!(String::from_utf8_lossy(&out.stderr), want, "{args:?}");
-    }
-}
-
-const LESSONS_LINE: &str = "To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.";
-
-#[test]
-fn lessons_names_search_remember_and_proposals() {
-    let dir = tempfile::tempdir().unwrap();
-    for word in ["lessons", "lesson", "learnings", "Lessons"] {
-        let out = run(dir.path(), &[word], &[]);
-        let said = text(&out);
-        assert_eq!(out.status.code(), Some(2), "{word}\n{said}");
-        assert!(out.stdout.is_empty(), "{word}\n{said}");
-        assert_eq!(
-            String::from_utf8_lossy(&out.stderr),
-            format!("ljos: no command {word}. {LESSONS_LINE}\n"),
-            "{word}"
-        );
-    }
-    let help = run(dir.path(), &["help", "lessons"], &[]);
-    assert_eq!(help.status.code(), Some(2), "{}", text(&help));
-    assert_eq!(
-        String::from_utf8_lossy(&help.stderr),
-        format!("ljos: no command lessons. {LESSONS_LINE}\n")
-    );
-}
-
-#[test]
-fn words_after_lessons_are_not_repeated() {
-    let dir = tempfile::tempdir().unwrap();
-    let cases: [(&[&str], &str); 3] = [
-        (
-            &["lessons", "kiln"],
-            "ljos: no command lessons. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
-        ),
-        (
-            &["--seat", "ada", "lessons", "cold", "metal", "-p", "demo"],
-            "ljos: no command lessons. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
-        ),
-        (
-            &["lessons", "--json"],
-            "ljos: no command lessons. To find lessons run `ljos search \"<words>\"`, to save one run `ljos remember \"The lexical default is BM25+.\"`, and to review the ones waiting run `ljos proposals`.\n",
-        ),
-    ];
-    for (args, want) in cases {
-        let out = run(dir.path(), args, &[]);
-        let said = text(&out);
-        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
-        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
-        assert_eq!(String::from_utf8_lossy(&out.stderr), want, "{args:?}");
-    }
-}
-
-#[test]
-fn a_stem_a_start_or_a_part_of_a_verb_names_that_verb() {
-    let dir = tempfile::tempdir().unwrap();
-    let cases: [(&[&str], &str); 8] = [
-        (
-            &["prop"],
-            "ljos: no command prop, and the closest is proposals, so run `ljos proposals`.\n",
-        ),
-        (
-            &["remembering", "cold metal"],
-            "ljos: no command remembering, and the closest is remember, so run `ljos remember <value>`.\n",
-        ),
-        (
-            &["searches", "kiln"],
-            "ljos: no command searches, and the closest is search, so run `ljos search <value>`.\n",
-        ),
-        (
-            &["search-lessons", "kiln"],
-            "ljos: no command search-lessons, and the closest is search, so run `ljos search <value>`.\n",
-        ),
-        (
-            &["note_add", "the door sticks"],
-            "ljos: no command note_add, and the closest is note, so run `ljos note <value>`.\n",
-        ),
-        (
-            &["memorize", "cold metal"],
-            "ljos: no command memorize, and the closest is remember, so run `ljos remember <value>`.\n",
-        ),
-        (
-            &["review"],
-            "ljos: no command review, and the closest is proposals, so run `ljos proposals`.\n",
-        ),
-        (
-            &["help", "prop"],
-            "ljos: no command prop, and the closest is proposals, so run `ljos help proposals`.\n",
-        ),
-    ];
-    for (args, want) in cases {
-        let out = run(dir.path(), args, &[]);
-        let said = text(&out);
-        assert_eq!(out.status.code(), Some(2), "{args:?}\n{said}");
-        assert!(out.stdout.is_empty(), "{args:?}\n{said}");
-        assert_eq!(String::from_utf8_lossy(&out.stderr), want, "{args:?}");
     }
 }
 
