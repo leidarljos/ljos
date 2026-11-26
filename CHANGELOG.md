@@ -5,6 +5,36 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 1.0.0 (2026-11-26)
+
+### Features
+
+- `ljos note ID --file PATH` keeps a land summary, a report, a gate verdict or a log as a long note: a plain org page at `notes/LEAF/SLUG.org` beside the ticket's issue file, linked from one stub line of under 200 bytes on the logbook.
+  The page and the stub land in one tracker commit, and the stub is inserted into the logbook without rewriting the rest of the issue file.
+  Markdown is converted to org with pandoc, or with a small converter built into ljos when pandoc is missing or `LJOS_PANDOC` is `off`, and a log goes inside `#+begin_example`.
+  A page is plain org that can be opened and edited in place; its path is its name, and a byte-identical body on the same ticket is noted once.
+  A failed write removes its temporary and leaves no page and no stub.
+  A body past 256 KiB is kept whole with a warning, and past 1 MiB the page keeps the first and last 128 KiB while the full body goes to the local deedar store and is cited on the ticket; `--refuse-trim` refuses instead.
+  A binary or encoded body exits 1, writes nothing, and names `deedar create file`.
+  A short `ljos note ID TEXT` past 4 KiB, or with a line past 2 KiB, is kept whole as a long note in the same way and says so, rather than being refused or dropped, and `ljos_note` does the same.
+  `ljos notes ID` lists a ticket's long notes, `ljos show ID --long [NOTE]` prints one, and `ljos notes import DIR --ticket ID [--dry-run]` notes a kit's `.md`, `.txt` and `.log` files once each in one commit.
+  `ljos search --long` searches the long notes through a gitignored local index that rereads a page whose size or modification time changed, and a plain `ljos search` never opens a note page or the index.
+  The MCP server gains `ljos_notes` and `ljos_show_long`, and `ljos_note` takes `file`, `title` and `kind`.
+
+### Fixes
+
+- A piece that starts with a NUL is no longer read as the stop word after that NUL, so `brine_\0the foo` keeps `\0the` and pairs it with the next word.
+- `ljos finish` and `ljos sync` pack the tracker on the bytes its loose objects hold, not on the object count `git gc --auto` reads, so thousands of rewritten issue files no longer pile up unpacked.
+  Past 32 MiB, or the bytes `LJOS_TRACKER_GC_BYTES` names, one `git gc` starts in its own session and holds the tracker commit lock and `ljos-gc.flock` until it ends, so a tracker write waits and a gc that cannot take the lock is skipped.
+  The gc passes `gc.pruneExpire=2.weeks.ago` and `gc.worktreePruneExpire=3.months.ago`, so a checkout config of `now` does not prune under it.
+  The command that started it returns at once, its deadline does not stop the gc, and no second gc starts while one holds the lock.
+  A note passed to `vissue note` past 4,096 bytes, or with a line past 2,048 bytes, is a failed command before it reaches the ticket: the process exits non-zero, and the line names the size, the cap and `ljos note ID --file PATH`. It is not a label that exits 0.
+  A ticket whose id has a `/`, such as `Software/ljos-3n59` in the nested project `Software/ljos`, gets its per-issue file under the name any other ticket gets, `issues/ljos-3n59.org`, and no longer `issues/Software%2Fljos-3n59.org`.
+  A split or a new ticket moves vissue's file to that name before its first commit when the layout name is free, and a file already committed under the old name, or a layout name that already exists, keeps its bytes and is still found.
+- `ljos search` no longer builds a term bag of every tracked ticket: each ticket's text is read once, through the same analyzer the bag uses, and only the terms the query can match are built, so the same tickets come back in the same order.
+  On a generated 100 MB tracker with the pack answering it takes about a tenth of the time it took, also when tickets hold non-ASCII text such as `café`, an em dash or a curly apostrophe, and one long token is read in linear time.
+
+
 ## 0.46.0 (2026-11-26)
 
 ### Features
