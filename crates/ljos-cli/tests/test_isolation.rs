@@ -303,9 +303,10 @@ fn pattern_binds(pat: &syn::Pat, name: &str) -> bool {
 /// Statement indices of top-level `let` bindings whose name is used by
 /// value after the let, in a scope that still sees that binding. Move
 /// captures are read from the raw tokens first, before any place or
-/// borrow is classified. A closure parameter or a `let` of that name
-/// does not capture the outer binding. A use before the let, or under a
-/// later binding of the same name, does not.
+/// borrow is classified. Any token of that name in a move closure,
+/// including the parameter list, ends the guard. A `let` of that name
+/// does not. A use before the let, or under a later binding of the same
+/// name, does not.
 fn ended_bindings(stmts: &[syn::Stmt]) -> Vec<usize> {
     let mut ended = Vec::new();
     for (at, stmt) in stmts.iter().enumerate() {
@@ -698,33 +699,7 @@ fn statement_shadows(trees: &[TokenTree], name: &str) -> bool {
     let Some(eq) = trees.iter().position(is_eq) else {
         return false;
     };
-    pattern_shadows(&trees[1..eq], name)
-}
-
-fn pattern_shadows(trees: &[TokenTree], name: &str) -> bool {
-    let mut index = 0;
-    while index < trees.len() {
-        match &trees[index] {
-            TokenTree::Ident(ident) if ident == "mut" || ident == "ref" => index += 1,
-            TokenTree::Ident(ident) => {
-                let leads_path = is_colon(trees.get(index + 1)) && is_colon(trees.get(index + 2));
-                let after_colon = index > 0 && is_colon(trees.get(index - 1));
-                if !leads_path && !after_colon && ident == name {
-                    return true;
-                }
-                index += 1;
-            }
-            TokenTree::Group(group) => {
-                let inner: Vec<TokenTree> = group.stream().into_iter().collect();
-                if pattern_shadows(&inner, name) {
-                    return true;
-                }
-                index += 1;
-            }
-            _ => index += 1,
-        }
-    }
-    false
+    simple_name(&trees[1..eq]).is_some_and(|got| got == name)
 }
 
 fn is_pipe(tree: Option<&TokenTree>) -> bool {
@@ -749,31 +724,27 @@ fn keyword_move(trees: &[TokenTree], index: usize) -> bool {
     }
 }
 
-/// `(body, end, parameter binds name)`. A brace is the body. Otherwise the
-/// region runs to a comma, a semicolon, or the end of this group.
-fn closure_after(trees: &[TokenTree], move_at: usize, name: &str) -> (usize, usize, bool) {
+/// Where the move region ends. A brace is the body. Otherwise the region
+/// runs to a comma, a semicolon, or the end of this group. Callers read
+/// every ident from the token after `move` through this end.
+fn closure_end(trees: &[TokenTree], move_at: usize) -> usize {
     let mut at = move_at + 1;
-    let mut shadowed = false;
     if is_pipe(trees.get(at)) {
-        let params = at + 1;
-        at = params;
+        at += 1;
         while at < trees.len() && !is_pipe(trees.get(at)) {
             at += 1;
         }
-        if at >= trees.len() {
-            return (params, trees.len(), false);
+        if at < trees.len() {
+            at += 1;
         }
-        shadowed = pattern_shadows(&trees[params..at], name);
-        at += 1;
     }
-    let end = match trees.get(at) {
+    match trees.get(at) {
         Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace => at + 1,
         _ => trees[at..]
             .iter()
             .position(is_end)
             .map_or(trees.len(), |rel| at + rel),
-    };
-    (at, end, shadowed)
+    }
 }
 
 /// An ident of the live `name`. A `let` of that name hides the rest of its
@@ -814,6 +785,7 @@ fn token_mentions(tree: &TokenTree, name: &str) -> bool {
 }
 
 /// A `move` or `async move` in these statements captures the live `name`.
+/// Any token of that name in the closure, including a parameter, counts.
 /// Groups are opened, so a macro token tree counts. Runs before borrows.
 fn moves_after(statements: &[&[TokenTree]], from: usize, name: &str) -> bool {
     let mut live = true;
@@ -832,8 +804,8 @@ fn stmt_moves_capture(trees: &[TokenTree], name: &str) -> bool {
     let mut index = 0;
     while index < trees.len() {
         if keyword_move(trees, index) {
-            let (body, end, shadowed) = closure_after(trees, index, name);
-            if !shadowed && mentions(&trees[body..end], name) {
+            let end = closure_end(trees, index);
+            if mentions(&trees[index + 1..end], name) {
                 return true;
             }
             index = end.max(index + 1);
@@ -855,7 +827,7 @@ fn walk_tokens(trees: &[TokenTree], name: &str) -> bool {
     let mut index = 0;
     while index < trees.len() {
         if keyword_move(trees, index) {
-            let (_, end, _) = closure_after(trees, index, name);
+            let end = closure_end(trees, index);
             index = end.max(index + 1);
             continue;
         }
@@ -1386,6 +1358,12 @@ fn a_move_capture_ends_the_guard() {
         "let guard = test_env_lock();\n    let release = async move { foo!(guard) };",
         "let guard = test_env_lock();\n    let release = Some(move || helper(&guard));",
         "let guard = test_env_lock();\n    let release = vec![move || helper(&guard)];",
+        "let guard = test_env_lock();\n    let release = move |S { guard: other }| helper(&guard);",
+        "let guard = test_env_lock();\n    let release = move |(guard, _)| ();",
+        "let guard = test_env_lock();\n    let release = move |guard| helper(&guard);",
+        "let guard = test_env_lock();\n    let release = move |guard| assert!(guard.ready());",
+        "let guard = test_env_lock();\n    let release = &(move |guard| helper(&guard));",
+        "let guard = test_env_lock();\n    x.spawn(move |guard| guard);",
     ] {
         assert_eq!(
             unguarded(&probe(body), path, LIB_GUARDS),
@@ -1396,14 +1374,10 @@ fn a_move_capture_ends_the_guard() {
     for body in [
         "let guard = test_env_lock();\n    let release = || helper(&guard);\n    drop(release);",
         "let guard = test_env_lock();\n    let release = move || helper(&other);",
-        "let guard = test_env_lock();\n    let release = move |guard| helper(&guard);",
-        "let guard = test_env_lock();\n    let release = move |guard| assert!(guard.ready());",
         "let guard = test_env_lock();\n    let release = move || { let guard = 1;\n        helper(&guard) };",
         "let guard = test_env_lock();\n    let release = move || { let guard = 1;\n        assert!(guard.ready()) };",
         "let guard = test_env_lock();\n    let release = async { helper(&guard) };",
         "let guard = test_env_lock();\n    let release = async move { let guard = 1;\n        format!(\"{}\", guard) };",
-        "let guard = test_env_lock();\n    let release = &(move |guard| helper(&guard));",
-        "let guard = test_env_lock();\n    x.spawn(move |guard| guard);",
     ] {
         assert!(
             unguarded(&probe(body), path, LIB_GUARDS).is_empty(),
@@ -1424,6 +1398,11 @@ fn a_move_capture_ends_the_guard() {
         "let guard = test_env_lock(); let release = async move { foo!(guard) };",
         "let guard = test_env_lock(); let release = Some(move || helper(&guard));",
         "let guard = test_env_lock(); let release = vec![move || helper(&guard)];",
+        "let guard = test_env_lock(); let release = move |S { guard: other }| helper(&guard);",
+        "let guard = test_env_lock(); let release = move |(guard, _)| ();",
+        "let guard = test_env_lock(); let release = move |guard| assert!(guard.ready());",
+        "let guard = test_env_lock(); let release = &(move |guard| helper(&guard));",
+        "let guard = test_env_lock(); x.spawn(move |guard| guard);",
     ] {
         assert_eq!(
             unguarded(&cell(body), path, LIB_GUARDS),
@@ -1432,11 +1411,8 @@ fn a_move_capture_ends_the_guard() {
         );
     }
     for body in [
-        "let guard = test_env_lock(); let release = move |guard| assert!(guard.ready());",
         "let guard = test_env_lock(); let release = move || { let guard = 1; assert!(guard.ready()) };",
         "let guard = test_env_lock(); let release = move || helper(&other);",
-        "let guard = test_env_lock(); let release = &(move |guard| helper(&guard));",
-        "let guard = test_env_lock(); x.spawn(move |guard| guard);",
     ] {
         assert!(
             unguarded(&cell(body), path, LIB_GUARDS).is_empty(),
