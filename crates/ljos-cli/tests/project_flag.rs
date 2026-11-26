@@ -7,6 +7,9 @@
 
 ljos_test_boot::harness!();
 
+#[path = "common/refused_port.rs"]
+mod refused_port;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -546,45 +549,10 @@ fn prefer_and_rule_record_a_project_and_tags_only_when_asked() {
 }
 
 #[test]
-fn a_verb_without_a_project_names_the_verbs_that_take_one() {
-    let seat = Seat::open();
-    for verb in ["note", "claim", "finish", "recall", "show"] {
-        let out = seat.run(&[verb, "-p", "finance"]);
-        let dump = said(&out);
-        assert_eq!(out.status.code(), Some(2), "{verb}\n{dump}");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let line = format!("ljos: {verb} has no flag -p. {VERBS}");
-        assert!(
-            stderr.lines().any(|row| row == line),
-            "expected {line:?}\n{dump}"
-        );
-    }
-    let sitting = seat.run(&["sitting", FINANCE_TICKET, "-p", "finance"]);
-    let dump = said(&sitting);
-    assert_eq!(sitting.status.code(), Some(2), "{dump}");
-    let stderr = String::from_utf8_lossy(&sitting.stderr);
-    let line = format!("ljos: sitting takes -p with --plan. {VERBS}");
-    assert!(
-        stderr.lines().any(|row| row == line),
-        "expected {line:?}\n{dump}"
-    );
-    let bare = seat.run(&["sitting", "-p", "finance"]);
-    let dump = said(&bare);
-    assert_eq!(bare.status.code(), Some(2), "{dump}");
-    let stderr = String::from_utf8_lossy(&bare.stderr);
-    assert!(
-        stderr.lines().any(|row| row == line),
-        "expected {line:?}\n{dump}"
-    );
-}
-
-#[test]
 fn queued_remember_keeps_the_project_when_the_pack_is_down() {
     let seat = Seat::open();
-    let dead = {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port())
-    };
+    let held = refused_port::RefusedPort::reserve();
+    let dead = format!("http://127.0.0.1:{}", held.port());
     let queued = seat.run_with_url(
         &["remember", "-p", "Finance", "Queued kiln finance lesson."],
         &dead,
@@ -619,6 +587,109 @@ fn queued_remember_keeps_the_project_when_the_pack_is_down() {
         }),
         "flushed MCP lesson lost project:garden:\n{posts:?}"
     );
+    drop(held);
+}
+
+fn flag_line(args: &[&str]) -> Output {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(args)
+        .current_dir(root.path())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", root.path().join("run"))
+        .env("LJOS_SEAT", "alice")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("LJOS_HOOKD", "off")
+        .env("VISSUE_NO_ROUTE", "1")
+        .env("PACKSET_URL", "off")
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn project_flag_errors_cover_upper_p_long_project_and_start_alias() {
+    let none = format!("ljos: {{verb}} has no flag {{shown}}. {VERBS}");
+    let sitting = format!("ljos: sitting takes -p with --plan. {VERBS}");
+    let mut rows: Vec<(Vec<&str>, String)> = Vec::new();
+    for verb in ["note", "claim", "finish", "recall", "show"] {
+        rows.push((
+            vec![verb, "-p", "finance"],
+            none.replace("{verb}", verb).replace("{shown}", "-p"),
+        ));
+        rows.push((
+            vec![verb, "-P", "finance"],
+            none.replace("{verb}", verb).replace("{shown}", "-P"),
+        ));
+        rows.push((
+            vec![verb, "--project", "finance"],
+            none.replace("{verb}", verb).replace("{shown}", "--project"),
+        ));
+        rows.push((
+            vec![verb, "--project=finance"],
+            none.replace("{verb}", verb).replace("{shown}", "--project"),
+        ));
+    }
+    rows.push((
+        vec!["sitting", FINANCE_TICKET, "-p", "finance"],
+        sitting.clone(),
+    ));
+    rows.push((vec!["sitting", "-p", "finance"], sitting.clone()));
+    rows.push((vec!["sitting", "-P", "finance"], sitting.clone()));
+    rows.push((
+        vec!["sitting", FINANCE_TICKET, "-P", "finance"],
+        sitting.clone(),
+    ));
+    rows.push((vec!["start", "-p", "finance"], sitting.clone()));
+    rows.push((vec!["start", FINANCE_TICKET, "-p", "finance"], sitting));
+    let suggest = |verb: &str, run: &str| {
+        format!("ljos: {verb} has no flag -P, and the closest is -p, so run `{run}`.")
+    };
+    rows.push((
+        vec!["search", "-P", "finance", "kiln"],
+        suggest("search", "ljos search -p <value>"),
+    ));
+    rows.push((
+        vec!["remember", "-P", "finance", "The kiln."],
+        suggest("remember", "ljos remember -p <value>"),
+    ));
+    rows.push((
+        vec!["list", "-P", "finance"],
+        suggest("list", "ljos list -p <value>"),
+    ));
+    rows.push((
+        vec!["ready", "-P", "finance"],
+        suggest("ready", "ljos ready -p <value>"),
+    ));
+    rows.push((
+        vec!["file", "Title", "-P", "finance"],
+        suggest("file", "ljos file <value> -p <value>"),
+    ));
+    rows.push((
+        vec!["calibrate", "-P", "finance"],
+        suggest("calibrate", "ljos calibrate -p <value>"),
+    ));
+    for (args, line) in rows {
+        let out = flag_line(&args);
+        let dump = said(&out);
+        assert_eq!(out.status.code(), Some(2), "{args:?}\n{dump}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.lines().any(|row| row == line),
+            "expected {line:?}\n{dump}"
+        );
+    }
 }
 
 #[test]
@@ -710,63 +781,4 @@ fn search_project_does_not_name_min_score_for_another_projects_weak_hit() {
         stdout.contains("No relevant matches") && stdout.contains("--min-score 0"),
         "garden search dropped its own weak hit without naming --min-score 0:\n{dump}"
     );
-}
-
-#[test]
-fn project_flag_errors_cover_upper_p_long_project_and_start_alias() {
-    let seat = Seat::open();
-    for verb in ["note", "claim", "finish", "recall", "show"] {
-        for (flag, args) in [
-            ("-P", vec![verb, "-P", "finance"]),
-            ("--project", vec![verb, "--project", "finance"]),
-            ("--project", vec![verb, "--project=finance"]),
-        ] {
-            let out = seat.run(&args);
-            let dump = said(&out);
-            assert_eq!(out.status.code(), Some(2), "{args:?}\n{dump}");
-            let line = format!("ljos: {verb} has no flag {flag}. {VERBS}");
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            assert!(
-                stderr.lines().any(|row| row == line),
-                "expected {line:?}\n{dump}"
-            );
-        }
-    }
-
-    for (verb, args) in [
-        ("search", vec!["search", "-P", "finance", "kiln"]),
-        ("remember", vec!["remember", "-P", "finance", "The kiln."]),
-        ("list", vec!["list", "-P", "finance"]),
-        ("ready", vec!["ready", "-P", "finance"]),
-        ("file", vec!["file", "Title", "-P", "finance"]),
-        ("calibrate", vec!["calibrate", "-P", "finance"]),
-    ] {
-        let out = seat.run(&args);
-        let dump = said(&out);
-        assert_eq!(out.status.code(), Some(2), "{args:?}\n{dump}");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains(&format!(
-                "ljos: {verb} has no flag -P, and the closest is -p"
-            )),
-            "expected -p suggestion for {verb}:\n{dump}"
-        );
-    }
-
-    let sitting_line = format!("ljos: sitting takes -p with --plan. {VERBS}");
-    for args in [
-        vec!["sitting", "-P", "finance"],
-        vec!["sitting", FINANCE_TICKET, "-P", "finance"],
-        vec!["start", "-p", "finance"],
-        vec!["start", FINANCE_TICKET, "-p", "finance"],
-    ] {
-        let out = seat.run(&args);
-        let dump = said(&out);
-        assert_eq!(out.status.code(), Some(2), "{args:?}\n{dump}");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.lines().any(|row| row == sitting_line),
-            "expected {sitting_line:?} for {args:?}\n{dump}"
-        );
-    }
 }
