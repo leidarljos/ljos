@@ -1404,6 +1404,7 @@ mod tests {
 
     #[test]
     fn grouped_puts_commas_every_three_digits() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(grouped(0), "0");
         assert_eq!(grouped(999), "999");
         assert_eq!(grouped(9412), "9,412");
@@ -1412,6 +1413,7 @@ mod tests {
 
     #[test]
     fn a_stub_stays_under_its_cap_with_a_long_title() {
+        let _env_read = crate::test_env_read_lock();
         let title = "a very long title ".repeat(20);
         let stub = stub_line(
             Some("report"),
@@ -1434,6 +1436,7 @@ mod tests {
 
     #[test]
     fn a_slug_is_short_lowercase_and_never_issues() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(slug_of("LAND r3"), "land-r3");
         assert_eq!(slug_of("REPORT.md"), "report-md");
         assert_eq!(slug_of("!!!"), "note");
@@ -1443,6 +1446,7 @@ mod tests {
 
     #[test]
     fn binary_and_encoded_bodies_are_refused_with_the_deed_route() {
+        let _env_read = crate::test_env_read_lock();
         let nul = text_body("p-1", "x.bin", b"a\0b").unwrap_err().to_string();
         assert!(
             nul.contains("NUL") && nul.contains("deedar create file"),
@@ -1471,6 +1475,7 @@ mod tests {
 
     #[test]
     fn head_and_tail_keep_whole_lines_from_each_end() {
+        let _env_read = crate::test_env_read_lock();
         let line = "0123456789abcdef\n";
         let text = line.repeat(2 * LONG_NOTE_MAX_BYTES / line.len());
         let (head, tail) = head_and_tail(&text);
@@ -1481,6 +1486,7 @@ mod tests {
 
     #[test]
     fn an_example_block_escapes_lines_org_would_read() {
+        let _env_read = crate::test_env_read_lock();
         let block = example_block("* not a heading\n#+end_example\nplain\n");
         assert_eq!(
             block,
@@ -1490,6 +1496,7 @@ mod tests {
 
     #[test]
     fn markdown_becomes_org_without_pandoc() {
+        let _env_read = crate::test_env_read_lock();
         let md = "# Title\n\nSome **bold** and `code` and [a link](https://example.org).\n\n* item\n  * nested\n\n```rust\nfn main() {}\n* inside\n```\n\n> quoted\n\n---\n";
         let org = markdown_to_org(md);
         assert_eq!(
@@ -1500,6 +1507,7 @@ mod tests {
 
     #[test]
     fn an_org_title_is_taken_from_the_body() {
+        let _env_read = crate::test_env_read_lock();
         let (title, body) = split_org_title("#+title: Gate r2\n* Findings\n");
         assert_eq!(title.as_deref(), Some("Gate r2"));
         assert_eq!(body, "* Findings\n");
@@ -1507,6 +1515,7 @@ mod tests {
 
     #[test]
     fn import_kinds_follow_kit_file_names() {
+        let _env_read = crate::test_env_read_lock();
         assert_eq!(import_kind("LAND.md"), Some("land"));
         assert_eq!(import_kind("REPORT-r2.md"), Some("report"));
         assert_eq!(import_kind("GATE-gpt.md"), Some("gate"));
