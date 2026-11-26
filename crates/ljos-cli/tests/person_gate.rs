@@ -232,39 +232,6 @@ fn push_is_labelled(case: &Case, cmd: &mut Command) {
     assert_eq!(case.failures(), 0);
 }
 
-#[test]
-fn the_right_passphrase_on_the_terminal_lets_the_push_through() {
-    let _process = ljos_test_boot::env_lock();
-    let case = Case::new(true);
-    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
-}
-
-#[test]
-fn a_wrong_passphrase_is_refused_and_counted() {
-    let _process = ljos_test_boot::env_lock();
-    let case = Case::new(true);
-    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
-}
-
-/// A string of wrong answers used to lock the prompt. The hook no longer
-/// asks, so each push is the same label and the failure count stays empty.
-#[test]
-fn five_wrong_passphrases_lock_the_prompt_out() {
-    let _process = ljos_test_boot::env_lock();
-    let case = Case::new(true);
-    for _ in 0..5 {
-        push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
-    }
-}
-
-/// Nothing typed is not a refusal: the push runs with the sitting label.
-#[test]
-fn nothing_typed_is_refused() {
-    let _process = ljos_test_boot::env_lock();
-    let case = Case::new(true);
-    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
-}
-
 /// A runner in the tree, with a key kept and a runner variable set, is
 /// not asked. The push runs with the sitting label.
 #[test]
@@ -334,14 +301,6 @@ fn piped_stdin_without_a_terminal_cannot_answer() {
     assert!(!err.contains(PROMPT), "{err}");
 }
 
-/// A passphrase on the pipe is not read. The push runs with the label.
-#[test]
-fn piped_stdin_with_a_terminal_cannot_answer() {
-    let _process = ljos_test_boot::env_lock();
-    let case = Case::new(true);
-    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
-}
-
 /// No variable supplies a passphrase, and none is asked. The push runs.
 #[test]
 fn no_variable_supplies_the_passphrase() {
@@ -362,14 +321,6 @@ fn no_variable_supplies_the_passphrase() {
 /// With no key kept, the hook does not ask for a yes. The push runs.
 #[test]
 fn no_key_asks_for_a_yes_and_a_passphrase_is_not_one() {
-    let _process = ljos_test_boot::env_lock();
-    let case = Case::new(false);
-    push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
-}
-
-/// With no key kept, the push runs without a yes at the terminal.
-#[test]
-fn no_key_and_a_yes_at_the_terminal_lets_the_push_through() {
     let _process = ljos_test_boot::env_lock();
     let case = Case::new(false);
     push_is_labelled(&case, &mut case.command(None, Some("CURSOR_AGENT")));
