@@ -1,7 +1,8 @@
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use std::path::{Path, PathBuf};
 use syn::visit::Visit;
-// `ToTokens` prints a move body, including each macro's tokens. syn only
+// `ToTokens` reprints a function tail, including each macro's tokens, so the
+// move pass reads the same stream a macro body already is. syn only
 // re-exports the trait here.
 use syn::__private::ToTokens;
 
@@ -300,22 +301,33 @@ fn pattern_binds(pat: &syn::Pat, name: &str) -> bool {
 }
 
 /// Statement indices of top-level `let` bindings whose name is used by
-/// value after the let, in a scope that still sees that binding. A `move`
-/// closure or `async move` block that names the guard, even inside a
-/// macro, counts. A closure parameter or a leading `let` of that name
-/// does not. A use before the let, or under a later binding of the same
-/// name, does not.
+/// value after the let, in a scope that still sees that binding. Move
+/// captures are read from the raw tokens first, before any place or
+/// borrow is classified. A closure parameter or a `let` of that name
+/// does not capture the outer binding. A use before the let, or under a
+/// later binding of the same name, does not.
 fn ended_bindings(stmts: &[syn::Stmt]) -> Vec<usize> {
     let mut ended = Vec::new();
     for (at, stmt) in stmts.iter().enumerate() {
         let Some(name) = local_name(stmt) else {
             continue;
         };
-        if stmts_consume(&stmts[at + 1..], &name, Use::Value, true) {
+        let tail = &stmts[at + 1..];
+        let tokens = tail_trees(tail);
+        let statements: Vec<&[TokenTree]> = tokens.split(is_semi).collect();
+        if moves_after(&statements, 0, &name) || stmts_consume(tail, &name, Use::Value, true) {
             ended.push(at);
         }
     }
     ended
+}
+
+fn tail_trees(stmts: &[syn::Stmt]) -> Vec<TokenTree> {
+    let mut stream = TokenStream::new();
+    for stmt in stmts {
+        stream.extend(stmt.to_token_stream());
+    }
+    stream.into_iter().collect()
 }
 
 fn stmts_consume(stmts: &[syn::Stmt], name: &str, how: Use, mut live: bool) -> bool {
@@ -366,47 +378,6 @@ enum Use {
 
 fn names_place(expr: &syn::Expr, name: &str, how: Use) -> bool {
     how == Use::Value && value_name(expr).as_deref() == Some(name)
-}
-
-/// An ident equal to `name` anywhere in `stream`, including inside a
-/// macro's token tree. Groups are opened, so a nested macro counts.
-fn tokens_mention(stream: TokenStream, name: &str) -> bool {
-    let trees: Vec<TokenTree> = stream.into_iter().collect();
-    tokens_mention_at(&trees, name)
-}
-
-fn tokens_mention_at(trees: &[TokenTree], name: &str) -> bool {
-    trees.iter().any(|tree| match tree {
-        TokenTree::Ident(ident) => ident == name,
-        TokenTree::Group(group) => tokens_mention(group.stream(), name),
-        _ => false,
-    })
-}
-
-/// A `move` body captures `name` when any ident in it matches. A `let`
-/// of that name at the top of a block hides the rest of the block; the
-/// initializer can still capture the outer guard.
-fn move_expr_captures(expr: &syn::Expr, name: &str) -> bool {
-    if let syn::Expr::Block(block) = expr {
-        move_block_captures(&block.block, name)
-    } else {
-        tokens_mention(expr.to_token_stream(), name)
-    }
-}
-
-fn move_block_captures(block: &syn::Block, name: &str) -> bool {
-    if let Some(syn::Stmt::Local(local)) = block.stmts.first() {
-        if pattern_binds(&local.pat, name) {
-            return local.init.as_ref().is_some_and(|init| {
-                tokens_mention(init.expr.to_token_stream(), name)
-                    || init
-                        .diverge
-                        .as_ref()
-                        .is_some_and(|(_, expr)| tokens_mention(expr.to_token_stream(), name))
-            });
-        }
-    }
-    tokens_mention(block.to_token_stream(), name)
 }
 
 fn compound_assign(op: &syn::BinOp) -> bool {
@@ -529,13 +500,7 @@ fn expr_uses(expr: &syn::Expr, name: &str, how: Use, live: bool) -> bool {
         syn::Expr::Unsafe(block) => block_uses(&block.block, name, how, live),
         syn::Expr::Loop(block) => block_uses(&block.body, name, how, live),
         syn::Expr::TryBlock(block) => block_uses(&block.block, name, how, live),
-        syn::Expr::Async(block) => {
-            if block.capture.is_some() {
-                move_block_captures(&block.block, name)
-            } else {
-                block_uses(&block.block, name, Use::Value, live)
-            }
-        }
+        syn::Expr::Async(block) => block_uses(&block.block, name, Use::Value, live),
         syn::Expr::Const(_) | syn::Expr::Continue(_) | syn::Expr::Infer(_) | syn::Expr::Lit(_) => {
             false
         }
@@ -554,11 +519,7 @@ fn expr_uses(expr: &syn::Expr, name: &str, how: Use, live: bool) -> bool {
         syn::Expr::Match(expr) => match_uses(expr, name, live),
         syn::Expr::Closure(expr) => {
             let body_live = live && !expr.inputs.iter().any(|pat| pattern_binds(pat, name));
-            if expr.capture.is_some() {
-                body_live && move_expr_captures(&expr.body, name)
-            } else {
-                expr_uses(&expr.body, name, Use::Value, body_live)
-            }
+            expr_uses(&expr.body, name, Use::Value, body_live)
         }
         _ => false,
     }
@@ -659,7 +620,8 @@ fn token_bindings(body: TokenStream) -> Vec<(usize, String, String)> {
 
 /// Statement indices in a macro body whose `let` name is used by value
 /// while that binding is still in scope. Semicolons inside braces stay
-/// with that block, matching `token_bindings`.
+/// with that block, matching `token_bindings`. Move captures are a
+/// separate pass over those same tokens.
 fn token_ended(body: TokenStream) -> Vec<usize> {
     let trees: Vec<TokenTree> = body.into_iter().collect();
     let statements: Vec<&[TokenTree]> = trees.split(is_semi).collect();
@@ -668,7 +630,7 @@ fn token_ended(body: TokenStream) -> Vec<usize> {
         let Some(name) = bound_simple(statement) else {
             continue;
         };
-        if rest_moves(&statements, at + 1, &name) {
+        if moves_after(&statements, at + 1, &name) || rest_moves(&statements, at + 1, &name) {
             ended.push(at);
         }
     }
@@ -716,7 +678,7 @@ fn simple_name(pattern: &[TokenTree]) -> Option<String> {
 fn rest_moves(statements: &[&[TokenTree]], from: usize, name: &str) -> bool {
     let mut live = true;
     for statement in &statements[from..] {
-        if live && statement_moves(statement, name) {
+        if live && walk_tokens(statement, name) {
             return true;
         }
         if statement_shadows(statement, name) {
@@ -765,97 +727,137 @@ fn pattern_shadows(trees: &[TokenTree], name: &str) -> bool {
     false
 }
 
-fn statement_moves(trees: &[TokenTree], name: &str) -> bool {
-    walk_tokens(trees, name)
-}
-
-enum Step {
-    Hit,
-    Next(usize),
-}
-
 fn is_pipe(tree: Option<&TokenTree>) -> bool {
     matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == '|')
 }
 
-fn keyword_move(trees: &[TokenTree], index: usize) -> bool {
-    matches!(trees.get(index), Some(TokenTree::Ident(word)) if word == "move")
-        && !matches!(
-            index.checked_sub(1).and_then(|at| trees.get(at)),
-            Some(TokenTree::Punct(punct)) if matches!(punct.as_char(), '.' | ':')
-        )
+fn is_end(tree: &TokenTree) -> bool {
+    matches!(tree, TokenTree::Punct(punct) if matches!(punct.as_char(), ',' | ';'))
 }
 
-/// A `move` closure or `async move` block. The body runs up to a comma.
-/// A parameter named `name`, or a leading `let` of that name in a brace
-/// body, hides the outer guard. Anything else that names it captures it.
-fn move_step(trees: &[TokenTree], index: usize, name: &str) -> Option<Step> {
-    if !keyword_move(trees, index) {
-        return None;
+/// `move` as a keyword. `name: move || ...` counts. `::move` and `.move` do not.
+fn keyword_move(trees: &[TokenTree], index: usize) -> bool {
+    if !matches!(trees.get(index), Some(TokenTree::Ident(word)) if word == "move") {
+        return false;
     }
-    let mut at = index + 1;
+    match index.checked_sub(1).and_then(|at| trees.get(at)) {
+        Some(TokenTree::Punct(punct)) if punct.as_char() == '.' => false,
+        Some(TokenTree::Punct(punct)) if punct.as_char() == ':' => {
+            !is_colon(index.checked_sub(2).and_then(|at| trees.get(at)))
+        }
+        _ => true,
+    }
+}
+
+/// `(body, end, parameter binds name)`. A brace is the body. Otherwise the
+/// region runs to a comma, a semicolon, or the end of this group.
+fn closure_after(trees: &[TokenTree], move_at: usize, name: &str) -> (usize, usize, bool) {
+    let mut at = move_at + 1;
     let mut shadowed = false;
     if is_pipe(trees.get(at)) {
-        at += 1;
-        let start = at;
+        let params = at + 1;
+        at = params;
         while at < trees.len() && !is_pipe(trees.get(at)) {
             at += 1;
         }
         if at >= trees.len() {
-            return None;
+            return (params, trees.len(), false);
         }
-        shadowed = pattern_shadows(&trees[start..at], name);
+        shadowed = pattern_shadows(&trees[params..at], name);
         at += 1;
-    } else if !matches!(
-        trees.get(at),
-        Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace
-    ) {
-        return None;
     }
-    let end = trees[at..]
-        .iter()
-        .position(|tree| matches!(tree, TokenTree::Punct(punct) if punct.as_char() == ','))
-        .map_or(trees.len(), |rel| at + rel);
-    if shadowed {
-        return Some(Step::Next(end));
-    }
-    let captures = if let Some(TokenTree::Group(group)) = trees.get(at) {
-        if end == at + 1 && group.delimiter() == Delimiter::Brace {
-            let inner: Vec<TokenTree> = group.stream().into_iter().collect();
-            brace_captures(&inner, name)
-        } else {
-            tokens_mention_at(&trees[at..end], name)
-        }
-    } else {
-        tokens_mention_at(&trees[at..end], name)
+    let end = match trees.get(at) {
+        Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace => at + 1,
+        _ => trees[at..]
+            .iter()
+            .position(is_end)
+            .map_or(trees.len(), |rel| at + rel),
     };
-    Some(if captures { Step::Hit } else { Step::Next(end) })
+    (at, end, shadowed)
 }
 
-fn brace_captures(trees: &[TokenTree], name: &str) -> bool {
-    let Some(first) = trees.split(is_semi).next() else {
-        return false;
-    };
-    if statement_shadows(first, name) {
-        return first
-            .iter()
-            .position(is_eq)
-            .is_some_and(|eq| tokens_mention_at(&first[eq + 1..], name));
+/// An ident of the live `name`. A `let` of that name hides the rest of its
+/// block. The initializer can still name the outer guard.
+fn mentions(trees: &[TokenTree], name: &str) -> bool {
+    let mut live = true;
+    for statement in trees.split(is_semi) {
+        if !live {
+            continue;
+        }
+        if statement_shadows(statement, name) {
+            if statement
+                .iter()
+                .position(is_eq)
+                .is_some_and(|eq| mentions(&statement[eq + 1..], name))
+            {
+                return true;
+            }
+            live = false;
+            continue;
+        }
+        if statement.iter().any(|tree| token_mentions(tree, name)) {
+            return true;
+        }
     }
-    tokens_mention_at(trees, name)
+    false
+}
+
+fn token_mentions(tree: &TokenTree, name: &str) -> bool {
+    match tree {
+        TokenTree::Ident(ident) => ident == name,
+        TokenTree::Group(group) => {
+            let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+            mentions(&inner, name)
+        }
+        _ => false,
+    }
+}
+
+/// A `move` or `async move` in these statements captures the live `name`.
+/// Groups are opened, so a macro token tree counts. Runs before borrows.
+fn moves_after(statements: &[&[TokenTree]], from: usize, name: &str) -> bool {
+    let mut live = true;
+    for statement in &statements[from..] {
+        if live && stmt_moves_capture(statement, name) {
+            return true;
+        }
+        if statement_shadows(statement, name) {
+            live = false;
+        }
+    }
+    false
+}
+
+fn stmt_moves_capture(trees: &[TokenTree], name: &str) -> bool {
+    let mut index = 0;
+    while index < trees.len() {
+        if keyword_move(trees, index) {
+            let (body, end, shadowed) = closure_after(trees, index, name);
+            if !shadowed && mentions(&trees[body..end], name) {
+                return true;
+            }
+            index = end.max(index + 1);
+            continue;
+        }
+        if let TokenTree::Group(group) = &trees[index] {
+            let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+            let nested: Vec<&[TokenTree]> = inner.split(is_semi).collect();
+            if moves_after(&nested, 0, name) {
+                return true;
+            }
+        }
+        index += 1;
+    }
+    false
 }
 
 fn walk_tokens(trees: &[TokenTree], name: &str) -> bool {
     let mut index = 0;
     while index < trees.len() {
-        if let Some(step) = move_step(trees, index, name) {
-            match step {
-                Step::Hit => return true,
-                Step::Next(next) => {
-                    index = next;
-                    continue;
-                }
-            }
+        if keyword_move(trees, index) {
+            let (_, end, _) = closure_after(trees, index, name);
+            index = end.max(index + 1);
+            continue;
         }
         match &trees[index] {
             TokenTree::Group(group) => {
@@ -925,6 +927,7 @@ fn skip_place_head(trees: &[TokenTree]) -> &[TokenTree] {
     let mut index = 0;
     while index < trees.len() {
         match &trees[index] {
+            TokenTree::Ident(word) if word == "move" => break,
             TokenTree::Ident(_) => index += 1,
             TokenTree::Punct(punct) if punct.as_char() == ':' => index += 1,
             _ => break,
@@ -940,16 +943,7 @@ fn skip_place_head(trees: &[TokenTree]) -> &[TokenTree] {
 }
 
 fn brace_moves(trees: &[TokenTree], name: &str) -> bool {
-    let mut live = true;
-    for statement in trees.split(is_semi) {
-        if live && statement_moves(statement, name) {
-            return true;
-        }
-        if statement_shadows(statement, name) {
-            live = false;
-        }
-    }
-    false
+    rest_moves(&trees.split(is_semi).collect::<Vec<_>>(), 0, name)
 }
 
 fn ident_moves(trees: &[TokenTree], index: usize, name: &str) -> bool {
@@ -1384,6 +1378,14 @@ fn a_move_capture_ends_the_guard() {
         "let guard = test_env_lock();\n    let release = move || (outer!(inner!(guard)));",
         "let guard = test_env_lock();\n    let release = move || vec![guard];",
         "let guard = test_env_lock();\n    let release = async move { assert!(guard.ready()) };",
+        "let guard = test_env_lock();\n    let release = &(move || helper(&guard));",
+        "let guard = test_env_lock();\n    let release = (move || helper(&guard));",
+        "let guard = test_env_lock();\n    x.spawn(move || helper(&guard));",
+        "let guard = test_env_lock();\n    let _job = Job { task: move || helper(&guard) };",
+        "let guard = test_env_lock();\n    let release = move || { || helper(&guard) };",
+        "let guard = test_env_lock();\n    let release = async move { foo!(guard) };",
+        "let guard = test_env_lock();\n    let release = Some(move || helper(&guard));",
+        "let guard = test_env_lock();\n    let release = vec![move || helper(&guard)];",
     ] {
         assert_eq!(
             unguarded(&probe(body), path, LIB_GUARDS),
@@ -1400,6 +1402,8 @@ fn a_move_capture_ends_the_guard() {
         "let guard = test_env_lock();\n    let release = move || { let guard = 1;\n        assert!(guard.ready()) };",
         "let guard = test_env_lock();\n    let release = async { helper(&guard) };",
         "let guard = test_env_lock();\n    let release = async move { let guard = 1;\n        format!(\"{}\", guard) };",
+        "let guard = test_env_lock();\n    let release = &(move |guard| helper(&guard));",
+        "let guard = test_env_lock();\n    x.spawn(move |guard| guard);",
     ] {
         assert!(
             unguarded(&probe(body), path, LIB_GUARDS).is_empty(),
@@ -1412,6 +1416,14 @@ fn a_move_capture_ends_the_guard() {
         "let guard = test_env_lock(); let release = move || (outer!(inner!(guard)));",
         "let guard = test_env_lock(); let release = move || vec![guard];",
         "let guard = test_env_lock(); let release = async move { assert!(guard.ready()) };",
+        "let guard = test_env_lock(); let release = &(move || helper(&guard));",
+        "let guard = test_env_lock(); let release = (move || helper(&guard));",
+        "let guard = test_env_lock(); x.spawn(move || helper(&guard));",
+        "let guard = test_env_lock(); let _job = Job { task: move || helper(&guard) };",
+        "let guard = test_env_lock(); let release = move || { || helper(&guard) };",
+        "let guard = test_env_lock(); let release = async move { foo!(guard) };",
+        "let guard = test_env_lock(); let release = Some(move || helper(&guard));",
+        "let guard = test_env_lock(); let release = vec![move || helper(&guard)];",
     ] {
         assert_eq!(
             unguarded(&cell(body), path, LIB_GUARDS),
@@ -1423,6 +1435,8 @@ fn a_move_capture_ends_the_guard() {
         "let guard = test_env_lock(); let release = move |guard| assert!(guard.ready());",
         "let guard = test_env_lock(); let release = move || { let guard = 1; assert!(guard.ready()) };",
         "let guard = test_env_lock(); let release = move || helper(&other);",
+        "let guard = test_env_lock(); let release = &(move |guard| helper(&guard));",
+        "let guard = test_env_lock(); x.spawn(move |guard| guard);",
     ] {
         assert!(
             unguarded(&cell(body), path, LIB_GUARDS).is_empty(),
