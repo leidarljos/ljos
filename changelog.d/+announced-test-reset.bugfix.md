@@ -1,1 +1,1 @@
-Test process-state guards now clear the announced seat, so one server test cannot change another test's seat.
+One server test no longer changes the seat another test announced.
