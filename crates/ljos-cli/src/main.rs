@@ -8231,6 +8231,14 @@ fn run_command() -> Result<()> {
             let mut shown = String::new();
             let mut opened_next = None;
             let detail = git_detail(verbose);
+            let planned = plan.as_deref().map(|title| {
+                let mut task = title.to_string();
+                for item in &items {
+                    task.push(' ');
+                    task.push_str(item);
+                }
+                task
+            });
             let issue = if let Some(title) = plan {
                 let opened = ljos_cli::plan::open_plan(project.as_deref(), &title, &items, top)?;
                 let quiet_plan = ljos_cli::without_routine_git(&opened.text);
@@ -8302,6 +8310,8 @@ fn run_command() -> Result<()> {
                 }
                 std::process::exit(ljos_cli::user_fault_exit(&e, &line));
             }
+            let task = planned.unwrap_or_else(|| ljos_cli::brief_rules::issue_task(&issue));
+            let rules = ljos_cli::brief_rules::for_task(&task).unwrap_or_default();
             if !detail {
                 let mut tail = String::new();
                 if !memories.is_empty() {
@@ -8311,10 +8321,18 @@ fn run_command() -> Result<()> {
                     }
                 }
                 tail.push_str(&sitting_close(&issue));
+                tail.push_str(&rules);
                 if json {
                     shown.push_str(&tail);
                 } else {
                     ljos_cli::emit_raw!("{tail}");
+                    let _ = ljos_cli::output::flush_stdout();
+                }
+            } else if !rules.is_empty() {
+                if json {
+                    full.push_str(&rules);
+                } else {
+                    ljos_cli::emit_raw!("{rules}");
                     let _ = ljos_cli::output::flush_stdout();
                 }
             }
