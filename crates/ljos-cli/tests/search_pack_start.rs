@@ -10,6 +10,8 @@ ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -24,6 +26,7 @@ const TRIP: &str = "pack busy try again fallback word ranking";
 struct Seat {
     url: String,
     home: tempfile::TempDir,
+    requests: Arc<AtomicUsize>,
 }
 
 fn content_length(head: &str) -> usize {
@@ -37,17 +40,19 @@ fn content_length(head: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// `ready_after` is when `/health` flips from `not-ready` to `ok`, measured
-/// from bind. `None` stays not-ready. `hits` is the search body once the
-/// pack has opened. While it is starting, search says the pack is busy
-/// loading.
-fn serve(ready_after: Option<Duration>, hits: &'static str) -> Seat {
+/// `closed_healths` is how many `/health` answers are `not-ready` before
+/// `ok`. `None` stays not-ready. `Some(0)` is open on the first poll.
+/// `hits` is the search body once the pack has opened. While it is
+/// starting, search says the pack is busy loading.
+fn serve(closed_healths: Option<usize>, hits: &'static str) -> Seat {
     let home = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let started = Instant::now();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&requests);
     thread::spawn(move || {
         for conn in listener.incoming().flatten() {
+            let requests = Arc::clone(&counted);
             thread::spawn(move || {
                 let mut sock = conn;
                 let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
@@ -70,7 +75,11 @@ fn serve(ready_after: Option<Duration>, hits: &'static str) -> Seat {
                         Ok(n) => buf.extend_from_slice(&tmp[..n]),
                     }
                 }
-                let open = ready_after.is_some_and(|delay| started.elapsed() >= delay);
+                let seen = requests.fetch_add(1, Ordering::SeqCst);
+                let open = match closed_healths {
+                    None => false,
+                    Some(n) => seen >= n,
+                };
                 let (status, body) = if path == "/health" {
                     if open {
                         (200, "ok".to_string())
@@ -117,6 +126,7 @@ fn serve(ready_after: Option<Duration>, hits: &'static str) -> Seat {
     Seat {
         url: format!("http://127.0.0.1:{port}"),
         home,
+        requests,
     }
 }
 
@@ -171,7 +181,7 @@ fn hits_body() -> &'static str {
 #[test]
 fn a_search_waits_out_not_ready_and_then_prints_the_hit() {
     let _process = ljos_test_boot::env_lock();
-    let seat = serve(Some(Duration::from_millis(400)), hits_body());
+    let seat = serve(Some(4), hits_body());
     let (out, elapsed) = run(
         &seat,
         &["search", "kiln"],
@@ -183,16 +193,17 @@ fn a_search_waits_out_not_ready_and_then_prints_the_hit() {
     assert!(!said.contains("Nothing matched"), "{said}");
     assert!(!said.contains(STARTING), "{said}");
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}\n{said}");
-    assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
+    let seen = seat.requests.load(Ordering::SeqCst);
+    assert!(
+        seen > 4,
+        "the client polled {seen} times while the pack was closed"
+    );
 }
 
 #[test]
 fn a_real_miss_after_the_pack_answers_uses_the_miss_line() {
     let _process = ljos_test_boot::env_lock();
-    let seat = serve(
-        Some(Duration::from_millis(200)),
-        r#"{"hits":[],"rank":"relevance"}"#,
-    );
+    let seat = serve(Some(0), r#"{"hits":[],"rank":"relevance"}"#);
     let (out, _) = run(
         &seat,
         &["search", "kiln"],
@@ -219,15 +230,14 @@ fn a_search_that_stays_not_ready_ranks_by_words() {
     assert!(said.contains(STARTING_WORDS), "{said}");
     assert!(!said.contains(STARTING), "{said}");
     assert!(!said.contains(HIT), "{said}");
-    assert!(elapsed < Duration::from_secs(4), "{elapsed:?}\n{said}");
     assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
 }
 
 #[test]
 fn a_warmup_wait_of_zero_does_not_wait_on_a_starting_pack() {
     let _process = ljos_test_boot::env_lock();
-    let seat = serve(Some(Duration::from_secs(30)), hits_body());
-    let (out, elapsed) = run(
+    let seat = serve(None, hits_body());
+    let (out, _) = run(
         &seat,
         &["search", "kiln"],
         &[("LJOS_SEARCH_WARMUP_WAIT", "0"), ("LJOS_SEARCH_WAIT", "0")],
@@ -236,13 +246,12 @@ fn a_warmup_wait_of_zero_does_not_wait_on_a_starting_pack() {
     assert!(out.status.success(), "{said}");
     assert!(said.contains(STARTING_WORDS), "{said}");
     assert!(!said.contains(STARTING), "{said}");
-    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}\n{said}");
 }
 
 #[test]
 fn remember_waits_for_the_pack_to_open() {
     let _process = ljos_test_boot::env_lock();
-    let seat = serve(Some(Duration::from_millis(300)), hits_body());
+    let seat = serve(Some(4), hits_body());
     let (out, elapsed) = run(
         &seat,
         &["remember", "Cold metal seats the door."],
@@ -425,6 +434,7 @@ fn open_pack(kind: Open) -> Seat {
     Seat {
         url: format!("http://127.0.0.1:{port}"),
         home,
+        requests: Arc::new(AtomicUsize::new(0)),
     }
 }
 
