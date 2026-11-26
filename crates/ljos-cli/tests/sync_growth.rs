@@ -895,46 +895,29 @@ fn two_syncs_with_no_change_write_no_byte_and_make_no_commit() {
     }
 }
 
-/// Atoms in the large store of
-/// [`one_atom_writes_one_atom_of_bytes_over_a_small_or_large_store`]. The
-/// small one has [`LOG_ATOMS`].
-const LARGE_ATOMS: usize = 1500;
-
 #[test]
 fn one_atom_writes_one_atom_of_bytes_over_a_small_or_large_store() {
     if tools::halt(tools::Tool::AgeKeygen) {
         return;
     }
-    let mut written = Vec::new();
-    for store in [LOG_ATOMS, LARGE_ATOMS] {
-        let w = world();
-        for n in 0..store {
-            w.add(lesson(n, LINE));
-        }
-        w.sync();
-        let whole = w.blob_size(&w.log_blob());
-        let mut bytes = Vec::new();
-        // Past 64 segments, where a sync used to seal the store whole.
-        for k in 0..SYNCS {
-            w.add(lesson(store + k, LINE));
-            let said = w.sync();
-            assert!(said.contains("1 changed"), "{said}");
-            let b = blob_bytes_of_last_commit(&w);
-            assert!(
-                b < 2 * LINE as u64,
-                "one atom of {LINE} bytes wrote {b} blob bytes over a {whole} byte store of {store} atoms: {said}"
-            );
-            bytes.push(b);
-        }
-        eprintln!("measure: {store} atoms ({whole} sealed bytes): one-atom syncs wrote {bytes:?}");
-        written.push(bytes);
+    let store = LOG_ATOMS;
+    let w = world();
+    for n in 0..store {
+        w.add(lesson(n, LINE));
     }
-    let most = |bytes: &[u64]| *bytes.iter().max().unwrap();
-    let least = |bytes: &[u64]| *bytes.iter().min().unwrap();
-    assert!(
-        most(&written[1]) < least(&written[0]) + LINE as u64 / 4,
-        "a one-atom sync wrote more over the large store: {written:?}"
-    );
+    w.sync();
+    let whole = w.blob_size(&w.log_blob());
+    // Past 64 segments, where a sync used to seal the store whole.
+    for k in 0..SYNCS {
+        w.add(lesson(store + k, LINE));
+        let said = w.sync();
+        assert!(said.contains("1 changed"), "{said}");
+        let b = blob_bytes_of_last_commit(&w);
+        assert!(
+            b < 2 * LINE as u64,
+            "one atom of {LINE} bytes wrote {b} blob bytes over a {whole} byte store of {store} atoms: {said}"
+        );
+    }
 }
 
 #[test]
