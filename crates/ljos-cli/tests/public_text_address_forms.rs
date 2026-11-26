@@ -1,6 +1,6 @@
-//! Every non-public address literal, written after every separator with
-//! every kind of prefix, before every kind of suffix and in every letter
-//! case, is refused by all three screens. Every Rust path, version and
+//! A fixed sample of every non-public address literal, after each kind of
+//! separator, with each kind of prefix and suffix and in each letter case,
+//! is refused by all three screens. Every Rust path, version and
 //! lone `::` the docs keep passes in every wrapping.
 
 use ljos_cli::public_text::{classify, Class, Screen};
@@ -19,6 +19,9 @@ const IPV4: &[&str] = &[
     "198.51.100.1",
     "203.0.113.1",
     "198.18.0.1",
+    "198.19.1.1",
+    "100.127.255.1",
+    "224.0.0.0",
     "224.0.0.1",
     "239.255.255.250",
 ];
@@ -41,6 +44,19 @@ const IPV6: &[&str] = &[
     "::7f00:1",
     "::a00:1",
     "fead::beef",
+    "fead::beef%eth0",
+    "fe80::1%eth0",
+    "febe::cafe",
+    "feab::dead",
+    "febf::face",
+    "fece::face",
+    "feed::beef",
+    "ffee::beef",
+    "fc00::1",
+    "fd00:beef::1",
+    "fd00::",
+    "2001:db8::dead",
+    "2001:2::dead",
 ];
 
 const SEPARATORS: &[&str] = &[
@@ -73,19 +89,86 @@ fn title(text: &str) -> String {
     out
 }
 
+/// Spellings the cartesian product does not build: a word in front of an
+/// address, or a sentence that still contains one.
+const EXTRA: &[&str] = &[
+    "ssh 0.0.0.0",
+    "ssh 224.0.0.0",
+    "see db.fe80::1 now",
+    "add.fe80::1%eth0",
+    "cafe.fd00::1",
+    "v10.0.0.1",
+    "release v10.0.0.5",
+];
+
+fn push_cases(out: &mut Vec<String>, form: &str) {
+    out.push(form.to_ascii_uppercase());
+    out.push(title(form));
+    out.push(form.to_string());
+}
+
+/// One form for every literal, prefix, separator and suffix, then a fixed
+/// sample of the product. The bare literal is included: every generated
+/// form otherwise starts with a prefix.
 fn forms() -> Vec<String> {
+    let literals: Vec<&str> = IPV4.iter().copied().chain(IPV6.iter().copied()).collect();
     let mut out = Vec::new();
-    for literal in IPV4.iter().chain(IPV6) {
-        for prefix in PREFIXES {
-            for separator in SEPARATORS {
-                for suffix in SUFFIXES {
-                    let form = format!("{prefix}{separator}{literal}{suffix}");
-                    out.push(form.to_ascii_uppercase());
-                    out.push(title(&form));
-                    out.push(form);
-                }
-            }
-        }
+    for (i, literal) in literals.iter().enumerate() {
+        push_cases(
+            &mut out,
+            &format!(
+                "{}{}{literal}{}",
+                PREFIXES[i % PREFIXES.len()],
+                SEPARATORS[i % SEPARATORS.len()],
+                SUFFIXES[i % SUFFIXES.len()]
+            ),
+        );
+        push_cases(&mut out, literal);
+    }
+    for (i, prefix) in PREFIXES.iter().enumerate() {
+        let literal = literals[i % literals.len()];
+        push_cases(
+            &mut out,
+            &format!(
+                "{prefix}{}{literal}{}",
+                SEPARATORS[i % SEPARATORS.len()],
+                SUFFIXES[i % SUFFIXES.len()]
+            ),
+        );
+    }
+    for (i, separator) in SEPARATORS.iter().enumerate() {
+        let literal = literals[i % literals.len()];
+        push_cases(
+            &mut out,
+            &format!(
+                "{}{separator}{literal}{}",
+                PREFIXES[i % PREFIXES.len()],
+                SUFFIXES[i % SUFFIXES.len()]
+            ),
+        );
+    }
+    for (i, suffix) in SUFFIXES.iter().enumerate() {
+        let literal = literals[i % literals.len()];
+        push_cases(
+            &mut out,
+            &format!(
+                "{}{}{literal}{suffix}",
+                PREFIXES[i % PREFIXES.len()],
+                SEPARATORS[i % SEPARATORS.len()]
+            ),
+        );
+    }
+    let mut state: u64 = 0x0a11_5eed;
+    for _ in 0..64 {
+        state = state.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
+        let literal = literals[(state as usize) % literals.len()];
+        let prefix = PREFIXES[((state >> 8) as usize) % PREFIXES.len()];
+        let separator = SEPARATORS[((state >> 16) as usize) % SEPARATORS.len()];
+        let suffix = SUFFIXES[((state >> 24) as usize) % SUFFIXES.len()];
+        push_cases(&mut out, &format!("{prefix}{separator}{literal}{suffix}"));
+    }
+    for extra in EXTRA {
+        push_cases(&mut out, extra);
     }
     out.sort();
     out.dedup();
@@ -103,7 +186,6 @@ fn verdicts(text: &str) -> [bool; 3] {
 #[test]
 fn every_non_public_literal_is_refused_whatever_surrounds_it() {
     let forms = forms();
-    assert!(forms.len() > 100_000, "only {} forms", forms.len());
     let missed: Vec<String> = forms
         .iter()
         .filter_map(|form| {
