@@ -2034,12 +2034,14 @@ impl Seat {
 #[cfg(not(any(test, feature = "test-hooks")))]
 static ANNOUNCED: std::sync::OnceLock<Seat> = std::sync::OnceLock::new();
 
-/// Tests run many server lifetimes in one process, so their announcement
-/// must end when the process-state guard does. The binaries' unit tests
-/// link this library without `cfg(test)`, and get this one through
-/// `test-hooks`.
+// Tests run many server lifetimes in one process, so their announcement
+// must end when the process-state guard does. The binaries' unit tests
+// link this library without `cfg(test)`, and get this one through
+// `test-hooks`.
 #[cfg(any(test, feature = "test-hooks"))]
-static ANNOUNCED: std::sync::Mutex<Option<Seat>> = std::sync::Mutex::new(None);
+thread_local! {
+    static ANNOUNCED: std::cell::RefCell<Option<Seat>> = const { std::cell::RefCell::new(None) };
+}
 
 fn announced_seat() -> Option<Seat> {
     #[cfg(not(any(test, feature = "test-hooks")))]
@@ -2048,10 +2050,7 @@ fn announced_seat() -> Option<Seat> {
     }
     #[cfg(any(test, feature = "test-hooks"))]
     {
-        ANNOUNCED
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        ANNOUNCED.with(|slot| slot.borrow().clone())
     }
 }
 
@@ -2062,12 +2061,12 @@ fn announce_once(seat: &Seat) {
     }
     #[cfg(any(test, feature = "test-hooks"))]
     {
-        let mut announced = ANNOUNCED
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if announced.is_none() {
-            *announced = Some(seat.clone());
-        }
+        ANNOUNCED.with(|slot| {
+            let mut announced = slot.borrow_mut();
+            if announced.is_none() {
+                *announced = Some(seat.clone());
+            }
+        });
     }
 }
 
@@ -2076,9 +2075,7 @@ fn announce_once(seat: &Seat) {
 #[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub fn clear_announced_seat() {
-    *ANNOUNCED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    ANNOUNCED.with(|slot| *slot.borrow_mut() = None);
 }
 
 /// A name as a seat: lower case, runs of letters and digits joined by one
@@ -3596,6 +3593,13 @@ impl Drop for BoundCallSeat {
         let previous = self.previous.take();
         BOUND_CALL_SEAT.with(|slot| *slot.borrow_mut() = previous);
     }
+}
+
+/// Cargo reuses threads. A seat left by the previous test on this thread
+/// is not this test's call.
+#[cfg(test)]
+pub(crate) fn clear_bound_call_seat() {
+    BOUND_CALL_SEAT.with(|slot| *slot.borrow_mut() = None);
 }
 
 /// The seat of the MCP call running on this task or this thread.
@@ -5793,6 +5797,11 @@ impl Drop for Seated {
         let previous = self.previous.take();
         SEATED.with(|slot| *slot.borrow_mut() = previous);
     }
+}
+
+#[cfg(test)]
+pub(crate) fn clear_seated() {
+    SEATED.with(|slot| *slot.borrow_mut() = None);
 }
 
 fn seated() -> Option<Seat> {
@@ -22956,6 +22965,27 @@ pub fn drop_listing_cache() {
     *LAST_LISTING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+/// Whether a listing is still held. Tests use this after an idle drop.
+#[cfg(test)]
+pub(crate) fn listing_cached() -> bool {
+    LAST_LISTING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+}
+
+/// Plant one listing so a test can see [`drop_listing_cache`] clear it.
+#[cfg(test)]
+pub(crate) fn remember_listing_for_test() {
+    *LAST_LISTING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
+        std::time::Instant::now(),
+        "probe".to_string(),
+        std::sync::Arc::new(Vec::new()),
+    ));
 }
 
 /// The whole listing as [`Row`]s for the reads one prompt makes side by
@@ -60570,6 +60600,7 @@ pub(crate) fn require_env_lock() {
 /// Bookkeeping tests live in another module and take the same one.
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> EnvLock {
+    clear_reused_test_thread();
     let guard = ljos_test_boot::env_write_lock();
     ENV_LOCK_HELD.with(|held| held.set(true));
     let (snapshot, runtime, git_config) = with_env_mutation(|| {
@@ -60611,7 +60642,16 @@ pub(crate) fn test_env_lock() -> EnvLock {
 #[cfg(test)]
 #[must_use = "hold the process-state read lock for the whole test"]
 pub(crate) fn test_env_read_lock() -> ljos_test_boot::EnvReadGuard {
+    clear_reused_test_thread();
     ljos_test_boot::env_read_lock()
+}
+
+#[cfg(test)]
+fn clear_reused_test_thread() {
+    clear_announced_seat();
+    clear_bound_call_seat();
+    clear_seated();
+    seat_resolve::reset_for_test();
 }
 
 /// Whether `tool` is missing, after the process `PATH` is the one the

@@ -44,6 +44,14 @@ pub fn prepare(flag: Option<String>, kind: Kind) {
     KIND.with(|cell| cell.set(kind));
 }
 
+/// A reused test thread starts with no flag, no write kind and no notice.
+#[cfg(test)]
+pub(crate) fn reset_for_test() {
+    FLAG.with(|slot| *slot.borrow_mut() = None);
+    KIND.with(|cell| cell.set(Kind::Keep));
+    NOTICED.with(|cell| cell.set(false));
+}
+
 /// The rest of this command writes, so a missing seat is the login name,
 /// or a short stable name, and [`announce_unknown`] can name it. The
 /// `--seat` flag already stored by [`prepare`] stays.

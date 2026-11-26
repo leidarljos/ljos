@@ -188,6 +188,18 @@ pub fn spawn_idle_drop() {
 mod tests {
     use super::*;
 
+    /// An idle drop forgets the listing a long-lived server kept.
+    #[test]
+    fn an_idle_drop_clears_the_atom_cache() {
+        // The listing cache is process-global, so this write takes the
+        // exclusive test lock.
+        let _env = crate::test_env_lock();
+        crate::remember_listing_for_test();
+        assert!(crate::listing_cached());
+        release_memory();
+        assert!(!crate::listing_cached());
+    }
+
     /// A call in flight is not idle however old the clock, and once it
     /// ends the clock is fresh.
     #[test]
