@@ -942,48 +942,6 @@ mod tests {
     }
 
     #[test]
-    fn unindented_prose_wraps_exactly() {
-        let _env_read = crate::test_env_read_lock();
-        let wrapped = wrap_prose("alpha beta gamma", Some(12));
-        assert_eq!(wrapped, "alpha beta\ngamma");
-    }
-
-    #[test]
-    fn code_span_in_parens_stays_whole() {
-        let _env_read = crate::test_env_read_lock();
-        let wrapped = wrap_prose("run (`ljos show ID`), now", Some(18));
-        assert_eq!(wrapped, "run\n(`ljos show ID`),\nnow");
-    }
-
-    #[test]
-    fn double_backtick_span_stays_whole() {
-        let _env_read = crate::test_env_read_lock();
-        let wrapped = wrap_prose("Use ``ljos show ID`` now", Some(12));
-        assert_eq!(wrapped, "Use\n``ljos show ID``\nnow");
-    }
-
-    #[test]
-    fn ansi_sequences_do_not_count_for_width() {
-        let _env_read = crate::test_env_read_lock();
-        let wrapped = wrap_prose("\u{1b}[31mred\u{1b}[0m blue", Some(7));
-        assert_eq!(wrapped, "\u{1b}[31mred\u{1b}[0m\nblue");
-    }
-
-    #[test]
-    fn cjk_uses_display_width() {
-        let _env_read = crate::test_env_read_lock();
-        let wrapped = wrap_prose("你好 世界 再见", Some(8));
-        assert_eq!(wrapped, "你好\n世界\n再见");
-    }
-
-    #[test]
-    fn urls_stay_whole_tokens() {
-        let _env_read = crate::test_env_read_lock();
-        let wrapped = wrap_prose("visit https://example.com/a/very/long/path now", Some(20));
-        assert_eq!(wrapped, "visit\nhttps://example.com/a/very/long/path\nnow");
-    }
-
-    #[test]
     fn no_break_spaces_are_not_break_points() {
         let _env_read = crate::test_env_read_lock();
         for space in ['\u{a0}', '\u{202f}', '\u{2007}'] {
@@ -1037,6 +995,32 @@ mod tests {
     fn table_driven_review_repros() {
         let _env_read = crate::test_env_read_lock();
         let cases = [
+            ("unindented_prose", "alpha beta gamma", 12, "alpha beta\ngamma"),
+            (
+                "code_span_in_parens",
+                "run (`ljos show ID`), now",
+                18,
+                "run\n(`ljos show ID`),\nnow",
+            ),
+            (
+                "double_backtick",
+                "Use ``ljos show ID`` now",
+                12,
+                "Use\n``ljos show ID``\nnow",
+            ),
+            (
+                "ansi_width",
+                "\u{1b}[31mred\u{1b}[0m blue",
+                7,
+                "\u{1b}[31mred\u{1b}[0m\nblue",
+            ),
+            ("cjk_width", "你好 世界 再见", 8, "你好\n世界\n再见"),
+            (
+                "urls_whole",
+                "visit https://example.com/a/very/long/path now",
+                20,
+                "visit\nhttps://example.com/a/very/long/path\nnow",
+            ),
             ("no_spurious_newline", "  hello              ", 20, "  hello"),
             (
                 "osc8_unbreakable",
@@ -1302,6 +1286,7 @@ mod tests {
         let wrapped = wrap_prose("pre \u{1b}]0;my title\u{7} post words", Some(10));
         assert!(wrapped.contains("\u{1b}]0;my title\u{7}"), "{wrapped}");
         assert!(!wrapped.contains("\u{1b}]0;\n"), "{wrapped}");
+        assert!(!wrapped.contains("my\n title"), "{wrapped}");
     }
 
     #[test]

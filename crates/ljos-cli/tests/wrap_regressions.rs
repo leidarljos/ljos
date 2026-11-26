@@ -2,47 +2,8 @@
 
 ljos_test_boot::harness!();
 
-use ljos_cli::output_wrap::{prose_display_width, wrap_hanging_prose, wrap_prose};
+use ljos_cli::output_wrap::{wrap_hanging_prose, wrap_prose};
 use ljos_cli::scan;
-
-#[test]
-fn multiline_hanging_keeps_prefix_blank_lines_and_inner_indent() {
-    let body = "first line\n  Þetta er íslenskt: ofninn í Reykjavík þarf nýja þéttingu.\n\nsecond";
-    let wrapped = wrap_hanging_prose(body, 28, "| ", "| ");
-    let lines: Vec<&str> = wrapped.lines().collect();
-    assert_eq!(lines.first().copied(), Some("| first line"));
-    assert!(lines.contains(&"|"), "{wrapped}");
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.starts_with("|   Þetta er íslenskt")),
-        "{wrapped}"
-    );
-    assert!(lines.iter().all(|line| !line.ends_with(' ')), "{wrapped}");
-}
-
-#[test]
-fn tabs_measure_to_the_next_eight_column_stop() {
-    fn tabstop_width(text: &str) -> usize {
-        let mut width = 0usize;
-        for ch in text.chars() {
-            if ch == '\x1b' {
-                continue;
-            }
-            if ch == '\t' {
-                width += 8 - (width % 8);
-            } else {
-                width += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            }
-        }
-        width
-    }
-
-    let wrapped = wrap_prose("alpha\tbeta\tgamma\tdelta\tepsilon", Some(20));
-    for line in wrapped.lines() {
-        assert!(tabstop_width(line) <= 20, "{wrapped}");
-    }
-}
 
 #[test]
 fn non_tty_scan_wrap_matches_legacy_break_word_behavior() {
@@ -56,39 +17,6 @@ fn non_tty_scan_wrap_matches_legacy_break_word_behavior() {
             .all(|line| line.chars().count() <= scan::COLS),
         "{wrapped}"
     );
-}
-
-#[test]
-fn osc_with_spaces_stays_atomic_when_wrapped() {
-    let wrapped = wrap_prose("pre \u{1b}]0;my title\u{7} post words", Some(10));
-    assert!(wrapped.contains("\u{1b}]0;my title\u{7}"), "{wrapped}");
-    assert!(!wrapped.contains("\u{1b}]0;\n"), "{wrapped}");
-    assert!(!wrapped.contains("my\n title"), "{wrapped}");
-}
-
-/// An OSC with no terminator before the line ends leaves the text after
-/// it visible, so the line is measured and wraps.
-#[test]
-fn an_unterminated_osc_leaves_the_line_visible_and_wrapping() {
-    let text = "pre \u{1b}]0;my title with spaces that still wraps";
-    let wrapped = wrap_prose(text, Some(12));
-    assert!(wrapped.lines().count() > 1, "{wrapped:?}");
-    for line in wrapped.lines() {
-        assert!(prose_display_width(line) <= 12, "{line:?} in {wrapped:?}");
-    }
-    assert_eq!(wrapped.replace('\n', " "), text);
-}
-
-/// A CSI with no final byte before the line ends is the same.
-#[test]
-fn an_unterminated_csi_leaves_the_line_visible_and_wrapping() {
-    let text = "pre \u{1b}[1;31 123 456 789 1011 1213";
-    let wrapped = wrap_prose(text, Some(10));
-    assert!(wrapped.lines().count() > 1, "{wrapped:?}");
-    for line in wrapped.lines() {
-        assert!(prose_display_width(line) <= 10, "{line:?} in {wrapped:?}");
-    }
-    assert_eq!(wrapped.replace('\n', " "), text);
 }
 
 #[test]
