@@ -497,6 +497,11 @@ const VARS: &[Var] = &[
         group: "ljos",
     },
     Var {
+        name: "LJOS_MCP_CALL_TTL_MS",
+        default: "30000",
+        group: "ljos",
+    },
+    Var {
         name: "LJOS_MCP_CONFIG",
         default: "unset",
         group: "ljos",

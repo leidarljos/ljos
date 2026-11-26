@@ -106,8 +106,15 @@ fn waiting(dir: &Path, now: u64) -> Vec<(PathBuf, Call)> {
 }
 
 /// The MCP calls under `dir` still waiting, within [`MCP_CALL_TTL_MS`].
+fn mcp_call_ttl_ms() -> u64 {
+    std::env::var("LJOS_MCP_CALL_TTL_MS")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(MCP_CALL_TTL_MS)
+}
+
 fn waiting_mcp(dir: &Path, now: u64) -> Vec<(PathBuf, Call)> {
-    listed(dir, now, "json", MCP_CALL_TTL_MS)
+    listed(dir, now, "json", mcp_call_ttl_ms())
 }
 
 /// The calls under `dir` already taken, within [`CALL_TTL_MS`].

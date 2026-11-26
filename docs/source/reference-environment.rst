@@ -136,6 +136,7 @@ LJOS variables
 - ``LJOS_LEASE_SECS`` default 900
 - ``LJOS_MAX_PARALLEL`` default the machine's parallelism, clamped to 4
 - ``LJOS_MCP_BIN`` default unset
+- ``LJOS_MCP_CALL_TTL_MS`` default 30000
 - ``LJOS_MCP_CONFIG`` default unset
 - ``LJOS_MCP_FORWARDED`` default unset
 - ``LJOS_MCP_GENERATION`` default unset
