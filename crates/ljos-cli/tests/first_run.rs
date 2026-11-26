@@ -783,19 +783,7 @@ fn plain(text: &str) -> String {
 }
 
 fn settled(term: &pty::Pty) -> String {
-    let mut last = String::new();
-    let mut same = 0u8;
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline && same < 3 {
-        let now = term.shown();
-        if now == last {
-            same += 1;
-        } else {
-            same = 0;
-            last = now;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    term.finish_reading();
     term.shown()
 }
 

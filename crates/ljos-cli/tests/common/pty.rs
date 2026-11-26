@@ -169,33 +169,21 @@ impl Pty {
     }
 
     /// Close the parent's slave handle so the reader hits EOF once the
-    /// child and its descendants close theirs, then drain buffered output.
+    /// child and its descendants close theirs, then wait until that
+    /// reader has finished. A quiet gap is not the end of the screen.
+    /// Thirty seconds is a hang backstop for a reader that never sees EOF.
     pub fn finish_reading(&self) {
         *self.slave.lock().unwrap() = None;
         let (lock, cvar) = &*self.reader_done;
         let guard = lock.lock().unwrap();
         let (guard, _) = cvar
-            .wait_timeout_while(guard, Duration::from_secs(2), |done| !*done)
+            .wait_timeout_while(guard, Duration::from_secs(30), |done| !*done)
             .unwrap();
         let finished = *guard;
         drop(guard);
         if finished {
             if let Some(handle) = self.reader.lock().unwrap().take() {
                 let _ = handle.join();
-            }
-            return;
-        }
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let mut last = self.shown.lock().unwrap().len();
-        let mut quiet_since = Instant::now();
-        while Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-            let now = self.shown.lock().unwrap().len();
-            if now != last {
-                last = now;
-                quiet_since = Instant::now();
-            } else if quiet_since.elapsed() >= Duration::from_millis(120) {
-                break;
             }
         }
     }
