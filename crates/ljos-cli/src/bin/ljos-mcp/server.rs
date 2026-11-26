@@ -310,12 +310,17 @@ fn attach_next(name: &str, response: CallToolResponse) -> CallToolResponse {
                     .filter_map(|block| block.as_text().map(|text| text.text.as_str()))
                     .collect::<Vec<_>>()
                     .join("\n");
-                if body.contains("unattached-note") {
-                    "next: start a sitting with ljos_sitting, then call ljos_note again"
+                if body.starts_with("label oversize:") {
+                    // A size refusal used to be a policy label. This tool
+                    // treated that as success and then said to keep going,
+                    // so a seat could believe a note that was never written.
+                    result.is_error = Some(true);
+                    failure_next(name)
+                } else if body.contains("unattached-note") {
+                    "next: start a sitting with ljos_sitting, then call ljos_note again".to_string()
                 } else {
-                    next_step(name)
+                    next_step(name).to_string()
                 }
-                .to_string()
             } else {
                 next_step(name).to_string()
             };
@@ -6413,6 +6418,48 @@ mod tests {
             finish_next_from("sync: committed chore; push refused: non-fast-forward\n");
         assert!(sync_failed.contains("failed"), "{sync_failed}");
         assert!(next_step("ljos_note").contains("ljos_finish"));
+        let CallToolResponse::Complete(oversize) = attach_next(
+            "ljos_note",
+            CallToolResult::success(vec![ContentBlock::text(
+                "label oversize: note: the note is 5000 bytes, past the cap of 4096, so run `ljos note proj-1 --file PATH`. Nothing was noted",
+            )])
+            .into(),
+        ) else {
+            panic!("an oversize note completes the call");
+        };
+        assert_eq!(oversize.is_error, Some(true));
+        let oversize_text = oversize
+            .content
+            .iter()
+            .filter_map(|block| block.as_text().map(|text| text.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(oversize_text.contains("5000"), "{oversize_text}");
+        assert!(oversize_text.contains("4096"), "{oversize_text}");
+        assert!(
+            oversize_text.contains("ljos note proj-1 --file PATH"),
+            "{oversize_text}"
+        );
+        assert!(
+            oversize_text.contains("fix the line above"),
+            "{oversize_text}"
+        );
+        assert!(!oversize_text.contains("keep going"), "{oversize_text}");
+        let CallToolResponse::Complete(noted) = attach_next(
+            "ljos_note",
+            CallToolResult::success(vec![ContentBlock::text("proj-1: noted\n")]).into(),
+        ) else {
+            panic!("a note completes");
+        };
+        assert_ne!(noted.is_error, Some(true));
+        assert!(
+            noted
+                .content
+                .last()
+                .and_then(|block| block.as_text())
+                .is_some_and(|text| text.text.contains("keep going")),
+            "{noted:?}"
+        );
         assert!(next_step("ljos_remember").contains("ljos_finish"));
         assert!(next_step("ljos_search").contains("ljos_start"));
         assert!(next_step("ljos_prefer").contains("ljos_finish"));
