@@ -28,6 +28,39 @@ fn says(name: &str, version: &str) -> String {
     format!("#!/bin/sh\necho \"{name} {version}\"\n")
 }
 
+fn elf_says(path: &Path, name: &str, version: &str) {
+    let src = path.with_extension("c");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    fs::write(
+        &src,
+        format!(
+            "#include <stdio.h>\nint main(void) {{\n    printf(\"{name} {version}\\n\");\n    return 0;\n}}\n"
+        ),
+    )
+    .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "starts a program outside git hook code"
+    )]
+    let compiled = Command::new("cc")
+        .args(["-O2", "-o"])
+        .arg(path)
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+}
+
 fn sha256(path: &Path) -> String {
     #[expect(
         clippy::disallowed_methods,
@@ -42,18 +75,16 @@ fn sha256(path: &Path) -> String {
         .to_string()
 }
 
-/// The archive the release workflow would publish, built from this
-/// crate's own binaries so the version line is real.
+/// The archive the release workflow would publish. The binaries are
+/// stubs that print the version line the upgrade reads.
 fn fixture_release(root: &Path) -> PathBuf {
     let top = format!("ljos-v{}-{}", version(), target());
     let stage = root.join("stage").join(&top);
     fs::create_dir_all(&stage).unwrap();
-    for (name, src) in [
-        ("ljos", env!("CARGO_BIN_EXE_ljos")),
-        ("ljos-mcp", env!("CARGO_BIN_EXE_ljos-mcp")),
-    ] {
-        let dest = stage.join(name);
-        ljos_cli::copy_executable(Path::new(src), &dest).unwrap();
+    for name in ["ljos", "ljos-mcp"] {
+        // The upgrade refuses a script. The stub is a real binary that
+        // prints the version line and exits.
+        elf_says(&stage.join(name), name, version());
     }
     let rel = root.join("release");
     fs::create_dir_all(&rel).unwrap();
