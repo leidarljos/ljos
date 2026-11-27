@@ -27,6 +27,8 @@ struct Seat {
     url: String,
     home: tempfile::TempDir,
     requests: Arc<AtomicUsize>,
+    /// Bodies of `POST /v1/atoms`, in the order the stub saw them.
+    posts: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 fn content_length(head: &str) -> usize {
@@ -44,15 +46,24 @@ fn content_length(head: &str) -> usize {
 /// `ok`. `None` stays not-ready. `Some(0)` is open on the first poll.
 /// `hits` is the search body once the pack has opened. While it is
 /// starting, search says the pack is busy loading.
+/// `starting_posts` is how many `POST /v1/atoms` stay `not-ready` after
+/// the pack has opened. `0` stores the first post.
 fn serve(closed_healths: Option<usize>, hits: &'static str) -> Seat {
+    serve_posts(closed_healths, hits, 0)
+}
+
+fn serve_posts(closed_healths: Option<usize>, hits: &'static str, starting_posts: usize) -> Seat {
     let home = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let requests = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&requests);
+    let posts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let counted_posts = Arc::clone(&posts);
     thread::spawn(move || {
         for conn in listener.incoming().flatten() {
             let requests = Arc::clone(&counted);
+            let posts = Arc::clone(&counted_posts);
             thread::spawn(move || {
                 let mut sock = conn;
                 let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
@@ -100,10 +111,34 @@ fn serve(closed_healths: Option<usize>, hits: &'static str) -> Seat {
                         )
                     }
                 } else if path == "/v1/atoms" && head.starts_with("POST") {
-                    if open {
+                    let raw = &buf[head_end..head_end + cl.min(buf.len().saturating_sub(head_end))];
+                    let posted = String::from_utf8_lossy(raw).into_owned();
+                    let n = {
+                        let mut seen = posts.lock().unwrap_or_else(|err| err.into_inner());
+                        seen.push(posted.clone());
+                        seen.len()
+                    };
+                    // The first posts are the pack still starting. A later
+                    // post is the stored lesson. Health being open is not
+                    // enough: remember does not poll `/health`.
+                    if open && n > starting_posts {
+                        let text = serde_json::from_str::<serde_json::Value>(&posted)
+                            .ok()
+                            .and_then(|value| {
+                                value
+                                    .get("text")
+                                    .and_then(|text| text.as_str())
+                                    .map(str::to_owned)
+                            })
+                            .unwrap_or_default();
                         (
                             200,
-                            r#"{"id":"atom-kept","kind":"lesson","text":"kept"}"#.to_string(),
+                            serde_json::json!({
+                                "id": "atom-kept",
+                                "kind": "lesson",
+                                "text": text,
+                            })
+                            .to_string(),
                         )
                     } else {
                         (503, r#"{"error":"not-ready"}"#.to_string())
@@ -131,6 +166,7 @@ fn serve(closed_healths: Option<usize>, hits: &'static str) -> Seat {
         url: format!("http://127.0.0.1:{port}"),
         home,
         requests,
+        posts,
     }
 }
 
@@ -253,11 +289,12 @@ fn a_warmup_wait_of_zero_does_not_wait_on_a_starting_pack() {
 }
 
 #[test]
-fn remember_stores_when_the_pack_is_open() {
+fn remember_retries_a_starting_pack_and_stores() {
     let _process = ljos_test_boot::env_lock();
-    // Remember posts /v1/atoms and does not poll /health, so the pack is
-    // open on that first post. A positive health count would never clear.
-    let seat = serve(Some(0), hits_body());
+    // Health is open. The first POST is still the pack starting, because
+    // remember does not poll `/health`. The call retries, and that post
+    // is the stored lesson.
+    let seat = serve_posts(Some(0), hits_body(), 1);
     let (out, elapsed) = run(
         &seat,
         &["remember", "Cold metal seats the door."],
@@ -267,7 +304,20 @@ fn remember_stores_when_the_pack_is_open() {
     assert!(out.status.success(), "{said}");
     assert!(!said.contains(STARTING), "{said}");
     assert!(!said.contains("queued"), "{said}");
+    assert!(said.contains("Cold metal seats the door."), "{said}");
+    assert!(said.contains("atom-kep"), "{said}");
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}\n{said}");
+    let posts = seat.posts.lock().unwrap_or_else(|err| err.into_inner());
+    assert!(
+        posts.len() >= 2,
+        "remember posted once, with no retry:\n{posts:?}"
+    );
+    assert!(
+        posts
+            .iter()
+            .any(|body| body.contains("Cold metal seats the door.")),
+        "the stored post was not the lesson:\n{posts:?}"
+    );
 }
 
 #[test]
@@ -441,6 +491,7 @@ fn open_pack(kind: Open) -> Seat {
         url: format!("http://127.0.0.1:{port}"),
         home,
         requests: Arc::new(AtomicUsize::new(0)),
+        posts: Arc::new(std::sync::Mutex::new(Vec::new())),
     }
 }
 
