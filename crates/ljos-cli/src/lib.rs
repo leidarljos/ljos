@@ -21723,6 +21723,11 @@ fn wake_writer() {
 
 /// A transport failure, as distinct from a writer that answered and refused.
 fn writer_unreachable(err: &anyhow::Error) -> bool {
+    // A writer that is listening and slow is not down: a timeout is the
+    // busy case ([`writer_timed_out`]).
+    if writer_timed_out(err) {
+        return false;
+    }
     err.chain().any(|cause| {
         cause
             .downcast_ref::<packset_client::Error>()
@@ -21733,6 +21738,24 @@ fn writer_unreachable(err: &anyhow::Error) -> bool {
                 )
             })
     })
+}
+
+/// A pack call that ran out of time. Something answered the connection or
+/// the socket stayed open; nothing refused it.
+fn writer_timed_out(err: &anyhow::Error) -> bool {
+    if format!("{err:#}")
+        .to_ascii_lowercase()
+        .contains("connection refused")
+    {
+        return false;
+    }
+    is_pack_busy(err)
+        || err.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::TimedOut)
+                || cause.to_string().to_ascii_lowercase().contains("timed out")
+        })
 }
 
 /// A writer that answered 503: up, with every worker answering and its
@@ -22517,6 +22540,11 @@ fn fault_line() -> String {
 
 fn text_is_down(text: &str) -> bool {
     let full = text.to_ascii_lowercase();
+    // A connect or read that timed out reached a listener or gave no
+    // refusal: slow, not down.
+    if full.contains("timed out") && !full.contains("connection refused") {
+        return false;
+    }
     full.contains("connection refused")
         || full.contains("connect error")
         || full.contains("not answering")
@@ -22914,6 +22942,8 @@ fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
         Err(err) if pack_link::clock_armed() && (is_pack_busy(&err) || writer_busy(&err)) => {
             Err(pack_busy_err())
         }
+        // A listening writer that ran out of time is busy, not down.
+        Err(err) if writer_timed_out(&err) => Err(pack_busy_err()),
         Err(err) if writer_unreachable(&err) && !skip_writer_ensure() => match ensure_writer() {
             Ok(()) => match op() {
                 // The start did not bring a writer up. A timeout on the
@@ -51978,8 +52008,8 @@ fn board_project(board: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// The file that holds `issue` on the split board `board`: the name vissue
-/// wrote it under ([`vissue_ledger_file_name`]), else its name in the
+/// The file that holds `issue` on the split board `board`: the name the
+/// tracker wrote it under ([`vissue_ledger_file_name`]), else its name in the
 /// layout ([`ledger_file_name`]). `None` when neither is there.
 fn ledger_issue_file(board: &Path, issue: &str) -> Option<PathBuf> {
     let dir = board.parent()?.join("issues");
@@ -56388,6 +56418,9 @@ fn policy_reading_known(
     // A guard check shares the hook's wall budget. A slow pack or a slow
     // policyd stops at that budget. The recall runs beside the verdict.
     let _wall = arm_wall_budget();
+    // The recall, the rules read and the origin record each list the pack.
+    // One listing serves them all for this call.
+    let _listing = ListingMemo::enter();
     let line = policy_line(argv)?;
     let call = HookCall {
         event: "argv".into(),
@@ -56420,6 +56453,19 @@ fn policy_reading_known(
         }
     });
     let judged = !static_clear && fast.is_some() && gates::policyd_config().is_none();
+    // The person's own allow for this line is the verdict: the law is not
+    // asked, and the choice is written to the book so it can be read back.
+    let person_allowed = user_rules::allows(&line).is_some();
+    if person_allowed {
+        bookkeep::log_line(&format!("person allow: policyd not asked for `{line}`"));
+    }
+    // The safety verdict is asked before any pack read, so a slow pack
+    // never spends the budget policyd needs.
+    let asked = if judged || off || person_allowed {
+        None
+    } else {
+        Some(hook_timed("tcb", tcb))
+    };
     // The same bound as a hook: one short read, then the rules kept on
     // disk. An unbounded listing is what made a commit check sit on a
     // quiet pack until the runner killed it.
@@ -56451,6 +56497,21 @@ fn policy_reading_known(
         })
     };
     let gated = fast.or(gated);
+    // A seat rule's warning is the one line; the TCB's allow beside it
+    // says nothing more. A policyd warning reads as the seat's do, and
+    // its block is policyd's own deny line.
+    let tcb = match asked {
+        None => None,
+        Some(answer) => match answer {
+            // A labelled rule's line is said once, below.
+            Some(tcb) if relabelled(&tcb, &line).is_some() => None,
+            Some(tcb) if tcb.is_empty() || tcb_is_allow(&tcb) && gated.is_some() => None,
+            Some(tcb) => Some(tcb),
+            // A missing policyd is the ordinary install. The hook stays
+            // quiet, the same bytes as a call no rule matched.
+            None => None,
+        },
+    };
     // Leave a little of the budget for the verdict text after this wait.
     let wait = wall_left()
         .unwrap_or_else(policy_recall_wait)
@@ -56464,29 +56525,6 @@ fn policy_reading_known(
         String::new()
     });
     let ruled = hook_output_ruled(&call, &context, gated.as_ref());
-    // The person's own allow for this line is the verdict: the law is not
-    // asked, and the choice is written to the book so it can be read back.
-    let person_allowed = user_rules::allows(&line).is_some();
-    if person_allowed {
-        bookkeep::log_line(&format!("person allow: policyd not asked for `{line}`"));
-    }
-    // A seat rule's warning is the one line; the TCB's allow beside it
-    // says nothing more. A policyd warning reads as the seat's do, and
-    // its block is policyd's own deny line.
-    let tcb = if judged || off || person_allowed {
-        None
-    } else {
-        match hook_timed("tcb", tcb) {
-            // A labelled rule's line is said once, below.
-            Some(tcb) if relabelled(&tcb, &line).is_some() => None,
-            Some(tcb) if tcb.is_empty() || tcb_is_allow(&tcb) && gated.is_some() => None,
-            Some(tcb) => Some(tcb),
-            // A missing policyd is the ordinary install. The hook stays
-            // quiet, the same bytes as a call no rule matched.
-            None if policyd_bin().is_none() => None,
-            _ => None,
-        }
-    };
     let refused = gated.as_ref().is_some_and(|rule| rule.verdict != "allow")
         || tcb.as_deref().is_some_and(|t| !tcb_is_allow(t));
     if refused {
@@ -80434,8 +80472,8 @@ warn\ttickets\tvissue 0.22.0 root=/t prefix=Software; 3 unpushed; last push refu
         let _env_read = crate::test_env_read_lock();
         let full = "\
 == reclaim
-handed back Software-eiw4: quiet 5678s and no conversation on this host holds it; gen=5
-handed back Omni-hgn2: quiet 5675s and no conversation on this host holds it; gen=7
+handed back board-eiw4: quiet 5678s and no conversation on this host holds it; gen=5
+handed back board-hgn2: quiet 5675s and no conversation on this host holds it; gen=7
 kept ljos-au1w: quiet 5521s, but the runner is still running
 could not hand back ljos-bad: the graph refused
 == claim
@@ -80485,7 +80523,7 @@ sync: the remote was not reached
         assert!(!short.contains("within a day"), "{short}");
         assert!(!short.contains("not fetched"), "{short}");
         assert!(!short.contains("16 due"), "{short}");
-        assert!(!short.contains("Software-eiw4"), "{short}");
+        assert!(!short.contains("board-eiw4"), "{short}");
         assert!(short.contains("ljos-u5he is yours"), "{short}");
         let refused = "tracker git: commit refused: Author identity unknown\n";
         let plain = without_routine_git(refused);
@@ -84190,6 +84228,58 @@ lesson, due yesterday, seat ada
         assert_ne!(a, work_id("demo-rimm"));
         assert_eq!(work_id(&a.to_ascii_uppercase()), a);
         assert_ne!(work_id("seat"), work_id("reader"));
+    }
+
+    #[test]
+    fn a_timeout_is_a_slow_writer_and_a_refusal_is_a_down_one() {
+        let _env_read = crate::test_env_read_lock();
+        let slow = anyhow::Error::from(packset_client::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out reading response",
+        )));
+        assert!(!writer_unreachable(&slow), "{slow:#}");
+        assert!(writer_slow(&slow), "{slow:#}");
+        assert!(pack_down_message(&slow).is_none(), "{slow:#}");
+        let connect = anyhow::anyhow!(
+            "http://127.0.0.1:8761/v1/status: Connection Failed: Connect error: timed out"
+        );
+        assert!(!text_is_down(&format!("{connect:#}")));
+        assert!(writer_slow(&connect));
+        assert!(pack_down_message(&connect).is_none());
+        let refused = anyhow::Error::from(packset_client::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "Connection refused (os error 111)",
+        )));
+        assert!(writer_unreachable(&refused), "{refused:#}");
+        assert!(!writer_slow(&refused), "{refused:#}");
+        assert!(pack_down_message(&refused).is_some(), "{refused:#}");
+    }
+
+    /// A pack that holds the connection and never answers must not spend
+    /// the budget the safety verdict needs.
+    #[test]
+    fn a_recall_past_the_budget_still_leaves_policyd_its_time() {
+        let _env = crate::test_env_lock();
+        let (url, _seen) = serve_http(|_| {
+            std::thread::sleep(std::time::Duration::from_secs(4));
+            (200, "{}".into())
+        });
+        let _url = PackUrl::set(&url);
+        disarm_wall();
+        let left_at_tcb = std::cell::Cell::new(None);
+        let argv = vec!["ls".to_string(), "-la".to_string()];
+        let out = policy_reading_in(&argv, None, || {
+            left_at_tcb.set(wall_left());
+            Some("deny\tsmoke-rule\tblocked by the test verdict".to_string())
+        })
+        .unwrap();
+        disarm_wall();
+        let left = left_at_tcb.get().expect("the verdict was asked");
+        assert!(
+            left >= std::time::Duration::from_millis(1_500),
+            "policyd was asked with {left:?} of the budget left"
+        );
+        assert!(out.contains("smoke-rule"), "{out}");
     }
 
     #[test]
