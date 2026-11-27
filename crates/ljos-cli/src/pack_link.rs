@@ -1083,8 +1083,8 @@ fn quiet_io() -> std::io::Error {
 
 /// A read or a connect that ended because the socket stayed silent.
 /// A refused connect is not this: the writer may still be starting.
-/// On macOS a dropped SYN to a held loopback port is reported as that
-/// refusal before this check, so the pack reads as down.
+/// On macOS a dropped SYN to a loopback port the tables show as empty
+/// is reported as that refusal before this check, so the pack reads as down.
 fn io_is_quiet(err: &std::io::Error) -> bool {
     matches!(
         err.kind(),
@@ -1097,6 +1097,9 @@ thread_local! {
     /// When set, a connect fails the way Darwin fails a dropped SYN:
     /// [`std::io::ErrorKind::TimedOut`], no os code, "connection timed out".
     static FAIL_HANDSHAKE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// When set, that timeout is passed through [`held_port_error`], the
+    /// rewrite a held-port probe applies on macOS.
+    static MAP_HELD_PORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Make the next connects on this thread fail as a dropped SYN.
@@ -1105,13 +1108,22 @@ pub(crate) fn fail_handshake_for_test(on: bool) {
     FAIL_HANDSHAKE.with(|cell| cell.set(on));
 }
 
+/// Pass a dropped-SYN timeout through [`held_port_error`].
+#[cfg(test)]
+pub(crate) fn map_held_port_for_test(on: bool) {
+    MAP_HELD_PORT.with(|cell| cell.set(on));
+}
+
 fn connect(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
     #[cfg(test)]
     if FAIL_HANDSHAKE.with(std::cell::Cell::get) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "connection timed out",
-        ));
+        let err = std::io::Error::new(std::io::ErrorKind::TimedOut, "connection timed out");
+        // The held-port probe rewrites this on macOS. The flag asks the
+        // test double to take that same path.
+        if MAP_HELD_PORT.with(std::cell::Cell::get) {
+            return Err(held_port_error(addr, err));
+        }
+        return Err(err);
     }
     if pack_quiet() {
         return Err(quiet_io());
@@ -1206,13 +1218,19 @@ fn held_port_cap(addr: SocketAddr, wait: Duration) -> Duration {
     wait
 }
 
-/// A loopback connect that timed out is a port something holds and
-/// nothing accepts. The classifiers read "connection refused" as down.
-/// A timeout to any other address stays a timeout. Production calls this
-/// only when the held-port probe shortened the wait, which is macOS.
-/// The function itself is what the classifier test checks on every platform.
+/// A loopback connect that timed out is a refused connect when the
+/// socket tables were read and nothing is listening on that port.
+/// The classifiers read "connection refused" as down. When the tables
+/// cannot be read, or a listener is up, the timeout stays a timeout,
+/// so a live writer is not started again. A timeout to any other
+/// address stays a timeout. Production calls this only when the
+/// held-port probe shortened the wait, which is macOS. The function
+/// itself is what the classifier test checks on every platform.
 fn held_port_error(addr: SocketAddr, err: std::io::Error) -> std::io::Error {
-    if addr.ip().is_loopback() && err.kind() == std::io::ErrorKind::TimedOut {
+    if addr.ip().is_loopback()
+        && err.kind() == std::io::ErrorKind::TimedOut
+        && super::port_listening(addr.port()) == Some(false)
+    {
         std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused")
     } else {
         err

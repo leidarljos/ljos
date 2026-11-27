@@ -18515,9 +18515,25 @@ fn pack_aim() -> PackAim {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// When set, [`port_listening`] answers the way it does when the
+    /// socket tables cannot be read.
+    static SOCKET_TABLES_HIDDEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn hide_socket_tables_for_test(on: bool) {
+    SOCKET_TABLES_HIDDEN.with(|cell| cell.set(on));
+}
+
 /// Whether a socket is listening on `port`. `None` when the tables cannot
 /// be read, so a guess does not start a second writer.
 fn port_listening(port: u16) -> Option<bool> {
+    #[cfg(test)]
+    if SOCKET_TABLES_HIDDEN.with(std::cell::Cell::get) {
+        return None;
+    }
     #[cfg(target_os = "linux")]
     {
         let tables: Vec<String> = ["/proc/net/tcp", "/proc/net/tcp6"]
@@ -95019,6 +95035,8 @@ lesson, due yesterday, seat ada
 
     /// A connect cap on a port with no listener is down and starts the
     /// writer. The same timeout against a listener that is up stays busy.
+    /// A listener that is up while the socket tables cannot be read stays
+    /// busy too, and is not started again.
     fn dropped_syn_timeout_starts_the_writer() {
         let held = ljos_test_boot::ClosedPort::bind().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -95104,6 +95122,66 @@ lesson, due yesterday, seat ada
             before,
             "a live listener was started again"
         );
+        let _hidden = HiddenTables::enter();
+        let _mapped = MappedHeldPort::enter();
+        let hidden = anyhow::Error::from(
+            pack_link::PacksetClient::from_env()
+                .unwrap()
+                .health()
+                .unwrap_err(),
+        );
+        assert_eq!(
+            crate::degraded::of_error(&hidden),
+            Some(crate::degraded::State::Busy),
+            "{hidden:?}"
+        );
+        let before = super::writer_start_count();
+        super::wake_writer();
+        let _clock = pack_link::PackClock::enter(std::time::Duration::from_secs(2));
+        let err = super::with_writer(|| {
+            pack_link::PacksetClient::from_env()
+                .map_err(anyhow::Error::from)?
+                .health()
+                .map(|_| ())
+                .map_err(anyhow::Error::from)
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), pack_busy_err().to_string(), "{err}");
+        assert_eq!(
+            super::writer_start_count(),
+            before,
+            "a listener with unreadable tables was started again"
+        );
+    }
+
+    struct MappedHeldPort;
+
+    impl MappedHeldPort {
+        fn enter() -> Self {
+            pack_link::map_held_port_for_test(true);
+            Self
+        }
+    }
+
+    impl Drop for MappedHeldPort {
+        fn drop(&mut self) {
+            pack_link::map_held_port_for_test(false);
+        }
+    }
+
+    struct HiddenTables;
+
+    impl HiddenTables {
+        fn enter() -> Self {
+            super::hide_socket_tables_for_test(true);
+            Self
+        }
+    }
+
+    impl Drop for HiddenTables {
+        fn drop(&mut self) {
+            super::hide_socket_tables_for_test(false);
+        }
     }
 
     struct HandshakeGuard;
