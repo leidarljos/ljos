@@ -1083,6 +1083,8 @@ fn quiet_io() -> std::io::Error {
 
 /// A read or a connect that ended because the socket stayed silent.
 /// A refused connect is not this: the writer may still be starting.
+/// On macOS a dropped SYN to a held loopback port is reported as that
+/// refusal before this check, so the pack reads as down.
 fn io_is_quiet(err: &std::io::Error) -> bool {
     matches!(
         err.kind(),
@@ -1174,17 +1176,75 @@ fn cap_loopback_connect(addr: SocketAddr, wait: Duration) -> Duration {
 
 fn connect_once(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
     let wait = bounded_wait(timeout, true)?;
-    // Darwin drops a SYN to a bound port that is not listening, so the
-    // connect waits out the whole call. The cap is applied below on
-    // loopback only. Linux resets that SYN at once and does not cap.
-    #[cfg(not(target_os = "linux"))]
-    let wait = cap_loopback_connect(addr, wait);
-    let stream = TcpStream::connect_timeout(&addr, wait)?;
+    let stream = open_connect(addr, wait)?;
     let io_wait = bounded_wait(timeout, false)?;
     stream.set_read_timeout(Some(io_wait))?;
     stream.set_write_timeout(Some(io_wait))?;
     let _ = stream.set_nodelay(true);
     Ok(stream)
+}
+
+/// How long a loopback connect waits before a silent port is a refusal.
+/// Darwin drops a SYN to a bound socket that is not listening, and to a
+/// queue that never answers, so the handshake does not return
+/// `ECONNREFUSED`. A listener SYN-ACKs in the kernel before `accept`,
+/// inside this probe. A shorter caller budget stays a timeout: that
+/// clock ran out, and the port was not shown to be held.
+#[cfg(target_os = "macos")]
+const HELD_PORT_PROBE: Duration = Duration::from_millis(800);
+
+/// The connect budget. On macOS a loopback wait of at least the held-port
+/// probe uses that probe, so a dropped SYN fails fast. Every other
+/// connect uses `wait`.
+fn held_port_cap(addr: SocketAddr, wait: Duration) -> Duration {
+    #[cfg(target_os = "macos")]
+    if addr.ip().is_loopback() && wait >= HELD_PORT_PROBE {
+        return HELD_PORT_PROBE;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = addr;
+    wait
+}
+
+/// A loopback connect that timed out is a port something holds and
+/// nothing accepts. The classifiers read "connection refused" as down.
+/// A timeout to any other address stays a timeout. Production calls this
+/// only when the held-port probe shortened the wait, which is macOS.
+/// The function itself is what the classifier test checks on every platform.
+fn held_port_error(addr: SocketAddr, err: std::io::Error) -> std::io::Error {
+    if addr.ip().is_loopback() && err.kind() == std::io::ErrorKind::TimedOut {
+        std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused")
+    } else {
+        err
+    }
+}
+
+fn open_connect(addr: SocketAddr, wait: Duration) -> std::io::Result<TcpStream> {
+    // `LJOS_PACK_CONNECT_MS` is the Darwin bound on its own. The held-port
+    // probe is the other copy of that bound, so the two are not both applied.
+    #[cfg(not(target_os = "linux"))]
+    if std::env::var_os("LJOS_PACK_CONNECT_MS").is_some() {
+        let cap = cap_loopback_connect(addr, wait);
+        return TcpStream::connect_timeout(&addr, cap);
+    }
+    let probed = held_port_cap(addr, wait);
+    // A wait the probe does not shorten still stops at 400 ms on a kernel
+    // that drops a SYN. The probe's wait is the one copy of that bound.
+    #[cfg(not(target_os = "linux"))]
+    let cap = if probed == wait {
+        cap_loopback_connect(addr, probed)
+    } else {
+        probed
+    };
+    #[cfg(target_os = "linux")]
+    let cap = probed;
+    TcpStream::connect_timeout(&addr, cap).map_err(|err| {
+        if probed != wait {
+            held_port_error(addr, err)
+        } else {
+            err
+        }
+    })
 }
 
 /// The wait a socket call may use. With a [`PackClock`], every call stops
@@ -2395,6 +2455,38 @@ mod tests {
 
     fn reads() -> usize {
         TABLE_READS.with(std::cell::Cell::get)
+    }
+
+    /// A Darwin drop of a SYN to a held loopback port is a refusal, so the
+    /// pack reads as down. A timeout to any other address, and a timeout
+    /// that was not that drop, stays busy.
+    #[test]
+    fn a_loopback_timeout_is_a_refused_connect_and_a_remote_one_stays_busy() {
+        let _env_read = crate::test_env_read_lock();
+        let _g = crate::tests::env_guard();
+        // SAFETY: under the lock every environment-reading test takes,
+        // which puts the environment back when it drops. Packs off so
+        // classifying a timeout does not open a socket.
+        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 9));
+        let remote = std::net::SocketAddr::from(([203, 0, 113, 1], 9));
+        let timed_out = || std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out");
+        let held = super::held_port_error(loopback, timed_out());
+        assert_eq!(held.kind(), std::io::ErrorKind::ConnectionRefused);
+        assert_eq!(
+            crate::degraded::of_error(&anyhow::Error::from(held)),
+            Some(crate::degraded::State::Down)
+        );
+        assert_eq!(
+            crate::degraded::of_error(&anyhow::Error::from(timed_out())),
+            Some(crate::degraded::State::Busy)
+        );
+        let far = super::held_port_error(remote, timed_out());
+        assert_eq!(far.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(
+            crate::degraded::of_error(&anyhow::Error::from(far)),
+            Some(crate::degraded::State::Busy)
+        );
     }
 
     /// One thread's silent pack is not the next thread's. The lib tests
