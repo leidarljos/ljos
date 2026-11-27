@@ -10,6 +10,7 @@ mod sibling;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
@@ -487,12 +488,126 @@ fn a_busy_pack_with_a_word_match_is_one_result_line() {
     assert!(session.alive());
 }
 
+/// Listen on `127.0.0.1:port`. Port 0 asks the kernel for a free port.
+///
+/// `SO_REUSEPORT` is set before bind, so a second call can bind the same
+/// port while this socket is still open. The descriptor is close-on-exec.
+fn listen_loopback(port: u16) -> TcpListener {
+    // SAFETY: the address lives only for bind. On success the fd belongs
+    // to the TcpListener. On failure it is closed before the error returns.
+    let fd = unsafe { listen_loopback_fd(port) }
+        .unwrap_or_else(|err| panic!("listen 127.0.0.1:{port}: {err}"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the fd is a loopback socket, not a terminal"
+    )]
+    unsafe {
+        TcpListener::from_raw_fd(fd)
+    }
+}
+
+/// Open, bind and listen. The caller owns `fd` on success.
+///
+/// # Safety
+///
+/// The returned fd is open and not owned by any other safe wrapper.
+unsafe fn listen_loopback_fd(port: u16) -> std::io::Result<std::os::fd::RawFd> {
+    let cloexec: libc::c_int = {
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "watchos",
+        ))]
+        {
+            libc::SOCK_CLOEXEC
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "watchos",
+        )))]
+        {
+            0
+        }
+    };
+    let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM | cloexec, 0);
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if cloexec == 0 {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
+            let err = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(err);
+        }
+    }
+    let one: libc::c_int = 1;
+    let optlen = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()).unwrap_or(4);
+    if libc::setsockopt(
+        fd,
+        libc::SOL_SOCKET,
+        libc::SO_REUSEADDR,
+        (&one as *const libc::c_int).cast(),
+        optlen,
+    ) != 0
+        || libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_REUSEPORT,
+            (&one as *const libc::c_int).cast(),
+            optlen,
+        ) != 0
+    {
+        let err = std::io::Error::last_os_error();
+        libc::close(fd);
+        return Err(err);
+    }
+    let mut addr: libc::sockaddr_in = std::mem::zeroed();
+    addr.sin_family = libc::AF_INET as libc::sa_family_t;
+    addr.sin_port = libc::htons(port);
+    addr.sin_addr = libc::in_addr {
+        s_addr: libc::htonl(libc::INADDR_LOOPBACK),
+    };
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+    ))]
+    {
+        addr.sin_len = u8::try_from(std::mem::size_of::<libc::sockaddr_in>()).unwrap_or(16);
+    }
+    let len = libc::socklen_t::try_from(std::mem::size_of::<libc::sockaddr_in>())
+        .unwrap_or(libc::socklen_t::MAX);
+    if libc::bind(fd, (&addr as *const libc::sockaddr_in).cast(), len) != 0
+        || libc::listen(fd, 128) != 0
+    {
+        let err = std::io::Error::last_os_error();
+        libc::close(fd);
+        return Err(err);
+    }
+    Ok(fd)
+}
+
+fn socket_ino(sock: &TcpListener) -> libc::ino_t {
+    // SAFETY: `stat` is a plain C struct. `sock` is an open listener.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::fstat(sock.as_raw_fd(), &mut st) };
+    assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+    st.st_ino
+}
+
 #[test]
 fn a_restarted_writer_is_reached_on_the_next_call() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    // One listener for both generations. Dropping it and binding the same
-    // port again lets another test take the port during the retry.
+    let first = listen_loopback(0);
+    let port = first.local_addr().unwrap().port();
+    // Keeps the first socket open until the new listener is bound.
+    let held = first.try_clone().unwrap();
     let serve = |listener: TcpListener, stop: Arc<std::sync::atomic::AtomicBool>| {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -520,7 +635,7 @@ fn a_restarted_writer_is_reached_on_the_next_call() {
         })
     };
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let first = serve(listener.try_clone().unwrap(), stop.clone());
+    let first_thread = serve(first, stop.clone());
     let url = format!("http://127.0.0.1:{port}");
     let mut session = Session::open(&[("PACKSET_URL", &url)]);
     let before = call(
@@ -532,10 +647,16 @@ fn a_restarted_writer_is_reached_on_the_next_call() {
     assert!(text_of(&before).contains("kiln door"), "{before}");
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = std::net::TcpStream::connect(("127.0.0.1", port));
-    let _ = first.join();
-    std::thread::sleep(Duration::from_millis(50));
+    let _ = first_thread.join();
+    let second_listener = listen_loopback(port);
+    assert_ne!(
+        socket_ino(&held),
+        socket_ino(&second_listener),
+        "the restart used the same socket"
+    );
+    drop(held);
     let again = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let second = serve(listener, again.clone());
+    let second = serve(second_listener, again.clone());
     let after = call(
         &mut session,
         3,
