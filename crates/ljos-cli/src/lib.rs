@@ -84266,18 +84266,31 @@ lesson, due yesterday, seat ada
         });
         let _url = PackUrl::set(&url);
         disarm_wall();
+        assert!(
+            wall_left().is_none(),
+            "a bound leaked onto this test thread: {:?}",
+            wall_left()
+        );
+        let begun = std::time::Instant::now();
+        let asked_after = std::cell::Cell::new(None);
         let left_at_tcb = std::cell::Cell::new(None);
         let argv = vec!["ls".to_string(), "-la".to_string()];
         let out = policy_reading_in(&argv, None, || {
+            asked_after.set(Some(begun.elapsed()));
             left_at_tcb.set(wall_left());
             Some("deny\tsmoke-rule\tblocked by the test verdict".to_string())
         })
         .unwrap();
         disarm_wall();
-        let left = left_at_tcb.get().expect("the verdict was asked");
+        // Asked after the recall wait, policyd would start near the 2 s
+        // wall budget. Asked first, it starts within milliseconds. The
+        // elapsed time since this call began does not depend on how old
+        // the test process is.
+        let asked_after = asked_after.get().expect("the verdict was asked");
         assert!(
-            left >= std::time::Duration::from_millis(1_500),
-            "policyd was asked with {left:?} of the budget left"
+            asked_after < std::time::Duration::from_millis(1_500),
+            "policyd was asked {asked_after:?} into the call, with {:?} of the budget left",
+            left_at_tcb.get()
         );
         assert!(out.contains("smoke-rule"), "{out}");
     }
