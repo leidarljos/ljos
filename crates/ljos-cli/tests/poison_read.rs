@@ -208,6 +208,53 @@ fn answer(atoms: &[serde_json::Value], path: &str) -> (&'static str, String) {
     (status, payload)
 }
 
+/// A seat on a scripted pack that has already said the encoder answered.
+///
+/// `/v1/status` carries `embedder.answering`. While that field is null the
+/// prompt hook waits on its own clock, then the by-id read that confirms a
+/// rule can miss and the hook prints only its startup notice. The seat is
+/// handed back once a status read has shown the field set.
+fn open_when_encoder_answered(
+    script: impl Fn(&str) -> Option<Reply> + Send + Sync + 'static,
+) -> Seat {
+    let url = serve_scripted(vec![], move |req| {
+        let path = req.lines().next().unwrap_or("");
+        if path.starts_with("GET /v1/status") {
+            return Some(Reply::now(
+                "200 OK",
+                serde_json::json!({
+                    "embedder": {"available": true, "answering": "warm"},
+                }),
+            ));
+        }
+        script(req)
+    });
+    let status_url = format!("{url}/v1/status");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if std::time::Instant::now() >= deadline {
+            panic!("timed out waiting for {status_url}");
+        }
+        let Ok(response) = ureq::get(&status_url).call() else {
+            thread::sleep(std::time::Duration::from_millis(20));
+            continue;
+        };
+        let Ok(status) = response.into_json::<serde_json::Value>() else {
+            thread::sleep(std::time::Duration::from_millis(20));
+            continue;
+        };
+        if status
+            .get("embedder")
+            .and_then(|embedder| embedder.get("answering"))
+            .is_some_and(|answering| !answering.is_null())
+        {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Seat::on(url)
+}
+
 /// One stored atom as the pack lists it.
 fn atom(id: &str, kind: &str, text: &str, origin: &str, entities: &[&str]) -> serde_json::Value {
     serde_json::json!({
@@ -711,9 +758,9 @@ fn a_slow_or_hung_lesson_read_does_not_state_the_rule() {
         (Reply::after(1, "404 Not Found", gone.clone()), false),
     ] {
         let (after, status) = (reply.after, reply.status);
-        let seat = Seat::on(serve_scripted(vec![], move |req| {
+        let seat = open_when_encoder_answered(move |req| {
             (reads_atom(req, ID) && authorized(req)).then(|| reply.clone())
-        }));
+        });
         promoted_rule(&seat, &lesson);
         let note = seat.prompt("tidy the changelog fragments");
         assert_eq!(
@@ -742,9 +789,9 @@ fn a_lesson_read_without_an_origin_does_not_state_the_rule() {
             None => drop(body.as_object_mut().unwrap().remove("origin")),
             Some(origin) => body["origin"] = origin.clone(),
         }
-        let seat = Seat::on(serve_scripted(vec![], move |req| {
+        let seat = open_when_encoder_answered(move |req| {
             (reads_atom(req, ID) && authorized(req)).then(|| Reply::now("200 OK", body.clone()))
-        }));
+        });
         promoted_rule(&seat, &lesson);
         let note = seat.prompt("tidy the changelog fragments");
         assert!(
@@ -769,10 +816,10 @@ fn a_pack_that_does_not_ask_for_the_token_confirms_no_rule() {
     let lesson = persons_lesson(ID, RELEASE_KEY);
     for asks in [true, false] {
         let body = lesson.clone();
-        let seat = Seat::on(serve_scripted(vec![], move |req| {
+        let seat = open_when_encoder_answered(move |req| {
             (reads_atom(req, ID) && (authorized(req) || !asks))
                 .then(|| Reply::now("200 OK", body.clone()))
-        }));
+        });
         promoted_rule(&seat, &lesson);
         let note = seat.prompt("tidy the changelog fragments");
         assert_eq!(
@@ -1566,9 +1613,9 @@ fn a_pack_that_answers_the_id_with_another_record_states_no_rule() {
         (&agents, &persons, false),
     ] {
         let body = answered.clone();
-        let seat = Seat::on(serve_scripted(vec![], move |req| {
+        let seat = open_when_encoder_answered(move |req| {
             (reads_atom(req, ID) && authorized(req)).then(|| Reply::now("200 OK", body.clone()))
-        }));
+        });
         promoted_rule(&seat, promoted);
         let note = seat.prompt("tidy the changelog fragments");
         assert_eq!(
