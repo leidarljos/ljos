@@ -3123,6 +3123,7 @@ impl LjosServer {
                         "a ballot records what it used (doi:10.1007/3-540-44503-X_20); pass used as deed accessions or none"
                     )));
                 }
+                ljos_cli::persona_deed(args.as_persona.as_deref(), used).map_err(refused)?;
                 let mut argv = vec![
                     "vote".to_string(),
                     args.issue.clone(),

@@ -7436,15 +7436,16 @@ fn run_command() -> Result<()> {
                 }
                 Some(c) => {
                     let who = ljos_cli::ballot_voter_on(&issue, as_persona.as_deref())?;
-                    let cast = ljos_cli::hook_timed("vote_claim", || {
-                        ljos_cli::panel_gate::claim_session_ballot(&issue, &who)
-                    })?;
                     let used = used.as_deref().unwrap_or("");
                     if used.is_empty() {
                         bail!(
                         "a ballot records what it used (doi:10.1007/3-540-44503-X_20); pass --used deed-... or --used none"
                     );
                     }
+                    ljos_cli::persona_deed(as_persona.as_deref(), used)?;
+                    let cast = ljos_cli::hook_timed("vote_claim", || {
+                        ljos_cli::panel_gate::claim_session_ballot(&issue, &who)
+                    })?;
                     let mut args = vec![
                         "vote".to_string(),
                         issue.clone(),

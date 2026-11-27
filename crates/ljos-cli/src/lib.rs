@@ -5896,9 +5896,11 @@ pub fn write_assignee(
 
 /// The name a ballot or a withdrawal records. `--as` (MCP `as`) names the
 /// persona. The process seat is who casts it, and that seat is kept with
-/// the ballot. An empty name is this seat's own ballot. A standing seat,
-/// the person, or a name that begins with `persona:` is recorded as the
-/// caster's persona ballot, not as that seat's own ballot.
+/// the ballot. An empty name, or a spelling of this seat, is this seat's
+/// own ballot. A longer name is that persona even when a pid-shaped suffix
+/// would otherwise fold it onto this seat (`tls-rev1` is not `tls`). A
+/// standing seat, the person, or a name that begins with `persona:` is
+/// recorded as the caster's persona ballot, not as that seat's own ballot.
 ///
 /// # Errors
 ///
@@ -5911,13 +5913,47 @@ pub fn ballot_voter(_verb: &str, named: Option<&str>) -> Result<String> {
     if let Some(rest) = name.strip_prefix(ballot_sig::PERSONA_VOTER) {
         return Ok(ballot_sig::prefixed_persona_voter(&seat, rest));
     }
-    if canonical_seat_name(name) == canonical_seat_name(&seat) {
+    if names_this_seat(name, &seat) {
         return Ok(seat);
     }
     if protected_ballot_name(name) {
         return Ok(ballot_sig::caster_persona_voter(&seat, name));
     }
     Ok(name.to_string())
+}
+
+/// `--as` written as this seat: the same slug, or the seat's canonical
+/// name. A pid-shaped suffix stays part of the persona (`tls-rev1`).
+fn names_this_seat(name: &str, seat: &str) -> bool {
+    let named = ballot_persona_slug(name);
+    if named.is_empty() || seat.trim().is_empty() {
+        return false;
+    }
+    named == ballot_persona_slug(seat) || named == canonical_seat_name(seat)
+}
+
+/// The persona slug without dropping a pid-shaped suffix. `ljos-bot` is
+/// still `ljosbot`. An `@tag` and a `:issue` scope are not part of the name.
+fn ballot_persona_slug(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return String::new();
+    }
+    let (body, _) = split_claim_scope(name);
+    let head = match body.split_once('@') {
+        Some((seat, tag)) if !seat.is_empty() && !tag.is_empty() => seat,
+        _ => body,
+    };
+    let lower = head.to_ascii_lowercase();
+    let mapped = LEGACY_SEATS
+        .iter()
+        .find(|(old, _)| *old == lower)
+        .map_or(lower, |(_, now)| (*now).to_string());
+    if mapped.is_empty() {
+        String::new()
+    } else {
+        seat_slug(&mapped)
+    }
 }
 
 /// [`ballot_voter`] for one issue. A persona that already holds a ballot
@@ -5934,9 +5970,10 @@ pub fn ballot_voter_on(issue: &str, named: Option<&str>) -> Result<String> {
     // A standing seat, this seat, and the account that owns the process
     // stay on the prefixed drawer. A persona whose key was pinned after
     // its first ballot keeps the plain name already on this issue.
-    let slug = canonical_seat_name(name);
-    if slug == canonical_seat_name(&seat_name())
-        || process_account().is_some_and(|account| canonical_seat_name(&account) == slug)
+    // The slug keeps a pid-shaped suffix, so `tls-rev1` is not the seat `tls`.
+    let slug = ballot_persona_slug(name);
+    if slug == ballot_persona_slug(&seat_name())
+        || process_account().is_some_and(|account| ballot_persona_slug(&account) == slug)
         || slot::standing(&slug)
     {
         return Ok(who);
@@ -5956,11 +5993,11 @@ pub fn ballot_voter_on(issue: &str, named: Option<&str>) -> Result<String> {
 /// A standing seat, on the frozen list or by a pin that stood, and the
 /// account that owns this process, are that set.
 fn protected_ballot_name(name: &str) -> bool {
-    let slug = canonical_seat_name(name);
+    let slug = ballot_persona_slug(name);
     if slug.is_empty() {
         return false;
     }
-    if process_account().is_some_and(|account| canonical_seat_name(&account) == slug) {
+    if process_account().is_some_and(|account| ballot_persona_slug(&account) == slug) {
         return true;
     }
     if slot::standing(&slug) {
@@ -5976,8 +6013,59 @@ fn protected_ballot_name(name: &str) -> bool {
         Ok(None) => false,
         // A partial read has not proved the name. The pickaxe treated an
         // unproven name as protected, so the vote records under that label.
-        Err(_) => true,
+        // A pid-shaped suffix is a persona, not the seat the suffix folds onto.
+        Err(_) => {
+            let plain = ballot_persona_slug(name);
+            plain.is_empty() || plain == canonical_seat_name(name) || slot::standing(&plain)
+        }
     }
+}
+
+/// A persona that is not this seat, except a standing seat, the person,
+/// and a `persona:` ballot.
+fn extra_persona(name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() || name.starts_with(ballot_sig::PERSONA_VOTER) {
+        return false;
+    }
+    if names_this_seat(name, &seat_name()) || protected_ballot_name(name) {
+        return false;
+    }
+    true
+}
+
+/// A persona whose name would be read as this seat (`tls-rev1` on seat
+/// `tls`) needs a deed. Another persona keeps the `--used none` it already
+/// accepts. `none` is not a deed.
+fn persona_needs_deed(name: &str) -> bool {
+    if !extra_persona(name) {
+        return false;
+    }
+    let folded = canonical_seat_name(name);
+    if folded.is_empty() || folded == ballot_persona_slug(name) {
+        return false;
+    }
+    let seat = seat_name();
+    folded == canonical_seat_name(&seat) || folded == ballot_persona_slug(&seat)
+}
+
+/// Refuse `--used none` for a persona that would otherwise count as this seat.
+///
+/// # Errors
+///
+/// [`persona_needs_deed`] and `used` is empty or `none`. One sentence.
+pub fn persona_deed(named: Option<&str>, used: &str) -> Result<()> {
+    let Some(name) = named.map(str::trim).filter(|n| !n.is_empty()) else {
+        return Ok(());
+    };
+    if !persona_needs_deed(name) {
+        return Ok(());
+    }
+    let used = used.trim();
+    if used.is_empty() || used.eq_ignore_ascii_case("none") {
+        bail!("a ballot cast as {name} needs --used naming a deed");
+    }
+    Ok(())
 }
 
 /// Refuse a tracker write from a seat the tracker's `vissue.toml` does not

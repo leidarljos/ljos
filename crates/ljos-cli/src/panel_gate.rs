@@ -1,7 +1,8 @@
 //! A ballot records the persona, the seat or session that cast it, and
 //! the parent session. Ballots that share a session id, a parent, a
-//! calling shell or a harness root are all recorded. They count as one
-//! voice, the latest when they disagree. Consensus names the ballots it
+//! calling shell or a harness root are all recorded. A seat's own ballots
+//! count as one voice, the latest when they disagree. A persona other than
+//! the casting seat counts on its own. Consensus names the ballots it
 //! folded and why. A subagent of that root counts with its parent.
 //! A session that filed a design candidate still casts. The ballot is
 //! labelled `authored: CANDIDATE`. Consensus names that authorship when
@@ -12,7 +13,7 @@
 
 use anyhow::Result;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -1089,12 +1090,39 @@ fn fold_why(members: &[usize], rows: &[Value], links: &BTreeMap<String, VoiceLin
     }
 }
 
+/// Personas whose name would be read as the caster (`tls-rev1` cast by
+/// `tls`). Those count on their own. Any other persona still folds into
+/// the session it shares with the seat.
+fn own_voice_voters(notes: &[String]) -> BTreeSet<String> {
+    let mut own = BTreeSet::new();
+    let mut seat_ballot = BTreeSet::new();
+    for note in notes {
+        let Some((persona, caster, _)) = ballot_sig::parse_from(note) else {
+            continue;
+        };
+        if persona.is_empty() || persona == "-" || caster.is_empty() || caster == "-" {
+            continue;
+        }
+        if persona == caster {
+            seat_ballot.insert(persona);
+            continue;
+        }
+        let folded = crate::canonical_seat_name(&persona);
+        if !folded.is_empty() && folded != persona && folded == caster {
+            own.insert(persona);
+        }
+    }
+    own.difference(&seat_ballot).cloned().collect()
+}
+
 /// Keep one row per session. A session is a shared session id or a shared
 /// parent, whichever seat name or key the ballots carry. The kept row is
 /// the latest ballot. The others stay recorded and are named here.
+/// A persona cast by another seat (`own`) is not folded into that session.
 fn fold_one_voice(
     rows: Vec<Value>,
     links: &BTreeMap<String, VoiceLink>,
+    own: &BTreeSet<String>,
 ) -> (Vec<Value>, Vec<String>) {
     let n = rows.len();
     let mut uf: Vec<usize> = (0..n).collect();
@@ -1102,6 +1130,9 @@ fn fold_one_voice(
     let mut parent_at = BTreeMap::new();
     for (i, row) in rows.iter().enumerate() {
         let voter = row["agent"].as_str().unwrap_or("").trim();
+        if own.contains(voter) {
+            continue;
+        }
         let Some(link) = links.get(voter) else {
             continue;
         };
@@ -1254,7 +1285,7 @@ fn tally_voices(
         counted.push(row.clone());
     }
     let links = voice_links(&sigs);
-    let (counted, folds) = fold_one_voice(counted, &links);
+    let (counted, folds) = fold_one_voice(counted, &links, &own_voice_voters(notes));
     Tally {
         counted,
         ignored,
