@@ -629,10 +629,13 @@ static ENV_RESOLVED: AtomicBool = AtomicBool::new(false);
 /// parent that does not resolve, or a `..` walk through a missing
 /// component, is an error. A relative `TMPDIR` with no `..` that is not a
 /// directory uses [`default_temp_dir`]. An empty `TMPDIR` uses that
-/// default. An absolute value outside the start directory is left as set.
-/// An unset `TMPDIR` is left unset. When `LJOS_HUD_BIN` is unset, the
-/// `ljos-hud` beside this binary and each `PATH` entry under the start
-/// directory are walked the same way.
+/// default. An absolute value outside the start directory is left as set,
+/// unless a symlink in that spelling lands inside the start directory. An
+/// unset `TMPDIR` is left unset. `LJOS_HUD_BIN` keeps the bytes it was
+/// given. The launcher trims a copy; the walk states that trimmed path
+/// and does not write the variable back. When `LJOS_HUD_BIN` is unset,
+/// the `ljos-hud` beside this binary and each absolute `PATH` entry are
+/// stated on the same deadline.
 fn resolve_relative_dirs() {
     let Some(start) = start_dir_for_env() else {
         return;
@@ -644,8 +647,14 @@ fn resolve_relative_dirs() {
         return;
     }
     resolve_tmpdir(&start);
-    resolve_root("VISSUE_ROOT", &start);
-    resolve_root("ISSUE_ROOT", &start);
+    // vissue reads `ISSUE_ROOT` when that variable is set and does not
+    // read `VISSUE_ROOT`. An empty `ISSUE_ROOT` is set, so it does not
+    // fall through. A missing `VISSUE_ROOT` is not an error in that case.
+    match std::env::var_os("ISSUE_ROOT") {
+        Some(raw) if !raw.is_empty() => resolve_root("ISSUE_ROOT", &start),
+        Some(_) => {}
+        None => resolve_root("VISSUE_ROOT", &start),
+    }
     resolve_hud(&start);
 }
 
@@ -683,6 +692,8 @@ fn resolve_tmpdir(start: &Path) {
         }
         Ok(_) if wrote_relative => adopt_tmpdir(default_temp_dir()),
         Ok(_) => {}
+        // The worker had not started. That is not a mount that hung.
+        Err(Fault::Late) => {}
         Err(Fault::TimedOut) => refuse_env("TMPDIR", &raw),
         Err(Fault::Unresolvable) if climbs(&rel) => refuse_env("TMPDIR", &raw),
         Err(Fault::Unresolvable) if wrote_relative => adopt_tmpdir(default_temp_dir()),
@@ -695,12 +706,36 @@ fn resolve_root(key: &str, start: &Path) {
         return;
     };
     let given = PathBuf::from(&raw);
-    let Some(rel) = under_start(start, &given) else {
+    if let Some(rel) = under_start(start, &given) {
+        apply_root(key, &raw, resolve_from_start(start, &rel, true));
+        return;
+    }
+    // An absolute spelling whose parent is a symlink into the start
+    // directory is not a lexical prefix of getcwd. The leaf is still
+    // that directory. A stat of the spelling that returns keeps the
+    // text. A stat that does not answer is replaced with the physical
+    // path, so a later stat does not wait on this thread.
+    let Some(rel) = symlink_rel(start, &given) else {
         return;
     };
-    match resolve_from_start(start, &rel, true) {
+    match spelling_answered(&given) {
+        Ok(()) | Err(Fault::Late) => {}
+        Err(Fault::TimedOut) => match resolve_from_start(start, &rel, true) {
+            Ok(hit) => {
+                std::env::set_var(key, hit.path);
+            }
+            Err(Fault::Late) => {}
+            Err(_) => refuse_env(key, &raw),
+        },
+        Err(Fault::Unresolvable) => refuse_env(key, &raw),
+    }
+}
+
+fn apply_root(key: &str, raw: &std::ffi::OsStr, result: Result<Hit, Fault>) {
+    match result {
         Ok(hit) => std::env::set_var(key, hit.path),
-        Err(_) => refuse_env(key, &raw),
+        Err(Fault::Late) => {}
+        Err(_) => refuse_env(key, raw),
     }
 }
 
@@ -734,23 +769,38 @@ fn resolve_hud_override(start: &Path, raw: &std::ffi::OsStr, given: &Path) {
     let Some(rel) = under_start(start, given) else {
         return;
     };
-    match resolve_from_start(start, &rel, false) {
-        Ok(hit) if !hit.is_dir => {
-            std::env::set_var("LJOS_HUD_BIN", &hit.path);
-            remember_hud(hit.path);
-        }
-        Ok(_) | Err(Fault::Unresolvable) => {}
+    // The variable keeps the bytes it was given. The launcher trims a
+    // copy and execs that path. Remember that path when it is a regular
+    // file so the launcher does not state the start directory again.
+    let remembered = hud_absolute(start, given);
+    let stated = joined_for_kernel(start, &rel);
+    match stat_program(stated) {
+        Ok(true) => remember_hud(remembered),
+        Ok(false) | Err(Fault::Unresolvable) | Err(Fault::Late) => {}
         Err(Fault::TimedOut) => refuse_env("LJOS_HUD_BIN", raw),
+    }
+}
+
+/// Absolute path the launcher will exec for `given`.
+///
+/// A relative value is joined to `start`, which is what [`from_start`]
+/// returns after the park. The join does not state `start`.
+fn hud_absolute(start: &Path, given: &Path) -> PathBuf {
+    if given.is_absolute() {
+        given.to_path_buf()
+    } else {
+        start.join(given)
     }
 }
 
 /// Sibling `ljos-hud`, then each `PATH` entry, when `LJOS_HUD_BIN` is unset.
 ///
-/// A candidate under `start` is walked on the deadline. The first file is
-/// remembered. A candidate outside `start` that is already a file stops
-/// the search, which is the order the launcher uses later. A walk that
-/// does not answer is an error: stating it on this thread would wait out
-/// the park.
+/// A candidate is stated on the deadline, never on this thread. The first
+/// regular file is remembered. A relative `PATH` entry is not a candidate:
+/// after the park it is relative to the parked directory, which is where
+/// the launcher looks, and it is not the start directory. A stat under
+/// `start` that does not answer is an error. A stat outside `start` that
+/// does not answer is not a program, and the search moves on.
 fn resolve_hud_search(start: &Path) {
     if let Some(sibling) = sibling_hud() {
         if claim_hud(start, &sibling, "ljos-hud") {
@@ -772,18 +822,28 @@ fn sibling_hud() -> Option<PathBuf> {
     Some(exe.parent()?.join("ljos-hud"))
 }
 
-/// `true` when `candidate` is the program the launcher would run.
+/// `true` when `candidate` is the regular file the launcher would run.
+///
+/// `.`, an empty `PATH` component, and any other relative entry are not
+/// resolved here. The launcher resolves them from the directory it is in
+/// after the park.
 fn claim_hud(start: &Path, candidate: &Path, key: &str) -> bool {
-    let Some(rel) = under_start(start, candidate) else {
-        return candidate.is_file();
+    if !candidate.is_absolute() {
+        return false;
+    }
+    let inside = under_start(start, candidate).is_some();
+    let stated = match under_start(start, candidate) {
+        Some(rel) => joined_for_kernel(start, &rel),
+        None => candidate.to_path_buf(),
     };
-    match resolve_from_start(start, &rel, false) {
-        Ok(hit) if !hit.is_dir => {
-            remember_hud(hit.path);
+    match stat_program(stated) {
+        Ok(true) => {
+            remember_hud(candidate.to_path_buf());
             true
         }
-        Ok(_) | Err(Fault::Unresolvable) => false,
-        Err(Fault::TimedOut) => refuse_env(key, candidate.as_os_str()),
+        Ok(false) | Err(Fault::Unresolvable) | Err(Fault::Late) => false,
+        Err(Fault::TimedOut) if inside => refuse_env(key, candidate.as_os_str()),
+        Err(Fault::TimedOut) => false,
     }
 }
 
@@ -834,7 +894,10 @@ struct Hit {
 }
 
 enum Fault {
+    /// The worker entered the walk and the walk did not return.
     TimedOut,
+    /// The worker had not entered the walk. A late schedule, not a hung mount.
+    Late,
     Unresolvable,
 }
 
@@ -861,14 +924,154 @@ fn resolve_from_start(start: &Path, rel: &Path, missing_leaf: bool) -> Result<Hi
     let path = joined_for_kernel(start, rel);
     let create_leaf =
         missing_leaf && matches!(rel.components().next_back(), Some(Component::Normal(_)));
+    bounded(move || walk_path(&path, create_leaf)).and_then(std::convert::identity)
+}
+
+/// What the worker thread has sent.
+enum Msg<T> {
+    /// The closure is running and is about to do its work.
+    Started,
+    /// The work returned.
+    Done(T),
+}
+
+/// Run `work` on another thread and stop waiting after [`CWD_PROBE`].
+///
+/// `Err(Fault::Late)` means the worker had not entered `work`. That is a
+/// late schedule, not a path that refused to answer. `Err(Fault::TimedOut)`
+/// means the worker entered `work` and `work` did not return. The caller's
+/// thread does not state the path.
+fn bounded<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, Fault> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(walk_path(&path, create_leaf));
+        let _ = tx.send(Msg::Started);
+        let _ = tx.send(Msg::Done(work()));
     });
-    match rx.recv_timeout(CWD_PROBE) {
-        Ok(answer) => answer,
-        Err(_) => Err(Fault::TimedOut),
+    let started = match rx.recv_timeout(CWD_PROBE) {
+        Ok(Msg::Started) => true,
+        Ok(Msg::Done(value)) => return Ok(value),
+        Err(_) => false,
+    };
+    if !started {
+        return Err(Fault::Late);
     }
+    match rx.recv_timeout(CWD_PROBE) {
+        Ok(Msg::Done(value)) => Ok(value),
+        _ => Err(Fault::TimedOut),
+    }
+}
+
+/// Whether `path` is a regular file. The stat runs on the deadline.
+///
+/// `Ok(false)` is a path that was stated and is not a regular file. A
+/// symlink to a device and a fifo are that. `Err(Fault::TimedOut)` is a
+/// stat that does not answer. `Err(Fault::Late)` is a worker that had not
+/// started.
+fn stat_program(path: PathBuf) -> Result<bool, Fault> {
+    bounded(move || match std::fs::metadata(&path) {
+        Ok(meta) => Ok(meta.is_file()),
+        Err(_) => Err(Fault::Unresolvable),
+    })
+    .and_then(std::convert::identity)
+}
+
+/// `true` when a stat of `path` returns within the deadline.
+///
+/// The stat is of `path` itself. The parent is not canonicalized: a
+/// symlink in the parent would otherwise be followed into the start
+/// directory. An error from the stat is still an answer.
+fn spelling_answered(path: &Path) -> Result<(), Fault> {
+    let path = path.to_path_buf();
+    bounded(move || {
+        let _ = std::fs::metadata(&path);
+    })
+}
+
+/// `given` relative to `start` when a symlink prefix lands in `start`.
+///
+/// The leaf is not stated. The start directory is not stated. `None` when
+/// the prefix does not land there, or when that walk does not answer.
+fn symlink_rel(start: &Path, given: &Path) -> Option<PathBuf> {
+    let start = start.to_path_buf();
+    let given = given.to_path_buf();
+    bounded(move || symlink_into_start(&start, &given)).unwrap_or_default()
+}
+
+fn symlink_into_start(start: &Path, given: &Path) -> Option<PathBuf> {
+    if !given.is_absolute() {
+        return None;
+    }
+    let name = given.file_name()?;
+    let parent = given.parent().filter(|dir| !dir.as_os_str().is_empty())?;
+    let resolved = resolve_prefix(start, parent)?;
+    if resolved == start {
+        return Some(PathBuf::from(name));
+    }
+    let rest = resolved.strip_prefix(start).ok()?;
+    let mut rel = PathBuf::from(rest);
+    rel.push(name);
+    Some(rel)
+}
+
+/// `path` with symlink components resolved, without stating `start`.
+fn resolve_prefix(start: &Path, path: &Path) -> Option<PathBuf> {
+    let mut pending: Vec<std::ffi::OsString> = path
+        .components()
+        .map(|comp| comp.as_os_str().to_os_string())
+        .collect();
+    let mut out = PathBuf::new();
+    let mut guard = 0u32;
+    while !pending.is_empty() {
+        guard += 1;
+        if guard > 64 {
+            return None;
+        }
+        let comp = pending.remove(0);
+        if comp == "/" {
+            out.push("/");
+            continue;
+        }
+        if comp == "." {
+            continue;
+        }
+        if comp == ".." {
+            if !out.pop() {
+                return None;
+            }
+            continue;
+        }
+        out.push(&comp);
+        if out == start || out.starts_with(start) {
+            continue;
+        }
+        let meta = std::fs::symlink_metadata(&out).ok()?;
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        let target = std::fs::read_link(&out).ok()?;
+        let rebuilt = if target.is_absolute() {
+            target
+        } else {
+            out.parent().unwrap_or(Path::new("/")).join(target)
+        };
+        let mut front: Vec<std::ffi::OsString> = rebuilt
+            .components()
+            .map(|comp| comp.as_os_str().to_os_string())
+            .collect();
+        front.append(&mut pending);
+        pending = front;
+        out = PathBuf::new();
+    }
+    Some(out)
+}
+
+/// Whether `path` is a regular file, stated on the deadline.
+///
+/// `false` when the path is not a regular file, the stat does not answer,
+/// or the worker had not started. The caller moves on. The stat does not
+/// run on this thread.
+pub(crate) fn program_file(path: &Path) -> bool {
+    stat_program(path.to_path_buf()).unwrap_or_default()
 }
 
 /// Canonical `path`, or the parent's canonical path plus a missing final

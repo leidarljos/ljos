@@ -69,12 +69,14 @@ fn absolute_program(path: &Path) -> PathBuf {
 }
 
 /// Whether `path` is a program file. A path resolved before the park, or
-/// one that lies in the start directory, is not stated again.
+/// one that lies in the start directory, is not stated again. Any other
+/// path is stated on the deadline. A stat that does not answer is not a
+/// program, and the search moves on.
 fn program_exists(path: &Path) -> bool {
     if let Some(ready) = crate::cwd_probe::prepared_program(path) {
         return ready;
     }
-    path.is_file()
+    crate::cwd_probe::program_file(path)
 }
 
 /// Hint printed when the launcher cannot find the HUD binary.

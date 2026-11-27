@@ -78,6 +78,46 @@ int newfstatat(int d, const char *restrict p, struct stat *restrict b, int fl) {
     if (!real) return -1;
     return real(d, p, b, fl);
 }
+
+#include <pthread.h>
+
+struct slow_wrap {
+    void *(*fn)(void *);
+    void *arg;
+    useconds_t delay;
+};
+
+static void *slow_start(void *raw) {
+    struct slow_wrap *w = raw;
+    void *(*fn)(void *) = w->fn;
+    void *arg = w->arg;
+    useconds_t delay = w->delay;
+    free(w);
+    if (delay > 0)
+        usleep(delay);
+    return fn(arg);
+}
+
+int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                    void *(*start)(void *), void *arg) {
+    static int (*real)(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
+    const char *ms;
+    struct slow_wrap *w;
+    if (!real)
+        real = dlsym(RTLD_NEXT, "pthread_create");
+    if (!real)
+        return -1;
+    ms = getenv("SLOW_THREAD_MS");
+    if (!ms || !ms[0] || strcmp(ms, "0") == 0)
+        return real(thread, attr, start, arg);
+    w = malloc(sizeof *w);
+    if (!w)
+        return -1;
+    w->fn = start;
+    w->arg = arg;
+    w->delay = (useconds_t)atoi(ms) * 1000;
+    return real(thread, attr, slow_start, w);
+}
 "#;
 
 fn script(dir: &Path, name: &str, body: &str) {
@@ -1486,6 +1526,14 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
         "sibling-hud",
         "hud-space",
         "path-hang",
+        "link-root",
+        "path-out",
+        "hud-hang",
+        "hud-late",
+        "path-rel",
+        "sib-fifo",
+        "hud-bytes",
+        "issue-wins",
     ] {
         let _ = std::fs::remove_file(mark.join("which"));
         let err = match row {
@@ -1580,6 +1628,344 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
                         && out.stdout.is_empty()
                         && gone
                         && !mark.join("which").is_file(),
+                    true,
+                    &format!("{row} {took:?}: {}", text(&out)),
+                )
+            }
+            "link-root" => {
+                let real = seat.dir.path().join("real");
+                let link = seat.dir.path().join("via-link");
+                std::fs::create_dir_all(&real).unwrap();
+                if !link.exists() {
+                    link_dir(&real, &link);
+                }
+                let spelling = link.join("leaf-abs");
+                let landed = real.join("leaf-abs/Software/landed");
+                let _ = std::fs::remove_dir_all(real.join("leaf-abs"));
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    seat.run(
+                        &real,
+                        &["file", "-p", "demo", "--top", "a title"],
+                        &[
+                            ("TMPDIR", tmp_s),
+                            ("VISSUE_ROOT", spelling.to_str().unwrap()),
+                            ("LJOS_MARK", mark_s),
+                            ("LD_PRELOAD", so_s),
+                            ("SLOW_EXACT", spelling.to_str().unwrap()),
+                        ],
+                    )
+                }));
+                let Ok((out, took)) = caught else {
+                    missed.push(format!("{row}: still running"));
+                    continue;
+                };
+                parked_ok(
+                    took < Duration::from_secs(4) && out.status.success() && landed.is_file(),
+                    true,
+                    &format!("{row} {took:?}: {}", text(&out)),
+                )
+            }
+            "path-out" => {
+                let hang = seat.dir.path().join("hangout");
+                std::fs::create_dir_all(&hang).unwrap();
+                script(&hang, "ljos-hud", "#!/bin/sh\nexit 0\n");
+                let hang_hud = hang.join("ljos-hud");
+                let path = format!("{}:{}:/usr/bin:/bin", hang.display(), seat.bin.display());
+                let landed = seat.tracker.join("Software/landed");
+                let _ = std::fs::remove_file(&landed);
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    seat.run_at(
+                        &copied,
+                        &work,
+                        &["file", "-p", "demo", "--top", "a title"],
+                        &[
+                            ("TMPDIR", tmp_s),
+                            ("VISSUE_ROOT", seat.tracker.to_str().unwrap()),
+                            ("LJOS_MARK", mark_s),
+                            ("LD_PRELOAD", so_s),
+                            ("SLOW_EXACT", hang_hud.to_str().unwrap()),
+                            ("PATH", path.as_str()),
+                            ("LJOS_HUD_BIN", ""),
+                        ],
+                    )
+                }));
+                let Ok((out, took)) = caught else {
+                    missed.push(format!("{row}: still running"));
+                    continue;
+                };
+                parked_ok(
+                    took < Duration::from_secs(4) && out.status.success() && landed.is_file(),
+                    true,
+                    &format!("{row} {took:?}: {}", text(&out)),
+                )
+            }
+            "hud-hang" => {
+                let hang = seat.dir.path().join("hudhang");
+                let good = seat.dir.path().join("hudgood");
+                let fast = seat.dir.path().join("fasthud");
+                std::fs::create_dir_all(&hang).unwrap();
+                std::fs::create_dir_all(&good).unwrap();
+                std::fs::create_dir_all(&fast).unwrap();
+                script(
+                    &hang,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf hung > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                script(
+                    &good,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf ran > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let path = format!("{}:{}:/usr/bin:/bin", hang.display(), good.display());
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    seat.run_at(
+                        &copied,
+                        &fast,
+                        &["hud", "--foreground"],
+                        &[
+                            ("TMPDIR", tmp_s),
+                            ("LJOS_MARK", mark_s),
+                            ("LD_PRELOAD", so_s),
+                            ("SLOW_EXACT", hang.join("ljos-hud").to_str().unwrap()),
+                            ("PATH", path.as_str()),
+                            ("LJOS_HUD_BIN", ""),
+                            ("VISSUE_ROOT", ""),
+                        ],
+                    )
+                }));
+                let Ok((out, took)) = caught else {
+                    missed.push(format!("{row}: still running"));
+                    continue;
+                };
+                parked_ok(
+                    took < Duration::from_secs(4)
+                        && out.status.success()
+                        && read_trim(&mark.join("which")) == "ran",
+                    true,
+                    &format!("{row} {took:?}: {}", text(&out)),
+                )
+            }
+            "hud-late" => {
+                let late = work.join("fast-hud");
+                script(
+                    &work,
+                    "fast-hud",
+                    "#!/bin/sh\nprintf late > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let landed = seat.tracker.join("Software/landed");
+                let _ = std::fs::remove_file(&landed);
+                let (out, took) = seat.run(
+                    &work,
+                    &["file", "-p", "demo", "--top", "a title"],
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("VISSUE_ROOT", seat.tracker.to_str().unwrap()),
+                        ("LJOS_HUD_BIN", late.to_str().unwrap()),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_THREAD_MS", "800"),
+                    ],
+                );
+                parked_ok(
+                    took < Duration::from_secs(4)
+                        && out.status.success()
+                        && landed.is_file()
+                        && !text(&out).contains("did not resolve"),
+                    true,
+                    &format!("{row} {took:?}: {}", text(&out)),
+                )
+            }
+            "path-rel" => {
+                let outside = seat.dir.path().join("outside");
+                std::fs::create_dir_all(&outside).unwrap();
+                std::fs::create_dir_all(slow.join("bin")).unwrap();
+                script(
+                    &slow,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf start > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                script(
+                    &slow.join("bin"),
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf relbin > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                script(
+                    &outside,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf outside > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let outside_path = format!("{}:/usr/bin:/bin", outside.display());
+                let mut bad = None;
+                for (label, path) in [
+                    ("dot", format!(".:{outside_path}")),
+                    ("empty", format!(":{outside_path}")),
+                    ("bin", format!("bin:{outside_path}")),
+                ] {
+                    let _ = std::fs::remove_file(mark.join("which"));
+                    let (out, took) = seat.run_at(
+                        &copied,
+                        &slow,
+                        &["hud", "--foreground"],
+                        &[
+                            ("TMPDIR", tmp_s),
+                            ("LJOS_MARK", mark_s),
+                            ("LD_PRELOAD", so_s),
+                            ("SLOW_EXACT", slow_s),
+                            ("PATH", path.as_str()),
+                            ("LJOS_HUD_BIN", ""),
+                            ("VISSUE_ROOT", ""),
+                        ],
+                    );
+                    if !(took < Duration::from_secs(4)
+                        && out.status.success()
+                        && read_trim(&mark.join("which")) == "outside")
+                    {
+                        bad = Some(format!(
+                            "{label} {took:?} marker {:?}: {}",
+                            read_trim(&mark.join("which")),
+                            text(&out)
+                        ));
+                        break;
+                    }
+                }
+                match bad {
+                    Some(why) => Err(format!("{row} {why}")),
+                    None => Ok(()),
+                }
+            }
+            "sib-fifo" => {
+                let outside = seat.dir.path().join("outside");
+                std::fs::create_dir_all(&outside).unwrap();
+                script(
+                    &outside,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf outside > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let fifo = slow.join("ljos-hud");
+                let _ = std::fs::remove_file(&fifo);
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "starts a program outside git hook code"
+                )]
+                let made = Command::new("mkfifo").arg(&fifo).output().unwrap();
+                assert!(made.status.success(), "mkfifo");
+                let path = format!("{}:/usr/bin:/bin", outside.display());
+                let (out, took) = seat.run_at(
+                    &beside,
+                    &slow,
+                    &["hud", "--foreground"],
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_EXACT", slow_s),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                );
+                parked_ok(
+                    took < Duration::from_secs(4)
+                        && out.status.success()
+                        && read_trim(&mark.join("which")) == "outside",
+                    true,
+                    &format!("{row} {took:?}: {}", text(&out)),
+                )
+            }
+            "hud-bytes" => {
+                let spaced = slow.join("plain ");
+                script(
+                    &slow,
+                    "plain",
+                    "#!/bin/sh\nprintf 'PLAIN\\n%s' \"$LJOS_HUD_BIN\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                script(
+                    &slow,
+                    "plain ",
+                    "#!/bin/sh\nprintf SPACED > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let _ = std::fs::remove_file(mark.join("which"));
+                let (out, took) = seat.run_at(
+                    &copied,
+                    &slow,
+                    &["hud", "--foreground"],
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_EXACT", slow_s),
+                        ("PATH", "/usr/bin:/bin"),
+                        ("LJOS_HUD_BIN", spaced.to_str().unwrap()),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                );
+                let body = std::fs::read_to_string(mark.join("which")).unwrap_or_default();
+                let want = format!("PLAIN\n{}", spaced.display());
+                let hud_ok = took < Duration::from_secs(4) && out.status.success() && body == want;
+                let spaced_root = slow.join("rname ");
+                let plain_root = slow.join("rname");
+                std::fs::create_dir_all(&spaced_root).unwrap();
+                std::fs::create_dir_all(&plain_root).unwrap();
+                let _ = std::fs::remove_dir_all(spaced_root.join("Software"));
+                let _ = std::fs::remove_dir_all(plain_root.join("Software"));
+                let (root_out, root_took) = seat.run(
+                    &slow,
+                    &["file", "-p", "demo", "--top", "a title"],
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("VISSUE_ROOT", "rname "),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_EXACT", slow_s),
+                    ],
+                );
+                let root_ok = root_took < Duration::from_secs(4)
+                    && root_out.status.success()
+                    && spaced_root.join("Software/landed").is_file()
+                    && !plain_root.join("Software/landed").exists();
+                parked_ok(
+                    hud_ok && root_ok,
+                    true,
+                    &format!(
+                        "{row} hud {took:?} body {body:?}: {} root {root_took:?}: {}",
+                        text(&out),
+                        text(&root_out)
+                    ),
+                )
+            }
+            "issue-wins" => {
+                script(
+                    &seat.bin,
+                    "vissue",
+                    r#"#!/bin/sh
+root="$ISSUE_ROOT"
+if [ -z "$root" ]; then root="$VISSUE_ROOT"; fi
+printf '%s\n' "$root" > "$LJOS_MARK/root"
+mkdir -p -- "$root/Software"
+printf x > "$root/Software/landed"
+printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
+"#,
+                );
+                let issue = seat.dir.path().join("issue-tracker");
+                std::fs::create_dir_all(issue.join("Software")).unwrap();
+                write_file(&issue.join("vissue.toml"), "prefix = \"Software\"\n");
+                let landed = issue.join("Software/landed");
+                let _ = std::fs::remove_file(&landed);
+                let (out, took) = seat.run(
+                    &work,
+                    &["file", "-p", "demo", "--top", "a title"],
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("VISSUE_ROOT", "missing/not-yet"),
+                        ("ISSUE_ROOT", issue.to_str().unwrap()),
+                        ("LJOS_MARK", mark_s),
+                    ],
+                );
+                parked_ok(
+                    took < Duration::from_secs(4)
+                        && out.status.success()
+                        && landed.is_file()
+                        && !work.join("missing").exists(),
                     true,
                     &format!("{row} {took:?}: {}", text(&out)),
                 )
