@@ -3,8 +3,12 @@
 //! Binding `127.0.0.1:0` and dropping the socket gives the port back to
 //! the kernel. Another test can bind it before the check that called the
 //! port closed. [`ClosedPort`] keeps the socket until it is dropped.
-//! `SO_REUSEADDR` stays off, so a later bind of the same port fails, and
-//! nothing is listening, so a connect is refused.
+//! `SO_REUSEADDR` stays off, so a later bind of the same port fails.
+//! Nothing is listening. On Linux the kernel resets the connect, which
+//! is `ECONNREFUSED`. On other Unixes a bound socket that is not
+//! listening drops the SYN, so the connect waits out its own timeout
+//! and is `ETIMEDOUT` or `ECONNREFUSED`. The socket stays bound and not
+//! listening, so a child can `listen` on the inherited descriptor.
 
 use std::io;
 use std::os::fd::RawFd;
@@ -150,12 +154,7 @@ mod tests {
     #[test]
     fn a_held_port_refuses_connect_and_a_second_bind() {
         let held = ClosedPort::bind().unwrap();
-        let refused = std::net::TcpStream::connect(("127.0.0.1", held.port())).unwrap_err();
-        assert_eq!(
-            refused.raw_os_error(),
-            Some(libc::ECONNREFUSED),
-            "{refused}"
-        );
+        assert_connect_fails(held.port());
         let taken = std::net::TcpListener::bind(("127.0.0.1", held.port())).unwrap_err();
         assert_eq!(taken.raw_os_error(), Some(libc::EADDRINUSE), "{taken}");
     }
@@ -185,12 +184,28 @@ mod tests {
             assert!(status.success(), "the armed child did not keep the socket");
             assert!(!child_has_fd(held.fd), "a later child inherited the socket");
         }
-        let refused = std::net::TcpStream::connect(("127.0.0.1", held.port())).unwrap_err();
-        assert_eq!(
-            refused.raw_os_error(),
-            Some(libc::ECONNREFUSED),
-            "{refused}"
-        );
+        assert_connect_fails(held.port());
+    }
+
+    /// A connect that stops on its own, short of the kernel's dropped-SYN
+    /// wait. Linux still has to be `ECONNREFUSED`. Other Unixes may be
+    /// that or `ETIMEDOUT`.
+    fn assert_connect_fails(port: u16) {
+        let refused = std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            std::time::Duration::from_millis(200),
+        )
+        .expect_err("a connect to a closed port should fail");
+        let reset = refused.kind() == std::io::ErrorKind::ConnectionRefused
+            || refused.raw_os_error() == Some(libc::ECONNREFUSED);
+        #[cfg(target_os = "linux")]
+        assert!(reset, "{refused}");
+        #[cfg(not(target_os = "linux"))]
+        {
+            let timed_out = refused.kind() == std::io::ErrorKind::TimedOut
+                || refused.raw_os_error() == Some(libc::ETIMEDOUT);
+            assert!(reset || timed_out, "{refused}");
+        }
     }
 
     fn fd_flags(fd: i32) -> i32 {

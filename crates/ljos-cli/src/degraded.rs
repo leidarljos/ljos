@@ -75,6 +75,12 @@ pub fn of_error(err: &anyhow::Error) -> Option<State> {
     if crate::is_memory_starting(err) {
         return Some(State::Starting);
     }
+    // One place decides a failed handshake. Nothing listening is down,
+    // the same fact as a reset. A listener that is up and slow stays
+    // busy, so a full accept queue does not start a second writer.
+    if let Some(state) = crate::connect_state(err) {
+        return Some(state);
+    }
     // The writer answered "busy" while it loads, on a route that does not
     // say it is starting. Its `/health` does, so ask it.
     if (crate::is_read_shed(err) || crate::is_reported_busy(err) || crate::is_pack_busy(err))

@@ -123,7 +123,18 @@ pub(crate) fn named_from_env() -> Option<(String, &'static str)> {
         .filter(|value| !value.is_empty());
     let env_file = read_files("env");
     let map = resolved_map();
-    let parent = parent_record();
+    // `--seat` and `LJOS_SEAT` win before the parent record, so the
+    // process walk would not change the result. On macOS that walk is
+    // one `ps` per ancestor, and it runs inside the pack ceilings that
+    // record a preference. Spending them leaves the next session's note
+    // empty. The parent is read only when an earlier rule missed.
+    let parent = if flag.as_deref().and_then(usable).is_some()
+        || ljos_seat.as_deref().and_then(usable).is_some()
+    {
+        None
+    } else {
+        parent_record()
+    };
     let write_log = writes_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .unwrap_or_default();

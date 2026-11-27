@@ -322,6 +322,16 @@ fn clock_deadline() -> Option<Instant> {
     CLOCK.with(|slot| slot.borrow().as_ref().map(|clock| clock.deadline))
 }
 
+/// Drop a pack clock a previous test left on this thread.
+///
+/// [`PackClock`] clears the clock on the thread that drops it. A guard
+/// moved elsewhere leaves the deadline set, and a later read on this
+/// thread is a timeout rather than an answer.
+#[cfg(test)]
+pub(crate) fn disarm_clock() {
+    CLOCK.with(|slot| *slot.borrow_mut() = None);
+}
+
 pub(crate) fn clock_armed() -> bool {
     clock_deadline().is_some()
 }
@@ -1080,7 +1090,27 @@ fn io_is_quiet(err: &std::io::Error) -> bool {
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    /// When set, a connect fails the way Darwin fails a dropped SYN:
+    /// [`std::io::ErrorKind::TimedOut`], no os code, "connection timed out".
+    static FAIL_HANDSHAKE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Make the next connects on this thread fail as a dropped SYN.
+#[cfg(test)]
+pub(crate) fn fail_handshake_for_test(on: bool) {
+    FAIL_HANDSHAKE.with(|cell| cell.set(on));
+}
+
 fn connect(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
+    #[cfg(test)]
+    if FAIL_HANDSHAKE.with(std::cell::Cell::get) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "connection timed out",
+        ));
+    }
     if pack_quiet() {
         return Err(quiet_io());
     }
@@ -1125,8 +1155,30 @@ fn budget_spent() -> std::io::Error {
     )
 }
 
+/// How long a loopback connect may wait on a kernel that drops a SYN to
+/// a bound port that is not listening. A listener completes the
+/// handshake well inside this. `LJOS_PACK_CONNECT_MS` replaces it when
+/// a caller sets one. A remote address keeps the budget it was given.
+#[cfg(not(target_os = "linux"))]
+fn cap_loopback_connect(addr: SocketAddr, wait: Duration) -> Duration {
+    if !addr.ip().is_loopback() {
+        return wait;
+    }
+    let cap = if std::env::var_os("LJOS_PACK_CONNECT_MS").is_some() {
+        super::pack_connect_budget()
+    } else {
+        Duration::from_millis(400)
+    };
+    wait.min(cap)
+}
+
 fn connect_once(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
     let wait = bounded_wait(timeout, true)?;
+    // Darwin drops a SYN to a bound port that is not listening, so the
+    // connect waits out the whole call. The cap is applied below on
+    // loopback only. Linux resets that SYN at once and does not cap.
+    #[cfg(not(target_os = "linux"))]
+    let wait = cap_loopback_connect(addr, wait);
     let stream = TcpStream::connect_timeout(&addr, wait)?;
     let io_wait = bounded_wait(timeout, false)?;
     stream.set_read_timeout(Some(io_wait))?;

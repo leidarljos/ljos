@@ -782,9 +782,11 @@ fn listed() -> Result<Vec<Value>> {
     let _clock = super::arm_cmd_pack();
     let client = super::pack()?;
     let workspace = client.workspace();
-    match super::atoms_mail(&client, &workspace) {
+    match super::with_writer(|| super::atoms_mail(&client, &workspace)) {
         Err(err) if super::is_read_shed(&err) || super::is_deadline_miss(&err) => Err(err),
-        Err(err) if super::is_pack_busy(&err) => Err(super::pack_busy_err()),
+        Err(err) if crate::degraded::of_error(&err) == Some(crate::degraded::State::Busy) => {
+            Err(super::pack_busy_err())
+        }
         Err(err) => Err(mail_store_error(err)),
         Ok(atoms) => Ok(atoms),
     }
@@ -813,7 +815,7 @@ fn post(atom: &Value, verb: &str) -> Result<Value> {
             .with_context(|| format!("{verb}: POST /v1/atoms failed"))
     })
     .map_err(|err| {
-        if super::is_pack_busy(&err) {
+        if crate::degraded::of_error(&err) == Some(crate::degraded::State::Busy) {
             super::pack_busy_err()
         } else {
             err
@@ -1009,8 +1011,10 @@ fn mark_shown(atoms: &[Value], seat: &str) -> Result<()> {
 fn seats_heard() -> Result<Vec<Value>> {
     let client = super::pack()?;
     let workspace = client.workspace();
-    match super::atoms_lean(&client, &workspace) {
-        Err(err) if super::is_pack_busy(&err) => Err(super::pack_busy_err()),
+    match super::with_writer(|| super::atoms_lean(&client, &workspace)) {
+        Err(err) if crate::degraded::of_error(&err) == Some(crate::degraded::State::Busy) => {
+            Err(super::pack_busy_err())
+        }
         Err(err) => Err(mail_store_error(err)),
         Ok(atoms) => Ok(atoms),
     }
