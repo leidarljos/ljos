@@ -51,7 +51,7 @@ pub fn git_calls(line: &str, cwd: Option<&Path>) -> Result<Vec<GitCall>, String>
     if !line.to_ascii_lowercase().contains("git") {
         return Ok(out);
     }
-    let found = std::env::current_dir().ok();
+    let found = crate::process_cwd().ok();
     let base = cwd.or(found.as_deref()).unwrap_or_else(|| Path::new("."));
     let mut queue = invocations(line, base, 0);
     let mut i = 0;
@@ -85,7 +85,7 @@ pub fn git_calls(line: &str, cwd: Option<&Path>) -> Result<Vec<GitCall>, String>
 pub fn guard_verdict(line: &str, cwd: Option<&Path>, rules: &[super::Rule]) -> Option<super::Rule> {
     let fast = super::static_guard_in(line, cwd);
     let here = cwd.and_then(Path::to_str).map(str::to_string).or_else(|| {
-        std::env::current_dir()
+        crate::process_cwd()
             .ok()
             .and_then(|dir| dir.into_os_string().into_string().ok())
     });

@@ -708,7 +708,7 @@ fn collect_mcp_files(include_user_harness: bool) -> Vec<McpFile> {
 /// checkout's root. A directory that is already gone is left out: the
 /// hook must not stall on it.
 fn project_config_dirs() -> Vec<PathBuf> {
-    let Ok(cwd) = std::env::current_dir() else {
+    let Ok(cwd) = crate::process_cwd() else {
         return Vec::new();
     };
     if !cwd.is_dir() {
@@ -3421,7 +3421,7 @@ fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
     let path = if path.is_absolute() {
         path
     } else {
-        absolute = std::env::current_dir()?.join(path);
+        absolute = crate::process_cwd()?.join(path);
         absolute.as_path()
     };
     let mut names = Vec::new();

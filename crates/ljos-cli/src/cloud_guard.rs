@@ -289,7 +289,7 @@ fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
     }
     let mut here = cwd
         .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok());
+        .or_else(|| crate::process_cwd().ok());
     let mut git_aliases = incoming.git_aliases.clone();
     let gh_aliases = incoming.gh_aliases.clone();
     let mut tainted = incoming.tainted;
@@ -2130,7 +2130,7 @@ fn read_script(cwd: Option<&Path>, file: &str) -> ScriptBody {
     } else {
         let Some(base) = cwd
             .map(Path::to_path_buf)
-            .or_else(|| std::env::current_dir().ok())
+            .or_else(|| crate::process_cwd().ok())
         else {
             return ScriptBody::Unreadable;
         };

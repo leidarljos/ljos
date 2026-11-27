@@ -1,0 +1,3 @@
+The parked directory is removed only when it is still the one this process created, and a relative, empty, or missing `TMPDIR` is stored as an absolute path.
+A second park keeps that directory. A child that outlives this process starts in the tracker when that directory is present, otherwise at `/`, and a detached panel is not given the parked directory. A forked child that exits does not remove it. After that directory is gone, the process still reads the directory it started in.
+A working directory whose name starts with `ljos-cwd-` is not that parked directory, so a relative `TMPDIR` there is still used. The temp directory is opened without read permission, and when that open fails the parked directory is removed only after the same identity check.

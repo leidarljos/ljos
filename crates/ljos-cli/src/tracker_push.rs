@@ -993,7 +993,7 @@ pub(crate) fn merge_atoms_driver(current: &Path, rel: &str) -> Result<(), String
     // symlink; the beneath check stays, and the write goes through the
     // directory fd, the same way the rebase path does.
     let resolved = if current.is_relative() {
-        std::env::current_dir()
+        crate::process_cwd()
             .map_err(|e| format!("atoms merge: cwd: {e}"))?
             .join(current)
     } else {

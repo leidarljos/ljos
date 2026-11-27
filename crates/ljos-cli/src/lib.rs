@@ -126,6 +126,19 @@ pub mod command_prefs;
 pub mod config_diag;
 pub mod converge;
 mod cwd_probe;
+
+pub(crate) fn child_work_dir() -> std::path::PathBuf {
+    cwd_probe::stable_child_dir()
+}
+
+/// Working directory for code in this process.
+///
+/// After the process parks, `getcwd` names a directory that may already
+/// be gone. While that directory is still there, this is the tracker.
+/// Once `getcwd` fails, this is the directory captured before the park.
+pub fn process_cwd() -> std::io::Result<std::path::PathBuf> {
+    cwd_probe::process_cwd()
+}
 pub mod deed_bytes;
 mod deedbag;
 pub mod degraded;
@@ -3298,9 +3311,7 @@ fn cmdline_runs(cmd: &str, script: &str) -> bool {
 /// window creation subcommand in `line`, resolved against `cwd`.
 fn tmux_spawn_specs(line: &str, cwd: Option<&str>) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
-    let base_cwd = cwd
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok());
+    let base_cwd = cwd.map(PathBuf::from).or_else(|| crate::process_cwd().ok());
     for seg in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
         let words = shell_words(&seg);
         let (at, _) = prefix_end(&words);
@@ -6523,7 +6534,7 @@ fn without_substitutions(segment: &str) -> String {
 pub(crate) fn writes_hold_record(line: &str, cwd: Option<&Path>) -> bool {
     let mut cwd = cwd
         .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok());
+        .or_else(|| crate::process_cwd().ok());
     let mut loops = LoopVars::default();
     for seg in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
         let listed = shell_words(&seg);
@@ -9803,7 +9814,7 @@ pub(crate) fn rel_to_top(top: &Path, path: &Path) -> Option<String> {
 /// run in [`fallback_directory`], so it is not judged there.
 pub fn command_directory(input: &str) -> Result<PathBuf> {
     let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
-    let here = || std::env::current_dir().context("hook working directory is unavailable");
+    let here = || hook_here().context("hook working directory is unavailable");
     let base = match session_path_raw(&value).map(Path::new) {
         Some(path) if path.is_absolute() => path.to_path_buf(),
         Some(path) => here()?.join(path),
@@ -9817,7 +9828,7 @@ pub fn command_directory(input: &str) -> Result<PathBuf> {
 /// A prompt is read there.
 #[must_use]
 pub fn fallback_directory(input: &str) -> Option<PathBuf> {
-    session_directory(input).or_else(|| std::env::current_dir().ok().filter(|path| path.is_dir()))
+    session_directory(input).or_else(|| hook_here().filter(|path| path.is_dir()))
 }
 
 /// The payload's `cwd` or first workspace path, when that directory exists.
@@ -9830,11 +9841,35 @@ fn session_directory(input: &str) -> Option<PathBuf> {
     let joined = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir().ok()?.join(path)
+        hook_here()?.join(path)
     };
     std::fs::canonicalize(joined)
         .ok()
         .filter(|path| path.is_dir())
+}
+
+/// Directory a hook reads as its working directory. See [`process_cwd`].
+fn hook_here() -> Option<PathBuf> {
+    crate::process_cwd().ok()
+}
+
+/// Directory named on a detached `open-panel`. An absolute payload `cwd`
+/// is kept. Anything else was resolved from the parked directory, so the
+/// child gets the tracker, or `/` when that directory is not here.
+#[must_use]
+pub fn detached_panel_cwd(input: &str) -> String {
+    let raw = serde_json::from_str::<Value>(input).ok().and_then(|value| {
+        value
+            .get("cwd")
+            .and_then(|item| item.as_str())
+            .map(str::to_owned)
+    });
+    if let Some(path) = raw.as_deref() {
+        if Path::new(path).is_absolute() {
+            return path.to_string();
+        }
+    }
+    cwd_probe::stable_child_dir().to_string_lossy().into_owned()
 }
 
 /// The payload directory, with agy's tool-call cwd before workspace paths.
@@ -12994,6 +13029,7 @@ fn spawn_judge_worker(
     )]
     let mut cmd = std::process::Command::new(exe);
     cmd.args(["hook", "--judge-worker"])
+        .current_dir(cwd_probe::stable_child_dir())
         .env_remove("LJOS_IN_HOOK")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -13683,10 +13719,16 @@ pub fn start_decision_panel(
         "--log".into(),
         log.display().to_string(),
     ];
-    if let Some(cwd) = cwd {
-        args.push("--cwd".into());
-        args.push(cwd.to_string());
-    }
+    let panel_cwd = match cwd {
+        Some(raw)
+            if Path::new(raw).is_absolute() && !cwd_probe::parked_work_dir(Path::new(raw)) =>
+        {
+            raw.to_string()
+        }
+        _ => cwd_probe::stable_child_dir().to_string_lossy().into_owned(),
+    };
+    args.push("--cwd".into());
+    args.push(panel_cwd);
     if let Some(session) = session {
         args.push("--session".into());
         args.push(session.to_string());
@@ -13721,6 +13763,7 @@ pub(crate) fn detach(bin: &str, args: &[String], log: &Path) -> Result<()> {
     )]
     let mut cmd = std::process::Command::new(bin);
     cmd.args(args)
+        .current_dir(cwd_probe::stable_child_dir())
         .stdin(std::process::Stdio::null())
         .stdout(file)
         .stderr(err);
@@ -14147,6 +14190,7 @@ fn spawn_member(persona: &str, argv: &[String], log: &Path) -> Result<std::proce
     )]
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..])
+        .current_dir(cwd_probe::stable_child_dir())
         .env("LJOS_PANEL_CHILD", "1")
         .env("LJOS_SEAT", persona)
         .env("VISSUE_AGENT", persona)
@@ -15131,7 +15175,7 @@ pub fn seat_tracker_project_no_cwd() -> Option<String> {
 /// then `project = "..."` in `ljos.toml`. No git checkout is no project:
 /// a held issue can still name one.
 fn cwd_project() -> Option<(String, String)> {
-    let cwd = std::env::current_dir().ok()?;
+    let cwd = crate::process_cwd().ok()?;
     let top = checkout_root(&cwd)?;
     if let Ok(text) = std::fs::read_to_string(top.join(".ljos").join("project")) {
         let name = text.lines().next().unwrap_or("").trim();
@@ -15606,6 +15650,7 @@ pub fn warm_command(exe: &Path) -> std::process::Command {
     let mut command = std::process::Command::new(exe);
     command
         .args(["search", "-n", "1", "--rerank", "the pack is open"])
+        .current_dir(child_work_dir())
         .env_remove("LJOS_IN_HOOK")
         .env_remove("PACKSET_TIMEOUT_MS")
         .stdin(Stdio::null())
@@ -33541,7 +33586,7 @@ fn seat_guard_judged(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     }
     let mut cwd = cwd
         .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok());
+        .or_else(|| crate::process_cwd().ok());
     let is_path_word = |w: &str, dir: Option<&Path>| {
         if w.chars().any(char::is_whitespace) {
             return false;
@@ -36238,7 +36283,7 @@ pub fn doctor() -> Vec<Habitat> {
     doctor_extend(&mut out, git_identity_row());
     doctor_push(
         &mut out,
-        sitting_gate::doctor_row(std::env::current_dir().ok().as_deref()),
+        sitting_gate::doctor_row(crate::process_cwd().ok().as_deref()),
     );
     doctor_push(&mut out, policy_row());
     doctor_extend(&mut out, policyd_config_row());
@@ -36248,7 +36293,7 @@ pub fn doctor() -> Vec<Habitat> {
     doctor_push(&mut out, panes_row());
     doctor_extend(
         &mut out,
-        config_diag::doctor_rows(std::env::current_dir().ok().as_deref()),
+        config_diag::doctor_rows(crate::process_cwd().ok().as_deref()),
     );
     doctor_push(&mut out, note_queue_row());
     if let Some(state) = sync::legacy_doctor_state() {
@@ -36327,7 +36372,7 @@ fn git_identity_dir() -> PathBuf {
             return layout.root().to_path_buf();
         }
     }
-    std::env::current_dir()
+    crate::process_cwd()
         .ok()
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."))
@@ -45769,7 +45814,7 @@ pub fn refuse_product_init(issue: &str) -> Result<()> {
     if !tracker_place::vissue_would_init_cwd() {
         return Ok(());
     }
-    let Ok(here) = std::env::current_dir() else {
+    let Ok(here) = crate::process_cwd() else {
         return Ok(());
     };
     if tracker_place::product_checkout(&here).is_none() {
@@ -51364,7 +51409,8 @@ pub(crate) fn gc_tracker_past(root: &Path, limit: u64) -> TrackerGc {
     let mut gc = git_cmd();
     apply_git_command_env(&mut gc);
     clear_git_repo_env(&mut gc);
-    gc.arg("-C")
+    gc.current_dir(cwd_probe::stable_child_dir())
+        .arg("-C")
         .arg(root)
         .args([
             "-c",
@@ -51502,7 +51548,7 @@ pub(crate) fn checkout_ceiling(dir: &Path) -> Option<PathBuf> {
     } else if dir.is_absolute() {
         dir.to_path_buf()
     } else {
-        std::env::current_dir().ok()?.join(dir)
+        crate::process_cwd().ok()?.join(dir)
     };
     let mut cur = start.clone();
     loop {
@@ -56512,11 +56558,7 @@ fn policy_reading_known(
     let cwd_text = cwd
         .filter(|path| path.is_dir())
         .map(|d| d.display().to_string())
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|d| d.display().to_string())
-        });
+        .or_else(|| crate::process_cwd().ok().map(|d| d.display().to_string()));
     let gated = if off {
         None
     } else {
@@ -56759,12 +56801,12 @@ fn guard_start_directory(cwd: Option<&Path>) -> Result<PathBuf> {
             if expanded.is_absolute() {
                 expanded
             } else {
-                std::env::current_dir()
+                crate::process_cwd()
                     .context("guard cwd is unavailable")?
                     .join(expanded)
             }
         }
-        None => std::env::current_dir().context("guard cwd is unavailable")?,
+        None => crate::process_cwd().context("guard cwd is unavailable")?,
     };
     let directory = std::fs::canonicalize(&rooted)
         .with_context(|| format!("guard cwd is unavailable: {}", rooted.display()))?;
@@ -57633,7 +57675,7 @@ fn static_guard_judged(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     // judged by the branch it would replace.
     let here = cwd
         .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok());
+        .or_else(|| crate::process_cwd().ok());
     if let Some(rule) = gate_push(None, line, here.as_deref().and_then(Path::to_str))
         .filter(|rule| matches!(rule.verdict.as_str(), "ask" | "deny"))
     {
@@ -58899,7 +58941,7 @@ fn shield_product_cwd(cmd: &mut std::process::Command) {
     if !tracker_place::vissue_would_init_cwd() {
         return;
     }
-    let Ok(here) = std::env::current_dir() else {
+    let Ok(here) = crate::process_cwd() else {
         return;
     };
     if tracker_place::product_checkout(&here).is_none() {
@@ -59446,6 +59488,9 @@ fn run_captured_within(
         cmd.arg(a.as_ref());
     }
     git_hooks::hook_child_env(&mut cmd);
+    if bin == "packset" && args.first().is_some_and(|arg| arg.as_ref() == "ensure") {
+        cmd.current_dir(child_work_dir());
+    }
     // The child leads its own group. A shell that sleeps in a grandchild
     // would otherwise keep the pipe open after the deadline, and the
     // caller would sit there past it.
@@ -68629,7 +68674,7 @@ mod tests {
         let _env_read = crate::test_env_read_lock();
         let _cwd = super::test_env_lock();
         let away = tempfile::tempdir().unwrap();
-        let back = std::env::current_dir().unwrap();
+        let back = crate::process_cwd().unwrap();
         std::env::set_current_dir(away.path()).unwrap();
         struct Back(std::path::PathBuf);
         impl Drop for Back {
@@ -68711,7 +68756,7 @@ mod tests {
             reason = "writes a file that is not a git hook"
         )]
         std::fs::write(repo.join(".ljos/project"), "leidarljos\n").unwrap();
-        let back = std::env::current_dir().unwrap();
+        let back = crate::process_cwd().unwrap();
         std::env::set_current_dir(&repo).unwrap();
         struct Back(std::path::PathBuf);
         impl Drop for Back {
@@ -68778,7 +68823,7 @@ mod tests {
             assert!(out.status.success(), "{args:?}");
         };
         git(&["init", "-q"]);
-        let back = std::env::current_dir().unwrap();
+        let back = crate::process_cwd().unwrap();
         std::env::set_current_dir(&repo).unwrap();
         struct Back(std::path::PathBuf);
         impl Drop for Back {
@@ -68802,7 +68847,7 @@ mod tests {
         let away = tempfile::tempdir().unwrap();
         let tracker = away.path().join("tracker");
         std::fs::create_dir_all(tracker.join("Software")).unwrap();
-        let back = std::env::current_dir().unwrap();
+        let back = crate::process_cwd().unwrap();
         std::env::set_current_dir(away.path()).unwrap();
         struct Back(std::path::PathBuf);
         impl Drop for Back {
@@ -88492,7 +88537,7 @@ lesson, due yesterday, seat ada
             ("LJOS_CONFIG", ""),
             ("LJOS_OFF", "0"),
         ]);
-        let process = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let process = std::fs::canonicalize(crate::process_cwd().unwrap()).unwrap();
         let here = std::fs::canonicalize(work.path()).unwrap();
         assert_ne!(
             here, process,

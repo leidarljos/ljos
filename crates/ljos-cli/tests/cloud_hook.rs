@@ -21,7 +21,7 @@ impl Guard {
     fn new() -> Self {
         let lock = ENV.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::vars_os().collect();
-        let cwd = std::env::current_dir().unwrap();
+        let cwd = ljos_cli::process_cwd().unwrap();
         Self {
             saved,
             cwd,

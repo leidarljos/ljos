@@ -1652,7 +1652,7 @@ pub fn warnings(cwd: Option<&Path>) -> Vec<String> {
 
 /// Print each warning on stderr. A caller that exits on its own work is unchanged.
 pub fn emit() {
-    let cwd = std::env::current_dir().ok();
+    let cwd = crate::process_cwd().ok();
     for line in warnings(cwd.as_deref()) {
         say!("warning: {line}");
     }

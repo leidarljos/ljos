@@ -144,7 +144,7 @@ impl Here {
 /// name of the git checkout the seat runs in.
 fn home_projects() -> Vec<String> {
     let mut home: Vec<String> = crate::seat_tracker_project().into_iter().collect();
-    let repo = std::env::current_dir()
+    let repo = crate::process_cwd()
         .ok()
         .and_then(|cwd| crate::checkout_root(&cwd))
         .and_then(|top| {

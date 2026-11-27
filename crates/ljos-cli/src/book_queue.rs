@@ -77,7 +77,7 @@ pub fn enqueue(raw: &str, call: &crate::HookCall) {
 }
 
 fn write_job(raw: &str, call: &crate::HookCall) {
-    let cwd = std::env::current_dir()
+    let cwd = crate::process_cwd()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     let value: serde_json::Value = serde_json::from_str(raw.trim()).unwrap_or_default();
@@ -239,6 +239,7 @@ fn kick() {
     )]
     let mut cmd = std::process::Command::new(exe);
     cmd.args(["hook", "--drain", "--no-wait"])
+        .current_dir(crate::child_work_dir())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());

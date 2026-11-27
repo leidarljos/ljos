@@ -148,6 +148,16 @@ impl Seat {
     }
 
     fn run(&self, cwd: &Path, args: &[&str], extra: &[(&str, &str)]) -> (Output, Duration) {
+        self.run_io(cwd, args, extra, None)
+    }
+
+    fn run_io(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        extra: &[(&str, &str)],
+        input: Option<&[u8]>,
+    ) -> (Output, Duration) {
         let path = format!("{}:/usr/bin:/bin", self.bin.display());
         #[expect(
             clippy::disallowed_methods,
@@ -168,9 +178,13 @@ impl Seat {
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off")
             .env("VISSUE_ROOT", &self.tracker)
-            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if input.is_some() {
+            cmd.stdin(Stdio::piped());
+        } else {
+            cmd.stdin(Stdio::null());
+        }
         std::fs::create_dir_all(self.dir.path().join("run")).unwrap();
         for (key, value) in extra {
             if value.is_empty() {
@@ -181,6 +195,12 @@ impl Seat {
         }
         let started = Instant::now();
         let mut child = cmd.spawn().unwrap();
+        if let Some(bytes) = input {
+            if let Some(mut pipe) = child.stdin.take() {
+                use std::io::Write as _;
+                let _ = pipe.write_all(bytes);
+            }
+        }
         let limit = Duration::from_secs(6);
         let status = loop {
             if started.elapsed() > limit {
@@ -223,6 +243,16 @@ fn text(out: &Output) -> String {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     )
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mode 0300 cannot be restored by change_mode, which opens the directory for reading"
+)]
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
 }
 
 #[test]
@@ -393,6 +423,270 @@ fn a_parked_working_directory_is_removed_when_the_command_ends() {
         "file without a title exited 0: {}",
         text(&err_out)
     );
+    let left: Vec<String> = std::fs::read_dir(&tmp)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("ljos-cwd-"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "parked working directories remained: {left:?}"
+    );
+    let rel = cwd.join("reltmp");
+    std::fs::create_dir_all(&rel).unwrap();
+    let (rel_out, _) = seat.run(
+        &cwd,
+        &["file", "-p", "demo", "--top", "a title"],
+        &[("TMPDIR", "reltmp")],
+    );
+    assert!(
+        rel_out.status.success()
+            && std::fs::read_dir(&rel)
+                .unwrap()
+                .flatten()
+                .all(|entry| { !entry.file_name().to_string_lossy().starts_with("ljos-cwd-") }),
+        "relative TMPDIR: {}",
+        text(&rel_out)
+    );
+    let panel = seat.bin.join("panel-bin");
+    script(
+        &seat.bin,
+        "panel-bin",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > panel-argv\nseen=0\ni=0\nwhile [ \"$i\" -lt 150 ]; do\n  have=0\n  for d in \"$TMPDIR\"/ljos-cwd-*; do\n    if [ -d \"$d\" ]; then\n      have=1\n      seen=1\n    fi\n  done\n  if [ \"$seen\" -eq 1 ] && [ \"$have\" -eq 0 ]; then\n    break\n  fi\n  i=$((i + 1))\n  sleep 0.02\ndone\ntouch child-ran\n",
+    );
+    let (hook_out, _) = seat.run_io(
+        &seat.slow,
+        &["hook"],
+        &[
+            ("TMPDIR", tmp_env),
+            ("LJOS_PANEL_BIN", panel.to_str().unwrap()),
+            ("LD_PRELOAD", seat.so.to_str().unwrap()),
+            ("LJOS_SLOW_HIT", seat.hit.to_str().unwrap()),
+        ],
+        Some(
+            br#"{"hook_event_name":"UserPromptSubmit","prompt":"which is right","cursor_version":"1","conversation_id":"c-park"}"#,
+        ),
+    );
+    let marker = seat.tracker.join("child-ran");
+    // The panel script polls for 3s when it never sees the parked
+    // directory. This ceiling is not that deadline.
+    let marked = Instant::now();
+    while !marker.is_file() && marked.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        marker.is_file(),
+        "detached child did not run after exit: {}",
+        text(&hook_out)
+    );
+    let argv = std::fs::read_to_string(seat.tracker.join("panel-argv")).unwrap_or_default();
+    let args: Vec<&str> = argv.lines().collect();
+    assert!(
+        !args.iter().any(|arg| arg.contains("ljos-cwd-")),
+        "parked directory in panel argv: {argv}"
+    );
+    let cwd_at = args
+        .iter()
+        .position(|arg| *arg == "--cwd")
+        .expect("open-panel cwd");
+    let panel_dir = args.get(cwd_at + 1).copied().unwrap_or("");
+    assert!(
+        Path::new(panel_dir).is_dir(),
+        "panel --cwd is not a directory: {panel_dir}\n{argv}"
+    );
+    let swap_tmp = seat.dir.path().join("swap-tmp");
+    std::fs::create_dir_all(&swap_tmp).unwrap();
+    script(
+        &seat.bin,
+        "vissue",
+        "#!/bin/sh\nsleep 0.4\nprintf '%s\\n' 'demo-abcd  TODO  [#C]  a title'\n",
+    );
+    let swap_watch = swap_tmp.clone();
+    let watcher = std::thread::spawn(move || {
+        use std::os::unix::fs::MetadataExt as _;
+        let start = Instant::now();
+        let parked = loop {
+            if start.elapsed() > Duration::from_secs(2) {
+                return None;
+            }
+            let found = std::fs::read_dir(&swap_watch).ok().and_then(|rd| {
+                rd.flatten()
+                    .find(|entry| entry.file_name().to_string_lossy().starts_with("ljos-cwd-"))
+            });
+            if let Some(entry) = found {
+                break entry.path();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let before = std::fs::symlink_metadata(&parked).ok()?.ino();
+        std::fs::remove_dir(&parked).ok()?;
+        std::fs::create_dir(&parked).ok()?;
+        let after = std::fs::symlink_metadata(&parked).ok()?.ino();
+        (before != after).then_some((parked, after))
+    });
+    let (swap_out, _) = seat.run(
+        &cwd,
+        &["file", "-p", "demo", "--top", "a title"],
+        &[("TMPDIR", swap_tmp.to_str().unwrap())],
+    );
+    let swapped = watcher.join().expect("swap watcher");
+    assert!(swap_out.status.success(), "swap: {}", text(&swap_out));
+    let (swapped_path, swapped_ino) = swapped.expect("parked directory was not replaced");
+    let swapped_meta =
+        std::fs::symlink_metadata(&swapped_path).expect("replaced directory removed");
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::ino(&swapped_meta),
+        swapped_ino
+    );
+}
+
+#[test]
+fn a_retargeted_tmpdir_symlink_leaves_the_foreign_directory() {
+    let seat = Seat::new();
+    script(
+        &seat.bin,
+        "vissue",
+        "#!/bin/sh\nsleep 0.6\nprintf '%s\\n' 'demo-abcd  TODO  [#C]  a title'\n",
+    );
+    let cwd = seat.dir.path().join("fast");
+    let dir_a = seat.dir.path().join("A");
+    let dir_b = seat.dir.path().join("B");
+    let link = seat.dir.path().join("tmp-link");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a directory that is not a git hook"
+    )]
+    std::os::unix::fs::symlink(&dir_a, &link).unwrap();
+    let watch_a = dir_a.clone();
+    let watch_b = dir_b.clone();
+    let watch_link = link.clone();
+    let watcher = std::thread::spawn(move || {
+        use std::os::unix::fs::MetadataExt as _;
+        let start = Instant::now();
+        let parked = loop {
+            if start.elapsed() > Duration::from_secs(2) {
+                return None;
+            }
+            let found = std::fs::read_dir(&watch_a).ok().and_then(|rd| {
+                rd.flatten()
+                    .find(|entry| entry.file_name().to_string_lossy().starts_with("ljos-cwd-"))
+            });
+            if let Some(entry) = found {
+                break entry.path();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let name = parked.file_name()?.to_os_string();
+        let original_ino = std::fs::symlink_metadata(&parked).ok()?.ino();
+        let moved = watch_b.join(&name);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "moves a directory that is not a git hook"
+        )]
+        std::fs::rename(&parked, &moved).ok()?;
+        std::fs::create_dir(&parked).ok()?;
+        let foreign_ino = std::fs::symlink_metadata(&parked).ok()?.ino();
+        if foreign_ino == original_ino {
+            return None;
+        }
+        std::fs::remove_file(&watch_link).ok()?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "links a directory that is not a git hook"
+        )]
+        std::os::unix::fs::symlink(&watch_b, &watch_link).ok()?;
+        Some((name, foreign_ino, original_ino, moved))
+    });
+    let (out, _) = seat.run(
+        &cwd,
+        &["file", "-p", "demo", "--top", "a title"],
+        &[("TMPDIR", link.to_str().unwrap())],
+    );
+    let swapped = watcher.join().expect("retarget watcher");
+    assert!(out.status.success(), "retarget: {}", text(&out));
+    let (name, foreign_ino, original_ino, moved) =
+        swapped.expect("parked directory was not retargeted");
+    let foreign = dir_a.join(&name);
+    let foreign_meta = std::fs::symlink_metadata(&foreign).expect("foreign directory removed");
+    assert!(foreign_meta.is_dir(), "foreign entry is not a directory");
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::ino(&foreign_meta),
+        foreign_ino
+    );
+    let original_meta = std::fs::symlink_metadata(&moved).expect("original directory removed");
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::ino(&original_meta),
+        original_ino
+    );
+}
+
+#[test]
+fn a_cwd_named_ljos_cwd_still_uses_a_relative_tmpdir() {
+    let seat = Seat::new();
+    script(
+        &seat.bin,
+        "vissue",
+        "#!/bin/sh\nsleep 0.4\nprintf '%s\\n' 'demo-abcd  TODO  [#C]  a title'\n",
+    );
+    let cwd = seat.dir.path().join("ljos-cwd-work");
+    let rel = cwd.join("reltmp");
+    std::fs::create_dir_all(&rel).unwrap();
+    let watch = rel.clone();
+    let watcher = std::thread::spawn(move || {
+        let start = Instant::now();
+        loop {
+            if start.elapsed() > Duration::from_secs(2) {
+                return None;
+            }
+            let found = std::fs::read_dir(&watch).ok().and_then(|rd| {
+                rd.flatten()
+                    .find(|entry| entry.file_name().to_string_lossy().starts_with("ljos-cwd-"))
+            });
+            if let Some(entry) = found {
+                return Some(entry.path());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let (out, _) = seat.run(
+        &cwd,
+        &["file", "-p", "demo", "--top", "a title"],
+        &[("TMPDIR", "reltmp")],
+    );
+    let seen = watcher.join().expect("relative watcher");
+    assert!(out.status.success(), "named cwd: {}", text(&out));
+    let parked = seen.expect("relative TMPDIR was not used");
+    assert!(
+        !parked.exists(),
+        "parked directory remained: {}",
+        parked.display()
+    );
+}
+
+#[test]
+fn an_unreadable_tmpdir_does_not_keep_the_parked_directory() {
+    let seat = Seat::new();
+    script(
+        &seat.bin,
+        "vissue",
+        "#!/bin/sh\nprintf '%s\\n' 'demo-abcd  TODO  [#C]  a title'\n",
+    );
+    let cwd = seat.dir.path().join("fast");
+    let tmp = seat.dir.path().join("tmp-0300");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&tmp).unwrap();
+    set_mode(&tmp, 0o300);
+    let (out, _) = seat.run(
+        &cwd,
+        &["file", "-p", "demo", "--top", "a title"],
+        &[("TMPDIR", tmp.to_str().unwrap())],
+    );
+    set_mode(&tmp, 0o700);
+    assert!(out.status.success(), "mode 0300: {}", text(&out));
     let left: Vec<String> = std::fs::read_dir(&tmp)
         .unwrap()
         .filter_map(|entry| entry.ok())
