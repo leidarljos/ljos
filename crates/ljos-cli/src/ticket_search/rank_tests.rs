@@ -424,6 +424,30 @@ mod develop {
 }
 
 /// A small deterministic generator, so a failure names a seed that repeats.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 33
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        usize::try_from(self.next()).unwrap_or(0) % n.max(1)
+    }
+
+    fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+        items[self.below(items.len())]
+    }
+
+    fn chance(&mut self, percent: usize) -> bool {
+        self.below(100) < percent
+    }
+}
+
 const ROOT: &str = "/srv/tracker";
 
 fn note(timestamp: &str, text: &str) -> LogEntry {
@@ -433,6 +457,16 @@ fn note(timestamp: &str, text: &str) -> LogEntry {
         to_state: None,
         note: Some(text.to_string()),
         raw: None,
+    }
+}
+
+fn raw_line(timestamp: &str, text: &str) -> LogEntry {
+    LogEntry {
+        timestamp: timestamp.to_string(),
+        from_state: None,
+        to_state: None,
+        note: None,
+        raw: Some(format!("- {text} {timestamp}")),
     }
 }
 
@@ -487,6 +521,400 @@ fn at_home(mine: &str, solo: bool, cwd: bool, home: &[&str]) -> Here {
         },
         home: home.iter().map(|name| (*name).to_string()).collect(),
     }
+}
+
+const PROJECTS: &[&str] = &["ljos", "vissue", "Kiln", "docs-site", "media", ""];
+const SEATS: &[&str] = &["ada", "bao", "cam", "Ada", "dee"];
+const WORDS: &[&str] = &[
+    "store",
+    "mount",
+    "mounted",
+    "mounting",
+    "kiln",
+    "glaze",
+    "narrated",
+    "narration",
+    "video",
+    "videos",
+    "docs",
+    "release",
+    "embed",
+    "records",
+    "update",
+    "fix",
+    "note",
+    "search",
+    "sign-in",
+    "signed-in",
+    "SHA-1",
+    "sha1",
+    "list_scans",
+    "listScans",
+    "http2",
+    "HTTP/2",
+    "preface",
+    "parser",
+    "timeout",
+    "mailbox",
+    "index",
+    "d-seams",
+    "migrate",
+    "webdav",
+    "drain",
+    "the",
+    "a",
+    "of",
+    "GPRidge",
+    "ridge",
+    "walk",
+    "backup",
+    "drive",
+    "overnight",
+    "temperature",
+    "storage",
+    "stores",
+    "anneal",
+    "annealed",
+    "168",
+    "restack3",
+    "default-on",
+    "default",
+    "gate",
+    "gated",
+];
+const STAMPS: &[&str] = &[
+    "[2026-11-01 Sun 09:00]",
+    "[2026-11-16 Mon 18:30]",
+    "[2026-11-16 Mon 08:05]",
+    "[2026-10-02 Fri 12:00]",
+    "",
+];
+
+fn phrase(rng: &mut Lcg, min: usize, max: usize) -> String {
+    let len = min + rng.below(max - min + 1);
+    (0..len)
+        .map(|_| rng.pick(WORDS))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A tracker with shared and repeated titles, empty ids and titles, a
+/// duplicated id, claims, filed, claimed, noted and released lines, and
+/// files inside and outside the working tracker.
+fn tracker(seed: u64, n: usize) -> Vec<IssueRec> {
+    let mut rng = Lcg(seed);
+    let mut out = Vec::with_capacity(n);
+    for index in 0..n {
+        let project = rng.pick(PROJECTS);
+        let id = match rng.below(40) {
+            0 => String::new(),
+            1 if index > 0 => format!("dup-{}", index % 7),
+            _ => format!(
+                "{}-{index:04}",
+                if project.is_empty() { "x" } else { project }
+            ),
+        };
+        let title = match rng.below(12) {
+            0 => String::new(),
+            1 => "Store mount".to_string(),
+            2 => "Fix the store mount timeout".to_string(),
+            3 => "GPRidge narrated video set".to_string(),
+            4 => "Anneal 168 restack3 default-on gate".to_string(),
+            _ => phrase(&mut rng, 1, 6),
+        };
+        let body = if rng.chance(60) {
+            phrase(&mut rng, 0, 12)
+        } else {
+            String::new()
+        };
+        let mut logbook = Vec::new();
+        for _ in 0..rng.below(4) {
+            let stamp = rng.pick(STAMPS);
+            let seat = rng.pick(SEATS);
+            logbook.push(match rng.below(6) {
+                0 => note(stamp, &format!("filed by {seat}")),
+                1 => note(stamp, &format!("noted by {seat}")),
+                2 => raw_line(stamp, &format!("claimed by {seat}")),
+                3 => note(stamp, &format!("claim released: {seat} held since {stamp}")),
+                _ => note(stamp, &phrase(&mut rng, 1, 8)),
+            });
+        }
+        let claim = rng.chance(25).then(|| (rng.pick(SEATS), rng.pick(STAMPS)));
+        let dir = if rng.chance(70) { ROOT } else { "/elsewhere" };
+        let path = PathBuf::from(format!("{dir}/{project}/issues.org"));
+        out.push(ticket(project, &id, &title, &body, logbook, claim, path));
+    }
+    out
+}
+
+fn pack_hits(rng: &mut Lcg, records: &[IssueRec]) -> Vec<Hit> {
+    let mut hits = Vec::new();
+    for _ in 0..rng.below(6) {
+        let seat = rng.pick(SEATS);
+        let (id, kind) = if rng.chance(50) && !records.is_empty() {
+            let rec = &records[rng.below(records.len())];
+            (rec.heading.id.clone(), "ticket")
+        } else {
+            (format!("mem-{}", rng.below(1000)), "lesson")
+        };
+        let mut entities = Vec::new();
+        if rng.chance(60) {
+            entities.push(format!("seat:{seat}"));
+        }
+        hits.push(Hit {
+            id: rng.chance(90).then_some(id),
+            text: phrase(rng, 1, 6),
+            score: (rng.below(100) as f64) / 100.0,
+            kind: kind.to_string(),
+            ts: None,
+            entities,
+            ballots: None,
+            of: None,
+            rerank_score: None,
+            labels: Vec::new(),
+        });
+    }
+    hits
+}
+
+fn queries(rng: &mut Lcg, records: &[IssueRec]) -> Vec<String> {
+    let mut asks: Vec<String> = [
+        "store mount",
+        "Store Mount",
+        "  store   mount  ",
+        "mount",
+        "store",
+        "mounting the store",
+        "fix the store mount timeout",
+        "fix store mount timeut",
+        "update the note about search",
+        "GPRidge video narration",
+        "gpridge VIDEO Narration",
+        "narrated video",
+        "docs video",
+        "d-SEAMS migrate video docs embed",
+        "sha1 preface",
+        "list scans",
+        "sign-in",
+        "the",
+        "",
+        "   ",
+        "zzzznotaword",
+        "kiln glaze overnight",
+        "webdav drain delete safety",
+        "release",
+        "a of the",
+        "anneal 168 restack3 default-on gate",
+        "default-on gate",
+        "restack3 anneal",
+        "kiln glaze overnight backup drive",
+        "store mount backup drive overnight 24",
+        "GPRidge narrated video set ridge walk",
+    ]
+    .iter()
+    .map(|ask| (*ask).to_string())
+    .collect();
+    for _ in 0..30 {
+        asks.push(phrase(rng, 1, 5));
+    }
+    for _ in 0..15 {
+        let rec = &records[rng.below(records.len())];
+        asks.push(rec.heading.title.clone());
+    }
+    asks
+}
+
+const ROUGH: &[&str] = &[
+    "b+rine_foo",
+    "-(brineSpindle)",
+    "cedar\u{b}latch",
+    "café",
+    "CAFÉ",
+    "Straße",
+    "ΣΊΣΥΦΟΣ",
+    "İstanbul",
+    "/}MOUNTion",
+    "list_scans,",
+    "(store)",
+    "mount.",
+    "HTTPServer",
+    "sha-1",
+    "\u{a0}kiln",
+    "glaze\u{1c}drain",
+    "東京",
+    "naïve",
+    "über-store",
+    "-?Stories5",
+    "-[-[Glaze",
+    "rev x20",
+    "it\u{2019}s\u{2014}done",
+    "ABcABcABc",
+    "\t\u{c}\u{85}\u{2028}",
+];
+
+const ROUGH_ASKS: &[&str] = &[
+    "brinefoo",
+    "brine spindle",
+    "brinespindle",
+    "cedar latch",
+    "café",
+    "cafe",
+    "pelican",
+    "istanbul",
+    "mountion",
+    "straße",
+    "σίσυφος",
+    "xylophone quadrature",
+    "über store",
+    "httpserver",
+    "stories5",
+    "glaze0",
+    "rev20",
+    "done",
+    "abc",
+];
+
+fn roughen(rng: &mut Lcg, text: &str) -> String {
+    let mut out = String::new();
+    for word in text.split(' ') {
+        out.push_str(word);
+        out.push_str(rng.pick(&[" ", " ", " ", "\n", "-", "+", ", ", "\u{b}", "\u{a0}", "/"]));
+        if rng.chance(20) {
+            out.push_str(rng.pick(ROUGH));
+            out.push(' ');
+        }
+    }
+    out
+}
+
+/// [`tracker`] with punctuation, Unicode and control characters through
+/// titles, bodies, notes and drawers, org tags that hold query words, and
+/// a second copy of some ids with words of their own.
+fn rough_tracker(seed: u64, n: usize) -> Vec<IssueRec> {
+    let mut rng = Lcg(seed ^ 0xbeef);
+    let mut records = tracker(seed, n);
+    for rec in &mut records {
+        let heading = &mut rec.heading;
+        heading.body = roughen(&mut rng, &heading.body);
+        if rng.chance(30) {
+            heading.title = roughen(&mut rng, &heading.title);
+        }
+        for entry in &mut heading.logbook {
+            if let Some(text) = entry.note.as_mut() {
+                *text = roughen(&mut rng, text);
+            }
+        }
+        if rng.chance(30) {
+            let tag = rng.pick(&["pelican", "store", "café"]);
+            heading.org_tags.push(tag.to_string());
+        }
+        if rng.chance(10) {
+            heading.extra_drawers.push(roughen(&mut rng, "kiln drawer"));
+        }
+    }
+    for index in 0..n / 10 {
+        let mut copy = records[index * 7 % n].clone();
+        copy.heading.title = "Second copy zebrafinch".to_string();
+        copy.heading.body = roughen(&mut rng, "zebrafinch only here");
+        records.push(copy);
+    }
+    records
+}
+
+/// Generated pages and bands match the per-call ranking, and the page the
+/// 0.45.4 analyzer built is that same page.
+#[test]
+fn generated_pages_and_bands_match_the_per_call_ranking() {
+    let _env_read = crate::test_env_read_lock();
+    let mut compared = 0usize;
+    let mut moved = 0usize;
+    for seed in [7_u64, 1_234, 99_991] {
+        let records = tracker(seed, 120);
+        let mut rng = Lcg(seed ^ 0x5eed);
+        let asks = queries(&mut rng, &records);
+        for (index, query) in asks.iter().enumerate() {
+            let place = || {
+                at_home(
+                    ["ada", "bao", "zed"][index % 3],
+                    index % 4 == 0,
+                    index % 5 != 0,
+                    [&[][..], &["Kiln"], &["media", "LJOS"]][index % 7 % 3],
+                )
+            };
+            let start = pack_hits(&mut rng, &records);
+            let mut before = start.clone();
+            develop::merge(&mut before, query, &records, &place());
+            let mut after = start.clone();
+            merge_records(&mut after, query, &records, place);
+            assert_eq!(
+                format!("{after:#?}"),
+                format!("{before:#?}"),
+                "seed {seed} query {query:?}"
+            );
+            compared += 1;
+            if format!("{start:?}") != format!("{after:?}") {
+                moved += 1;
+            }
+        }
+    }
+    assert!(compared >= 200, "{compared} pages");
+    assert!(
+        moved * 2 >= compared,
+        "only {moved} of {compared} pages changed"
+    );
+
+    let records = tracker(42, 100);
+    let titles: Vec<&str> = records
+        .iter()
+        .map(|rec| rec.heading.title.trim())
+        .filter(|title| !title.is_empty())
+        .collect();
+    let mut rng = Lcg(42);
+    for query in queries(&mut rng, &records) {
+        for rec in &records {
+            let notes = super::notes_text(&rec.heading);
+            let title = rec.heading.title.as_str();
+            assert_eq!(
+                super::band(&query, title, &notes, &titles),
+                develop::band(&query, title, &notes, &titles),
+                "{query:?} against {title:?}"
+            );
+        }
+    }
+
+    let mut old_pages = 0usize;
+    let seeds = (0..3 * crate::word_rank::fuzz_scale())
+        .map(|round| [3_u64, 71, 4_099][round % 3] + 7_919 * u64::try_from(round / 3).unwrap_or(0));
+    for seed in seeds {
+        let records = rough_tracker(seed, 100);
+        let mut rng = Lcg(seed);
+        let mut asks = queries(&mut rng, &records);
+        asks.extend(ROUGH_ASKS.iter().copied().map(str::to_string));
+        for (index, query) in asks.iter().enumerate() {
+            let place = || {
+                at_home(
+                    ["ada", "bao", "zed"][index % 3],
+                    index % 4 == 0,
+                    index % 5 != 0,
+                    [&[][..], &["Kiln"], &["media", "LJOS"]][index % 7 % 3],
+                )
+            };
+            let start = pack_hits(&mut rng, &records);
+            let mut before = start.clone();
+            crate::word_rank::with_old_terms(|| {
+                develop::merge(&mut before, query, &records, &place());
+            });
+            let mut after = start;
+            merge_records(&mut after, query, &records, place);
+            assert_eq!(
+                format!("{after:#?}"),
+                format!("{before:#?}"),
+                "seed {seed} query {query:?}"
+            );
+            old_pages += 1;
+        }
+    }
+    assert!(old_pages >= 250, "{old_pages} pages");
 }
 
 /// `count` tickets, of which `sharing` titles share one word with the

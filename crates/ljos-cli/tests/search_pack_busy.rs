@@ -454,7 +454,7 @@ fn a_pack_that_accepts_and_stays_silent_uses_one_word_line() {
     std::fs::create_dir_all(home.join(".local/state")).unwrap();
     std::fs::create_dir_all(home.join("run")).unwrap();
     let url = serve_silent();
-    let (out, _) = search(&url, &home, &["search", WORD_QUERY]);
+    let (out, took) = search(&url, &home, &["search", WORD_QUERY]);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let text = format!("{stdout}{stderr}");
@@ -472,6 +472,10 @@ fn a_pack_that_accepts_and_stays_silent_uses_one_word_line() {
     );
     assert!(!text.contains("The memory writer is busy"), "{text}");
     // LJOS_SEARCH_BUSY_WAIT (2s) plus one short request (3s).
+    assert!(
+        took < Duration::from_secs(5),
+        "a silent pack waited {took:?}, past the busy bound plus one request\n{text}"
+    );
 }
 
 const LESSON: &str = "Seat the kiln door only when cold.";

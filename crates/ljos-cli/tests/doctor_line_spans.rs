@@ -5,12 +5,38 @@
 
 ljos_test_boot::harness!();
 
+use std::path::Path;
 use std::process::Command;
 
 const BROKEN: &str = "`ljos doctor`.`";
 
+fn root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("the workspace root")
+}
+
 #[test]
 fn the_help_for_search_and_remember_has_whole_code_spans() {
+    let mut bad = Vec::new();
+    for file in [
+        "README.md",
+        "crates/ljos-cli/doc/protocol.md",
+        "skills/ljos/SKILL.md",
+        "crates/ljos-cli/src/main.rs",
+    ] {
+        let text = std::fs::read_to_string(root().join(file)).unwrap();
+        for (n, line) in text.lines().enumerate() {
+            if line.contains(BROKEN) {
+                bad.push(format!("{file}:{}", n + 1));
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "single span around the doctor line: {bad:?}"
+    );
     for command in ["search", "remember"] {
         #[expect(
             clippy::disallowed_methods,
