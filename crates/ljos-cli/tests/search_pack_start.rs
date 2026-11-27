@@ -9,9 +9,8 @@ ljos_test_boot::harness!();
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::process::CommandExt as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -177,87 +176,389 @@ fn serve_posts(closed_healths: Option<usize>, hits: &'static str, starting_posts
 /// How long a reap may sit in `try_wait` after `SIGKILL`.
 const REAP_BOUND: Duration = Duration::from_millis(200);
 
-/// Pids this harness spawned, and process groups it created.
-///
-/// A signal goes only to one of these pids, or to a process in one of
-/// these groups. A descendant is recorded with its group, and that whole
-/// group is killed, so an embed is not left behind.
-struct Spawned {
-    pids: Vec<u32>,
-    groups: Vec<u32>,
+fn harness_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|err| err.into_inner())
 }
 
-impl Spawned {
-    fn leader(pid: u32) -> Self {
-        Self {
-            pids: vec![pid],
-            groups: vec![pid],
+/// Make this process the parent of every orphaned descendant.
+///
+/// A setsid grandchild is reparented here when its parent exits, instead of
+/// to pid 1. Other targets have no child subreaper; the rest of the harness
+/// still compiles.
+fn become_subreaper() {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: PR_SET_CHILD_SUBREAPER takes an integer flag and no pointers.
+        let rc = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
+        assert!(
+            rc == 0,
+            "child subreaper: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProcStat {
+    state: char,
+    ppid: u32,
+    pgrp: u32,
+    sid: u32,
+}
+
+fn proc_stat(pid: u32) -> Option<ProcStat> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = text.rsplit_once(')')?.1.trim_start();
+    let mut fields = rest.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let ppid = fields.next()?.parse().ok()?;
+    let pgrp = fields.next()?.parse().ok()?;
+    let sid = fields.next()?.parse().ok()?;
+    Some(ProcStat {
+        state,
+        ppid,
+        pgrp,
+        sid,
+    })
+}
+
+fn comm(pid: u32) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|text| text.trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn report_pid(pid: u32) -> Option<String> {
+    let stat = proc_stat(pid)?;
+    Some(format!(
+        "{pid} {} {} ppid {} pgrp {} sid {}",
+        stat.state,
+        comm(pid),
+        stat.ppid,
+        stat.pgrp,
+        stat.sid
+    ))
+}
+
+/// Direct children of `pid`, from every thread's `/proc/<pid>/task/<tid>/children`.
+fn child_pids(pid: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return out;
+    };
+    for task in tasks.flatten() {
+        let Ok(text) = std::fs::read_to_string(task.path().join("children")) else {
+            continue;
+        };
+        for word in text.split_whitespace() {
+            let Ok(child) = word.parse::<u32>() else {
+                continue;
+            };
+            if child > 1 && child != pid {
+                out.push(child);
+            }
         }
     }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
 
-    fn none() -> Self {
-        Self {
-            pids: Vec::new(),
-            groups: Vec::new(),
+fn descendants(root: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut stack = child_pids(root);
+    let mut steps = 0u32;
+    while let Some(pid) = stack.pop() {
+        steps += 1;
+        if steps > 4096 || pid <= 1 || pid == root || out.contains(&pid) {
+            continue;
+        }
+        out.push(pid);
+        stack.extend(child_pids(pid));
+    }
+    out
+}
+
+/// Descendants of this process that were not already children at `before`.
+///
+/// A host `packsetd` is not our child, so it is not in this set. A process
+/// the test spawned earlier is in `before` and is not signaled.
+fn owned_pids(before: &[u32]) -> Vec<u32> {
+    let mut keep = Vec::new();
+    for &pid in before {
+        if pid <= 1 || keep.contains(&pid) {
+            continue;
+        }
+        keep.push(pid);
+        for child in descendants(pid) {
+            if !keep.contains(&child) {
+                keep.push(child);
+            }
         }
     }
+    let self_pid = std::process::id();
+    descendants(self_pid)
+        .into_iter()
+        .filter(|pid| *pid != self_pid && !keep.contains(pid))
+        .collect()
+}
 
-    fn owns(&self, pid: u32) -> bool {
-        if self.pids.contains(&pid) {
-            return true;
-        }
-        match pgrp(pid) {
-            Some(group) => self.groups.contains(&group) || self.pids.contains(&group),
-            None => false,
+fn left_owned(before: &[u32], leader: Option<u32>) -> Vec<String> {
+    owned_pids(before)
+        .into_iter()
+        .filter(|pid| Some(*pid) != leader)
+        .filter_map(report_pid)
+        .collect()
+}
+
+fn still_alive(pid: u32) -> bool {
+    matches!(
+        proc_stat(pid),
+        Some(stat) if stat.state != 'Z' && stat.state != 'X'
+    )
+}
+
+/// `SIGKILL` for one pid this harness may signal.
+///
+/// The returned error is the errno from `kill`. `ESRCH` means the pid was
+/// already gone. Pid `0`, pid `-1`, and pid 1 are refused.
+fn raw_signal(pid: libc::pid_t, sig: i32) -> Result<(), i32> {
+    if pid <= 1 {
+        return Err(libc::EINVAL);
+    }
+    // SAFETY: `pid` is one descendant this harness spawned, or one child this
+    // test spawned. It is never `0` or `-1`.
+    let rc = unsafe { libc::kill(pid, sig) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::ESRCH))
+    }
+}
+
+fn signal_one(pid: u32) {
+    let Ok(raw) = libc::pid_t::try_from(pid) else {
+        return;
+    };
+    if raw <= 1 || pid == std::process::id() {
+        return;
+    }
+    let _ = raw_signal(raw, libc::SIGKILL);
+}
+
+/// Reap one direct child without blocking. A descendant that is not yet our
+/// child returns false; the caller signals it and tries again.
+fn wait_pid(pid: u32) -> bool {
+    let Ok(raw) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if raw <= 1 {
+        return false;
+    }
+    let mut status = 0;
+    // SAFETY: `pid` is a direct child of this process when the call succeeds.
+    // `WNOHANG` does not block.
+    let rc = unsafe { libc::waitpid(raw, &mut status, libc::WNOHANG) };
+    rc == raw
+}
+
+fn wait_until(child: &mut Child, bound: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + bound;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() >= deadline => return None,
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(_) => return None,
         }
     }
+}
 
-    fn adopt(&mut self, pid: u32) {
-        if pid <= 1 || pid == std::process::id() {
+/// Signal and reap descendants this run started.
+///
+/// This is the only teardown. The leader's `Child` owns that pid's wait, so
+/// `leader` is signaled and left for the caller. Every other owned pid is
+/// waited here. The walk is the children of this process, recursively, minus
+/// the pids in `before`.
+fn reap_owned(before: &[u32], leader: Option<u32>) {
+    let deadline = Instant::now() + REAP_BOUND;
+    loop {
+        let owned = owned_pids(before);
+        if owned.is_empty() {
             return;
         }
-        if !self.pids.contains(&pid) {
-            self.pids.push(pid);
-        }
-        if let Some(group) = pgrp(pid) {
-            if group > 1 && !self.groups.contains(&group) {
-                self.groups.push(group);
+        for pid in &owned {
+            signal_one(*pid);
+            if Some(*pid) != leader {
+                let _ = wait_pid(*pid);
             }
         }
-    }
-
-    fn adopt_tree(&mut self) {
-        for pid in proc_pids() {
-            if self.owns(pid) || descends_from(pid, self) {
-                self.adopt(pid);
-            }
+        if left_owned(before, leader).is_empty() {
+            return;
         }
+        if Instant::now() >= deadline {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
-/// Kills the group this harness created on the way out of [`run`], then
-/// stops a recorded pid only when it spawned that pid or created its group.
+/// Reap `child` after the owned descendants are signaled.
+///
+/// The ceiling calls this before the reader grace, so a grandchild still
+/// holding a pipe cannot keep the read waiting. The wait is bounded.
+fn reap_leader(child: &mut Child, before: &[u32], found: Option<ExitStatus>) -> ExitStatus {
+    let leader = child.id();
+    reap_owned(before, Some(leader));
+    if let Some(status) = found {
+        return status;
+    }
+    wait_until(child, REAP_BOUND)
+        .unwrap_or_else(|| panic!("leader {leader} still alive after SIGKILL"))
+}
+
+/// Calls [`reap_owned`] on the way out of [`run`].
 struct GroupGuard {
-    group: libc::pid_t,
-    spawned: Spawned,
-    home: PathBuf,
+    before: Vec<u32>,
+    leader: u32,
 }
 
 impl Drop for GroupGuard {
     fn drop(&mut self) {
-        // Every return drops this guard: a clean exit, pipes that have
-        // already closed, and the ceiling. A second signal covers a path
-        // that has not signaled yet. The result is not a reason to wait.
-        // [`reap_leader`] checks it when the leader is still running.
-        // The group is signaled even when the leader pid is already gone,
-        // so an embed still in that group is not left behind.
-        let _ = signal_group(self.group);
-        stop_recorded(&self.home, &mut self.spawned);
+        reap_owned(&self.before, Some(self.leader));
+    }
+}
+
+/// Setsid grandchild the harness starts beside the client.
+///
+/// The parent exits at once. The grandchild's cwd is `/`, its environment
+/// is empty, and the socket it holds is `socket:[inode]`. After the parent
+/// is gone its ppid is this process when the subreaper is set, and pid 1
+/// when it is not.
+struct SetsidGrand {
+    pid: u32,
+}
+
+const SETSID_GRANDCHILD: &str = r#"
+import os, socket, sys, fcntl
+sock_path = sys.argv[1]
+pid = os.fork()
+if pid == 0:
+    os.setsid()
+    os.chdir("/")
+    sock = socket.socket(socket.AF_UNIX)
+    sock.bind(sock_path)
+    sock.listen(1)
+    keep = sock.fileno()
+    flags = fcntl.fcntl(keep, fcntl.F_GETFD)
+    fcntl.fcntl(keep, fcntl.F_SETFD, flags & ~fcntl.FD_CLOEXEC)
+    null = os.open("/dev/null", os.O_RDWR)
+    os.dup2(null, 0)
+    os.dup2(null, 1)
+    os.dup2(null, 2)
+    os.close(null)
+    for n in range(3, 256):
+        if n == keep:
+            continue
+        try:
+            os.close(n)
+        except OSError:
+            pass
+    os.execve("/usr/bin/sleep", ["sleep", "30"], {})
+else:
+    os.write(1, b"%d\n" % pid)
+    os.close(1)
+    os._exit(0)
+"#;
+
+impl Drop for SetsidGrand {
+    fn drop(&mut self) {
+        // The survivor check has already run. This only stops the sleeper
+        // when that check failed, so the next test does not inherit it.
+        if proc_stat(self.pid).is_none() {
+            return;
+        }
+        let mut before = child_pids(std::process::id());
+        before.retain(|cand| *cand != self.pid);
+        reap_owned(&before, None);
+        signal_one(self.pid);
+        let deadline = Instant::now() + REAP_BOUND;
+        while proc_stat(self.pid).is_some() && Instant::now() < deadline {
+            let _ = wait_pid(self.pid);
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl SetsidGrand {
+    fn start(home: &Path) -> Self {
+        let sock = home.join("leak.sock");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg("-c")
+            .arg(SETSID_GRANDCHILD)
+            .arg(&sock)
+            .process_group(0)
+            .current_dir("/")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().unwrap();
+        let mut line = String::new();
+        {
+            let stdout = child.stdout.take().unwrap();
+            let mut reader = BufReader::new(stdout);
+            reader.read_line(&mut line).unwrap();
+        }
+        let pid = line
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("setsid pid from {line:?}"));
+        assert!(
+            wait_until(&mut child, Duration::from_secs(2)).is_some(),
+            "setsid parent did not exit"
+        );
+        let self_pid = std::process::id();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let stat = proc_stat(pid);
+            let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
+            let settled = stat.is_some_and(|stat| {
+                stat.state == 'S' && stat.sid == pid && (stat.ppid == 1 || stat.ppid == self_pid)
+            }) && comm(pid) == "sleep"
+                && cwd.as_deref() == Some(Path::new("/"));
+            if settled {
+                break;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "setsid grandchild {pid} did not settle: {}",
+                    report_pid(pid).unwrap_or_else(|| "gone".to_string())
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Self { pid }
     }
 }
 
 fn run(seat: &Seat, args: &[&str], env: &[(&str, &str)]) -> (Output, Duration) {
+    let _gate = harness_lock();
+    become_subreaper();
     let home = seat.home.path();
+    // Children already alive are not this run's. The setsid grandchild and
+    // the client are spawned after the snapshot, so the reap can see them
+    // even after they leave the client's process group.
+    let before = child_pids(std::process::id());
+    let grand = SetsidGrand::start(home);
     let started = Instant::now();
     #[expect(
         clippy::disallowed_methods,
@@ -293,17 +594,15 @@ fn run(seat: &Seat, args: &[&str], env: &[(&str, &str)]) -> (Output, Duration) {
     // caller can fail with the elapsed time. Stdout and stderr are
     // drained on reader threads while the child runs. A full pipe would
     // otherwise stall the write, the ceiling would kill the child, and
-    // the capture would stop at the pipe's capacity. `GroupGuard` kills
-    // the group on the way out, including a clean exit and pipes that
-    // have already closed. The ceiling kills before the reader grace, so
-    // a grandchild still holding a pipe cannot keep the read waiting.
-    // The kill result is checked, and the reap is a bounded `try_wait`.
+    // the capture would stop at the pipe's capacity. The ceiling reaps
+    // before the reader grace, so a grandchild still holding a pipe
+    // cannot keep the read waiting. The reap is one bounded walk of the
+    // children of this process.
     let mut child = cmd.process_group(0).spawn().unwrap();
-    let group = libc::pid_t::try_from(child.id()).unwrap();
+    let leader = child.id();
     let guard = GroupGuard {
-        group,
-        spawned: Spawned::leader(child.id()),
-        home: home.to_path_buf(),
+        before: before.clone(),
+        leader,
     };
     let stdout_rx = spawn_drain(child.stdout.take());
     let stderr_rx = spawn_drain(child.stderr.take());
@@ -316,12 +615,12 @@ fn run(seat: &Seat, args: &[&str], env: &[(&str, &str)]) -> (Output, Duration) {
         match child.try_wait() {
             Ok(Some(status)) if stdout.is_some() && stderr.is_some() => break status,
             Ok(found) if started.elapsed() >= ceiling => {
-                let status = reap_leader(&mut child, group, found);
+                let status = reap_leader(&mut child, &guard.before, found);
                 await_closed(&mut stdout, &mut stderr, &stdout_rx, &stderr_rx);
                 break status;
             }
             Ok(Some(_) | None) => thread::sleep(Duration::from_millis(20)),
-            Err(err) => panic!("leader {group}: {err}"),
+            Err(err) => panic!("leader {leader}: {err}"),
         }
     };
     let elapsed = started.elapsed();
@@ -330,14 +629,15 @@ fn run(seat: &Seat, args: &[&str], env: &[(&str, &str)]) -> (Output, Duration) {
         stdout: stdout.unwrap_or_default(),
         stderr: stderr.unwrap_or_default(),
     };
-    drop(child);
     drop(guard);
-    let left = alive_under(home);
+    drop(child);
+    let left = left_owned(&before, None);
+    let grand_left = report_pid(grand.pid);
     assert!(
-        left.is_empty(),
-        "a process started under {} is still alive:\n{}",
-        home.display(),
-        left.join("\n")
+        left.is_empty() && grand_left.is_none(),
+        "a process this harness started is still alive:\n{}\nsetsid grandchild {}",
+        left.join("\n"),
+        grand_left.as_deref().unwrap_or("gone")
     );
     (output, elapsed)
 }
@@ -357,461 +657,6 @@ fn await_closed(
         }
         thread::sleep(Duration::from_millis(10));
     }
-}
-
-/// `SIGKILL` for `pid`. A negative pid is a process group.
-///
-/// The returned error is the errno from `kill`. `ESRCH` means the pid
-/// was already gone.
-fn raw_signal(pid: libc::pid_t, sig: i32) -> Result<(), i32> {
-    // `kill(-1)` signals every process this user may signal, and
-    // `kill(0)` signals this process's own group.
-    if pid == 0 || pid == -1 {
-        return Err(libc::EINVAL);
-    }
-    // SAFETY: `pid` is the leader this test spawned, that leader's
-    // process group, or a daemon pid read from the test home.
-    let rc = unsafe { libc::kill(pid, sig) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error()
-            .raw_os_error()
-            .unwrap_or(libc::ESRCH))
-    }
-}
-
-fn signal_group(group: libc::pid_t) -> Result<(), i32> {
-    if group <= 1 {
-        return Err(libc::EINVAL);
-    }
-    raw_signal(-group, libc::SIGKILL)
-}
-
-/// Reap `child` after the group signal. A failed group kill means the
-/// leader has left the group, so the leader pid is signaled while
-/// `try_wait` still owns it. The wait is bounded either way.
-fn reap_leader(child: &mut Child, group: libc::pid_t, found: Option<ExitStatus>) -> ExitStatus {
-    let group_rc = signal_group(group);
-    if let Some(status) = found {
-        // The leader is already reaped. `ESRCH` means the group was
-        // empty. There is no wait on this path.
-        let _ = group_rc;
-        return status;
-    }
-    if group_rc.is_err() {
-        let _ = raw_signal(group, libc::SIGKILL);
-    }
-    wait_until(child, REAP_BOUND)
-        .or_else(|| {
-            let _ = raw_signal(group, libc::SIGKILL);
-            wait_until(child, REAP_BOUND)
-        })
-        .unwrap_or_else(|| panic!("leader {group} still alive after SIGKILL"))
-}
-
-fn wait_until(child: &mut Child, bound: Duration) -> Option<ExitStatus> {
-    let deadline = Instant::now() + bound;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) if Instant::now() >= deadline => return None,
-            Ok(None) => thread::sleep(Duration::from_millis(10)),
-            Err(_) => return None,
-        }
-    }
-}
-
-fn stop_recorded(home: &Path, spawned: &mut Spawned) {
-    let deadline = Instant::now() + REAP_BOUND;
-    loop {
-        spawned.adopt_tree();
-        let groups = spawned.groups.clone();
-        for group in groups {
-            let Ok(group) = libc::pid_t::try_from(group) else {
-                continue;
-            };
-            let _ = signal_group(group);
-        }
-        let pids = recorded_pids(home, spawned);
-        if pids.is_empty() && alive_under(home).is_empty() {
-            return;
-        }
-        for pid in pids {
-            stop_pid(pid, spawned);
-        }
-        if Instant::now() >= deadline {
-            return;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-/// Signals `pid` only when this harness spawned it or created its group.
-///
-/// The whole group is signaled. `packset-embed` publishes no pid file and
-/// dies with the writer's group instead of being left behind by a signal
-/// to the writer pid alone.
-fn stop_pid(pid: u32, spawned: &Spawned) {
-    if !may_signal(pid, spawned) {
-        return;
-    }
-    let Ok(raw) = libc::pid_t::try_from(pid) else {
-        return;
-    };
-    if raw <= 1 {
-        return;
-    }
-    if let Some(group) = pgrp(pid) {
-        let owned = spawned.groups.contains(&group)
-            || spawned.pids.contains(&group)
-            || spawned.pids.contains(&pid)
-            || descends_from(pid, spawned);
-        if owned {
-            if let Ok(group) = libc::pid_t::try_from(group) {
-                let _ = signal_group(group);
-            }
-        }
-    }
-    let _ = raw_signal(raw, libc::SIGKILL);
-    // `ESRCH` means the pid is already gone. The caller polls the home
-    // until [`REAP_BOUND`] and does not block in `wait`.
-}
-
-fn may_signal(pid: u32, spawned: &Spawned) -> bool {
-    pid > 1 && pid != std::process::id() && (spawned.owns(pid) || descends_from(pid, spawned))
-}
-
-fn descends_from(pid: u32, spawned: &Spawned) -> bool {
-    let mut cur = pid;
-    for _ in 0..16 {
-        let Some(parent) = ppid(cur) else {
-            return false;
-        };
-        if parent <= 1 {
-            return false;
-        }
-        if spawned.pids.contains(&parent) {
-            return true;
-        }
-        cur = parent;
-    }
-    false
-}
-
-fn ppid(pid: u32) -> Option<u32> {
-    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rest = text.rsplit_once(')')?.1;
-    let mut fields = rest.split_whitespace();
-    let _state = fields.next()?;
-    fields.next()?.parse().ok()
-}
-
-fn recorded_pids(home: &Path, spawned: &Spawned) -> Vec<u32> {
-    let mut found = Vec::new();
-    let mut stack = vec![home.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if kind.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            note_record(&path, kind, spawned, &mut found);
-        }
-    }
-    found.sort_unstable();
-    found.dedup();
-    found
-}
-
-fn note_record(path: &Path, kind: std::fs::FileType, spawned: &Spawned, found: &mut Vec<u32>) {
-    if is_pid_name(path) {
-        if let Some(pid) = read_pid_file(path) {
-            if may_signal(pid, spawned) {
-                found.push(pid);
-            }
-        }
-        return;
-    }
-    if path.file_name().is_some_and(|name| name == "port") {
-        if let Some(port) = read_port(path) {
-            for pid in listeners(port) {
-                if may_signal(pid, spawned) {
-                    found.push(pid);
-                }
-            }
-        }
-        return;
-    }
-    if path.file_name().is_some_and(|name| name == "packsetd.lock") {
-        if let Some(pid) = lock_holder(path) {
-            if may_signal(pid, spawned) {
-                found.push(pid);
-            }
-        }
-        return;
-    }
-    if kind.is_socket() {
-        if let Some(pid) = socket_owner(path) {
-            if may_signal(pid, spawned) {
-                found.push(pid);
-            }
-        }
-    }
-}
-
-fn is_pid_name(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name == "pid")
-        || path.extension().is_some_and(|ext| ext == "pid")
-}
-
-fn read_pid_file(path: &Path) -> Option<u32> {
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > 32 {
-        return None;
-    }
-    let text = std::fs::read_to_string(path).ok()?;
-    let text = text.trim();
-    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let pid = text.parse().ok()?;
-    (pid > 1).then_some(pid)
-}
-
-fn read_port(path: &Path) -> Option<u16> {
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > 16 {
-        return None;
-    }
-    let text = std::fs::read_to_string(path).ok()?;
-    let text = text.trim();
-    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let port = text.parse().ok()?;
-    (port > 0).then_some(port)
-}
-
-fn listeners(port: u16) -> Vec<u32> {
-    let mut inodes = Vec::new();
-    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        let Ok(text) = std::fs::read_to_string(table) else {
-            continue;
-        };
-        for line in text.lines().skip(1) {
-            let cols: Vec<&str> = line.split_whitespace().collect();
-            if cols.len() < 10 || cols[3] != "0A" {
-                continue;
-            }
-            let Some((_, hex_port)) = cols[1].rsplit_once(':') else {
-                continue;
-            };
-            let Ok(found) = u16::from_str_radix(hex_port, 16) else {
-                continue;
-            };
-            if found != port {
-                continue;
-            }
-            let Ok(inode) = cols[9].parse::<u64>() else {
-                continue;
-            };
-            if inode != 0 {
-                inodes.push(inode);
-            }
-        }
-    }
-    inodes.into_iter().filter_map(pid_for_inode).collect()
-}
-
-fn socket_owner(path: &Path) -> Option<u32> {
-    pid_for_inode(listening_inode(path)?)
-}
-
-/// Inode of the socket bound at `path`, from the listening socket table.
-///
-/// That number is the sockfs inode in `socket:[inode]`. The directory
-/// inode of the socket file is a different number and can name an
-/// unrelated process.
-fn listening_inode(path: &Path) -> Option<u64> {
-    let text = std::fs::read_to_string("/proc/net/unix").ok()?;
-    let want = path.as_os_str().to_string_lossy();
-    for line in text.lines().skip(1) {
-        let mut cols = line.split_whitespace();
-        let Some(inode) = cols.nth(6) else {
-            continue;
-        };
-        let Some(listed) = cols.next() else {
-            continue;
-        };
-        if listed != want.as_ref() {
-            continue;
-        }
-        let Ok(inode) = inode.parse::<u64>() else {
-            continue;
-        };
-        if inode != 0 {
-            return Some(inode);
-        }
-    }
-    None
-}
-
-fn pid_for_inode(inode: u64) -> Option<u32> {
-    let needle = format!("socket:[{inode}]");
-    for pid in proc_pids() {
-        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
-            continue;
-        };
-        for fd in fds.flatten() {
-            if std::fs::read_link(fd.path()).is_ok_and(|target| target.to_string_lossy() == needle)
-            {
-                return Some(pid);
-            }
-        }
-    }
-    None
-}
-
-fn lock_holder(path: &Path) -> Option<u32> {
-    for pid in proc_pids() {
-        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
-            continue;
-        };
-        for fd in fds.flatten() {
-            if std::fs::read_link(fd.path()).is_ok_and(|target| same_path(&target, path)) {
-                return Some(pid);
-            }
-        }
-    }
-    None
-}
-
-fn same_path(target: &Path, want: &Path) -> bool {
-    if target == want {
-        return true;
-    }
-    match (std::fs::canonicalize(target), std::fs::canonicalize(want)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
-}
-
-fn alive_under(home: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    for pid in proc_pids() {
-        if !tied(pid, home) {
-            continue;
-        }
-        let state = process_state(pid).unwrap_or('?');
-        out.push(format!("{pid} {state} {}", comm(pid)));
-    }
-    out
-}
-
-/// A process this test started under `home`: its cwd, a home variable, or
-/// an open file sits in that directory.
-fn tied(pid: u32, home: &Path) -> bool {
-    if pid <= 1 || pid == std::process::id() {
-        return false;
-    }
-    match process_state(pid) {
-        Some('Z' | 'X') | None => false,
-        Some(_) => cwd_under(pid, home) || env_under(pid, home) || fd_under(pid, home),
-    }
-}
-
-fn process_state(pid: u32) -> Option<char> {
-    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rest = text.rsplit_once(')')?.1.trim_start();
-    rest.chars().next()
-}
-
-fn pgrp(pid: u32) -> Option<u32> {
-    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rest = text.rsplit_once(')')?.1;
-    let mut fields = rest.split_whitespace();
-    let _state = fields.next()?;
-    let _ppid = fields.next()?;
-    fields.next()?.parse().ok()
-}
-
-fn comm(pid: u32) -> String {
-    std::fs::read_to_string(format!("/proc/{pid}/comm"))
-        .map(|text| text.trim().to_string())
-        .unwrap_or_else(|_| "unknown".to_string())
-}
-
-fn cwd_under(pid: u32, home: &Path) -> bool {
-    std::fs::read_link(format!("/proc/{pid}/cwd"))
-        .ok()
-        .is_some_and(|cwd| cwd.starts_with(home))
-}
-
-fn env_under(pid: u32, home: &Path) -> bool {
-    let Ok(bytes) = std::fs::read(format!("/proc/{pid}/environ")) else {
-        return false;
-    };
-    let home = home.as_os_str().as_encoded_bytes();
-    for entry in bytes.split(|byte| *byte == 0) {
-        let Some(eq) = entry.iter().position(|byte| *byte == b'=') else {
-            continue;
-        };
-        if !home_key(&entry[..eq]) {
-            continue;
-        }
-        if path_under(&entry[eq + 1..], home) {
-            return true;
-        }
-    }
-    false
-}
-
-fn home_key(key: &[u8]) -> bool {
-    matches!(
-        key,
-        b"HOME"
-            | b"TMPDIR"
-            | b"XDG_STATE_HOME"
-            | b"XDG_RUNTIME_DIR"
-            | b"XDG_CACHE_HOME"
-            | b"XDG_DATA_HOME"
-            | b"PACKSET_HOME"
-            | b"PACKSET_LOG"
-    )
-}
-
-fn path_under(value: &[u8], home: &[u8]) -> bool {
-    value == home || (value.starts_with(home) && value.get(home.len()) == Some(&b'/'))
-}
-
-fn fd_under(pid: u32, home: &Path) -> bool {
-    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
-        return false;
-    };
-    fds.flatten().any(|fd| {
-        std::fs::read_link(fd.path())
-            .ok()
-            .is_some_and(|target| target.starts_with(home))
-    })
-}
-
-fn proc_pids() -> Vec<u32> {
-    let Ok(proc) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    let self_pid = std::process::id();
-    proc.flatten()
-        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
-        .filter(|pid| *pid > 1 && *pid != self_pid)
-        .collect()
 }
 
 fn spawn_drain<R>(pipe: Option<R>) -> mpsc::Receiver<Vec<u8>>
@@ -1229,7 +1074,7 @@ fn remember_keeps_a_lesson_that_names_the_busy_words() {
     assert!(elapsed < Duration::from_secs(2), "{elapsed:?}\n{said}");
 }
 
-/// Holds sockets until dropped, then the child is signaled and reaped.
+/// Holds sockets until dropped, then the child is reaped through [`reap_owned`].
 struct ForeignHold {
     child: Child,
 }
@@ -1237,11 +1082,10 @@ struct ForeignHold {
 impl Drop for ForeignHold {
     fn drop(&mut self) {
         let pid = self.child.id();
-        if let Ok(raw) = libc::pid_t::try_from(pid) {
-            let _ = raw_signal(raw, libc::SIGKILL);
-            let _ = signal_group(raw);
-        }
-        let _ = self.child.wait();
+        let mut before = child_pids(std::process::id());
+        before.retain(|cand| *cand != pid);
+        reap_owned(&before, Some(pid));
+        let _ = wait_until(&mut self.child, REAP_BOUND);
     }
 }
 
@@ -1294,45 +1138,38 @@ fn spawn_foreign(script: &str, arg: Option<&std::ffi::OsStr>) -> (ForeignHold, u
     (ForeignHold { child }, pid)
 }
 
-fn still_alive(pid: u32) -> bool {
-    matches!(process_state(pid), Some(ch) if ch != 'Z' && ch != 'X')
-}
-
-/// A process this harness did not spawn holds a socket, and another binds
-/// a socket file under the test home. The directory inode of that file is
-/// not the listening socket. Neither process is signaled.
+/// A process this run did not start holds a socket, and another binds a
+/// socket file under the test home. Both are already children when the reap
+/// snapshots them, so neither is signaled. A listening inode is not consulted.
 #[test]
 fn a_foreign_process_holding_a_matching_inode_is_not_signaled() {
     let _process = ljos_test_boot::env_lock();
+    let _gate = harness_lock();
+    become_subreaper();
     let home = tempfile::TempDir::new().unwrap();
     let sock_path = home.path().join("probe.sock");
     let (binder, binder_pid) = spawn_foreign(BIND_SOCKET, Some(sock_path.as_os_str()));
     let (canary, canary_pid) = spawn_foreign(HOLD_SOCKET, None);
-    let file_ino = std::fs::metadata(&sock_path).unwrap().ino();
-    let listen = listening_inode(&sock_path);
-    assert_ne!(listen, Some(file_ino));
-    assert_eq!(socket_owner(&sock_path), Some(binder_pid));
-    assert_ne!(socket_owner(&sock_path), Some(canary_pid));
-    let mut spawned = Spawned::none();
-    stop_recorded(home.path(), &mut spawned);
+    let before = child_pids(std::process::id());
     assert!(
-        still_alive(canary_pid),
-        "foreign pid {canary_pid} holding a socket inode was signaled, state {:?}",
-        process_state(canary_pid),
+        before.contains(&binder_pid),
+        "binder {binder_pid} is not a child of this process"
     );
+    assert!(
+        before.contains(&canary_pid),
+        "canary {canary_pid} is not a child of this process"
+    );
+    reap_owned(&before, None);
     assert!(
         still_alive(binder_pid),
-        "listener {binder_pid} was signaled, state {:?}",
-        process_state(binder_pid),
+        "listener {binder_pid} was signaled, {}",
+        report_pid(binder_pid).unwrap_or_else(|| "gone".to_string())
     );
-    // The directory inode is the old lookup key. A process that holds
-    // `socket:[that]` is not one this harness may signal.
-    if let Some(matched) = pid_for_inode(file_ino) {
-        assert!(
-            still_alive(matched),
-            "pid {matched} matched directory inode {file_ino} and was signaled"
-        );
-    }
+    assert!(
+        still_alive(canary_pid),
+        "foreign pid {canary_pid} was signaled, {}",
+        report_pid(canary_pid).unwrap_or_else(|| "gone".to_string())
+    );
     drop(binder);
     drop(canary);
 }
