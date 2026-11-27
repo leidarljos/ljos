@@ -594,12 +594,61 @@ unsafe fn listen_loopback_fd(port: u16) -> std::io::Result<std::os::fd::RawFd> {
     Ok(fd)
 }
 
-fn socket_ino(sock: &TcpListener) -> libc::ino_t {
-    // SAFETY: `stat` is a plain C struct. `sock` is an open listener.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::fstat(sock.as_raw_fd(), &mut st) };
+fn rcvbuf(sock: &TcpListener) -> libc::c_int {
+    let mut val: libc::c_int = 0;
+    let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()).unwrap_or(4);
+    // SAFETY: `val` is a C int. `sock` is an open listener.
+    let rc = unsafe {
+        libc::getsockopt(
+            sock.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            (&mut val as *mut libc::c_int).cast(),
+            &mut len,
+        )
+    };
     assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
-    st.st_ino
+    val
+}
+
+fn set_rcvbuf(sock: &TcpListener, val: libc::c_int) {
+    let len = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>()).unwrap_or(4);
+    // SAFETY: `val` is a C int. `sock` is an open listener.
+    let rc = unsafe {
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            (&val as *const libc::c_int).cast(),
+            len,
+        )
+    };
+    assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+}
+
+/// `second` is bound to `port` and is not a dup of `held`.
+///
+/// Darwin reports `st_ino` 0 for every TCP socket, so the inode cannot
+/// tell two listeners apart. The receive buffer belongs to the socket:
+/// a dup sees a change and a new socket does not.
+fn assert_new_listener(held: &TcpListener, second: &TcpListener, port: u16) {
+    assert_eq!(
+        second.local_addr().unwrap().port(),
+        port,
+        "the restart left the port"
+    );
+    let before = rcvbuf(held);
+    set_rcvbuf(held, before.saturating_add(65_536));
+    let changed = rcvbuf(held);
+    let other = rcvbuf(second);
+    // Linux doubles the size it stores. Darwin keeps the value it was given.
+    set_rcvbuf(held, before);
+    if rcvbuf(held) != before {
+        set_rcvbuf(held, before / 2);
+    }
+    assert_eq!(rcvbuf(held), before, "the socket buffer did not go back");
+    assert_ne!(changed, before, "the socket buffer did not move");
+    assert_ne!(other, changed, "the restart used the same socket");
 }
 
 #[test]
@@ -649,12 +698,16 @@ fn a_restarted_writer_is_reached_on_the_next_call() {
     let _ = std::net::TcpStream::connect(("127.0.0.1", port));
     let _ = first_thread.join();
     let second_listener = listen_loopback(port);
-    assert_ne!(
-        socket_ino(&held),
-        socket_ino(&second_listener),
-        "the restart used the same socket"
-    );
+    assert_new_listener(&held, &second_listener, port);
     drop(held);
+    // The first socket is closed, so this connection cannot land on it.
+    let probe = second_listener.try_clone().unwrap();
+    let accepted = std::thread::spawn(move || probe.accept().is_ok());
+    std::net::TcpStream::connect(("127.0.0.1", port)).expect("the restarted port");
+    assert!(
+        accepted.join().unwrap(),
+        "the new listener took no connection"
+    );
     let again = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let second = serve(second_listener, again.clone());
     let after = call(
