@@ -60778,6 +60778,13 @@ fn clear_reused_test_thread() {
     clear_bound_call_seat();
     clear_seated();
     seat_resolve::reset_for_test();
+    // A guard moved to another thread restores its budget there and
+    // leaves this thread's deadline set. The next pack read is then one
+    // millisecond, and a hook note comes back empty.
+    disarm_wall();
+    PACK_BUDGET_MS.with(|cell| cell.set(None));
+    tool_bound::disarm();
+    pack_link::disarm_clock();
 }
 
 /// Whether `tool` is missing, after the process `PATH` is the one the

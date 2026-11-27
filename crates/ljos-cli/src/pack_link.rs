@@ -322,6 +322,16 @@ fn clock_deadline() -> Option<Instant> {
     CLOCK.with(|slot| slot.borrow().as_ref().map(|clock| clock.deadline))
 }
 
+/// Drop a pack clock a previous test left on this thread.
+///
+/// [`PackClock`] clears the clock on the thread that drops it. A guard
+/// moved elsewhere leaves the deadline set, and a later read on this
+/// thread is a timeout rather than an answer.
+#[cfg(test)]
+pub(crate) fn disarm_clock() {
+    CLOCK.with(|slot| *slot.borrow_mut() = None);
+}
+
 pub(crate) fn clock_armed() -> bool {
     clock_deadline().is_some()
 }
