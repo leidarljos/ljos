@@ -75,6 +75,13 @@ pub fn of_error(err: &anyhow::Error) -> Option<State> {
     if crate::is_memory_starting(err) {
         return Some(State::Starting);
     }
+    // Darwin drops a SYN to a bound port that is not listening. The
+    // handshake wait is the same fact as a reset: nothing accepted the
+    // connection. A read that goes quiet stays busy, below.
+    #[cfg(not(target_os = "linux"))]
+    if crate::connect_timed_out(err) {
+        return Some(State::Down);
+    }
     // The writer answered "busy" while it loads, on a route that does not
     // say it is starting. Its `/health` does, so ask it.
     if (crate::is_read_shed(err) || crate::is_reported_busy(err) || crate::is_pack_busy(err))

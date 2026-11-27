@@ -18451,12 +18451,42 @@ pub fn refine_default_hits(hits: &mut Vec<Hit>, query: &str, attempts: bool) {
 /// prints is this fact alone, not the chain under it.
 #[must_use]
 pub fn pack_unreachable(err: &anyhow::Error) -> bool {
-    err.to_string()
-        .to_ascii_lowercase()
-        .contains("connection refused")
-        || format!("{err:#}")
-            .to_ascii_lowercase()
-            .contains("connection refused")
+    let text = err.to_string().to_ascii_lowercase();
+    let chain = format!("{err:#}").to_ascii_lowercase();
+    text.contains("connection refused")
+        || chain.contains("connection refused")
+        || connect_timed_out(err)
+}
+
+/// Whether `err` is the handshake wait, not a read that went quiet.
+///
+/// `TcpStream::connect_timeout` builds this error itself: kind
+/// [`std::io::ErrorKind::TimedOut`], no os code, and the words
+/// "connection timed out". A later read that the kernel times out carries
+/// an os code and is not this. On Linux a closed port is
+/// `ECONNREFUSED` before the wait, so this stays false there.
+#[cfg(target_os = "linux")]
+fn connect_timed_out(_err: &anyhow::Error) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "linux"))]
+fn connect_timed_out(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let io = cause.downcast_ref::<std::io::Error>().or_else(|| {
+            cause
+                .downcast_ref::<packset_client::Error>()
+                .and_then(|inner| match inner {
+                    packset_client::Error::Io(io) => Some(io),
+                    _ => None,
+                })
+        });
+        io.is_some_and(|io| {
+            io.kind() == std::io::ErrorKind::TimedOut
+                && io.raw_os_error().is_none()
+                && io.to_string().contains("connection timed out")
+        })
+    })
 }
 
 /// [`packset_search_opts`] without the rerank, chosen by relevance, see

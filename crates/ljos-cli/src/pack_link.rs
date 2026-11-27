@@ -1125,8 +1125,30 @@ fn budget_spent() -> std::io::Error {
     )
 }
 
+/// How long a loopback connect may wait on a kernel that drops a SYN to
+/// a bound port that is not listening. A listener completes the
+/// handshake well inside this. `LJOS_PACK_CONNECT_MS` replaces it when
+/// a caller sets one. A remote address keeps the budget it was given.
+#[cfg(not(target_os = "linux"))]
+fn cap_loopback_connect(addr: SocketAddr, wait: Duration) -> Duration {
+    if !addr.ip().is_loopback() {
+        return wait;
+    }
+    let cap = if std::env::var_os("LJOS_PACK_CONNECT_MS").is_some() {
+        super::pack_connect_budget()
+    } else {
+        Duration::from_millis(400)
+    };
+    wait.min(cap)
+}
+
 fn connect_once(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
     let wait = bounded_wait(timeout, true)?;
+    // Darwin drops a SYN to a bound port that is not listening, so the
+    // connect waits out the whole call. The cap is applied below on
+    // loopback only. Linux resets that SYN at once and does not cap.
+    #[cfg(not(target_os = "linux"))]
+    let wait = cap_loopback_connect(addr, wait);
     let stream = TcpStream::connect_timeout(&addr, wait)?;
     let io_wait = bounded_wait(timeout, false)?;
     stream.set_read_timeout(Some(io_wait))?;
