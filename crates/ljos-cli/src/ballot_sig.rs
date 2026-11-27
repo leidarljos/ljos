@@ -157,7 +157,7 @@ pub fn parse_note(note: &str) -> Option<SigNote> {
     };
     let choice = rest[at[1].0..at[k - 1].1].trim();
     Some(SigNote {
-        voter: tok(0).to_string(),
+        voter: noted_voter(tok(0)),
         choice: choice.to_string(),
         key: tok(k).to_string(),
         sig: tok(k + 1).to_string(),
@@ -215,7 +215,7 @@ pub fn withdrawn_line_on(voter: &str, harness: &str, nonce: &str, issue: Option<
     if let Some(issue) = issue {
         return format!(
             "{WITHDRAWN_NOTE}{} {} {} {}",
-            field(voter),
+            noted_voter(voter),
             field(harness),
             field(nonce),
             issue
@@ -223,7 +223,7 @@ pub fn withdrawn_line_on(voter: &str, harness: &str, nonce: &str, issue: Option<
     }
     format!(
         "{WITHDRAWN_NOTE}{} {} {}",
-        field(voter),
+        noted_voter(voter),
         field(harness),
         field(nonce)
     )
@@ -241,7 +241,7 @@ pub fn parse_withdrawn(note: &str) -> Option<WithdrawnNote> {
         _ => return None,
     };
     Some(WithdrawnNote {
-        voter: voter.to_string(),
+        voter: noted_voter(voter),
         harness: harness.to_string(),
         nonce: nonce.to_string(),
         issue,
@@ -655,14 +655,9 @@ pub(crate) fn git_in(root: &Path, args: &[&str]) -> Option<String> {
 /// The note text for a ballot signed by `key` (v1, choice only).
 #[must_use]
 pub fn sign_with(key: &SigningKey, issue: &str, voter: &str, choice: &str) -> String {
-    let (public, sig) = signed_hex(key, &message(issue, voter, choice));
-    format!(
-        "{SIG_NOTE}{} {} {} {}",
-        voter.trim(),
-        choice.trim(),
-        public,
-        sig
-    )
+    let voter = noted_voter(voter);
+    let (public, sig) = signed_hex(key, &message(issue, &voter, choice));
+    format!("{SIG_NOTE}{} {} {} {}", voter, choice.trim(), public, sig)
 }
 
 /// The note text for a ballot bound to a harness session and its marker.
@@ -675,12 +670,13 @@ pub fn sign_bound(
     harness: &str,
     nonce: &str,
 ) -> String {
+    let voter = noted_voter(voter);
     let harness = field(harness);
     let nonce = field(nonce);
-    let (public, sig) = signed_hex(key, &message_v2(issue, voter, choice, &harness, &nonce));
+    let (public, sig) = signed_hex(key, &message_v2(issue, &voter, choice, &harness, &nonce));
     format!(
         "{SIG_NOTE}{} {} {} {} {} {}",
-        voter.trim(),
+        voter,
         choice.trim(),
         public,
         sig,
@@ -709,6 +705,7 @@ pub(crate) fn sign_linked(
     choice: &str,
     fields: LinkedFields<'_>,
 ) -> String {
+    let voter = noted_voter(voter);
     let harness = field(fields.harness);
     let nonce = field(fields.nonce);
     let claimed_harness = field(fields.claimed_harness);
@@ -718,7 +715,7 @@ pub(crate) fn sign_linked(
         key,
         &message_v3(
             issue,
-            voter,
+            &voter,
             choice,
             &harness,
             &nonce,
@@ -731,7 +728,7 @@ pub(crate) fn sign_linked(
     );
     format!(
         "{SIG_NOTE}{} {} {} {} {} {} {} {} {}",
-        voter.trim(),
+        voter,
         choice.trim(),
         public,
         sig,
@@ -854,6 +851,22 @@ pub fn pins() -> BTreeMap<String, String> {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|t| parse_pins(&t))
         .unwrap_or_default()
+}
+
+/// The voter token written into a signature. A compound `persona:` id is
+/// already one token and stays as written so an older note still verifies.
+/// Every other name is [`crate::voter_id`], which has no spaces.
+fn noted_voter(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.contains(':') {
+        return raw.to_string();
+    }
+    let id = crate::voter_id(raw);
+    if id.is_empty() {
+        raw.to_string()
+    } else {
+        id
+    }
 }
 
 /// A token safe to put in a signature note: no whitespace.
@@ -1421,8 +1434,8 @@ pub fn provenance_line(persona: &str, caster: &str, parent: &str) -> String {
 pub fn caster_persona_voter(caster: &str, persona: &str) -> String {
     format!(
         "{PERSONA_VOTER}{}:{}",
-        field(&crate::canonical_seat_name(caster)),
-        field(&crate::canonical_seat_name(persona))
+        field(&crate::voter_id(caster)),
+        field(&crate::voter_id(persona))
     )
 }
 
@@ -1597,8 +1610,12 @@ fn current_public_hex(voter: &str) -> Option<String> {
     Some(hex::encode(key.verifying_key().to_bytes()))
 }
 
-fn same_voter(signed: &str, voter: &str) -> bool {
-    signed == voter.trim() || signed == field(voter)
+pub(crate) fn same_voter(signed: &str, voter: &str) -> bool {
+    let signed_id = crate::voter_id(signed);
+    let voter_id = crate::voter_id(voter);
+    (!signed_id.is_empty() && signed_id == voter_id)
+        || signed == voter.trim()
+        || signed == field(voter)
 }
 
 fn newest_sig(issue: &str, voter: &str) -> Option<(SigNote, bool)> {
@@ -1660,12 +1677,12 @@ pub fn sign_own_ballot(issue: &str) -> Result<String> {
     };
     let Some(choice) = ballots
         .iter()
-        .find(|b| b.agent == voter)
+        .find(|b| same_voter(&b.agent, &voter))
         .map(|b| b.choice.clone())
     else {
         return Ok(String::new());
     };
-    sign_ballot(issue, &voter, &choice)
+    sign_ballot(issue, &crate::voter_id(&voter), &choice)
 }
 
 /// The name this process's seat casts and signs under: the seat its write
@@ -1863,7 +1880,7 @@ pub fn seat_check(
         let newest = notes
             .iter()
             .filter_map(|n| parse_note(n))
-            .find(|n| n.voter == *voter);
+            .find(|n| same_voter(&n.voter, voter));
         match newest {
             None if legacy(voter, choice) => old.push((*voter).to_string()),
             None => out.push(format!("{voter}'s ballot is unsigned")),
@@ -2180,14 +2197,14 @@ mod tests {
     fn a_withdrawn_note_is_three_fields() {
         let _env_read = crate::test_env_read_lock();
         let line = withdrawn_line("seat a", "sess-1", "-");
-        assert_eq!(line, "ballot-withdrawn: seat_a sess-1 -");
+        assert_eq!(line, "ballot-withdrawn: seat-a sess-1 -");
         let parsed = parse_withdrawn(&line).unwrap();
-        assert_eq!(parsed.voter, "seat_a");
+        assert_eq!(parsed.voter, "seat-a");
         assert_eq!(parsed.harness, "sess-1");
         assert_eq!(parsed.nonce, "-");
         assert_eq!(parsed.issue, None);
         let on = withdrawn_line_on("seat a", "sess-1", "-", Some("child-a"));
-        assert_eq!(on, "ballot-withdrawn: seat_a sess-1 - child-a");
+        assert_eq!(on, "ballot-withdrawn: seat-a sess-1 - child-a");
         let parsed = parse_withdrawn(&on).unwrap();
         assert_eq!(parsed.issue.as_deref(), Some("child-a"));
         assert!(parse_withdrawn("ballot-withdrawn: only-one").is_none());

@@ -290,7 +290,9 @@ fn withdrawal_cuts(notes: &[String], home: &str) -> BTreeMap<(String, String), u
     for (at, note) in notes.iter().enumerate() {
         if let Some(w) = ballot_sig::parse_withdrawn(note) {
             let issue = w.issue.unwrap_or_else(|| home.to_string());
-            cuts.entry((issue, w.voter)).or_insert(at);
+            let voter = crate::voter_id(&w.voter);
+            let voter = if voter.is_empty() { w.voter } else { voter };
+            cuts.entry((issue, voter)).or_insert(at);
         }
     }
     cuts
@@ -301,19 +303,22 @@ fn withdrawn_at(
     issue: &str,
     voter: &str,
 ) -> Option<usize> {
+    let voter = crate::voter_id(voter);
+    if voter.is_empty() {
+        return None;
+    }
     if issue.is_empty() {
-        let field = ballot_sig::field(voter);
         return cuts
             .iter()
-            .find_map(|((_issue, v), at)| (v == voter || v == &field).then_some(*at));
+            .find_map(|((_issue, v), at)| (v == &voter).then_some(*at));
     }
-    let named = (issue.to_string(), voter.to_string());
-    let field = (issue.to_string(), ballot_sig::field(voter));
-    cuts.get(&named).or_else(|| cuts.get(&field)).copied()
+    cuts.get(&(issue.to_string(), voter)).copied()
 }
 
 fn same_voter(signed: &str, voter: &str) -> bool {
-    signed == voter.trim() || signed == ballot_sig::field(voter)
+    let signed = crate::voter_id(signed);
+    let voter = crate::voter_id(voter);
+    !signed.is_empty() && signed == voter
 }
 
 fn matching_ballot_issue(
@@ -851,6 +856,15 @@ fn held_choice(issue: &str, voter: &str) -> Option<String> {
         .map(|row| row["choice"].as_str().unwrap_or("").trim().to_string())
 }
 
+/// Drop the in-process mark so `voter` can cast again after a withdrawal.
+/// The drawer row is a separate write.
+pub fn release_session_ballot(issue: &str, voter: &str) {
+    let mark = format!("{}\n{}", issue.trim(), crate::voter_id(voter));
+    if let Ok(mut held) = CAST.lock() {
+        held.remove(&mark);
+    }
+}
+
 /// Reserve `voter`'s ballot on `issue`. Another persona from this session
 /// is recorded with it. The same voter withdraws before casting again.
 /// This process holds that voter's claim across the gap before the note
@@ -886,7 +900,16 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
         });
         return Err(crate::policy_label::labelled("repeated-ballot", why));
     }
-    let mark = format!("{}\n{voter}", issue.trim());
+    let id = crate::voter_id(voter);
+    let mark = format!(
+        "{}\n{}",
+        issue.trim(),
+        if id.is_empty() {
+            voter.trim()
+        } else {
+            id.as_str()
+        }
+    );
     let mut held = CAST.lock().unwrap_or_else(|e| e.into_inner());
     if !held.insert(mark.clone()) {
         ballot_sig::end_cast();
@@ -1106,6 +1129,7 @@ fn own_voice_voters(notes: &[String]) -> BTreeSet<String> {
             continue;
         }
         own.insert(persona.clone());
+        own.insert(crate::voter_id(&persona));
         own.insert(ballot_sig::caster_persona_voter(&caster, &persona));
     }
     own
@@ -1126,7 +1150,7 @@ fn fold_one_voice(
     let mut parent_at = BTreeMap::new();
     for (i, row) in rows.iter().enumerate() {
         let voter = row["agent"].as_str().unwrap_or("").trim();
-        if own.contains(voter) {
+        if own.contains(voter) || own.contains(&crate::voter_id(voter)) {
             continue;
         }
         let Some(link) = links.get(voter) else {
@@ -1231,7 +1255,7 @@ fn tally_voices(
             continue;
         }
         let entry = bound
-            .entry(sig.voter.clone())
+            .entry(crate::voter_id(&sig.voter))
             .or_insert_with(|| (key, None, sig.seat_only()));
         if entry.1.is_none() && *standing {
             entry.1 = Some(sig.choice.clone());
@@ -1242,16 +1266,17 @@ fn tally_voices(
     let mut seen = std::collections::BTreeSet::new();
     for row in rows {
         let voter = row["agent"].as_str().unwrap_or("").trim();
-        if voter.is_empty() || !seen.insert(voter.to_string()) {
+        let id = crate::voter_id(voter);
+        if id.is_empty() || !seen.insert(id.clone()) {
             continue;
         }
         let any_standing = sigs
             .iter()
-            .any(|(standing, sig)| *standing && sig.voter == voter);
-        if withdrawn_at(&cuts, issue, voter).is_some() && !any_standing {
+            .any(|(standing, sig)| *standing && same_voter(&sig.voter, &id));
+        if withdrawn_at(&cuts, issue, &id).is_some() && !any_standing {
             continue;
         }
-        if let Some((key, oldest, seat_only)) = bound.get(voter) {
+        if let Some((key, oldest, seat_only)) = bound.get(&id) {
             if authors.contains(key) {
                 ignored.push(IgnoredBallot {
                     voter: voter.to_string(),
@@ -1265,9 +1290,9 @@ fn tally_voices(
                 continue;
             };
             let drawer = row["choice"].as_str().unwrap_or("").trim();
-            let signed = sigs
-                .iter()
-                .any(|(standing, sig)| *standing && sig.voter == voter && sig.choice == drawer);
+            let signed = sigs.iter().any(|(standing, sig)| {
+                *standing && same_voter(&sig.voter, &id) && sig.choice == drawer
+            });
             if !signed {
                 continue;
             }

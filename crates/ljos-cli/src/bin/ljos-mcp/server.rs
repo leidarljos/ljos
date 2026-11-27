@@ -3136,8 +3136,12 @@ impl LjosServer {
                 let ballot_issue = ljos_cli::panel_gate::standing_ballot_issue(&args.issue, &who);
                 let mut said =
                     match habitat_as("vissue", &["vote", &args.issue, "--withdraw"], Some(&who)) {
-                        Ok(said) => said,
+                        Ok(said) => {
+                            ljos_cli::panel_gate::release_session_ballot(&args.issue, &who);
+                            said
+                        }
                         Err(e) if format!("{e:#}").contains("holds no ballot") => {
+                            ljos_cli::panel_gate::release_session_ballot(&args.issue, &who);
                             let text = format!(
                                 "{}: {who} holds no ballot; withdrawing the forecast\n",
                                 args.issue
@@ -4430,7 +4434,7 @@ impl LjosServer {
                 concluded into its own set. It ends by casting exactly one ballot: `ljos_vote` \
                 on {issue} with `as` set to the persona's name, for the option it would defend. \
                 The ballot carries `confidence` in (0, 1], `expect` as what it thinks the others \
-                will pick, and `used` as the deeds it drew on, or `none`. \
+                will pick, and `used` naming a deed. A non-seat persona must name a deed. \
                 The line that comes back is a count. The settle is the next step. \
                 Subagents run in parallel and do not see each other's ballots. One playbook \
                 step per subagent; do not resume across phases.\n\

@@ -218,14 +218,16 @@ fn a_vote_on_a_long_tracker_matches_and_does_not_pickaxe() {
     ]);
     let mina_out = String::from_utf8_lossy(&mina.stdout);
     let mina_err = String::from_utf8_lossy(&mina.stderr);
+    let mina_said = format!("{mina_out}{mina_err}");
     assert!(
-        mina.status.success(),
-        "mina vote failed\n{mina_out}\n{mina_err}"
+        !mina.status.success(),
+        "a seat that stood is not a persona of the caster\n{mina_said}"
     );
     assert!(
-        mina_out.contains("recorded on the tracker: persona:ada:mina for ship on probe-humz"),
-        "a seat pinned before slots was not recorded as that persona\n{mina_out}\n{mina_err}"
+        mina_said.contains("a seat cannot cast a ballot for mina"),
+        "{mina_said}"
     );
+    assert!(!mina_said.contains("persona:ada:mina"), "{mina_said}");
     assert!(
         !mina_err.contains("slot history: partial"),
         "the lookup stopped early\n{mina_err}"

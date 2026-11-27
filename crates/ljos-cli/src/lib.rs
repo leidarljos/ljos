@@ -5707,6 +5707,8 @@ fn login_user() -> String {
 
 /// The account that owns this process. A tool can change `USER`. It
 /// cannot change this. This is the person a ballot must not be written as.
+/// Seat resolution reads it outside tests. A test passes the name in.
+#[cfg_attr(test, allow(dead_code))]
 fn process_account() -> Option<String> {
     // The account does not change while the process runs, and a hook asks
     // several times; the passwd lookup is made once.
@@ -5714,6 +5716,7 @@ fn process_account() -> Option<String> {
     ACCOUNT.get_or_init(process_account_read).clone()
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn process_account_read() -> Option<String> {
     let mut buf = vec![0u8; 1024];
     loop {
@@ -5914,17 +5917,16 @@ pub fn canonical_persona(name: &str) -> String {
 /// The name a ballot or a withdrawal records.
 ///
 /// No `--as`, or a spelling of this seat, is this seat's own ballot, stored
-/// as the seat is stored today. A legacy holder of a standing seat is that
-/// seat (`inky-n9o` is `inky` when this seat is `inky`). Another standing
-/// seat is refused. A plain name whose pin stood, or whose slot history was
-/// not proved, is the caster's persona ballot. Any other name is a persona,
-/// stored as [`canonical_persona`], the same value used for the drawer, the
-/// dedup key and the pin.
+/// as [`voter_id`]. A legacy holder of a seat that has stood is that seat
+/// (`inky-n9o` is `inky` when `inky` stood). Another seat that has stood is
+/// refused. Any other plain name is a persona, the same [`voter_id`] for
+/// the drawer, the dedup key and the pin. A leading `persona:` is stripped
+/// once and takes that same path.
 ///
 /// # Errors
 ///
-/// `named` is another standing seat, or a persona whose characters cannot
-/// be stored as a pin line.
+/// `named` is another seat that has stood, or a persona whose characters
+/// cannot be stored as a pin line.
 pub fn ballot_voter(_verb: &str, named: Option<&str>) -> Result<String> {
     Ok(resolve_ballot(named)?.voter)
 }
@@ -5945,126 +5947,123 @@ struct ResolvedBallot {
     persona: bool,
 }
 
-/// `name` as the standing seat the holder resolver already knows, if it
-/// is one. `inky-n9o` is `inky`. `tls-rev1` is not, because `tls` is not
-/// on that list.
-fn resolved_standing_seat(name: &str) -> Option<String> {
-    let resolved = canonical_seat_name(name);
-    if resolved.is_empty() || !slot::standing(&resolved) {
-        None
-    } else {
-        Some(resolved)
+fn nfkc_name(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization as _;
+    name.trim().nfkc().collect()
+}
+
+/// The one id a seat or a persona is cast, folded, tallied, withdrawn,
+/// stored and signed under. NFKC, ASCII case fold, then the seat slug:
+/// each run of non-alphanumerics becomes one hyphen.
+#[must_use]
+pub fn voter_id(name: &str) -> String {
+    canonical_persona(name)
+}
+
+/// Whether `id` is a seat that has stood: the frozen list, or a pin that
+/// stood once slot notes exist. A history that cannot be read, including a
+/// shallow clone with no remote, is not a stand. An empty slot history is
+/// not a stand either: a pin with no slot note is still a persona.
+fn seat_has_stood(id: &str) -> bool {
+    if id.is_empty() {
+        return false;
     }
-}
-
-/// Whether `name` is a spelling of `seat`. The comparison is
-/// [`canonical_persona`], so `TLS` and `Disk Saver` are the seat and a
-/// pid-shaped suffix is not (`tls-rev1` is not `tls`).
-fn names_casting_seat(name: &str, seat: &str) -> bool {
-    let named = canonical_persona(name);
-    !named.is_empty() && (named == canonical_persona(seat) || named == canonical_seat_name(seat))
-}
-
-fn names_process_account(name: &str) -> bool {
-    let Some(account) = process_account() else {
-        return false;
-    };
-    let named = canonical_persona(name);
-    !named.is_empty() && named == canonical_persona(&account)
-}
-
-/// A plain holder whose pin stood, or whose slot history was not proved.
-/// A pid-shaped suffix is not one (`tls-rev1` stays a persona). The drawer
-/// is the caster's persona ballot, which is the answer an unproven name
-/// already got.
-fn caster_labelled_holder(name: &str) -> bool {
-    let plain = canonical_persona(name);
-    if plain.is_empty() || plain != canonical_seat_name(name) {
-        return false;
+    if slot::standing(id) {
+        return true;
     }
     match slot::starts() {
-        Err(_) => true,
-        // No slot note yet: a pin at HEAD is the persona's own key, not a
-        // seat that stood before slots. `tls-rev1` and `alice` stay personas.
-        Ok(Some(starts)) if starts.is_empty() => false,
-        Ok(Some(starts)) => {
+        Ok(Some(starts)) if !starts.is_empty() => {
             let pins = ballot_sig::pins();
-            let key = pins.get(&plain).map(String::as_str);
-            slot::stands(&plain, key, Some(starts.as_slice())).unwrap_or(false)
+            let key = pins.get(id).map(String::as_str);
+            slot::stands(id, key, Some(starts.as_slice())).unwrap_or(false)
         }
-        Ok(None) => false,
+        _ => false,
     }
+}
+
+/// `name` as a seat that has stood, after NFKC and the legacy holder
+/// form (`inky-n9o` and `inky@sha` are `inky` when `inky` stood).
+/// A colon is a separator in a persona name, not a seat scope, so
+/// `inky:x` is not the standing seat `inky`.
+fn stood_seat_id(name: &str) -> Option<String> {
+    let folded = nfkc_name(name);
+    if folded.contains(':') {
+        return None;
+    }
+    let resolved = canonical_seat_name(&folded);
+    if resolved.is_empty() || !seat_has_stood(&resolved) {
+        return None;
+    }
+    Some(voter_id(&resolved))
 }
 
 fn persona_chars_ok(name: &str) -> bool {
     use unicode_normalization::UnicodeNormalization as _;
     let folded: String = name.nfkc().collect();
-    folded.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || matches!(c, ' ' | '_' | '.' | '-')
-            || matches!(
-                c,
-                '\u{2010}'
-                    | '\u{2011}'
-                    | '\u{2012}'
-                    | '\u{2013}'
-                    | '\u{2014}'
-                    | '\u{2015}'
-                    | '\u{2212}'
-            )
-    })
+    !folded.chars().any(char::is_whitespace)
+        && folded.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '.' | '-')
+                || matches!(
+                    c,
+                    '\u{2010}'
+                        | '\u{2011}'
+                        | '\u{2012}'
+                        | '\u{2013}'
+                        | '\u{2014}'
+                        | '\u{2015}'
+                        | '\u{2212}'
+                )
+        })
+}
+
+fn persona_name_sentence() -> &'static str {
+    "a persona name may use only letters, digits, '.', '_' and '-'"
 }
 
 fn resolve_ballot(named: Option<&str>) -> Result<ResolvedBallot> {
     let seat = seat_name();
-    let Some(name) = named.map(str::trim).filter(|n| !n.is_empty()) else {
+    let seat_id = voter_id(&seat);
+    let Some(raw) = named.map(str::trim).filter(|n| !n.is_empty()) else {
         return Ok(ResolvedBallot {
-            voter: seat,
+            voter: seat_id,
             persona: false,
         });
     };
-    if let Some(rest) = name.strip_prefix(ballot_sig::PERSONA_VOTER) {
+    // One boundary step. A leading `persona:` is the same name without
+    // it, so `persona:Alice` is `alice` and still takes the deed check.
+    let name = if let Some(rest) = raw.strip_prefix(ballot_sig::PERSONA_VOTER) {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            bail!("{}", persona_name_sentence());
+        }
+        rest
+    } else {
+        raw
+    };
+    let id = voter_id(name);
+    if !seat_id.is_empty() && id == seat_id {
         return Ok(ResolvedBallot {
-            voter: ballot_sig::prefixed_persona_voter(&seat, rest),
+            voter: seat_id,
             persona: false,
         });
     }
-    if let Some(resolved) = resolved_standing_seat(name) {
-        if resolved == canonical_seat_name(&seat) {
+    // A stood seat is that seat. The caster may cast it only as itself.
+    // `mina-n9o`, fullwidth `inky` and a Kelvin `disk-saver` land here.
+    if let Some(stood) = stood_seat_id(name) {
+        if stood == seat_id {
             return Ok(ResolvedBallot {
-                voter: seat,
+                voter: seat_id,
                 persona: false,
             });
         }
-        bail!("a seat cannot cast a ballot for {resolved}");
+        bail!("a seat cannot cast a ballot for {stood}");
     }
-    if names_casting_seat(name, &seat) {
-        return Ok(ResolvedBallot {
-            voter: seat,
-            persona: false,
-        });
-    }
-    if names_process_account(name) || caster_labelled_holder(name) {
-        return Ok(ResolvedBallot {
-            voter: ballot_sig::caster_persona_voter(&seat, name),
-            persona: false,
-        });
-    }
-    if !persona_chars_ok(name) {
-        bail!("a persona name may use only letters, digits, spaces, '.', '_' and '-'");
-    }
-    let slug = canonical_persona(name);
-    if slug.is_empty() {
-        bail!("a persona name may use only letters, digits, spaces, '.', '_' and '-'");
-    }
-    if names_casting_seat(&slug, &seat) {
-        return Ok(ResolvedBallot {
-            voter: seat,
-            persona: false,
-        });
+    if !persona_chars_ok(name) || id.is_empty() {
+        bail!("{}", persona_name_sentence());
     }
     Ok(ResolvedBallot {
-        voter: slug,
+        voter: id,
         persona: true,
     })
 }
@@ -6101,12 +6100,8 @@ fn deed_held_by_other(issue: &str, persona: &str, ids: &[String]) -> Option<Stri
     let rows = raw_ballot_rows(issue).unwrap_or_default();
     for row in rows {
         let agent = row["agent"].as_str().unwrap_or("").trim();
-        if agent.is_empty()
-            || agent == persona
-            || canonical_persona(agent) == canonical_persona(persona)
-            || agent == seat
-            || canonical_persona(agent) == canonical_persona(&seat)
-        {
+        let agent_id = voter_id(agent);
+        if agent_id.is_empty() || agent_id == voter_id(persona) || agent_id == voter_id(&seat) {
             continue;
         }
         let used = row["used"].as_str().unwrap_or("");
@@ -6126,12 +6121,20 @@ fn deed_held_by_other(issue: &str, persona: &str, ids: &[String]) -> Option<Stri
     None
 }
 
-/// A persona needs `--used` to name a deed [`resolve_deed`] accepts.
-/// `none`, a lookalike, an unknown id and a malformed id are one sentence.
-/// One resolved deed backs one persona on `issue`.
-fn persona_deed_check(issue: &str, persona: &str, used: &str) -> Result<()> {
+const USED_RECORD: &str = "a ballot records what it used (doi:10.1007/3-540-44503-X_20); pass --used deed-.... This seat's own ballot may pass --used none. A persona needs a real deed, and one deed backs one persona on an issue";
+
+/// The deed ids to store. A persona needs each part to resolve, and one
+/// deed backs one persona on `issue`. A seat may pass `none`. The drawer
+/// stores these ids, not the text the caller typed.
+fn stored_used(issue: &str, persona: &str, used: &str, is_persona: bool) -> Result<String> {
+    if used.trim().is_empty() {
+        bail!("{USED_RECORD}");
+    }
     if used_is_none(used) {
-        bail!("{}", persona_needs_sentence(persona));
+        if is_persona {
+            bail!("{}", persona_needs_sentence(persona));
+        }
+        return Ok("none".to_string());
     }
     let mut ids = Vec::new();
     for part in used.split(',') {
@@ -6140,22 +6143,38 @@ fn persona_deed_check(issue: &str, persona: &str, used: &str) -> Result<()> {
             continue;
         }
         if used_is_none(part) {
-            bail!("{}", persona_needs_sentence(persona));
+            if is_persona {
+                bail!("{}", persona_needs_sentence(persona));
+            }
+            bail!("{USED_RECORD}");
         }
-        match resolve_deed(part) {
-            Ok(id) => ids.push(id),
-            Err(_) => bail!("{}", persona_needs_sentence(persona)),
-        }
+        let id = match resolve_deed(part) {
+            Ok(id) => id,
+            Err(_) if is_persona => bail!("{}", persona_needs_sentence(persona)),
+            Err(err) => return Err(err),
+        };
+        ids.push(id);
     }
     if ids.is_empty() {
-        bail!("{}", persona_needs_sentence(persona));
+        if is_persona {
+            bail!("{}", persona_needs_sentence(persona));
+        }
+        bail!("{USED_RECORD}");
     }
-    if let Some(id) = deed_held_by_other(issue, persona, &ids) {
-        bail!(
-            "a ballot cast as {persona} cannot cite {id}, which another persona already used on {issue}"
-        );
+    if is_persona {
+        if let Some(id) = deed_held_by_other(issue, persona, &ids) {
+            bail!(
+                "a ballot cast as {persona} cannot cite {id}, which another persona already used on {issue}"
+            );
+        }
     }
-    Ok(())
+    Ok(ids.join(","))
+}
+
+/// `vissue` reads ` used=` inside a choice as the used field. Refuse that
+/// before any write.
+fn choice_hides_used(choice: &str) -> bool {
+    choice.contains(" used=")
 }
 
 /// One cast, from the CLI and from MCP.
@@ -6180,32 +6199,31 @@ pub struct CastReport {
 /// Cast one ballot. A voter who already holds one is `repeated-ballot`
 /// before `--used` is required, which is how a seat repeats when `--used`
 /// is omitted. A persona is refused unless `--used` resolves to a deed.
+/// The choice and the deed are checked before `vissue` is run. A row that
+/// does not match what was checked is withdrawn, so a refusal leaves nothing.
 ///
 /// # Errors
 ///
-/// The name is refused, this voter already holds a ballot, the deed does
-/// not resolve, or the tracker does not show the row afterwards.
+/// The name is refused, this voter already holds a ballot, the choice
+/// hides a used field, the deed does not resolve, or the tracker does not
+/// show the row afterwards.
 pub fn cast_ballot(args: &CastBallot<'_>) -> Result<CastReport> {
     let resolved = resolve_ballot(args.as_persona)?;
     let who = resolved.voter.clone();
     let cast = hook_timed("vote_claim", || {
         panel_gate::claim_session_ballot(args.issue, &who)
     })?;
-    if resolved.persona {
-        persona_deed_check(args.issue, &who, args.used)?;
+    if choice_hides_used(args.choice) {
+        bail!("a ballot choice cannot contain ` used=`; nothing was cast");
     }
-    if args.used.trim().is_empty() {
-        bail!(
-            "a ballot records what it used (doi:10.1007/3-540-44503-X_20); pass --used deed-.... This seat's own ballot may pass --used none. A persona needs a real deed, and one deed backs one persona on an issue"
-        );
-    }
+    let stored = stored_used(args.issue, &who, args.used, resolved.persona)?;
     let mut argv = vec![
         "vote".to_string(),
         args.issue.to_string(),
         "--for".into(),
         args.choice.to_string(),
         "--used".into(),
-        args.used.to_string(),
+        stored.clone(),
     ];
     if let Some(p) = args.confidence {
         argv.push("--confidence".into());
@@ -6215,7 +6233,19 @@ pub fn cast_ballot(args: &CastBallot<'_>) -> Result<CastReport> {
     let rows = hook_timed("vote_readback", || {
         raw_ballot_rows(args.issue).unwrap_or_default()
     });
-    if !tracker_holds_ballot(&rows, &who, args.choice) {
+    let matches = rows.iter().any(|row| {
+        let agent = row["agent"].as_str().map(str::trim) == Some(who.as_str());
+        let choice = row["choice"].as_str().map(str::trim) == Some(args.choice.trim());
+        let used = row
+            .get("used")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .unwrap_or(stored.as_str())
+            == stored.as_str();
+        agent && choice && used
+    });
+    if !matches {
+        let _ = run_captured_as("vissue", &["vote", args.issue, "--withdraw"], Some(&who));
         bail!(
             "the tracker does not hold a ballot from {who} for {} on {}: nothing was cast",
             args.choice,
@@ -21815,7 +21845,7 @@ pub fn check_seat_signatures(
         notes
             .iter()
             .filter_map(|n| ballot_sig::parse_note(n))
-            .any(|n| n.voter == voter)
+            .any(|n| ballot_sig::same_voter(&n.voter, voter))
     };
     let tracker = slot::tracker_id();
     let mut left_out = Vec::new();

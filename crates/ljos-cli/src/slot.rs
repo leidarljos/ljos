@@ -2850,8 +2850,8 @@ mod tests {
         );
     }
 
-    /// A partial read does not refuse the vote. The name is recorded under
-    /// the caster's label, the answer an unproven name gets.
+    /// A partial read is not a stand. The name stays that persona's id.
+    /// It is not stored as the caster's label.
     #[test]
     fn a_partial_read_records_the_ballot_under_the_protected_label() {
         let _env_read = crate::test_env_read_lock();
@@ -2877,7 +2877,7 @@ mod tests {
         std::env::set_var("LJOS_SEAT", "ada");
         override_lookup_budget_for_test(Some(0));
         let who = crate::ballot_voter("vote", Some("postslot")).expect("the vote was refused");
-        assert_eq!(who, "persona:ada:postslot", "{who}");
+        assert_eq!(who, "postslot", "{who}");
     }
 
     /// After a finished answer, a merge that brings a new introduction is
@@ -3000,7 +3000,7 @@ mod tests {
 
     /// A tree git cannot read is not a commit without the note. The lookup
     /// stays partial, including when an empty finished list would otherwise
-    /// be trusted, and the vote is recorded under the protected label.
+    /// be trusted. The name is still that persona's id.
     #[test]
     fn a_tree_read_failure_yields_partial() {
         let _env_read = crate::test_env_read_lock();
@@ -3053,7 +3053,7 @@ mod tests {
         std::env::set_var("VISSUE_ROOT", &repo);
         std::env::set_var("LJOS_SEAT", "ada");
         let who = crate::ballot_voter("vote", Some("postslot")).expect("the vote was refused");
-        assert_eq!(who, "persona:ada:postslot", "{who}");
+        assert_eq!(who, "postslot", "{who}");
     }
 
     /// Two votes, and a commit between them. The second vote's read starts
