@@ -92,6 +92,92 @@ fn a_forwarded_call_is_answered_by_the_fresh_server() {
     );
 }
 
+/// Arm an inotify watch for the open an exec of `path` performs.
+#[cfg(target_os = "linux")]
+fn watch_exec_open(path: &Path) -> i32 {
+    // SAFETY: a new inotify descriptor, or -1. Nothing else is touched.
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+    assert!(fd >= 0, "inotify: {}", std::io::Error::last_os_error());
+    let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: `name` is NUL-terminated and lives until the call returns.
+    let wd = unsafe { libc::inotify_add_watch(fd, name.as_ptr(), libc::IN_OPEN) };
+    assert!(
+        wd >= 0,
+        "inotify watch: {}",
+        std::io::Error::last_os_error()
+    );
+    fd
+}
+
+/// Block until [`watch_exec_open`] sees an open. The event is queued before
+/// exec returns, so pause until that return has delivered ETXTBSY.
+#[cfg(target_os = "linux")]
+fn wait_exec_open(fd: i32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut buf = [0u8; 4096];
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(!left.is_zero(), "the forward did not exec the held script");
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ms = i32::try_from(left.as_millis().min(i32::MAX as u128)).unwrap_or(i32::MAX);
+        // SAFETY: one pollfd for the inotify descriptor this test owns.
+        let rc = unsafe { libc::poll(&mut pfd, 1, ms) };
+        if rc == 0 {
+            continue;
+        }
+        assert!(rc > 0, "inotify poll: {}", std::io::Error::last_os_error());
+        // SAFETY: `buf` is ours and `fd` is the inotify descriptor.
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n > 0 {
+            break;
+        }
+        let err = std::io::Error::last_os_error();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::Interrupted,
+            "inotify read: {err}"
+        );
+    }
+    // SAFETY: `fd` is the descriptor this test opened.
+    unsafe { libc::close(fd) };
+    std::thread::sleep(std::time::Duration::from_millis(50));
+}
+
+/// Drop `held` only after the forward has exec'd `path` and seen it busy.
+/// A probe spawn in this test used to win that race and drop the writer
+/// before `mcp_forward` ran. `watch` is armed before that exec.
+fn release_after_busy_exec(
+    watch: i32,
+    held: std::fs::File,
+    started: &std::sync::atomic::AtomicBool,
+) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = started;
+        wait_exec_open(watch);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = watch;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !started.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the forward did not start"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // Spawn is the next call. One attempt returns well inside this
+        // pause, and the retry budget is still open when it ends.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    drop(held);
+}
+
 /// A writer still holds the script. Exec answers ETXTBSY until that handle
 /// closes. The forward waits it out and still gets the answer.
 #[test]
@@ -115,36 +201,16 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text
         .write(true)
         .open(&program)
         .unwrap();
-    let watched = program.clone();
-    let releaser = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if std::time::Instant::now() > deadline {
-                drop(held);
-                return;
-            }
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "starts a program outside git hook code"
-            )]
-            let spawned = std::process::Command::new(&watched).spawn();
-            match spawned {
-                Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                    drop(held);
-                    return;
-                }
-                Ok(mut child) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-                Err(_) => {}
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    });
+    #[cfg(target_os = "linux")]
+    let watch = watch_exec_open(&program);
+    #[cfg(not(target_os = "linux"))]
+    let watch = -1;
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&started);
     let called = program.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
+        flag.store(true, std::sync::atomic::Ordering::Release);
         let answer = ljos_cli::mcp_forward(
             &called,
             "TEST_FORWARDED",
@@ -153,11 +219,11 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text
         );
         let _ = tx.send(answer);
     });
+    release_after_busy_exec(watch, held, &started);
     let answer = rx
         .recv_timeout(std::time::Duration::from_secs(15))
         .expect("the forward did not finish")
         .unwrap();
     assert!(answer.to_string().contains("busy-ok"), "{answer}");
-    releaser.join().unwrap();
     worker.join().unwrap();
 }
