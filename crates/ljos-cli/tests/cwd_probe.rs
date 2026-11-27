@@ -1562,6 +1562,10 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
         "path-up",
         "path-budget",
         "same-bin",
+        "stat-wait",
+        "path-unset",
+        "empty-mode",
+        "same-answer",
     ] {
         let _ = std::fs::remove_file(mark.join("which"));
         let err = match row {
@@ -2028,10 +2032,9 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                 )
             }
             "late-hud" => {
-                // The lookup has one budget from the moment it starts. A
-                // worker that has not entered the stat by then is skipped.
-                // That is not "did not resolve", and it is not a new budget
-                // per entry.
+                // The budget starts when the stat starts. A worker that has
+                // not entered the stat is waited for, and both flags run
+                // the file.
                 let good = seat.dir.path().join("late-good");
                 let dir = seat.dir.path().join("late-cwd");
                 std::fs::create_dir_all(&good).unwrap();
@@ -2042,7 +2045,7 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                     "#!/bin/sh\nprintf 'GOOD %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
                 );
                 let path = format!("{}:/usr/bin:/bin", good.display());
-                one_budget_miss(
+                both_flags(
                     &seat,
                     &copied,
                     &dir,
@@ -2056,6 +2059,8 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                         ("LJOS_HUD_BIN", ""),
                         ("VISSUE_ROOT", ""),
                     ],
+                    "GOOD",
+                    Duration::from_secs(4),
                 )
             }
             "sib-hang" => {
@@ -2360,7 +2365,7 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                             let good = seat.dir.path().join("late-good");
                             let dir = seat.dir.path().join("late-cwd");
                             let path = format!("{}:/usr/bin:/bin", good.display());
-                            one_budget_miss(
+                            both_flags(
                                 &seat,
                                 &copied,
                                 &dir,
@@ -2374,6 +2379,8 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                                     ("LJOS_HUD_BIN", ""),
                                     ("VISSUE_ROOT", ""),
                                 ],
+                                "GOOD",
+                                Duration::from_secs(4),
                             )
                         }
                         "sib-hang" => {
@@ -2407,6 +2414,251 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                     None => Ok(()),
                 }
             }
+            "stat-wait" => {
+                // A worker that has not entered the stat is not a missing
+                // program. The budget starts when the stat starts. Both
+                // flags run that file, from PATH and from LJOS_HUD_BIN.
+                let good = seat.dir.path().join("wait-good");
+                let dir = seat.dir.path().join("wait-cwd");
+                std::fs::create_dir_all(&good).unwrap();
+                std::fs::create_dir_all(&dir).unwrap();
+                script(
+                    &good,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'GOOD %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let path = format!("{}:/usr/bin:/bin", good.display());
+                let hud = good.join("ljos-hud");
+                let path_ok = both_flags(
+                    &seat,
+                    &copied,
+                    &dir,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_THREAD_MS", "800"),
+                        ("SLOW_EXACT", "/no/such/stat"),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    "GOOD",
+                    Duration::from_secs(4),
+                );
+                let bin_ok = both_flags(
+                    &seat,
+                    &copied,
+                    &dir,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_THREAD_MS", "800"),
+                        ("SLOW_EXACT", "/no/such/stat"),
+                        ("PATH", "/usr/bin:/bin"),
+                        ("LJOS_HUD_BIN", hud.to_str().unwrap()),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    "GOOD",
+                    Duration::from_secs(4),
+                );
+                match (path_ok, bin_ok) {
+                    (Ok(()), Ok(())) => Ok(()),
+                    (Err(why), _) => Err(format!("{row} path {why}")),
+                    (_, Err(why)) => Err(format!("{row} bin {why}")),
+                }
+            }
+            "path-unset" => {
+                // An unset PATH is not the working directory. An empty
+                // PATH is that directory, and both flags run its program.
+                let dir = seat.dir.path().join("unset-cwd");
+                std::fs::create_dir_all(&dir).unwrap();
+                script(
+                    &dir,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'start %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let missed = one_budget_miss(
+                    &seat,
+                    &copied,
+                    &dir,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", ""),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                );
+                let empty = both_flags(
+                    &seat,
+                    &copied,
+                    &dir,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", "\u{1}"),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    "start",
+                    Duration::from_secs(4),
+                );
+                match (missed, empty) {
+                    (Ok(()), Ok(())) => Ok(()),
+                    (Err(why), _) => Err(format!("{row} unset {why}")),
+                    (_, Err(why)) => Err(format!("{row} empty {why}")),
+                }
+            }
+            "empty-mode" => {
+                // An empty PATH component that names a mode 644 file is
+                // not the program. A later executable is. A slash path
+                // that names a mode 644 file is still the one exec runs.
+                let bare = seat.dir.path().join("bare644");
+                let later = seat.dir.path().join("bare-later");
+                let slash = seat.dir.path().join("slash644");
+                let slash_later = seat.dir.path().join("slash-later");
+                std::fs::create_dir_all(&bare).unwrap();
+                std::fs::create_dir_all(&later).unwrap();
+                std::fs::create_dir_all(slash.join("bin")).unwrap();
+                std::fs::create_dir_all(&slash_later).unwrap();
+                script(
+                    &bare,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'dot644 %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                set_mode(&bare.join("ljos-hud"), 0o644);
+                script(
+                    &later,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'later %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                script(
+                    &slash.join("bin"),
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'blocked %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                set_mode(&slash.join("bin/ljos-hud"), 0o644);
+                script(
+                    &slash_later,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'slashlater %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let bare_path = format!(":{}:/usr/bin:/bin", later.display());
+                let slash_path = format!("bin:{}:/usr/bin:/bin", slash_later.display());
+                let ran = both_flags(
+                    &seat,
+                    &copied,
+                    &bare,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", bare_path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    "later",
+                    Duration::from_secs(4),
+                );
+                let denied = exec_denied(
+                    &seat,
+                    &copied,
+                    &slash,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", slash_path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                );
+                match (ran, denied) {
+                    (Ok(()), Ok(())) => Ok(()),
+                    (Err(why), _) => Err(format!("{row} bare {why}")),
+                    (_, Err(why)) => Err(format!("{row} slash {why}")),
+                }
+            }
+            "same-answer" => {
+                // `--hide` and `--foreground` name the same program when
+                // the worker has not yet entered the stat, when PATH is
+                // unset, and when an empty component names a mode 644 file.
+                let good = seat.dir.path().join("wait-good");
+                let dir = seat.dir.path().join("wait-cwd");
+                let path = format!("{}:/usr/bin:/bin", good.display());
+                let hud = good.join("ljos-hud");
+                let waited = both_flags(
+                    &seat,
+                    &copied,
+                    &dir,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_THREAD_MS", "800"),
+                        ("SLOW_EXACT", "/no/such/stat"),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    "GOOD",
+                    Duration::from_secs(4),
+                );
+                let waited_bin = both_flags(
+                    &seat,
+                    &copied,
+                    &dir,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_THREAD_MS", "800"),
+                        ("SLOW_EXACT", "/no/such/stat"),
+                        ("PATH", "/usr/bin:/bin"),
+                        ("LJOS_HUD_BIN", hud.to_str().unwrap()),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    "GOOD",
+                    Duration::from_secs(4),
+                );
+                let unset_dir = seat.dir.path().join("unset-cwd");
+                let unset = one_budget_miss(
+                    &seat,
+                    &copied,
+                    &unset_dir,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", ""),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                );
+                let bare = seat.dir.path().join("bare644");
+                let later = seat.dir.path().join("bare-later");
+                let bare_path = format!(":{}:/usr/bin:/bin", later.display());
+                let mode = both_flags(
+                    &seat,
+                    &copied,
+                    &bare,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", bare_path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    "later",
+                    Duration::from_secs(4),
+                );
+                match (waited, waited_bin, unset, mode) {
+                    (Ok(()), Ok(()), Ok(()), Ok(())) => Ok(()),
+                    (Err(why), _, _, _) => Err(format!("{row} wait {why}")),
+                    (_, Err(why), _, _) => Err(format!("{row} bin {why}")),
+                    (_, _, Err(why), _) => Err(format!("{row} unset {why}")),
+                    (_, _, _, Err(why)) => Err(format!("{row} mode {why}")),
+                }
+            }
             _ => unreachable!(),
         };
         if let Err(why) = err {
@@ -2414,6 +2666,36 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
         }
     }
     assert!(missed.is_empty(), "{}", missed.join("\n"));
+}
+
+fn exec_denied(
+    seat: &Seat,
+    program: &Path,
+    cwd: &Path,
+    extra: &[(&str, &str)],
+) -> Result<(), String> {
+    for flag in ["--foreground", "--hide"] {
+        let mark = extra
+            .iter()
+            .find(|(key, _)| *key == "LJOS_MARK")
+            .map(|(_, value)| PathBuf::from(value))
+            .unwrap();
+        let _ = std::fs::remove_file(mark.join("which"));
+        let (out, took) = seat.run_at(program, cwd, &["hud", flag], extra);
+        let body = read_trim(&mark.join("which"));
+        if took >= Duration::from_secs(4)
+            || out.status.code() != Some(1)
+            || !body.is_empty()
+            || !text(&out).contains("Permission denied")
+        {
+            return Err(format!(
+                "{flag} {took:?} code {:?} marker {body:?}: {}",
+                out.status.code(),
+                text(&out)
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn one_budget_miss(

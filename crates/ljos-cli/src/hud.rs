@@ -31,7 +31,7 @@ pub struct HudLaunch {
 struct HudHit {
     cwd: PathBuf,
     hud: std::ffi::OsString,
-    path: std::ffi::OsString,
+    path: Option<std::ffi::OsString>,
     exe: PathBuf,
     found: Option<PathBuf>,
 }
@@ -43,13 +43,17 @@ static HUD_HIT: std::sync::Mutex<Option<HudHit>> = std::sync::Mutex::new(None);
 /// The order is the base launcher's. A set `LJOS_HUD_BIN` is that path
 /// and nothing else; the bytes of the variable are not rewritten. Otherwise
 /// the sibling beside this binary, then each `PATH` entry, including `.`,
-/// an empty component, and any other relative entry. A candidate is a
-/// regular file. A stat that does not answer is not that file, and the
-/// walk tries the next entry. It does not stop the command.
+/// an empty component, and any other relative entry. An unset `PATH` is
+/// not searched. A candidate whose path contains a slash is a regular
+/// file, which is what base execs. A candidate with no slash is a regular
+/// file this user can execute, which is what `execvp` runs for an empty
+/// component. A stat that has not started is waited for. A stat that
+/// started and does not answer is skipped, and the walk tries the next
+/// entry. It does not stop the command.
 pub fn resolve_hud_bin() -> Option<PathBuf> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let hud = std::env::var_os(HUD_BIN_ENV).unwrap_or_default();
-    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::var_os("PATH");
     let exe = std::env::current_exe().unwrap_or_default();
     let mut held = HUD_HIT
         .lock()
@@ -59,7 +63,7 @@ pub fn resolve_hud_bin() -> Option<PathBuf> {
             return hit.found.clone();
         }
     }
-    let found = walk_hud(&hud, &path);
+    let found = walk_hud(&hud, path.as_deref());
     *held = Some(HudHit {
         cwd,
         hud,
@@ -72,13 +76,13 @@ pub fn resolve_hud_bin() -> Option<PathBuf> {
 
 /// `LJOS_HUD_BIN`, then the sibling, then `PATH`, in that order.
 ///
-/// Filing commands never call this, so they do not stat `PATH`.
-/// The sibling and `PATH` share one [`crate::cwd_probe::CWD_PROBE`].
-/// `statx` with `AT_STATX_DONT_SYNC` only skips a cached server refresh,
-/// and a lookup that has not returned still blocks, so the wait is
-/// abandoned instead. An entry that has not answered is skipped. The
-/// next entry does not start a new budget.
-fn walk_hud(hud: &std::ffi::OsString, path: &std::ffi::OsString) -> Option<PathBuf> {
+/// Filing commands never call this, so they do not stat `PATH`. An unset
+/// `PATH` adds no entry. An empty `PATH` is the current directory.
+/// `statx` does not stop a lookup that has not returned, so each stat
+/// runs on its own thread. The budget for that stat starts when the stat
+/// starts. A stat that has not started is waited for. A stat that started
+/// and does not answer is skipped and is not the program.
+fn walk_hud(hud: &std::ffi::OsString, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     if let Some(text) = hud.to_str() {
         let trimmed = text.trim();
         if !trimmed.is_empty() {
@@ -92,17 +96,58 @@ fn walk_hud(hud: &std::ffi::OsString, path: &std::ffi::OsString) -> Option<PathB
     {
         cands.push(dir.join("ljos-hud"));
     }
-    for dir in std::env::split_paths(path) {
-        cands.push(dir.join("ljos-hud"));
+    if let Some(listed) = path {
+        for dir in std::env::split_paths(listed) {
+            cands.push(dir.join("ljos-hud"));
+        }
     }
     first_ready(cands)
 }
 
-/// First candidate that is a regular file, in order, within one budget.
+/// What a stated candidate is, in base's exec rules.
+#[derive(Clone, Copy)]
+enum HudFile {
+    /// Regular file base would exec.
+    Yes,
+    /// Not a regular file.
+    No,
+    /// Slash-free regular file this user cannot execute.
+    Denied,
+}
+
+/// Where a candidate's stat is.
+#[derive(Clone, Copy)]
+enum Phase {
+    /// The worker has not entered the stat.
+    Pending,
+    /// The stat has started.
+    Running(std::time::Instant),
+    Yes,
+    No,
+    Denied,
+    /// The stat started and overran. A late answer is not a program.
+    Skip,
+}
+
+enum Note {
+    Started(usize, std::time::Instant),
+    Done(usize, HudFile),
+}
+
+enum Step {
+    Hit(usize),
+    /// Wait for the next note. `None` means the blocking stat has not started.
+    Hold(Option<std::time::Duration>),
+    /// No executable program. The index is a slash-free non-executable file,
+    /// which base still hands to `execvp` once nothing later is a program.
+    Miss(Option<usize>),
+}
+
+/// First candidate base would exec, in order.
 ///
-/// Every candidate is stated together. An earlier stat that does not
-/// answer is not a program, so a later one that did answer can win.
-/// The wait is not restarted per entry.
+/// Every candidate is stated together. An earlier stat that has not
+/// started still blocks a later one. An earlier stat that started and
+/// does not answer is skipped, so a later one that did answer can win.
 fn first_ready(cands: Vec<PathBuf>) -> Option<PathBuf> {
     if cands.is_empty() {
         return None;
@@ -111,53 +156,130 @@ fn first_ready(cands: Vec<PathBuf>) -> Option<PathBuf> {
     for (index, path) in cands.iter().cloned().enumerate() {
         let tx = tx.clone();
         std::thread::spawn(move || {
-            let ready = std::fs::metadata(&path)
-                .map(|meta| meta.is_file())
-                .unwrap_or(false);
-            let _ = tx.send((index, ready));
+            let _ = tx.send(Note::Started(index, std::time::Instant::now()));
+            let _ = tx.send(Note::Done(index, accept_hud(&path)));
         });
     }
     drop(tx);
-    let deadline = std::time::Instant::now() + crate::cwd_probe::CWD_PROBE;
-    let mut answered = vec![None; cands.len()];
-    while std::time::Instant::now() < deadline {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            break;
-        }
-        match rx.recv_timeout(left) {
-            Ok((index, ready)) => {
-                if index < answered.len() {
-                    answered[index] = Some(ready);
-                }
-                if let Some(hit) = pick_ready(&cands, &answered, false) {
-                    return Some(hit);
-                }
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+    let mut phase = vec![Phase::Pending; cands.len()];
+    loop {
+        match step(&mut phase) {
+            Step::Hit(index) => return Some(cands[index].clone()),
+            Step::Miss(denied) => return denied.map(|index| cands[index].clone()),
+            Step::Hold(Some(limit)) => match rx.recv_timeout(limit) {
+                Ok(note) => apply_note(&mut phase, note),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => abandon(&mut phase),
+            },
+            Step::Hold(None) => match rx.recv() {
+                Ok(note) => apply_note(&mut phase, note),
+                Err(_) => abandon(&mut phase),
+            },
         }
     }
-    pick_ready(&cands, &answered, true)
 }
 
-/// The earliest regular file. While the budget is open, an unanswered
-/// earlier candidate still blocks a later one. When the budget is closed,
-/// an unanswered candidate is skipped.
-fn pick_ready(
-    cands: &[PathBuf],
-    answered: &[Option<bool>],
-    budget_closed: bool,
-) -> Option<PathBuf> {
-    for (index, path) in cands.iter().enumerate() {
-        match answered.get(index).copied().flatten() {
-            Some(true) => return Some(path.clone()),
-            Some(false) => continue,
-            None if budget_closed => continue,
-            None => return None,
+fn apply_note(phase: &mut [Phase], note: Note) {
+    match note {
+        Note::Started(index, started) => {
+            if index < phase.len() && matches!(phase[index], Phase::Pending) {
+                phase[index] = Phase::Running(started);
+            }
+        }
+        Note::Done(index, kind) => {
+            if index >= phase.len() || matches!(phase[index], Phase::Skip) {
+                return;
+            }
+            phase[index] = match kind {
+                HudFile::Yes => Phase::Yes,
+                HudFile::No => Phase::No,
+                HudFile::Denied => Phase::Denied,
+            };
         }
     }
-    None
+}
+
+fn abandon(phase: &mut [Phase]) {
+    for phase in phase.iter_mut() {
+        if matches!(phase, Phase::Pending | Phase::Running(_)) {
+            *phase = Phase::Skip;
+        }
+    }
+}
+
+fn step(phase: &mut [Phase]) -> Step {
+    let mut denied = None;
+    for (index, slot) in phase.iter_mut().enumerate() {
+        match *slot {
+            Phase::Yes => return Step::Hit(index),
+            Phase::No | Phase::Skip => continue,
+            Phase::Denied => {
+                if denied.is_none() {
+                    denied = Some(index);
+                }
+            }
+            Phase::Running(started) => {
+                if started.elapsed() >= crate::cwd_probe::CWD_PROBE {
+                    *slot = Phase::Skip;
+                    continue;
+                }
+                let left = crate::cwd_probe::CWD_PROBE.saturating_sub(started.elapsed());
+                return Step::Hold(Some(left));
+            }
+            Phase::Pending => return Step::Hold(None),
+        }
+    }
+    Step::Miss(denied)
+}
+
+/// Regular file, and executable by this user when the name has no slash.
+///
+/// Base's `is_file` accepts a mode `644` file. `Command` then `execve`s a
+/// path that contains a slash, and `execvp`s a slash-free name. `execvp`
+/// skips a file this user cannot execute and tries the next `PATH` entry.
+fn accept_hud(path: &Path) -> HudFile {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => {}
+        _ => return HudFile::No,
+    }
+    if path_has_slash(path) || user_can_exec(path) {
+        HudFile::Yes
+    } else {
+        HudFile::Denied
+    }
+}
+
+fn path_has_slash(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+                | std::path::Component::CurDir
+                | std::path::Component::ParentDir
+        )
+    }) || path.components().count() > 1
+}
+
+fn user_can_exec(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let flags = libc::AT_EACCESS;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let flags = 0;
+        // SAFETY: `c_path` is NUL-terminated. The check does not create a file.
+        unsafe { libc::faccessat(libc::AT_FDCWD, c_path.as_ptr(), libc::X_OK, flags) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        true
+    }
 }
 
 /// `path` when it is a regular file, as an absolute path.

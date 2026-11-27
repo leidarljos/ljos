@@ -779,25 +779,23 @@ enum Msg<T> {
     Done(T),
 }
 
-/// Run `work` on another thread and stop waiting after [`CWD_PROBE`].
+/// Run `work` on another thread and stop waiting [`CWD_PROBE`] after it starts.
 ///
-/// `Err(Fault::Late)` means the worker had not entered `work`. That is a
-/// late schedule, not a path that refused to answer. `Err(Fault::TimedOut)`
-/// means the worker entered `work` and `work` did not return. The caller's
-/// thread does not state the path.
+/// The budget does not include the time before the worker enters `work`.
+/// A late schedule is waited for. `Err(Fault::Late)` means the worker ended
+/// before that entry, which is not a path that refused to answer.
+/// `Err(Fault::TimedOut)` means the worker entered `work` and `work` did
+/// not return. The caller's thread does not state the path.
 fn bounded<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, Fault> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(Msg::Started);
         let _ = tx.send(Msg::Done(work()));
     });
-    let started = match rx.recv_timeout(CWD_PROBE) {
-        Ok(Msg::Started) => true,
+    match rx.recv() {
+        Ok(Msg::Started) => {}
         Ok(Msg::Done(value)) => return Ok(value),
-        Err(_) => false,
-    };
-    if !started {
-        return Err(Fault::Late);
+        Err(_) => return Err(Fault::Late),
     }
     match rx.recv_timeout(CWD_PROBE) {
         Ok(Msg::Done(value)) => Ok(value),
