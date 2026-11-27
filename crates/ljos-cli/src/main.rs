@@ -1885,9 +1885,12 @@ enum Cmd {
         #[arg(long)]
         apply: bool,
     },
-    /// Cast this seat's vote, or show the tally when `--for` is omitted.
+    /// Cast this seat's vote, or a persona's, or show the tally when `--for` is omitted.
     ///
-    /// The tracker records the voter as `VISSUE_AGENT`, which is this seat's name.
+    /// This seat's own ballots, with no `--as` or with `--as` this seat, are one
+    /// voice per session. A persona is its own voice. It needs `--used` naming a
+    /// real deed, and one deed backs one persona on an issue.
+    /// A deed is a stored file this ballot names.
     ///
     /// Example: `ljos vote proj-1a2b --for keep --used none`
     Vote {
@@ -1901,8 +1904,9 @@ enum Cmd {
         /// or push cite weighs it.
         #[arg(long)]
         confidence: Option<f64>,
-        /// Ids of stored files this ballot used, comma-separated, or `none`.
-        /// Required when `--for` is set.
+        /// Ids of stored files this ballot used, comma-separated.
+        /// This seat's own ballot may pass `none`. A persona needs a real
+        /// deed accession, not `none`. Required when `--for` is set.
         #[arg(long)]
         used: Option<String>,
         /// The option you expect the others to pick, or a JSON object of
@@ -1911,8 +1915,9 @@ enum Cmd {
         #[arg(long)]
         expect: Option<String>,
         /// The persona this ballot records. The casting seat and the parent
-        /// session are stored with it. Consensus counts the ballot.
-        /// A standing seat or the person is the caster's persona ballot.
+        /// session are stored with it. This seat's own ballots are one voice
+        /// per session. A persona is its own voice and needs a real deed.
+        /// One deed backs one persona on an issue.
         /// With `--jev`, the persona Jev answers for.
         #[arg(long = "as")]
         as_persona: Option<String>,
@@ -7435,66 +7440,22 @@ fn run_command() -> Result<()> {
                     }
                 }
                 Some(c) => {
-                    let who = ljos_cli::ballot_voter_on(&issue, as_persona.as_deref())?;
-                    let used = used.as_deref().unwrap_or("");
-                    if used.is_empty() {
-                        bail!(
-                        "a ballot records what it used (doi:10.1007/3-540-44503-X_20); pass --used deed-... or --used none"
-                    );
-                    }
-                    ljos_cli::persona_deed(as_persona.as_deref(), used)?;
-                    let cast = ljos_cli::hook_timed("vote_claim", || {
-                        ljos_cli::panel_gate::claim_session_ballot(&issue, &who)
+                    let report = ljos_cli::cast_ballot(&ljos_cli::CastBallot {
+                        issue: &issue,
+                        choice: &c,
+                        used: used.as_deref().unwrap_or(""),
+                        confidence,
+                        expect: expect.as_deref(),
+                        as_persona: as_persona.as_deref(),
                     })?;
-                    let mut args = vec![
-                        "vote".to_string(),
-                        issue.clone(),
-                        "--for".into(),
-                        c,
-                        "--used".into(),
-                        used.to_string(),
-                    ];
-                    if let Some(p) = confidence {
-                        args.push("--confidence".into());
-                        args.push(format!("{p}"));
-                    }
-                    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                    ljos_cli::hook_timed("vote_cast", || run_as("vissue", &refs, Some(&who)))?;
-                    // Read the ballot back: only the tracker is proof it exists.
-                    let rows: Vec<serde_json::Value> =
-                        ljos_cli::hook_timed("vote_readback", || {
-                            ljos_cli::raw_ballot_rows(&issue).unwrap_or_default()
-                        });
-                    if !ljos_cli::tracker_holds_ballot(&rows, &who, &args[3]) {
-                        bail!(
-                        "the tracker does not hold a ballot from {who} for {} on {issue}: nothing was cast",
-                        args[3]
-                    );
-                    }
-                    ljos_cli::tell!("recorded on the tracker: {who} for {} on {issue}", args[3]);
-                    cast.keep();
-                    // Every ballot, a persona's included, is signed and bound to
-                    // this connection. The push gate still counts only seat
-                    // ballots; the panel gate counts the session, not the seat.
-                    match ljos_cli::hook_timed("vote_sign", || {
-                        ljos_cli::ballot_sig::sign_ballot(&issue, &who, &args[3])
-                    }) {
-                        Ok(said) => ljos_cli::tell_raw!("{said}"),
-                        Err(e) => ljos_cli::say!("ljos vote: {e:#}"),
-                    }
-                    if let Some(expect) = expect.as_deref().map(str::trim).filter(|e| !e.is_empty())
-                    {
-                        write_prediction(&issue, &who, expect).with_context(|| {
-                            format!("ballot cast; forecast for {who} was not recorded")
-                        })?;
-                        ljos_cli::tell!("forecast recorded for {who}");
-                    }
-                    ljos_cli::tell_raw!("{}", ljos_cli::persist_tracker(&issue, "ballot cast"));
+                    ljos_cli::tell_raw!("{}", report.text);
                     if let Some((reason, child_id)) = &against_note {
+                        let who = &report.voter;
                         let note = format!("{who}: against: {reason} (child {child_id})");
-                        run_as("vissue", &["note", &issue, &note], Some(&who))?;
+                        run_as("vissue", &["note", &issue, &note], Some(who))?;
+                        let used_again = if report.persona { "DEED" } else { "none" };
                         ljos_cli::tell!(
-                        "no ballot linked to child {child_id}. {issue} stays open while {child_id} is open. After `ljos finish {child_id} --close`, replace the ballot: `ljos vote {issue} --withdraw --as {who}` then `ljos vote {issue} --for OPTION --used none --as {who}`, then `ljos consensus {issue}`."
+                        "no ballot linked to child {child_id}. {issue} stays open while {child_id} is open. After `ljos finish {child_id} --close`, replace the ballot: `ljos vote {issue} --withdraw --as {who}` then `ljos vote {issue} --for OPTION --used {used_again} --as {who}`, then `ljos consensus {issue}`."
                     );
                     }
                 }

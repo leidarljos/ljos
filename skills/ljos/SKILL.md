@@ -172,8 +172,9 @@ sitting that gets that far.
 10. `== workflow`, left out when neither the issue nor its parent carries a
    workflow. The stage and the next step, the same reading as `ljos workflow`.
 11. `== panel`, left out unless the issue is a decision. One brief per persona
-   the issue speaks to. A session casts `ljos vote --as NAME` for each.
-   Consensus records those ballots and counts one voice per session.
+   the issue speaks to. A session casts `ljos vote --as NAME --used DEED` for each.
+   This seat's own ballots are one voice per session. A persona is its own voice,
+   needs a real deed, and one deed backs one persona on an issue.
 12. `== recall`. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
    cited so far.
 13. `== timeline`. `ljos timeline ISSUE`. The last twelve dated events across the three
@@ -183,9 +184,10 @@ A decision is handed to the panel by the sitting. An issue tagged
 `decision`, typed `decision`, or with a body line opening `Options:`
 binds the `company-panel` recipe, and the sitting writes one brief per
 persona the issue speaks to under `== panel`. A session casts
-`ljos vote ISSUE --for OPTION --as NAME` for each persona. The ballot
-records the casting seat, the parent session and the persona, and
-`ljos consensus ISSUE` records each ballot and counts one voice per session, one voice per shell and one voice per agent runner's root session.
+`ljos vote ISSUE --for OPTION --used DEED --as NAME` for each persona. The ballot
+records the casting seat, the parent session and the persona.
+This seat's own ballots are one voice per session. A persona is its own voice, needs a real deed, and one deed backs one persona on an issue.
+`ljos consensus ISSUE` records each ballot.
 A close of a decision is refused
 with fewer than two ballots. Put any choice with more than one defensible
 answer on an issue this way before building it. A person closes the ticket.
@@ -428,12 +430,12 @@ cloud seat git runs only the hooks the repository and the login name.
   that voice and the session the environment claimed. A six-field note
   from before that field still verifies.
   No nonce of the process goes in: every process of one session signs the
-  same binding. `ljos consensus`
-  records every persona ballot, including ones cast from one session or
-  by `--as`. Ballots that share a session id, a parent, a calling shell
-  or an agent runner's root session count as one
+  same binding.   `ljos consensus`
+  records every ballot. This seat's own ballots that share a session id, a parent, a calling shell
+  or an agent runner's root session are one
   voice, the latest when they disagree, and consensus names the ballots
-  it folded and why. A session that authored a candidate can vote.
+  it folded and why. A persona is its own voice. It needs a real deed, and one deed backs one persona on an issue. A persona never folds into the seat's ballot.
+  A session that authored a candidate can vote.
   Its ballot stays recorded with an `authored: CANDIDATE` label and a warning.
   The verdict leaves that ballot out of the count and still settles.
   Each reviewer casts

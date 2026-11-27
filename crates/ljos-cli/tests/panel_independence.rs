@@ -2780,9 +2780,9 @@ fn a_seat_no_harness_names_is_an_unverified_session() {
         ],
     );
     let said = text(&second);
-    assert!(second.status.success(), "{said}");
+    assert!(!second.status.success(), "{said}");
     assert!(
-        said.contains("reviewer-b cast by ljosbot, parent ljosbot"),
+        said.contains("a ballot cast as reviewer-b needs --used naming a deed"),
         "{said}"
     );
     let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
@@ -2790,13 +2790,9 @@ fn a_seat_no_harness_names_is_an_unverified_session() {
     assert!(tally.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&tally.stdout);
     assert!(stdout.contains("1 ballot counts"), "{said}");
-    assert!(stdout.contains("reviewer-b  hold"), "{said}");
-    assert!(
-        stdout.contains("folded into one voice (same session ljosbot):"),
-        "{said}"
-    );
-    assert!(stdout.contains("counted reviewer-b"), "{said}");
-    assert!(stdout.contains("ljosbot"), "{said}");
+    assert!(stdout.contains("ljosbot  ship"), "{said}");
+    assert!(!stdout.contains("reviewer-b"), "{said}");
+    assert!(!stdout.contains("folded into one voice"), "{said}");
     assert!(stdout.contains(&unverified), "{said}");
     // A ballot that went around the cast gate, as a raw drawer row and a
     // later signature on the same seat leave it.
@@ -2874,7 +2870,7 @@ fn account_name() -> String {
 }
 
 #[test]
-fn a_named_standing_seat_is_the_casters_persona_ballot() {
+fn a_named_standing_seat_cannot_be_cast_by_another_seat() {
     let world = World::new();
     let issue = "demo-as-inky";
     let session = "sess-caster-0001";
@@ -2896,18 +2892,12 @@ fn a_named_standing_seat_is_the_casters_persona_ballot() {
         ],
     );
     let said = text(&cast);
-    assert!(cast.status.success(), "{said}");
-    let persona = "persona:saddle:inky";
+    assert!(!cast.status.success(), "{said}");
     assert!(
-        said.contains("inky cast by saddle, parent sess-caster-0001"),
+        said.contains("a seat cannot cast a ballot for inky"),
         "{said}"
     );
-    assert!(
-        said.contains(&format!("ballot signed by {persona}")),
-        "{said}"
-    );
-    assert!(!said.contains("ballot signed by inky"), "{said}");
-    assert_eq!(signed_key(&said, persona), saddle_key, "{said}");
+    assert!(!said.contains("persona:saddle:inky"), "{said}");
 
     let inky = world.ljos(
         "inky",
@@ -2916,45 +2906,14 @@ fn a_named_standing_seat_is_the_casters_persona_ballot() {
     );
     let inky_said = text(&inky);
     assert!(inky.status.success(), "{inky_said}");
-    assert_ne!(signed_key(&inky_said, "inky"), saddle_key, "{inky_said}");
 
-    let tally = world.ljos("clerk", "sess-reader-0001", &["vote", issue]);
-    let said = text(&tally);
-    assert!(tally.status.success(), "{said}");
-    let stdout = String::from_utf8_lossy(&tally.stdout);
-    assert!(stdout.contains("2 ballots count"), "{said}");
-    assert!(stdout.contains("inky  ship"), "{said}");
-    assert!(stdout.contains(&format!("{persona}  hold")), "{said}");
-    assert!(
-        stdout.contains("inky cast by saddle, parent sess-caster-0001"),
-        "{said}"
-    );
-
-    let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
-    assert!(ballots.contains("\"agent\": \"inky\""), "{ballots}");
-    assert!(
-        ballots.contains(&format!("\"agent\": \"{persona}\"")),
-        "{ballots}"
-    );
-
-    let withdrawn = world.ljos(
-        "saddle",
-        session,
-        &["vote", issue, "--withdraw", "--as", "inky"],
-    );
-    assert_withdraw_forecast_error(&withdrawn, issue, persona);
-    let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
-    assert!(ballots.contains("\"agent\": \"inky\""), "{ballots}");
-    assert!(
-        !ballots.contains(&format!("\"agent\": \"{persona}\"")),
-        "{ballots}"
-    );
     let tally = world.ljos("clerk", "sess-reader-0001", &["vote", issue]);
     let said = text(&tally);
     assert!(tally.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&tally.stdout);
     assert!(stdout.contains("1 ballot counts"), "{said}");
     assert!(stdout.contains("inky  ship"), "{said}");
+    assert!(!stdout.contains("persona:saddle:inky"), "{said}");
     assert!(!stdout.contains("hold"), "{said}");
 }
 

@@ -432,10 +432,10 @@ fn a_bump_plan_is_filed_only_as_a_listed_seat() {
 }
 
 #[test]
-fn a_ballot_or_a_withdrawal_as_another_persona_is_recorded() {
+fn a_ballot_as_another_standing_seat_is_refused() {
     let b = Bench::new();
     b.seats("seats = [\"saddle\", \"inky\"]\n");
-    let _ = b.ljos(
+    let cast = b.ljos(
         Some("saddle"),
         &[
             "vote",
@@ -448,26 +448,18 @@ fn a_ballot_or_a_withdrawal_as_another_persona_is_recorded() {
             "inky",
         ],
     );
-    let _ = b.ljos(
-        Some("saddle"),
-        &["vote", "proj-aaaa", "--withdraw", "--as", "inky"],
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&cast.stdout),
+        String::from_utf8_lossy(&cast.stderr)
+    );
+    assert!(!cast.status.success(), "{said}");
+    assert!(
+        said.contains("a seat cannot cast a ballot for inky"),
+        "{said}"
     );
     let calls = b.calls();
-    let persona = "persona:saddle:inky";
-    assert!(
-        calls.contains(&format!(
-            "vissue vote proj-aaaa --for accept --used none VISSUE_AGENT={persona}"
-        )),
-        "{calls}"
-    );
-    assert!(
-        calls.contains(&format!(
-            "vissue vote proj-aaaa --withdraw VISSUE_AGENT={persona}"
-        )),
-        "{calls}"
-    );
-    assert!(!calls.contains("VISSUE_AGENT=inky"), "{calls}");
-    assert!(!calls.contains("not this seat"), "{calls}");
+    assert!(!calls.contains("vissue vote"), "{calls}");
 }
 
 #[test]
@@ -661,13 +653,16 @@ fn a_forecast_is_recorded_as_the_seat_the_check_named() {
         &[("LJOS_SEAT", "saddle"), ("PACKSET_URL", &pack)],
         &["predict", "proj-aaaa", "--expect", "accept", "--as", "inky"],
     );
-    let said = String::from_utf8_lossy(&named.stdout);
-    assert!(named.status.success(), "{named:?}");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&named.stdout),
+        String::from_utf8_lossy(&named.stderr)
+    );
+    assert!(!named.status.success(), "{said}");
     assert!(
-        said.contains("\"agent\": \"persona:saddle:inky\""),
+        said.contains("a seat cannot cast a ballot for inky"),
         "{said}"
     );
-    assert!(!said.contains("\"agent\": \"inky\""), "{said}");
 }
 
 #[test]

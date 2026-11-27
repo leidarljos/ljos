@@ -775,7 +775,7 @@ pub fn persona_agent(p: &Persona) -> (String, String) {
          You are handed a decision issue id. Then:\n\n\
          1. Run `ljos brief {who} ISSUE` and read all of it: what you remembered yourself, what the seat knows on your domains, the playbook and the work.\n\
          2. Decide as yourself before you see another voice: do not read `vissue vote ISSUE`, `vissue show ISSUE` or `ljos consensus ISSUE` until your ballot is cast.\n\
-         3. Cast one ballot: `ljos vote ISSUE --for OPTION --expect '{{\"OPTION\": SHARE}}' --confidence P --used none --as {who}`, with your forecast of the others' shares and the probability you give your own choice.\n\
+         3. Cast one ballot: `ljos vote ISSUE --for OPTION --expect '{{\"OPTION\": SHARE}}' --confidence P --used DEED --as {who}`, with your forecast of the others' shares and the probability you give your own choice. A persona needs a real deed.\n\
          4. Check the tracker holds it: `vissue vote ISSUE --json` has your row. Only the tracker is proof; a ballot you did not see there was not cast, so say that instead of reporting a vote.\n\
          5. Note why, in short sentences, with the evidence your ballot stands on: `ljos note ISSUE \"{who}: ...\"`.\n\n\
          Do not edit files, push, or ssh. Stop after the note.\n",
@@ -5894,178 +5894,371 @@ pub fn write_assignee(
     Ok(assignee)
 }
 
-/// The name a ballot or a withdrawal records. `--as` (MCP `as`) names the
-/// persona. The process seat is who casts it, and that seat is kept with
-/// the ballot. An empty name, or a spelling of this seat, is this seat's
-/// own ballot. A longer name is that persona even when a pid-shaped suffix
-/// would otherwise fold it onto this seat (`tls-rev1` is not `tls`). A
-/// standing seat, the person, or a name that begins with `persona:` is
-/// recorded as the caster's persona ballot, not as that seat's own ballot.
+/// The one slug a persona and a caster compare, dedup and store under.
+/// NFKC, lower case, and each run of non-alphanumerics becomes one `-`.
+#[must_use]
+pub fn canonical_persona(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization as _;
+    let folded: String = name.trim().nfkc().collect();
+    let mut out = String::new();
+    for c in folded.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
+/// The name a ballot or a withdrawal records.
+///
+/// No `--as`, or a spelling of this seat, is this seat's own ballot, stored
+/// as the seat is stored today. A legacy holder of a standing seat is that
+/// seat (`inky-n9o` is `inky` when this seat is `inky`). Another standing
+/// seat is refused. A plain name whose pin stood, or whose slot history was
+/// not proved, is the caster's persona ballot. Any other name is a persona,
+/// stored as [`canonical_persona`], the same value used for the drawer, the
+/// dedup key and the pin.
 ///
 /// # Errors
 ///
-/// Never. The result stays a [`Result`] so callers keep one shape.
+/// `named` is another standing seat, or a persona whose characters cannot
+/// be stored as a pin line.
 pub fn ballot_voter(_verb: &str, named: Option<&str>) -> Result<String> {
-    let seat = seat_name();
-    let Some(name) = named.map(str::trim).filter(|n| !n.is_empty()) else {
-        return Ok(seat);
-    };
-    if let Some(rest) = name.strip_prefix(ballot_sig::PERSONA_VOTER) {
-        return Ok(ballot_sig::prefixed_persona_voter(&seat, rest));
-    }
-    if names_this_seat(name, &seat) {
-        return Ok(seat);
-    }
-    if protected_ballot_name(name) {
-        return Ok(ballot_sig::caster_persona_voter(&seat, name));
-    }
-    Ok(name.to_string())
+    Ok(resolve_ballot(named)?.voter)
 }
 
-/// `--as` written as this seat: the same slug, or the seat's canonical
-/// name. A pid-shaped suffix stays part of the persona (`tls-rev1`).
-fn names_this_seat(name: &str, seat: &str) -> bool {
-    let named = ballot_persona_slug(name);
-    if named.is_empty() || seat.trim().is_empty() {
-        return false;
-    }
-    named == ballot_persona_slug(seat) || named == canonical_seat_name(seat)
+/// [`ballot_voter`] for one issue. The drawer name is the canonical persona,
+/// so a later withdraw and recast replace the same row.
+///
+/// # Errors
+///
+/// [`ballot_voter`].
+pub fn ballot_voter_on(_issue: &str, named: Option<&str>) -> Result<String> {
+    ballot_voter("vote", named)
 }
 
-/// The persona slug without dropping a pid-shaped suffix. `ljos-bot` is
-/// still `ljosbot`. An `@tag` and a `:issue` scope are not part of the name.
-fn ballot_persona_slug(name: &str) -> String {
-    let name = name.trim();
-    if name.is_empty() {
-        return String::new();
-    }
-    let (body, _) = split_claim_scope(name);
-    let head = match body.split_once('@') {
-        Some((seat, tag)) if !seat.is_empty() && !tag.is_empty() => seat,
-        _ => body,
-    };
-    let lower = head.to_ascii_lowercase();
-    let mapped = LEGACY_SEATS
-        .iter()
-        .find(|(old, _)| *old == lower)
-        .map_or(lower, |(_, now)| (*now).to_string());
-    if mapped.is_empty() {
-        String::new()
+struct ResolvedBallot {
+    voter: String,
+    /// A persona, which needs a real deed. This seat's own ballot is false.
+    persona: bool,
+}
+
+/// `name` as the standing seat the holder resolver already knows, if it
+/// is one. `inky-n9o` is `inky`. `tls-rev1` is not, because `tls` is not
+/// on that list.
+fn resolved_standing_seat(name: &str) -> Option<String> {
+    let resolved = canonical_seat_name(name);
+    if resolved.is_empty() || !slot::standing(&resolved) {
+        None
     } else {
-        seat_slug(&mapped)
+        Some(resolved)
     }
 }
 
-/// [`ballot_voter`] for one issue. A persona that already holds a ballot
-/// here keeps that drawer name, so a later withdraw and recast replace it
-/// after the persona's key is pinned.
-pub fn ballot_voter_on(issue: &str, named: Option<&str>) -> Result<String> {
-    let who = ballot_voter("vote", named)?;
-    let Some(name) = named.map(str::trim).filter(|n| !n.is_empty()) else {
-        return Ok(who);
-    };
-    if name == who {
-        return Ok(who);
-    }
-    // A standing seat, this seat, and the account that owns the process
-    // stay on the prefixed drawer. A persona whose key was pinned after
-    // its first ballot keeps the plain name already on this issue.
-    // The slug keeps a pid-shaped suffix, so `tls-rev1` is not the seat `tls`.
-    let slug = ballot_persona_slug(name);
-    if slug == ballot_persona_slug(&seat_name())
-        || process_account().is_some_and(|account| ballot_persona_slug(&account) == slug)
-        || slot::standing(&slug)
-    {
-        return Ok(who);
-    }
-    let rows = raw_ballot_rows(issue).unwrap_or_default();
-    let held = |agent: &str| {
-        rows.iter()
-            .any(|row| row["agent"].as_str().map(str::trim) == Some(agent))
-    };
-    if held(name) && !held(&who) {
-        return Ok(name.to_string());
-    }
-    Ok(who)
+/// Whether `name` is a spelling of `seat`. The comparison is
+/// [`canonical_persona`], so `TLS` and `Disk Saver` are the seat and a
+/// pid-shaped suffix is not (`tls-rev1` is not `tls`).
+fn names_casting_seat(name: &str, seat: &str) -> bool {
+    let named = canonical_persona(name);
+    !named.is_empty() && (named == canonical_persona(seat) || named == canonical_seat_name(seat))
 }
 
-/// Whether `--as name` must not be written as that seat's own ballot.
-/// A standing seat, on the frozen list or by a pin that stood, and the
-/// account that owns this process, are that set.
-fn protected_ballot_name(name: &str) -> bool {
-    let slug = ballot_persona_slug(name);
-    if slug.is_empty() {
+fn names_process_account(name: &str) -> bool {
+    let Some(account) = process_account() else {
         return false;
-    }
-    if process_account().is_some_and(|account| ballot_persona_slug(&account) == slug) {
-        return true;
-    }
-    if slot::standing(&slug) {
-        return true;
+    };
+    let named = canonical_persona(name);
+    !named.is_empty() && named == canonical_persona(&account)
+}
+
+/// A plain holder whose pin stood, or whose slot history was not proved.
+/// A pid-shaped suffix is not one (`tls-rev1` stays a persona). The drawer
+/// is the caster's persona ballot, which is the answer an unproven name
+/// already got.
+fn caster_labelled_holder(name: &str) -> bool {
+    let plain = canonical_persona(name);
+    if plain.is_empty() || plain != canonical_seat_name(name) {
+        return false;
     }
     match slot::starts() {
+        Err(_) => true,
+        // No slot note yet: a pin at HEAD is the persona's own key, not a
+        // seat that stood before slots. `tls-rev1` and `alice` stay personas.
+        Ok(Some(starts)) if starts.is_empty() => false,
         Ok(Some(starts)) => {
             let pins = ballot_sig::pins();
-            let key = pins.get(&slug).map(String::as_str);
-            slot::stands(&slug, key, Some(starts.as_slice())).unwrap_or(false)
+            let key = pins.get(&plain).map(String::as_str);
+            slot::stands(&plain, key, Some(starts.as_slice())).unwrap_or(false)
         }
-        // Not a git tracker: a name is not protected by pin order.
         Ok(None) => false,
-        // A partial read has not proved the name. The pickaxe treated an
-        // unproven name as protected, so the vote records under that label.
-        // A pid-shaped suffix is a persona, not the seat the suffix folds onto.
-        Err(_) => {
-            let plain = ballot_persona_slug(name);
-            plain.is_empty() || plain == canonical_seat_name(name) || slot::standing(&plain)
+    }
+}
+
+fn persona_chars_ok(name: &str) -> bool {
+    use unicode_normalization::UnicodeNormalization as _;
+    let folded: String = name.nfkc().collect();
+    folded.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, ' ' | '_' | '.' | '-')
+            || matches!(
+                c,
+                '\u{2010}'
+                    | '\u{2011}'
+                    | '\u{2012}'
+                    | '\u{2013}'
+                    | '\u{2014}'
+                    | '\u{2015}'
+                    | '\u{2212}'
+            )
+    })
+}
+
+fn resolve_ballot(named: Option<&str>) -> Result<ResolvedBallot> {
+    let seat = seat_name();
+    let Some(name) = named.map(str::trim).filter(|n| !n.is_empty()) else {
+        return Ok(ResolvedBallot {
+            voter: seat,
+            persona: false,
+        });
+    };
+    if let Some(rest) = name.strip_prefix(ballot_sig::PERSONA_VOTER) {
+        return Ok(ResolvedBallot {
+            voter: ballot_sig::prefixed_persona_voter(&seat, rest),
+            persona: false,
+        });
+    }
+    if let Some(resolved) = resolved_standing_seat(name) {
+        if resolved == canonical_seat_name(&seat) {
+            return Ok(ResolvedBallot {
+                voter: seat,
+                persona: false,
+            });
+        }
+        bail!("a seat cannot cast a ballot for {resolved}");
+    }
+    if names_casting_seat(name, &seat) {
+        return Ok(ResolvedBallot {
+            voter: seat,
+            persona: false,
+        });
+    }
+    if names_process_account(name) || caster_labelled_holder(name) {
+        return Ok(ResolvedBallot {
+            voter: ballot_sig::caster_persona_voter(&seat, name),
+            persona: false,
+        });
+    }
+    if !persona_chars_ok(name) {
+        bail!("a persona name may use only letters, digits, spaces, '.', '_' and '-'");
+    }
+    let slug = canonical_persona(name);
+    if slug.is_empty() {
+        bail!("a persona name may use only letters, digits, spaces, '.', '_' and '-'");
+    }
+    if names_casting_seat(&slug, &seat) {
+        return Ok(ResolvedBallot {
+            voter: seat,
+            persona: false,
+        });
+    }
+    Ok(ResolvedBallot {
+        voter: slug,
+        persona: true,
+    })
+}
+
+fn ignored_used_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00ad}'
+            | '\u{180e}'
+            | '\u{200b}'
+            | '\u{200c}'
+            | '\u{200d}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{2060}'
+            | '\u{feff}'
+    )
+}
+
+/// `none`, empty, fullwidth `none`, or `none` with zero-width characters.
+fn used_is_none(used: &str) -> bool {
+    use unicode_normalization::UnicodeNormalization as _;
+    let folded: String = used.nfkc().filter(|c| !ignored_used_char(*c)).collect();
+    let trimmed = folded.trim();
+    trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none")
+}
+
+fn persona_needs_sentence(name: &str) -> String {
+    format!("a ballot cast as {name} needs --used naming a deed")
+}
+
+fn deed_held_by_other(issue: &str, persona: &str, ids: &[String]) -> Option<String> {
+    let seat = seat_name();
+    let rows = raw_ballot_rows(issue).unwrap_or_default();
+    for row in rows {
+        let agent = row["agent"].as_str().unwrap_or("").trim();
+        if agent.is_empty()
+            || agent == persona
+            || canonical_persona(agent) == canonical_persona(persona)
+            || agent == seat
+            || canonical_persona(agent) == canonical_persona(&seat)
+        {
+            continue;
+        }
+        let used = row["used"].as_str().unwrap_or("");
+        for part in used.split(',') {
+            let part = part.trim();
+            if part.is_empty() || used_is_none(part) {
+                continue;
+            }
+            let Ok(id) = resolve_deed(part) else {
+                continue;
+            };
+            if ids.iter().any(|want| want == &id) {
+                return Some(id);
+            }
         }
     }
+    None
 }
 
-/// A persona that is not this seat, except a standing seat, the person,
-/// and a `persona:` ballot.
-fn extra_persona(name: &str) -> bool {
-    let name = name.trim();
-    if name.is_empty() || name.starts_with(ballot_sig::PERSONA_VOTER) {
-        return false;
+/// A persona needs `--used` to name a deed [`resolve_deed`] accepts.
+/// `none`, a lookalike, an unknown id and a malformed id are one sentence.
+/// One resolved deed backs one persona on `issue`.
+fn persona_deed_check(issue: &str, persona: &str, used: &str) -> Result<()> {
+    if used_is_none(used) {
+        bail!("{}", persona_needs_sentence(persona));
     }
-    if names_this_seat(name, &seat_name()) || protected_ballot_name(name) {
-        return false;
+    let mut ids = Vec::new();
+    for part in used.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if used_is_none(part) {
+            bail!("{}", persona_needs_sentence(persona));
+        }
+        match resolve_deed(part) {
+            Ok(id) => ids.push(id),
+            Err(_) => bail!("{}", persona_needs_sentence(persona)),
+        }
     }
-    true
+    if ids.is_empty() {
+        bail!("{}", persona_needs_sentence(persona));
+    }
+    if let Some(id) = deed_held_by_other(issue, persona, &ids) {
+        bail!(
+            "a ballot cast as {persona} cannot cite {id}, which another persona already used on {issue}"
+        );
+    }
+    Ok(())
 }
 
-/// A persona whose name would be read as this seat (`tls-rev1` on seat
-/// `tls`) needs a deed. Another persona keeps the `--used none` it already
-/// accepts. `none` is not a deed.
-fn persona_needs_deed(name: &str) -> bool {
-    if !extra_persona(name) {
-        return false;
-    }
-    let folded = canonical_seat_name(name);
-    if folded.is_empty() || folded == ballot_persona_slug(name) {
-        return false;
-    }
-    let seat = seat_name();
-    folded == canonical_seat_name(&seat) || folded == ballot_persona_slug(&seat)
+/// One cast, from the CLI and from MCP.
+pub struct CastBallot<'a> {
+    pub issue: &'a str,
+    pub choice: &'a str,
+    pub used: &'a str,
+    pub confidence: Option<f64>,
+    pub expect: Option<&'a str>,
+    pub as_persona: Option<&'a str>,
 }
 
-/// Refuse `--used none` for a persona that would otherwise count as this seat.
+/// What [`cast_ballot`] recorded, for the caller to print or return.
+pub struct CastReport {
+    pub text: String,
+    pub voter: String,
+    pub persona: bool,
+    /// Set when this session filed a candidate. The CLI already printed it.
+    pub session_label: Option<String>,
+}
+
+/// Cast one ballot. A voter who already holds one is `repeated-ballot`
+/// before `--used` is required, which is how a seat repeats when `--used`
+/// is omitted. A persona is refused unless `--used` resolves to a deed.
 ///
 /// # Errors
 ///
-/// [`persona_needs_deed`] and `used` is empty or `none`. One sentence.
-pub fn persona_deed(named: Option<&str>, used: &str) -> Result<()> {
-    let Some(name) = named.map(str::trim).filter(|n| !n.is_empty()) else {
-        return Ok(());
-    };
-    if !persona_needs_deed(name) {
-        return Ok(());
+/// The name is refused, this voter already holds a ballot, the deed does
+/// not resolve, or the tracker does not show the row afterwards.
+pub fn cast_ballot(args: &CastBallot<'_>) -> Result<CastReport> {
+    let resolved = resolve_ballot(args.as_persona)?;
+    let who = resolved.voter.clone();
+    let cast = hook_timed("vote_claim", || {
+        panel_gate::claim_session_ballot(args.issue, &who)
+    })?;
+    if resolved.persona {
+        persona_deed_check(args.issue, &who, args.used)?;
     }
-    let used = used.trim();
-    if used.is_empty() || used.eq_ignore_ascii_case("none") {
-        bail!("a ballot cast as {name} needs --used naming a deed");
+    if args.used.trim().is_empty() {
+        bail!(
+            "a ballot records what it used (doi:10.1007/3-540-44503-X_20); pass --used deed-.... This seat's own ballot may pass --used none. A persona needs a real deed, and one deed backs one persona on an issue"
+        );
     }
-    Ok(())
+    let mut argv = vec![
+        "vote".to_string(),
+        args.issue.to_string(),
+        "--for".into(),
+        args.choice.to_string(),
+        "--used".into(),
+        args.used.to_string(),
+    ];
+    if let Some(p) = args.confidence {
+        argv.push("--confidence".into());
+        argv.push(format!("{p}"));
+    }
+    let said = hook_timed("vote_cast", || run_captured_as("vissue", &argv, Some(&who)))?;
+    let rows = hook_timed("vote_readback", || {
+        raw_ballot_rows(args.issue).unwrap_or_default()
+    });
+    if !tracker_holds_ballot(&rows, &who, args.choice) {
+        bail!(
+            "the tracker does not hold a ballot from {who} for {} on {}: nothing was cast",
+            args.choice,
+            args.issue
+        );
+    }
+    let mut text = String::new();
+    if !said.stdout.is_empty() {
+        text.push_str(&said.stdout);
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+    }
+    if !said.stderr.is_empty() {
+        text.push_str(&said.stderr);
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+    }
+    text.push_str(&format!(
+        "recorded on the tracker: {who} for {} on {}\n",
+        args.choice, args.issue
+    ));
+    let session_label = cast.label.clone();
+    cast.keep();
+    match hook_timed("vote_sign", || {
+        ballot_sig::sign_ballot(args.issue, &who, args.choice)
+    }) {
+        Ok(line) => text.push_str(&line),
+        Err(e) => text.push_str(&format!("ljos vote: {e:#}\n")),
+    }
+    if let Some(expect) = args.expect.map(str::trim).filter(|e| !e.is_empty()) {
+        write_prediction(args.issue, &who, expect)
+            .with_context(|| format!("ballot cast; forecast for {who} was not recorded"))?;
+        text.push_str(&format!("forecast recorded for {who}\n"));
+    }
+    text.push_str(&persist_tracker(args.issue, "ballot cast"));
+    Ok(CastReport {
+        text,
+        voter: who,
+        persona: resolved.persona,
+        session_label,
+    })
 }
 
 /// Refuse a tracker write from a seat the tracker's `vissue.toml` does not
@@ -13753,7 +13946,8 @@ pub fn decision_member_task(brief: &str, persona: &str, issue: &str) -> String {
          The brief above holds the issue; decide from it before you see another voice, so do \
          not run `vissue show`, `vissue vote` or `ljos consensus` on {issue} first. \
          Then `ljos vote {issue} --for OPTION --expect OPTION --as {persona} \
-         --confidence 0.7 --used none`. OPTION is one of the issue's options. \
+         --confidence 0.7 --used DEED`. OPTION is one of the issue's options. \
+         A persona needs a real deed, and one deed backs one persona on an issue. \
          Do not open a sitting, edit files, push, or ssh."
     )
 }
@@ -29381,10 +29575,10 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
          Decide before you see another voice: do not read `vissue vote {issue}`, `vissue show {issue}` or `ljos consensus {issue}` until your ballot is cast. \
          A ballot that follows the ones before it adds a voice and no evidence. \
          End with one ballot: `ljos vote {issue} --for OPTION --expect OPTION --confidence P --used deed-... --as {name}`. \
-         A no vote files a child first (`ljos file --parent {issue} \"TITLE\"`) and then `ljos vote {issue} --against REASON --used none --as {name} --child CHILD`. \
+         A no vote files a child first (`ljos file --parent {issue} \"TITLE\"`) and then `ljos vote {issue} --against REASON --used DEED --as {name} --child CHILD`. \
          --expect is what you think the others will pick, or a JSON object of option to share; the surprisingly popular reading needs that forecast on the same command. \
          P is the probability you give that your own choice is the outcome. \
-         --used none records that the ballot drew on no deed. \
+         A persona needs --used naming a real deed. One deed backs one persona on an issue. --used none is only this seat's own ballot. \
          The line it prints is a count. `ljos consensus {issue}` is the settle. \
          Only the tracker is proof: your ballot is cast when `vissue vote {issue} --json` holds your row and `ljos vote` printed `recorded on the tracker`. Never report a ballot, claim or finish the tracker does not show. \
          A lesson of your own is `ljos note {issue} \"...\"`.\n",
@@ -29958,8 +30152,8 @@ pub fn persona_ballot_task(brief: &str, persona: &str, issue: &str) -> String {
          it is yours to reason. Read `vissue show {issue}` and what the pack holds \
          (`ljos search \"...\"`). Write your reasoning in two or three sentences with \
          `ljos note {issue} \"{persona}: ...\"`, then cast \
-         `ljos vote {issue} --for OPTION --expect OPTION --as {persona} --used none` (name the \
-         deeds you used instead of none). A lesson of your own is \
+         `ljos vote {issue} --for OPTION --expect OPTION --as {persona} --used DEED`. \
+         A persona needs a real deed, and one deed backs one persona on an issue. A lesson of your own is \
          `ljos note {issue} \"...\"`. Do not open a sitting, change files or push."
     )
 }
@@ -47059,8 +47253,9 @@ workflow. The stage and the next step, the same reading as `ljos workflow`.",
         name: "panel",
         optional: true,
         step: "`== panel`, left out unless the issue is a decision. One brief per persona\n   \
-the issue speaks to. A session casts `ljos vote --as NAME` for each.\n   \
-Consensus records those ballots and counts one voice per session.",
+the issue speaks to. A session casts `ljos vote --as NAME --used DEED` for each.\n   \
+This seat's own ballots are one voice per session. A persona is its own voice,\n   \
+needs a real deed, and one deed backs one persona on an issue.",
     },
     SittingSection {
         name: "recall",

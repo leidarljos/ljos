@@ -1090,12 +1090,11 @@ fn fold_why(members: &[usize], rows: &[Value], links: &BTreeMap<String, VoiceLin
     }
 }
 
-/// Personas whose name would be read as the caster (`tls-rev1` cast by
-/// `tls`). Those count on their own. Any other persona still folds into
-/// the session it shares with the seat.
+/// Personas. The session fold is only the seat's own ballots, where the
+/// provenance persona and the caster are the same name. A persona is its
+/// own voter and never folds with the seat or with another persona.
 fn own_voice_voters(notes: &[String]) -> BTreeSet<String> {
     let mut own = BTreeSet::new();
-    let mut seat_ballot = BTreeSet::new();
     for note in notes {
         let Some((persona, caster, _)) = ballot_sig::parse_from(note) else {
             continue;
@@ -1103,16 +1102,13 @@ fn own_voice_voters(notes: &[String]) -> BTreeSet<String> {
         if persona.is_empty() || persona == "-" || caster.is_empty() || caster == "-" {
             continue;
         }
-        if persona == caster {
-            seat_ballot.insert(persona);
+        if crate::canonical_persona(&persona) == crate::canonical_persona(&caster) {
             continue;
         }
-        let folded = crate::canonical_seat_name(&persona);
-        if !folded.is_empty() && folded != persona && folded == caster {
-            own.insert(persona);
-        }
+        own.insert(persona.clone());
+        own.insert(ballot_sig::caster_persona_voter(&caster, &persona));
     }
-    own.difference(&seat_ballot).cloned().collect()
+    own
 }
 
 /// Keep one row per session. A session is a shared session id or a shared
@@ -1760,7 +1756,8 @@ fn plan(issue: &str, harness: &str, designers: usize, personas: &[String]) -> Ve
             Err(_) => format!(
                 "You are {name}, in your own harness session. Cast exactly one ballot on {issue} \
                  and stop. Do not read `vissue vote {issue}` or another persona's ballot first.\n\
-                 `ljos vote {issue} --for OPTION --expect OPTION --as {name} --confidence 0.7 --used none`.\n"
+                 `ljos vote {issue} --for OPTION --expect OPTION --as {name} --confidence 0.7 --used DEED`. \
+                 A persona needs a real deed.\n"
             ),
         };
         jobs.push(Job {

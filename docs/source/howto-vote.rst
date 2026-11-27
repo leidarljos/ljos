@@ -17,10 +17,13 @@ Vote with personas
    $ ljos brief reader $id
 
 Each brief goes to its own subagent or run, which casts as its persona:
-the reviewer's runs ``ljos vote $id --for hold --used none --as reviewer`` and the
-reader's ``ljos vote $id --for ship --used none --as reader``. One session that cast
-both would be refused at the second, since a seat argument does not
-make another voice. The seat then runs ``ljos consensus $id``.
+the reviewer's runs
+``ljos vote $id --for hold --used deed-9f3a --as reviewer``
+and the reader's
+``ljos vote $id --for ship --used deed-2c1b --as reader``.
+One session that cast both would be refused at the second, since a
+seat argument does not make another voice. The seat then runs
+``ljos consensus $id``.
 
 Each persona is one atom in the pack; its ballots carry its name. The
 settle takes its anchor, never below the 0.5 every other voter on the
