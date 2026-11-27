@@ -42,6 +42,16 @@ static void hit(void) {
 }
 
 static void block(const char *p) {
+    const char *once = getenv("SLOW_ONCE");
+    static int used;
+    if (once && once[0] && p && strcmp(p, once) == 0) {
+        if (!used) {
+            used = 1;
+            hit();
+            usleep(800000);
+        }
+        return;
+    }
     if (!slow(p)) return;
     hit();
     sleep(30);
@@ -1212,9 +1222,10 @@ fn a_slow_relative_tmpdir_is_refused() {
     }
 }
 
-/// A relative `LJOS_HUD_BIN` in a parked start directory is refused for
-/// `hud --foreground` and `hud --hide`. `--hide` does not report success
-/// without running it, and the parked directory is not left behind.
+/// A relative `LJOS_HUD_BIN` is resolved after the park. `./hud-rel` names
+/// the start directory, not the parked directory, so that file is not run.
+/// `--foreground` exits 127. `--hide` exits 0. The parked directory is
+/// not left behind.
 #[test]
 fn a_slow_relative_hud_bin_is_refused() {
     let seat = Seat::new();
@@ -1242,7 +1253,13 @@ fn a_slow_relative_hud_bin_is_refused() {
             "{args:?} took {took:?}: {}",
             text(&out)
         );
-        assert!(refused(&out, "LJOS_HUD_BIN"), "{args:?}: {}", text(&out));
+        let want = if args[1] == "--hide" { 0 } else { 127 };
+        assert_eq!(out.status.code(), Some(want), "{args:?}: {}", text(&out));
+        assert!(
+            !text(&out).contains("did not resolve"),
+            "{args:?}: {}",
+            text(&out)
+        );
         assert!(out.stdout.is_empty(), "{args:?} stdout: {}", text(&out));
         assert!(!mark.join("which").is_file(), "{args:?} ran the hud");
         assert!(
@@ -1534,6 +1551,17 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
         "sib-fifo",
         "hud-bytes",
         "issue-wins",
+        "split-flag",
+        "late-hud",
+        "sib-hang",
+        "hud-serve",
+        "link-dotdot",
+        "path-dot",
+        "path-empty",
+        "path-bin",
+        "path-up",
+        "path-budget",
+        "same-bin",
     ] {
         let _ = std::fs::remove_file(mark.join("which"));
         let err = match row {
@@ -1597,39 +1625,31 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
                 )
             }
             "path-hang" => {
-                // The unrepaired lookup states this path on the main thread.
-                // The harness kills that at 6s. Catch it so the other rows
-                // still report.
-                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    seat.run_at(
-                        &copied,
-                        &slow,
-                        &["hud", "--foreground"],
-                        &[
-                            ("TMPDIR", tmp_s),
-                            ("LJOS_MARK", mark_s),
-                            ("LD_PRELOAD", so_s),
-                            ("PATH", path_in.as_str()),
-                            ("LJOS_HUD_BIN", ""),
-                        ],
-                    )
-                }));
-                let Ok((out, took)) = caught else {
-                    missed.push(format!("{row}: still running"));
-                    continue;
-                };
-                let gone = ljos_names(&tmp)
-                    .iter()
-                    .all(|name| !name.starts_with("ljos-cwd-"));
-                parked_ok(
-                    took < Duration::from_secs(4)
-                        && !out.status.success()
-                        && text(&out).contains("did not resolve")
-                        && out.stdout.is_empty()
-                        && gone
-                        && !mark.join("which").is_file(),
-                    true,
-                    &format!("{row} {took:?}: {}", text(&out)),
+                // A PATH entry under the parked start directory that does
+                // not answer is skipped. The later entry runs. The command
+                // does not exit 1.
+                let later = seat.dir.path().join("hang-later");
+                std::fs::create_dir_all(&later).unwrap();
+                script(
+                    &later,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'later %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let path = format!("{slow_s}:{}:/usr/bin:/bin", later.display());
+                both_flags(
+                    &seat,
+                    &copied,
+                    &slow,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    "later",
+                    Duration::from_secs(4),
                 )
             }
             "link-root" => {
@@ -1970,6 +1990,423 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                     &format!("{row} {took:?}: {}", text(&out)),
                 )
             }
+            "split-flag" => {
+                let dir = seat.dir.path().join("split");
+                let good = seat.dir.path().join("split-good");
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::create_dir_all(&good).unwrap();
+                let program = dir.join("ljos");
+                ljos_cli::copy_executable(Path::new(env!("CARGO_BIN_EXE_ljos")), &program).unwrap();
+                script(
+                    &dir,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'SIB %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                script(
+                    &good,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'GOOD %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let once = canon(&dir.join("ljos-hud"));
+                let path = format!("{}:/usr/bin:/bin", good.display());
+                both_flags(
+                    &seat,
+                    &program,
+                    &dir,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_ONCE", once.to_str().unwrap()),
+                        ("SLOW_EXACT", "/no/such/stat"),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    "GOOD",
+                    Duration::from_secs(4),
+                )
+            }
+            "late-hud" => {
+                // The lookup has one budget from the moment it starts. A
+                // worker that has not entered the stat by then is skipped.
+                // That is not "did not resolve", and it is not a new budget
+                // per entry.
+                let good = seat.dir.path().join("late-good");
+                let dir = seat.dir.path().join("late-cwd");
+                std::fs::create_dir_all(&good).unwrap();
+                std::fs::create_dir_all(&dir).unwrap();
+                script(
+                    &good,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'GOOD %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let path = format!("{}:/usr/bin:/bin", good.display());
+                one_budget_miss(
+                    &seat,
+                    &copied,
+                    &dir,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_THREAD_MS", "800"),
+                        ("SLOW_EXACT", "/no/such/stat"),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                )
+            }
+            "sib-hang" => {
+                let later = seat.dir.path().join("sib-later");
+                std::fs::create_dir_all(&later).unwrap();
+                script(
+                    &later,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'later %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let path = format!("{}:/usr/bin:/bin", later.display());
+                both_flags(
+                    &seat,
+                    &beside,
+                    &slow,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    "later",
+                    Duration::from_secs(4),
+                )
+            }
+            "hud-serve" => {
+                let hung = slow.join("fast-hud");
+                script(
+                    &slow,
+                    "fast-hud",
+                    "#!/bin/sh\nprintf hung > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                script(
+                    &slow,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf path > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let path_hud = slow.join("ljos-hud");
+                let landed = seat.tracker.join("Software/landed");
+                let vissue_path = format!("{}:/usr/bin:/bin", seat.bin.display());
+                let serve = |args: &[&str], extra_path: Option<&str>| {
+                    let _ = std::fs::remove_file(&landed);
+                    let _ = std::fs::remove_file(mark.join("which"));
+                    let path = extra_path.unwrap_or(vissue_path.as_str());
+                    let (hud, exact) = if extra_path.is_some() {
+                        ("", path_hud.to_str().unwrap())
+                    } else {
+                        (hung.to_str().unwrap(), hung.to_str().unwrap())
+                    };
+                    let (out, took) = seat.run(
+                        &slow,
+                        args,
+                        &[
+                            ("TMPDIR", tmp_s),
+                            ("VISSUE_ROOT", seat.tracker.to_str().unwrap()),
+                            ("LJOS_HUD_BIN", hud),
+                            ("LJOS_MARK", mark_s),
+                            ("LD_PRELOAD", so_s),
+                            ("SLOW_EXACT", exact),
+                            ("PATH", path),
+                        ],
+                    );
+                    (out, took)
+                };
+                let (file_out, file_took) =
+                    serve(&["file", "-p", "demo", "--top", "a title"], None);
+                let file_ok = file_took < Duration::from_secs(4)
+                    && file_out.status.success()
+                    && landed.is_file()
+                    && !text(&file_out).contains("did not resolve");
+                let (note_out, note_took) = serve(&["note", "demo-1", "a note"], None);
+                let note_ok = note_took < Duration::from_secs(4)
+                    && note_out.status.success()
+                    && landed.is_file()
+                    && !text(&note_out).contains("did not resolve");
+                let path = format!("{slow_s}:{}:/usr/bin:/bin", seat.bin.display());
+                let (path_out, path_took) = serve(
+                    &["file", "-p", "demo", "--top", "a title"],
+                    Some(path.as_str()),
+                );
+                let path_ok = path_took < Duration::from_secs(4)
+                    && path_out.status.success()
+                    && landed.is_file()
+                    && !text(&path_out).contains("did not resolve");
+                parked_ok(
+                    file_ok && note_ok && path_ok,
+                    true,
+                    &format!(
+                        "{row} file {file_took:?}: {} note {note_took:?}: {} path {path_took:?}: {}",
+                        text(&file_out),
+                        text(&note_out),
+                        text(&path_out)
+                    ),
+                )
+            }
+            "link-dotdot" => {
+                let start = seat.dir.path().join("dotstart");
+                let outside = seat.dir.path().join("vendor-target");
+                let link = seat.dir.path().join("dotlink");
+                std::fs::create_dir_all(&start).unwrap();
+                std::fs::create_dir_all(&outside).unwrap();
+                if !link.exists() {
+                    link_dir(&start, &link);
+                }
+                let vendor = start.join("vendor");
+                if !vendor.exists() {
+                    link_dir(&outside, &vendor);
+                }
+                let spelling = PathBuf::from(format!("{}/vendor/../tracker", link.display()));
+                let lexical = start.join("tracker");
+                let _ = std::fs::remove_dir_all(&lexical);
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    seat.run(
+                        &start,
+                        &["file", "-p", "demo", "--top", "a title"],
+                        &[
+                            ("TMPDIR", tmp_s),
+                            ("VISSUE_ROOT", spelling.to_str().unwrap()),
+                            ("LJOS_MARK", mark_s),
+                            ("LD_PRELOAD", so_s),
+                            ("SLOW_EXACT", spelling.to_str().unwrap()),
+                        ],
+                    )
+                }));
+                let guessed = lexical.join("Software/landed").is_file() || lexical.exists();
+                match caught {
+                    Err(_) => parked_ok(!guessed, true, "link-dotdot guessed while hanging"),
+                    Ok((out, took)) => parked_ok(
+                        !guessed,
+                        true,
+                        &format!("{row} {took:?} guessed={guessed}: {}", text(&out)),
+                    ),
+                }
+            }
+            "path-dot" | "path-empty" | "path-bin" => {
+                let fast = seat.dir.path().join("fastroot");
+                let abs = seat.dir.path().join("abs-hud");
+                std::fs::create_dir_all(fast.join("bin")).unwrap();
+                std::fs::create_dir_all(&abs).unwrap();
+                script(
+                    &fast,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'start %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                script(
+                    &fast.join("bin"),
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'relbin %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                script(
+                    &abs,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'abs %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let abs_path = format!("{}:/usr/bin:/bin", abs.display());
+                let (label, path) = match row {
+                    "path-dot" => ("start", format!(".:{abs_path}")),
+                    "path-empty" => ("start", format!(":{abs_path}")),
+                    "path-bin" => ("relbin", format!("bin:{abs_path}")),
+                    _ => unreachable!(),
+                };
+                both_flags(
+                    &seat,
+                    &copied,
+                    &fast,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    label,
+                    Duration::from_secs(4),
+                )
+            }
+            "path-up" => {
+                let nest = seat.dir.path().join("park-nest");
+                let rel = seat.dir.path().join("rel-hud");
+                let abs = seat.dir.path().join("up-abs");
+                std::fs::create_dir_all(&nest).unwrap();
+                std::fs::create_dir_all(&rel).unwrap();
+                std::fs::create_dir_all(&abs).unwrap();
+                script(
+                    &rel,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'rel %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                script(
+                    &abs,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'abs %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let nest_s = nest.to_str().unwrap();
+                let with_abs = format!("../../rel-hud:{}:/usr/bin:/bin", abs.display());
+                let only = "../../rel-hud:/usr/bin:/bin".to_string();
+                let mut bad = None;
+                for path in [&with_abs, &only] {
+                    let err = both_flags(
+                        &seat,
+                        &copied,
+                        &slow,
+                        &[
+                            ("TMPDIR", nest_s),
+                            ("LJOS_MARK", mark_s),
+                            ("LD_PRELOAD", so_s),
+                            ("SLOW_EXACT", slow_s),
+                            ("PATH", path.as_str()),
+                            ("LJOS_HUD_BIN", ""),
+                            ("VISSUE_ROOT", ""),
+                        ],
+                        "rel",
+                        Duration::from_secs(4),
+                    );
+                    if let Err(why) = err {
+                        bad = Some(why);
+                        break;
+                    }
+                }
+                match bad {
+                    Some(why) => Err(format!("{row} {why}")),
+                    None => Ok(()),
+                }
+            }
+            "path-budget" => {
+                // Three hung PATH entries share nothing with this command.
+                // Base does not stat them while filing, so the run stays
+                // inside one probe budget and still writes the tracker.
+                let cwd = seat.dir.path().join("budget-cwd");
+                std::fs::create_dir_all(&cwd).unwrap();
+                let mut path = format!("{}:", seat.bin.display());
+                for index in 1..=3 {
+                    let dir = seat.dir.path().join(format!("ljos-slow-cwd-h{index}"));
+                    std::fs::create_dir_all(&dir).unwrap();
+                    script(
+                        &dir,
+                        "ljos-hud",
+                        "#!/bin/sh\nprintf 'hung %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                    );
+                    path.push_str(dir.to_str().unwrap());
+                    path.push(':');
+                }
+                path.push_str("/usr/bin:/bin");
+                let landed = seat.tracker.join("Software/landed");
+                let _ = std::fs::remove_file(&landed);
+                let (out, took) = seat.run(
+                    &cwd,
+                    &["file", "-p", "demo", "--top", "a title"],
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("VISSUE_ROOT", seat.tracker.to_str().unwrap()),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                    ],
+                );
+                parked_ok(
+                    took < Duration::from_millis(500)
+                        && out.status.success()
+                        && landed.is_file()
+                        && !text(&out).contains("did not resolve")
+                        && !mark.join("which").is_file(),
+                    true,
+                    &format!("{row} {took:?}: {}", text(&out)),
+                )
+            }
+            "same-bin" => {
+                // `--hide` and `--foreground` name the same program when an
+                // earlier stat overruns, when the worker is late, and when
+                // a sibling under the start directory does not answer.
+                let mut bad = None;
+                for earlier in ["split-flag", "late-hud", "sib-hang"] {
+                    let err = match earlier {
+                        "split-flag" => {
+                            let dir = seat.dir.path().join("split");
+                            let good = seat.dir.path().join("split-good");
+                            let program = dir.join("ljos");
+                            let once = canon(&dir.join("ljos-hud"));
+                            let path = format!("{}:/usr/bin:/bin", good.display());
+                            both_flags(
+                                &seat,
+                                &program,
+                                &dir,
+                                &[
+                                    ("TMPDIR", tmp_s),
+                                    ("LJOS_MARK", mark_s),
+                                    ("LD_PRELOAD", so_s),
+                                    ("SLOW_ONCE", once.to_str().unwrap()),
+                                    ("SLOW_EXACT", "/no/such/stat"),
+                                    ("PATH", path.as_str()),
+                                    ("LJOS_HUD_BIN", ""),
+                                    ("VISSUE_ROOT", ""),
+                                ],
+                                "GOOD",
+                                Duration::from_secs(4),
+                            )
+                        }
+                        "late-hud" => {
+                            let good = seat.dir.path().join("late-good");
+                            let dir = seat.dir.path().join("late-cwd");
+                            let path = format!("{}:/usr/bin:/bin", good.display());
+                            one_budget_miss(
+                                &seat,
+                                &copied,
+                                &dir,
+                                &[
+                                    ("TMPDIR", tmp_s),
+                                    ("LJOS_MARK", mark_s),
+                                    ("LD_PRELOAD", so_s),
+                                    ("SLOW_THREAD_MS", "800"),
+                                    ("SLOW_EXACT", "/no/such/stat"),
+                                    ("PATH", path.as_str()),
+                                    ("LJOS_HUD_BIN", ""),
+                                    ("VISSUE_ROOT", ""),
+                                ],
+                            )
+                        }
+                        "sib-hang" => {
+                            let later = seat.dir.path().join("sib-later");
+                            let path = format!("{}:/usr/bin:/bin", later.display());
+                            both_flags(
+                                &seat,
+                                &beside,
+                                &slow,
+                                &[
+                                    ("TMPDIR", tmp_s),
+                                    ("LJOS_MARK", mark_s),
+                                    ("LD_PRELOAD", so_s),
+                                    ("PATH", path.as_str()),
+                                    ("LJOS_HUD_BIN", ""),
+                                    ("VISSUE_ROOT", ""),
+                                ],
+                                "later",
+                                Duration::from_secs(4),
+                            )
+                        }
+                        _ => unreachable!(),
+                    };
+                    if let Err(why) = err {
+                        bad = Some(format!("{earlier}: {why}"));
+                        break;
+                    }
+                }
+                match bad {
+                    Some(why) => Err(format!("{row} {why}")),
+                    None => Ok(()),
+                }
+            }
             _ => unreachable!(),
         };
         if let Err(why) = err {
@@ -1977,6 +2414,69 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
         }
     }
     assert!(missed.is_empty(), "{}", missed.join("\n"));
+}
+
+fn one_budget_miss(
+    seat: &Seat,
+    program: &Path,
+    cwd: &Path,
+    extra: &[(&str, &str)],
+) -> Result<(), String> {
+    for flag in ["--foreground", "--hide"] {
+        let mark = extra
+            .iter()
+            .find(|(key, _)| *key == "LJOS_MARK")
+            .map(|(_, value)| PathBuf::from(value))
+            .unwrap();
+        let _ = std::fs::remove_file(mark.join("which"));
+        let (out, took) = seat.run_at(program, cwd, &["hud", flag], extra);
+        let want = if flag == "--hide" { 0 } else { 127 };
+        let body = read_trim(&mark.join("which"));
+        if took >= Duration::from_millis(1600)
+            || out.status.code() != Some(want)
+            || !body.is_empty()
+            || text(&out).contains("did not resolve")
+        {
+            return Err(format!(
+                "{flag} {took:?} code {:?} marker {body:?}: {}",
+                out.status.code(),
+                text(&out)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn both_flags(
+    seat: &Seat,
+    program: &Path,
+    cwd: &Path,
+    extra: &[(&str, &str)],
+    id: &str,
+    limit: Duration,
+) -> Result<(), String> {
+    let mut seen = Vec::new();
+    for flag in ["--foreground", "--hide"] {
+        let mark = extra
+            .iter()
+            .find(|(key, _)| *key == "LJOS_MARK")
+            .map(|(_, value)| PathBuf::from(value))
+            .unwrap();
+        let _ = std::fs::remove_file(mark.join("which"));
+        let (out, took) = seat.run_at(program, cwd, &["hud", flag], extra);
+        let body = read_trim(&mark.join("which"));
+        if took >= limit || !out.status.success() || !body.starts_with(id) {
+            return Err(format!("{flag} {took:?} marker {body:?}: {}", text(&out)));
+        }
+        seen.push(body);
+    }
+    if seen.len() == 2
+        && seen[0].split_once(' ').map(|p| p.0) == seen[1].split_once(' ').map(|p| p.0)
+    {
+        Ok(())
+    } else {
+        Err(format!("flags diverged: {seen:?}"))
+    }
 }
 
 fn parked_ok(passed: bool, marker: bool, why: &str) -> Result<(), String> {

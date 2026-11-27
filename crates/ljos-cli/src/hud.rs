@@ -23,60 +23,153 @@ pub struct HudLaunch {
     pub install_desktop: bool,
 }
 
+/// One answer from [`resolve_hud_bin`], for this directory and environment.
+///
+/// A second call, including `--hide` after the lookup that `--foreground`
+/// would have used, returns this path. A stat that did not answer on the
+/// first walk is not stated again.
+struct HudHit {
+    cwd: PathBuf,
+    hud: std::ffi::OsString,
+    path: std::ffi::OsString,
+    exe: PathBuf,
+    found: Option<PathBuf>,
+}
+
+static HUD_HIT: std::sync::Mutex<Option<HudHit>> = std::sync::Mutex::new(None);
+
 /// Locate `ljos-hud`. Missing means exit 127.
+///
+/// The order is the base launcher's. A set `LJOS_HUD_BIN` is that path
+/// and nothing else; the bytes of the variable are not rewritten. Otherwise
+/// the sibling beside this binary, then each `PATH` entry, including `.`,
+/// an empty component, and any other relative entry. A candidate is a
+/// regular file. A stat that does not answer is not that file, and the
+/// walk tries the next entry. It does not stop the command.
 pub fn resolve_hud_bin() -> Option<PathBuf> {
-    if let Ok(raw) = std::env::var(HUD_BIN_ENV) {
-        let t = raw.trim();
-        if !t.is_empty() {
-            return Some(PathBuf::from(t));
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let hud = std::env::var_os(HUD_BIN_ENV).unwrap_or_default();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let exe = std::env::current_exe().unwrap_or_default();
+    let mut held = HUD_HIT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(hit) = held.as_ref() {
+        if hit.cwd == cwd && hit.hud == hud && hit.path == path && hit.exe == exe {
+            return hit.found.clone();
         }
     }
-    if let Some(found) = crate::cwd_probe::resolved_hud() {
-        return Some(found);
+    let found = walk_hud(&hud, &path);
+    *held = Some(HudHit {
+        cwd,
+        hud,
+        path,
+        exe,
+        found: found.clone(),
+    });
+    found
+}
+
+/// `LJOS_HUD_BIN`, then the sibling, then `PATH`, in that order.
+///
+/// Filing commands never call this, so they do not stat `PATH`.
+/// The sibling and `PATH` share one [`crate::cwd_probe::CWD_PROBE`].
+/// `statx` with `AT_STATX_DONT_SYNC` only skips a cached server refresh,
+/// and a lookup that has not returned still blocks, so the wait is
+/// abandoned instead. An entry that has not answered is skipped. The
+/// next entry does not start a new budget.
+fn walk_hud(hud: &std::ffi::OsString, path: &std::ffi::OsString) -> Option<PathBuf> {
+    if let Some(text) = hud.to_str() {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sibling = dir.join("ljos-hud");
-            if program_exists(&sibling) {
-                return Some(sibling);
+    let mut cands = Vec::new();
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        cands.push(dir.join("ljos-hud"));
+    }
+    for dir in std::env::split_paths(path) {
+        cands.push(dir.join("ljos-hud"));
+    }
+    first_ready(cands)
+}
+
+/// First candidate that is a regular file, in order, within one budget.
+///
+/// Every candidate is stated together. An earlier stat that does not
+/// answer is not a program, so a later one that did answer can win.
+/// The wait is not restarted per entry.
+fn first_ready(cands: Vec<PathBuf>) -> Option<PathBuf> {
+    if cands.is_empty() {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (index, path) in cands.iter().cloned().enumerate() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let ready = std::fs::metadata(&path)
+                .map(|meta| meta.is_file())
+                .unwrap_or(false);
+            let _ = tx.send((index, ready));
+        });
+    }
+    drop(tx);
+    let deadline = std::time::Instant::now() + crate::cwd_probe::CWD_PROBE;
+    let mut answered = vec![None; cands.len()];
+    while std::time::Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(left) {
+            Ok((index, ready)) => {
+                if index < answered.len() {
+                    answered[index] = Some(ready);
+                }
+                if let Some(hit) = pick_ready(&cands, &answered, false) {
+                    return Some(hit);
+                }
             }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join("ljos-hud");
-        if program_exists(&candidate) {
-            return Some(candidate);
+    pick_ready(&cands, &answered, true)
+}
+
+/// The earliest regular file. While the budget is open, an unanswered
+/// earlier candidate still blocks a later one. When the budget is closed,
+/// an unanswered candidate is skipped.
+fn pick_ready(
+    cands: &[PathBuf],
+    answered: &[Option<bool>],
+    budget_closed: bool,
+) -> Option<PathBuf> {
+    for (index, path) in cands.iter().enumerate() {
+        match answered.get(index).copied().flatten() {
+            Some(true) => return Some(path.clone()),
+            Some(false) => continue,
+            None if budget_closed => continue,
+            None => return None,
         }
     }
     None
 }
 
-/// `path` as an absolute program path. A relative `LJOS_HUD_BIN` is
-/// joined to the directory this process started in, which is the current
-/// directory when it did not park. The join does not state that directory.
-fn absolute_program(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        return path.to_path_buf();
+/// `path` when it is a regular file, as an absolute path.
+///
+/// A relative candidate is resolved from the current directory, which is
+/// the parked directory when this process has already moved. The absolute
+/// path is what `exec` uses after that directory is removed.
+fn absolute_ready(path: &Path) -> Option<PathBuf> {
+    if !crate::cwd_probe::program_file(path) {
+        return None;
     }
-    let from = crate::cwd_probe::from_start(path);
-    if from.is_absolute() {
-        return from;
-    }
-    std::env::current_dir()
-        .map(|cwd| cwd.join(path))
-        .unwrap_or(from)
-}
-
-/// Whether `path` is a program file. A path resolved before the park, or
-/// one that lies in the start directory, is not stated again. Any other
-/// path is stated on the deadline. A stat that does not answer is not a
-/// program, and the search moves on.
-fn program_exists(path: &Path) -> bool {
-    if let Some(ready) = crate::cwd_probe::prepared_program(path) {
-        return ready;
-    }
-    crate::cwd_probe::program_file(path)
+    std::fs::canonicalize(path).ok()
 }
 
 /// Hint printed when the launcher cannot find the HUD binary.
@@ -87,28 +180,15 @@ pub fn missing_bin_message() -> &'static str {
 /// Dispatch `ljos hud`. `--help` is answered by clap before this runs.
 pub fn run(opts: HudLaunch) -> i32 {
     // Hide with no HUD binary is success (compositor bind miss).
-    // The check uses the path resolved before the park, not the parked
-    // directory.
-    if opts.hide
-        && !opts.show
-        && !opts.toggle
-        && !opts.install_desktop
-        && !resolve_hud_bin().is_some_and(|p| program_exists(&absolute_program(&p)))
-    {
+    // One lookup serves `--hide` and `--foreground`.
+    let bin = resolve_hud_bin().and_then(|path| absolute_ready(&path));
+    if opts.hide && !opts.show && !opts.toggle && !opts.install_desktop && bin.is_none() {
         return 0;
     }
-    let Some(bin) = resolve_hud_bin() else {
+    let Some(bin) = bin else {
         say!("{}", missing_bin_message());
         return 127;
     };
-    // `execvp` resolves a relative program after `chdir`. The file check
-    // uses the path resolved before the park, and does not state the
-    // start directory again.
-    let bin = absolute_program(&bin);
-    if !program_exists(&bin) {
-        say!("{}", missing_bin_message());
-        return 127;
-    }
     #[expect(
         clippy::disallowed_methods,
         reason = "starts a program outside git hook code"

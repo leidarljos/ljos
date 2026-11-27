@@ -71,9 +71,7 @@ fn settle_at(here: &Path, args: &[String], move_process_cwd: bool) {
     // A network or FUSE mount is left without a stat. getattr is the wait.
     if remote_or_fuse(here) {
         park(here, move_process_cwd);
-        return;
-    }
-    if named {
+    } else if named {
         // `-p` or the ticket id already names the project. A tracker the
         // environment names is not this directory, so this directory is
         // not stated to find one. A child `vissue` states its working
@@ -81,21 +79,17 @@ fn settle_at(here: &Path, args: &[String], move_process_cwd: bool) {
         // first. The seat's configuration is left to `pin_root`: that
         // check is what refuses a product checkout, and it is a local
         // read when this directory is not a slow mount.
-        if env_tracker().is_some_and(|root| root != here) {
-            park(here, move_process_cwd);
-            return;
-        }
-        // Nothing in the environment names a tracker. One stat asks
-        // whether this directory is the tracker the seat is standing in.
-        // It gives up when the mount does not answer.
-        if timed_is_file(&here.join("vissue.toml")).is_none() {
+        if env_tracker().is_some_and(|root| root != here)
+            || timed_is_file(&here.join("vissue.toml")).is_none()
+        {
             park(here, move_process_cwd);
         }
-        return;
-    }
-    if timed_metadata(here).is_none() {
+    } else if timed_metadata(here).is_none() {
         park(here, move_process_cwd);
     }
+    // `file -p` and `note` do not look up `ljos-hud`. Base does not stat
+    // `PATH` while it files a ticket, so a hung entry must not add time
+    // or change the exit status. `ljos hud` is the one lookup.
 }
 
 /// `ISSUE_ROOT` or `VISSUE_ROOT` when one is set. The working directory
@@ -560,10 +554,6 @@ fn directory_flags() -> &'static [libc::c_int] {
 /// the variable still holds it.
 static REWRITTEN_TMPDIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-/// `LJOS_HUD_BIN` after it was resolved to a file before the park. Later
-/// checks use this and do not state the start directory again.
-static RESOLVED_HUD: Mutex<Option<PathBuf>> = Mutex::new(None);
-
 /// Whether `TMPDIR` is the absolute path this process wrote for a relative
 /// or empty value. An absolute `TMPDIR` the process was given stays a
 /// temp root.
@@ -575,34 +565,6 @@ pub(crate) fn tmpdir_rewritten_from_relative() -> bool {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     held.as_ref().is_some_and(|path| path.as_os_str() == raw)
-}
-
-/// HUD program found under the start directory before the park.
-///
-/// `LJOS_HUD_BIN`, the sibling beside this binary, and `PATH` are walked
-/// once. A later lookup returns this path and does not state the start
-/// directory again.
-pub(crate) fn resolved_hud() -> Option<PathBuf> {
-    RESOLVED_HUD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
-}
-
-/// Whether `path` is the HUD program resolved before the park.
-///
-/// `Some(true)` when it is: the caller must not state it again. `Some(false)`
-/// when stating `path` would read the start directory. `None` when the
-/// caller may state `path` itself.
-pub(crate) fn prepared_program(path: &Path) -> Option<bool> {
-    let held = RESOLVED_HUD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if held.as_ref().is_some_and(|ready| ready == path) {
-        return Some(true);
-    }
-    drop(held);
-    lives_under_start(path).then_some(false)
 }
 
 fn lives_under_start(path: &Path) -> bool {
@@ -631,11 +593,8 @@ static ENV_RESOLVED: AtomicBool = AtomicBool::new(false);
 /// directory uses [`default_temp_dir`]. An empty `TMPDIR` uses that
 /// default. An absolute value outside the start directory is left as set,
 /// unless a symlink in that spelling lands inside the start directory. An
-/// unset `TMPDIR` is left unset. `LJOS_HUD_BIN` keeps the bytes it was
-/// given. The launcher trims a copy; the walk states that trimmed path
-/// and does not write the variable back. When `LJOS_HUD_BIN` is unset,
-/// the `ljos-hud` beside this binary and each absolute `PATH` entry are
-/// stated on the same deadline.
+/// unset `TMPDIR` is left unset. `PATH` is not walked here. A hung
+/// `ljos-hud` on `PATH` is not a reason to refuse the command.
 fn resolve_relative_dirs() {
     let Some(start) = start_dir_for_env() else {
         return;
@@ -655,7 +614,6 @@ fn resolve_relative_dirs() {
         Some(_) => {}
         None => resolve_root("VISSUE_ROOT", &start),
     }
-    resolve_hud(&start);
 }
 
 fn start_dir_for_env() -> Option<PathBuf> {
@@ -711,10 +669,10 @@ fn resolve_root(key: &str, start: &Path) {
         return;
     }
     // An absolute spelling whose parent is a symlink into the start
-    // directory is not a lexical prefix of getcwd. The leaf is still
-    // that directory. A stat of the spelling that returns keeps the
-    // text. A stat that does not answer is replaced with the physical
-    // path, so a later stat does not wait on this thread.
+    // directory is not a lexical prefix of getcwd. A stat that returns
+    // keeps the text. A stat that does not answer is not a path: `..`
+    // is not applied to the spelling. The prefix walk returns nothing
+    // when that `..` would pop a component this walk did not state.
     let Some(rel) = symlink_rel(start, &given) else {
         return;
     };
@@ -737,120 +695,6 @@ fn apply_root(key: &str, raw: &std::ffi::OsStr, result: Result<Hit, Fault>) {
         Err(Fault::Late) => {}
         Err(_) => refuse_env(key, raw),
     }
-}
-
-fn resolve_hud(start: &Path) {
-    if let Some(raw) = std::env::var_os("LJOS_HUD_BIN") {
-        if let Some(given) = trimmed_hud(&raw) {
-            resolve_hud_override(start, &raw, &given);
-            return;
-        }
-    }
-    resolve_hud_search(start);
-}
-
-/// `LJOS_HUD_BIN` with surrounding whitespace removed.
-///
-/// The launcher trims this variable. The walk has to see that same path,
-/// or a trailing space is stated and the file itself never is. A value
-/// that is empty after trimming is unset, and the sibling and `PATH`
-/// search runs.
-fn trimmed_hud(raw: &std::ffi::OsStr) -> Option<PathBuf> {
-    let text = raw.to_str()?;
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(trimmed))
-    }
-}
-
-fn resolve_hud_override(start: &Path, raw: &std::ffi::OsStr, given: &Path) {
-    let Some(rel) = under_start(start, given) else {
-        return;
-    };
-    // The variable keeps the bytes it was given. The launcher trims a
-    // copy and execs that path. Remember that path when it is a regular
-    // file so the launcher does not state the start directory again.
-    let remembered = hud_absolute(start, given);
-    let stated = joined_for_kernel(start, &rel);
-    match stat_program(stated) {
-        Ok(true) => remember_hud(remembered),
-        Ok(false) | Err(Fault::Unresolvable) | Err(Fault::Late) => {}
-        Err(Fault::TimedOut) => refuse_env("LJOS_HUD_BIN", raw),
-    }
-}
-
-/// Absolute path the launcher will exec for `given`.
-///
-/// A relative value is joined to `start`, which is what [`from_start`]
-/// returns after the park. The join does not state `start`.
-fn hud_absolute(start: &Path, given: &Path) -> PathBuf {
-    if given.is_absolute() {
-        given.to_path_buf()
-    } else {
-        start.join(given)
-    }
-}
-
-/// Sibling `ljos-hud`, then each `PATH` entry, when `LJOS_HUD_BIN` is unset.
-///
-/// A candidate is stated on the deadline, never on this thread. The first
-/// regular file is remembered. A relative `PATH` entry is not a candidate:
-/// after the park it is relative to the parked directory, which is where
-/// the launcher looks, and it is not the start directory. A stat under
-/// `start` that does not answer is an error. A stat outside `start` that
-/// does not answer is not a program, and the search moves on.
-fn resolve_hud_search(start: &Path) {
-    if let Some(sibling) = sibling_hud() {
-        if claim_hud(start, &sibling, "ljos-hud") {
-            return;
-        }
-    }
-    let Some(path) = std::env::var_os("PATH") else {
-        return;
-    };
-    for dir in std::env::split_paths(&path) {
-        if claim_hud(start, &dir.join("ljos-hud"), "PATH") {
-            return;
-        }
-    }
-}
-
-fn sibling_hud() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.join("ljos-hud"))
-}
-
-/// `true` when `candidate` is the regular file the launcher would run.
-///
-/// `.`, an empty `PATH` component, and any other relative entry are not
-/// resolved here. The launcher resolves them from the directory it is in
-/// after the park.
-fn claim_hud(start: &Path, candidate: &Path, key: &str) -> bool {
-    if !candidate.is_absolute() {
-        return false;
-    }
-    let inside = under_start(start, candidate).is_some();
-    let stated = match under_start(start, candidate) {
-        Some(rel) => joined_for_kernel(start, &rel),
-        None => candidate.to_path_buf(),
-    };
-    match stat_program(stated) {
-        Ok(true) => {
-            remember_hud(candidate.to_path_buf());
-            true
-        }
-        Ok(false) | Err(Fault::Unresolvable) | Err(Fault::Late) => false,
-        Err(Fault::TimedOut) if inside => refuse_env(key, candidate.as_os_str()),
-        Err(Fault::TimedOut) => false,
-    }
-}
-
-fn remember_hud(path: PathBuf) {
-    *RESOLVED_HUD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
 }
 
 /// `given` relative to `start` when the park must state it first.
@@ -1035,6 +879,13 @@ fn resolve_prefix(start: &Path, path: &Path) -> Option<PathBuf> {
             continue;
         }
         if comp == ".." {
+            // Inside the start directory the leaf was not stated. Popping
+            // it would apply `..` to the spelling. That is not the path
+            // the kernel walks through a symlink, so the prefix is not
+            // resolved.
+            if out != start && out.starts_with(start) {
+                return None;
+            }
             if !out.pop() {
                 return None;
             }
@@ -1067,11 +918,43 @@ fn resolve_prefix(start: &Path, path: &Path) -> Option<PathBuf> {
 
 /// Whether `path` is a regular file, stated on the deadline.
 ///
-/// `false` when the path is not a regular file, the stat does not answer,
-/// or the worker had not started. The caller moves on. The stat does not
-/// run on this thread.
+/// `false` when the path is not a regular file or the stat does not
+/// answer. A timeout is not a program, and the same path is not stated
+/// again: a later lookup must not take a file the first lookup skipped.
+/// The stat does not run on this thread. The deadline starts when the
+/// stat starts.
 pub(crate) fn program_file(path: &Path) -> bool {
-    stat_program(path.to_path_buf()).unwrap_or_default()
+    if hud_stat_missed(path) {
+        return false;
+    }
+    match stat_program(path.to_path_buf()) {
+        Ok(answer) => answer,
+        Err(Fault::TimedOut) => {
+            remember_hud_miss(path);
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+/// Paths whose stat did not answer. The answer stays "not a program".
+static HUD_MISS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+fn hud_stat_missed(path: &Path) -> bool {
+    HUD_MISS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|missed| missed == path)
+}
+
+fn remember_hud_miss(path: &Path) {
+    let mut held = HUD_MISS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held.iter().all(|missed| missed != path) {
+        held.push(path.to_path_buf());
+    }
 }
 
 /// Canonical `path`, or the parent's canonical path plus a missing final
