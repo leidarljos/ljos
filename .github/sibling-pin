@@ -3,9 +3,7 @@
 # The commit is the full git object name. A tag moves, so it is not a pin.
 # The version is the first line of `NAME --version` without the name: these
 # tools print `NAME VERSION`. CI builds that commit and puts the binary on PATH.
-# deedar at this commit writes bytes/ and a sources sidecar. deedar on main
-# writes neither, so a carried deed from a bag that does not hold the source
-# cannot be imported.
-vissue https://github.com/leidarljos/vissue.git 84697ee3a43cc1e48c382037f7969c81c752583d 0.25.0
-claimdag https://github.com/leidarljos/claimdag.git e0f79d7ee343a74819ccb7421bc9ac644c1d8479 0.8.0
-deedar https://github.com/leidarljos/deedar.git 57a32369ca0ab64553ea81058886021c6c79e8a4 0.4.0
+# Each commit is the tag commit of the release .github/release-pin names.
+vissue https://github.com/leidarljos/vissue.git b92671f174b867734033d60b6e9411fce55a4717 0.25.1
+claimdag https://github.com/leidarljos/claimdag.git 8e0f98d846ddc5848abf950936e83019e8426879 0.9.1
+deedar https://github.com/leidarljos/deedar.git 4fc453a799f9aff9e8f5ccd35f768e1efb07834a 0.7.1

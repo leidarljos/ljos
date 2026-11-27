@@ -59,15 +59,15 @@ pin=$root/.github/sibling-pin
 
 # The commit the cargo test job built for packset and packsetd.
 # install.sh installs the latest packset release when nobody passes --pin.
-# That release is v0.18.2. 0.17.3 and 0.18.0 published none.
+# That release is v0.18.3. 0.17.3 and 0.18.0 published none.
 packset_repo=https://github.com/leidarljos/packset.git
-packset_sha=4c6b1d33f89dd04924db3dd2651d4e5233261200
+packset_sha=68234af9a382fc82dac9d618daeb9003fe37d1ec
 # workspace.package.version at that commit.
-packset_version=0.18.2
+packset_version=0.18.3
 # Eight hex digits. packset's build.rs stamps `git rev-parse --short=8 HEAD`
 # into `NAME --version` on a clean tree, which for this commit is 4c6b1d33.
 # PACKSET_COMMIT sets that stamp so a dirty tree does not append `+`.
-packset_stamp=4c6b1d33
+packset_stamp=68234af9
 
 # phronesis keeps no release tags. This is the commit the cargo test job
 # configured with meson and passed as PHRONESIS_DIR. Its VERSION file

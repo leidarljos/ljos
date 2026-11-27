@@ -1,0 +1,1 @@
+install.sh installs the latest sibling releases, vissue 0.25.1, claimdag 0.9.1 and deedar 0.7.1, and CI tests those release commits; the earlier pins (0.25.0, 0.8.0, 0.4.0) made an install downgrade a seat that already had the newer tools. The test helper builds packset 0.18.3.

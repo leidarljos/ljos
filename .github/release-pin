@@ -4,21 +4,9 @@
 # scripts/release-pin-check.sh asks GitHub for those archives.
 # .github/sibling-pin is the list of commits CI builds for the tests. The
 # two lists name the same tool at the same point in its history:
-# vissue 0.25.0 is the commit sibling-pin names, so the tests and the
-# install run the same vissue. claimdag 0.8.0 is that commit too. claimdag
-# has later releases, 0.9.0 and 0.9.1, that sibling-pin does not reach.
-# deedar 0.4.0 is the newest release at or below the sibling-pin commit.
-# The commit is on a side branch that 0.5.0 and later releases do not
-# contain. sibling-pin says deedar on main writes no bytes/ and no sources
-# sidecar, and the tests need that commit's output, so the install stays
-# on the release behind it.
-# Move a line here only together with its line in sibling-pin.
-# This file is the source. Two copies of the list follow it:
-# crates/ljos-cli/release-pin is the whole file, comments included, because
-# the published crate embeds it and cannot reach .github/. The fallback list
-# in scripts/install.sh, the `for item in` line in apply_release_pins, is for
-# a download that does not sit next to this tree. Change all three together.
-# scripts/release-install-check.sh fails when a copy differs.
-vissue 0.25.0
-claimdag 0.8.0
-deedar 0.4.0
+# Each version is the release whose tag commit sibling-pin names, so the
+# tests and the install run the same vissue 0.25.1, claimdag 0.9.1 and
+# deedar 0.7.1.
+vissue 0.25.1
+claimdag 0.9.1
+deedar 0.7.1

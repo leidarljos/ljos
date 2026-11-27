@@ -38,7 +38,7 @@ The script needs `git`, the Rust toolchain in `rust-toolchain.toml`, and the pac
 `age` and `age-keygen` 1.1.1 come from the `age` package.
 `apt-get install age` installs that package on Ubuntu 24.04, and `brew install age` installs it on macOS.
 The script does not build them.
-`source scripts/sibling-tools.sh` builds the pinned `vissue` 0.25.0 and `packsetd` 0.18.2 and puts them on `PATH`.
+`source scripts/sibling-tools.sh` builds the pinned `vissue` 0.25.1 and `packsetd` 0.18.3 and puts them on `PATH`.
 The release test is `LJOS_TEST_REQUIRE_TOOLS=1 cargo test --locked -p ljos`.
 Run that source line first. It reads `.github/sibling-pin` and installs `vissue` the same way the cargo test job does.
 A test that runs `vissue` and does not check for the binary first fails when `vissue` is missing.
