@@ -15483,16 +15483,31 @@ pub(crate) fn cap_pack_wait(requested: std::time::Duration) -> std::time::Durati
 /// its wall time go to stderr, one line each, so a slow hook names the stage
 /// that holds it.
 pub fn hook_timed<T>(stage: &str, f: impl FnOnce() -> T) -> T {
-    if std::env::var_os("LJOS_HOOK_TIMING").is_none() {
+    let say_it = std::env::var_os("LJOS_HOOK_TIMING").is_some();
+    if !say_it && !cfg!(test) {
         return f();
     }
     let started = std::time::Instant::now();
     let out = f();
-    say!(
-        "hook-timing {stage} {:.0} ms",
-        started.elapsed().as_secs_f64() * 1000.0
-    );
+    #[cfg(test)]
+    HOOK_STAGES.with(|rows| {
+        rows.borrow_mut()
+            .push((stage.to_string(), started.elapsed()));
+    });
+    if say_it {
+        say!(
+            "hook-timing {stage} {:.0} ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     out
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The stages [`hook_timed`] ran on this thread, with their wall time.
+    static HOOK_STAGES: std::cell::RefCell<Vec<(String, std::time::Duration)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// How long a cold prompt with no lexical hit waits for the encoder
@@ -56429,14 +56444,6 @@ fn policy_reading_known(
         shape: HookShape::Asks,
     };
     let started = std::time::Instant::now();
-    let recall = {
-        let call = call.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(hook_timed("policy_context", || hook_context(&call, 5)));
-        });
-        rx
-    };
     // The rules are the law's memory: a rule's warning comes before the
     // context, so a reader sees it first. A line the fast check already
     // judged does not wait on policyd, which can hang, unless a named
@@ -56465,6 +56472,16 @@ fn policy_reading_known(
         None
     } else {
         Some(hook_timed("tcb", tcb))
+    };
+    // The recall starts after the verdict is asked, so nothing it holds
+    // can stand between this call and policyd.
+    let recall = {
+        let call = call.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(hook_timed("policy_context", || hook_context(&call, 5)));
+        });
+        rx
     };
     // The same bound as a hook: one short read, then the rules kept on
     // disk. An unbounded listing is what made a commit check sit on a
@@ -84255,44 +84272,83 @@ lesson, due yesterday, seat ada
         assert!(pack_down_message(&refused).is_some(), "{refused:#}");
     }
 
-    /// A pack that holds the connection and never answers must not spend
-    /// the budget the safety verdict needs.
-    #[test]
-    fn a_recall_past_the_budget_still_leaves_policyd_its_time() {
-        let _env = crate::test_env_lock();
-        let (url, _seen) = serve_http(|_| {
-            std::thread::sleep(std::time::Duration::from_secs(4));
-            (200, "{}".into())
+    /// A listener on `addr` that accepts every connection and answers none,
+    /// for the life of the test process.
+    fn hold_every_connection(addr: &str) -> Option<String> {
+        let listener = TcpListener::bind(addr).ok()?;
+        let at = listener.local_addr().ok()?;
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+            }
         });
-        let _url = PackUrl::set(&url);
+        Some(match at {
+            std::net::SocketAddr::V4(v4) => format!("http://{v4}"),
+            std::net::SocketAddr::V6(v6) => format!("http://[{}]:{}", v6.ip(), v6.port()),
+        })
+    }
+
+    /// Ask `ljos policy` about `ls -la` with the pack at `url` and check
+    /// that policyd was asked first, whatever the pack does.
+    fn assert_policyd_asked_before_a_dead_pack_answers(url: &str) {
+        let _url = PackUrl::set(url);
         disarm_wall();
+        HOOK_STAGES.with(|rows| rows.borrow_mut().clear());
         assert!(
             wall_left().is_none(),
             "a bound leaked onto this test thread: {:?}",
             wall_left()
         );
         let begun = std::time::Instant::now();
-        let asked_after = std::cell::Cell::new(None);
-        let left_at_tcb = std::cell::Cell::new(None);
+        let asked_after = std::sync::Mutex::new(None);
+        let left_at_tcb = std::sync::Mutex::new(None);
         let argv = vec!["ls".to_string(), "-la".to_string()];
         let out = policy_reading_in(&argv, None, || {
-            asked_after.set(Some(begun.elapsed()));
-            left_at_tcb.set(wall_left());
+            *asked_after.lock().unwrap() = Some(begun.elapsed());
+            *left_at_tcb.lock().unwrap() = wall_left();
             Some("deny\tsmoke-rule\tblocked by the test verdict".to_string())
         })
         .unwrap();
         disarm_wall();
+        let stages: Vec<String> = HOOK_STAGES.with(|rows| {
+            rows.borrow()
+                .iter()
+                .map(|(name, took)| format!("{name} {} ms", took.as_millis()))
+                .collect()
+        });
         // Asked after the recall wait, policyd would start near the 2 s
         // wall budget. Asked first, it starts within milliseconds. The
         // elapsed time since this call began does not depend on how old
         // the test process is.
-        let asked_after = asked_after.get().expect("the verdict was asked");
+        let asked_after = asked_after.lock().unwrap().expect("the verdict was asked");
         assert!(
             asked_after < std::time::Duration::from_millis(1_500),
-            "policyd was asked {asked_after:?} into the call, with {:?} of the budget left",
-            left_at_tcb.get()
+            "policyd was asked {asked_after:?} into the call, with {:?} of the budget left; stages: {stages:?}",
+            *left_at_tcb.lock().unwrap()
         );
         assert!(out.contains("smoke-rule"), "{out}");
+    }
+
+    /// A pack that holds the connection and never answers must not spend
+    /// the budget the safety verdict needs.
+    #[test]
+    fn a_recall_past_the_budget_still_leaves_policyd_its_time() {
+        let _env = crate::test_env_lock();
+        let url = hold_every_connection("127.0.0.1:0").expect("bind 127.0.0.1");
+        assert_policyd_asked_before_a_dead_pack_answers(&url);
+    }
+
+    /// The same, with the pack on the IPv6 loopback. A host with no IPv6
+    /// loopback has nothing to hold, and the test says so.
+    #[test]
+    fn a_recall_on_the_ipv6_loopback_still_leaves_policyd_its_time() {
+        let _env = crate::test_env_lock();
+        let Some(url) = hold_every_connection("[::1]:0") else {
+            say!("no IPv6 loopback on this host; the test holds nothing");
+            return;
+        };
+        assert_policyd_asked_before_a_dead_pack_answers(&url);
     }
 
     #[test]
