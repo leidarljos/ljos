@@ -18649,7 +18649,9 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
             unscored.extend(extra);
             merge_by_lexical(scored.into_iter().map(|(h, _)| h).collect(), unscored, q)
         };
-        keep_search_origins(&client, &hits);
+        // A miss on this thread must not clear a person the caller's
+        // search just recorded. The thread also outlives the wait.
+        keep_origins_of(&client, &hits, false);
         Ok((hits, ran))
     })?;
     Ok((hits, ran))
@@ -42834,7 +42836,7 @@ pub fn packset_search_as_of(
             )
             .map_err(anyhow::Error::from)
             .context("search: GET /v1/search failed")?;
-        keep_origins_of(&client, &hits);
+        keep_search_origins(&client, &hits);
         Ok(hits)
     })?;
     // The cross-encoder replaces the head. When the fused leader is also
@@ -56180,9 +56182,17 @@ fn keep_origin_at(atom: &impl Claim, now: &str) {
 /// Record the stored origin of each hit from the pack's listing, read
 /// fresh: the pack can change a held atom's origin in place, and a
 /// long-lived process must not name a hit by the origin it read before.
-/// A hit the listing does not hold is recorded as not held, and a listing
-/// that does not answer clears the person recorded for every hit.
-fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'a Hit>) {
+/// A hit the listing does not hold is recorded as not held. When
+/// `clear_on_miss` is set, a socket whose last answer did not carry the
+/// token, or a listing that does not answer, clears the person recorded
+/// for every hit. The rerank thread passes false. It has not proved the
+/// writer on its own, it keeps running after the caller stops waiting,
+/// and a miss there would wipe a person the caller's search just recorded.
+fn keep_origins_of<'a>(
+    client: &PacksetClient,
+    hits: impl IntoIterator<Item = &'a Hit>,
+    clear_on_miss: bool,
+) {
     let ids: Vec<&str> = hits.into_iter().filter_map(|h| h.id.as_deref()).collect();
     if ids.is_empty() {
         return;
@@ -56190,13 +56200,17 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
     // The last answer on this socket did not carry the token. A listing
     // now would be another request, and its rows would not name the person.
     if !pack_proven(client) {
-        ids.into_iter().for_each(unrecord_person);
+        if clear_on_miss {
+            ids.into_iter().for_each(unrecord_person);
+        }
         return;
     }
     let atoms = match rows_listed(client, &client.workspace()) {
         Ok((atoms, true)) => atoms,
         _ => {
-            ids.into_iter().for_each(unrecord_person);
+            if clear_on_miss {
+                ids.into_iter().for_each(unrecord_person);
+            }
             return;
         }
     };
@@ -56233,7 +56247,7 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
 /// is not the person's: [`keep_origins_of`] records the first as not
 /// held and clears the person for the second.
 fn keep_search_origins<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'a Hit>) {
-    keep_origins_of(client, hits);
+    keep_origins_of(client, hits, true);
 }
 
 /// Whether the pack stored `h` as the person's. A hit whose origin no
@@ -93111,7 +93125,11 @@ lesson, due yesterday, seat ada
         let mut buf = Vec::new();
         let mut tmp = [0u8; 1024];
         loop {
-            let n = s.read(&mut tmp).unwrap_or(0);
+            let n = match s.read(&mut tmp) {
+                Ok(n) => n,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => 0,
+            };
             if n == 0 {
                 break;
             }
@@ -93962,6 +93980,15 @@ lesson, due yesterday, seat ada
 
     /// The keeping pack, plus the list and delete adopt and import call.
     /// The same request loop as [`serve_keeping_pack`].
+    /// An id no other stub in this process has minted. `held.len() + 1`
+    /// is `1` for every stub's first atom, and the origin map is keyed
+    /// by that id for the whole process.
+    fn fresh_stub_id() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        format!("{:032x}", NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
     pub(crate) fn serve_sync_pack(mode: SyncPack) -> (String, Arc<Mutex<Vec<Value>>>) {
         let stored = Arc::new(Mutex::new(Vec::<Value>::new()));
         let slot = Arc::clone(&stored);
@@ -93999,7 +94026,7 @@ lesson, due yesterday, seat ada
                         return (200, existing.to_string());
                     }
                 }
-                atom["id"] = Value::String(format!("{:032x}", held.len() + 1));
+                atom["id"] = Value::String(fresh_stub_id());
                 held.push(atom.clone());
                 return (200, atom.to_string());
             }
@@ -94028,7 +94055,7 @@ lesson, due yesterday, seat ada
             if first.contains("POST /v1/atoms") {
                 let mut atom: Value = serde_json::from_str(body).unwrap_or(Value::Null);
                 let mut held = slot.lock().unwrap();
-                atom["id"] = Value::String(format!("{:032x}", held.len() + 1));
+                atom["id"] = Value::String(fresh_stub_id());
                 held.push(atom.clone());
                 return (200, atom.to_string());
             }
@@ -94108,7 +94135,10 @@ lesson, due yesterday, seat ada
             shape: HookShape::default(),
         };
         let (note, _) = hook_note(&next, 5);
-        assert!(note.contains("always use bun, never yarn"), "{note}");
+        assert!(
+            note.contains("always use bun, never yarn"),
+            "the next session's note did not bring the choice back\n{note:?}"
+        );
         capture::set_persons_prompt(false);
     }
 
