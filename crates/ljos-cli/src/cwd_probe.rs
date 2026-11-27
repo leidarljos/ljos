@@ -14,7 +14,7 @@
 //! that refused to answer.
 
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::sync::{Mutex, Once};
 use std::time::Duration;
 
@@ -248,6 +248,11 @@ fn directory_id(path: &Path) -> Option<(u64, u64)> {
 }
 
 fn usable_dir(path: &Path) -> bool {
+    // The start directory was left because stating it waits. Do not state
+    // it, or a path inside it, on the way out.
+    if lives_under_start(path) {
+        return false;
+    }
     path.is_absolute() && !remote_or_fuse(path) && stated_dir(path) && searchable(path)
 }
 
@@ -555,6 +560,10 @@ fn directory_flags() -> &'static [libc::c_int] {
 /// the variable still holds it.
 static REWRITTEN_TMPDIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 
+/// `LJOS_HUD_BIN` after it was resolved to a file before the park. Later
+/// checks use this and do not state the start directory again.
+static RESOLVED_HUD: Mutex<Option<PathBuf>> = Mutex::new(None);
+
 /// Whether `TMPDIR` is the absolute path this process wrote for a relative
 /// or empty value. An absolute `TMPDIR` the process was given stays a
 /// temp root.
@@ -568,22 +577,59 @@ pub(crate) fn tmpdir_rewritten_from_relative() -> bool {
     held.as_ref().is_some_and(|path| path.as_os_str() == raw)
 }
 
-/// Make relative `TMPDIR`, `VISSUE_ROOT`, and `ISSUE_ROOT` absolute from
-/// the directory this process started in.
+/// Whether `path` is the HUD program resolved before the park.
 ///
-/// Called before a chdir into or away from the parked directory. A fast
-/// `ljos hud` does not park and does not call this, so those variables
-/// stay as given and the process stays where it started. An empty
-/// `TMPDIR`, or a relative value that is not a directory, uses
-/// [`default_temp_dir`]. An absolute value is left as set. An unset
-/// `TMPDIR` is left unset.
+/// `Some(true)` when it is: the caller must not state it again. `Some(false)`
+/// when stating `path` would read the start directory. `None` when the
+/// caller may state `path` itself.
+pub(crate) fn prepared_program(path: &Path) -> Option<bool> {
+    let held = RESOLVED_HUD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held.as_ref().is_some_and(|ready| ready == path) {
+        return Some(true);
+    }
+    drop(held);
+    lives_under_start(path).then_some(false)
+}
+
+fn lives_under_start(path: &Path) -> bool {
+    let held = SKIP_FROM
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.as_ref()
+        .is_some_and(|start| path == start || path.starts_with(start))
+}
+
+/// Set on the one call that walks relative environment paths.
+static ENV_RESOLVED: AtomicBool = AtomicBool::new(false);
+
+/// Make relative `TMPDIR`, `VISSUE_ROOT`, `ISSUE_ROOT`, and `LJOS_HUD_BIN`
+/// absolute from the directory this process started in.
+///
+/// Called once, before the chdir into the parked directory. A fast command
+/// does not park and does not call this, so those variables stay as given.
+/// One walk resolves every relative value: `..` after a symlink is that
+/// symlink's parent, and a component that is not there does not collapse
+/// onto the start directory. The walk gives up after [`CWD_PROBE`]. A path
+/// that does not answer, or a `..` walk through a missing component, is an
+/// error. A relative `TMPDIR` with no `..` that is not a directory uses
+/// [`default_temp_dir`]. An empty `TMPDIR` uses that default. An absolute
+/// value is left as set. An unset `TMPDIR` is left unset.
 fn resolve_relative_dirs() {
     let Some(start) = start_dir_for_env() else {
         return;
     };
+    if !start.is_absolute() {
+        return;
+    }
+    if ENV_RESOLVED.swap(true, Ordering::SeqCst) {
+        return;
+    }
     resolve_tmpdir(&start);
-    resolve_env_path("VISSUE_ROOT", &start);
-    resolve_env_path("ISSUE_ROOT", &start);
+    resolve_root("VISSUE_ROOT", &start);
+    resolve_root("ISSUE_ROOT", &start);
+    resolve_hud(&start);
 }
 
 fn start_dir_for_env() -> Option<PathBuf> {
@@ -605,26 +651,20 @@ fn resolve_tmpdir(start: &Path) {
     if given.is_absolute() {
         return;
     }
-    let resolved = if raw.is_empty() {
-        default_temp_dir()
-    } else {
-        let abs = lexical_absolute(start, &given);
-        if abs.is_dir() {
-            abs
-        } else {
-            default_temp_dir()
-        }
-    };
-    if !resolved.is_absolute() {
+    if raw.is_empty() {
+        adopt_tmpdir(default_temp_dir());
         return;
     }
-    std::env::set_var("TMPDIR", &resolved);
-    *REWRITTEN_TMPDIR
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resolved);
+    match resolve_from_start(start, &given) {
+        Ok(hit) if hit.is_dir => adopt_tmpdir(hit.path),
+        Ok(_) => adopt_tmpdir(default_temp_dir()),
+        Err(Fault::TimedOut) => refuse_env("TMPDIR", &raw),
+        Err(Fault::Unresolvable) if climbs(&given) => refuse_env("TMPDIR", &raw),
+        Err(Fault::Unresolvable) => adopt_tmpdir(default_temp_dir()),
+    }
 }
 
-fn resolve_env_path(key: &str, start: &Path) {
+fn resolve_root(key: &str, start: &Path) {
     let Some(raw) = std::env::var_os(key) else {
         return;
     };
@@ -632,28 +672,105 @@ fn resolve_env_path(key: &str, start: &Path) {
     if given.as_os_str().is_empty() || given.is_absolute() {
         return;
     }
-    std::env::set_var(key, lexical_absolute(start, &given));
+    match resolve_from_start(start, &given) {
+        Ok(hit) => std::env::set_var(key, hit.path),
+        Err(_) => refuse_env(key, &raw),
+    }
 }
 
-/// `start` joined with `rel`, with `.` and `..` removed.
-fn lexical_absolute(start: &Path, rel: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in start.components().chain(rel.components()) {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other),
-        }
+fn resolve_hud(start: &Path) {
+    let Some(raw) = std::env::var_os("LJOS_HUD_BIN") else {
+        return;
+    };
+    let given = PathBuf::from(&raw);
+    if given.as_os_str().is_empty() || given.is_absolute() {
+        return;
     }
-    out
+    match resolve_from_start(start, &given) {
+        Ok(hit) if !hit.is_dir => {
+            std::env::set_var("LJOS_HUD_BIN", &hit.path);
+            *RESOLVED_HUD
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hit.path);
+        }
+        Ok(_) | Err(Fault::Unresolvable) => {}
+        Err(Fault::TimedOut) => refuse_env("LJOS_HUD_BIN", &raw),
+    }
+}
+
+fn adopt_tmpdir(path: PathBuf) {
+    if !path.is_absolute() {
+        return;
+    }
+    std::env::set_var("TMPDIR", &path);
+    *REWRITTEN_TMPDIR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
+}
+
+/// `..` is in `path`, so a missing component must not be popped away.
+fn climbs(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
+}
+
+struct Hit {
+    path: PathBuf,
+    is_dir: bool,
+}
+
+enum Fault {
+    TimedOut,
+    Unresolvable,
+}
+
+/// `start` joined with `rel` as the kernel will walk it. `..` stays in the
+/// text. [`Path::join`] is not used: a parent component must not be dropped
+/// before `realpath` sees the symlink it applies to.
+fn joined_for_kernel(start: &Path, rel: &Path) -> PathBuf {
+    let mut text = start.as_os_str().to_owned();
+    text.push("/");
+    text.push(rel.as_os_str());
+    PathBuf::from(text)
+}
+
+/// Canonical path of `rel` from `start`, or why that walk failed.
+///
+/// The walk runs on another thread and stops after [`CWD_PROBE`]. A missing
+/// component and a walk that does not answer are different failures. Neither
+/// one is a path this function invents.
+fn resolve_from_start(start: &Path, rel: &Path) -> Result<Hit, Fault> {
+    let path = joined_for_kernel(start, rel);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let answer = match std::fs::canonicalize(&path) {
+            Ok(abs) => {
+                let is_dir = std::fs::metadata(&abs)
+                    .map(|meta| meta.is_dir())
+                    .unwrap_or(false);
+                Ok(Hit { path: abs, is_dir })
+            }
+            Err(_) => Err(Fault::Unresolvable),
+        };
+        let _ = tx.send(answer);
+    });
+    match rx.recv_timeout(CWD_PROBE) {
+        Ok(answer) => answer,
+        Err(_) => Err(Fault::TimedOut),
+    }
+}
+
+fn refuse_env(key: &str, raw: &std::ffi::OsStr) -> ! {
+    let shown = raw.to_string_lossy();
+    crate::say!("ljos: {key}={shown} did not resolve against the start directory");
+    std::process::exit(1);
 }
 
 /// Absolute temp directory for the parked cwd. An empty `TMPDIR`, or one
 /// that does not name a directory, uses the platform default (`/tmp` when
-/// `TMPDIR` is unset on Linux). A relative `TMPDIR` is joined to the
-/// current directory before this process leaves it.
+/// `TMPDIR` is unset on Linux). A relative value was resolved before this
+/// runs. A relative value that is still set is joined to the current
+/// directory.
 fn parked_parent() -> Option<PathBuf> {
     let raw = std::env::var_os("TMPDIR").unwrap_or_default();
     if !raw.is_empty() {
@@ -742,18 +859,17 @@ static PARKED_CWD: AtomicPtr<ParkedCwd> = AtomicPtr::new(std::ptr::null_mut());
 /// handler; `exit` in the child must not remove the parent's directory.
 static PARK_OWNER: AtomicU32 = AtomicU32::new(0);
 
-/// Directory to use when leaving the parked cwd, after relative
-/// `TMPDIR` and tracker roots have been resolved against the start
-/// directory.
+/// Directory to use when leaving the parked cwd.
 ///
-/// `None` when the current directory is not the parked directory this
-/// process created. Callers then keep the directory they started in.
+/// Relative environment paths were resolved once, before the park. This
+/// does not state the start directory. `None` when the current directory
+/// is not the parked directory this process created. Callers then keep
+/// the directory they started in.
 pub(crate) fn parked_replacement_dir() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     if !parked_leaf(&cwd) {
         return None;
     }
-    resolve_relative_dirs();
     Some(stable_child_dir())
 }
 

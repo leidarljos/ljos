@@ -51,7 +51,7 @@ pub fn resolve_hud_bin() -> Option<PathBuf> {
 
 /// `path` as an absolute program path. A relative `LJOS_HUD_BIN` is
 /// joined to the directory this process started in, which is the current
-/// directory when it did not park.
+/// directory when it did not park. The join does not state that directory.
 fn absolute_program(path: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
@@ -65,6 +65,15 @@ fn absolute_program(path: &Path) -> PathBuf {
         .unwrap_or(from)
 }
 
+/// Whether `path` is a program file. A path resolved before the park, or
+/// one that lies in the start directory, is not stated again.
+fn program_exists(path: &Path) -> bool {
+    if let Some(ready) = crate::cwd_probe::prepared_program(path) {
+        return ready;
+    }
+    path.is_file()
+}
+
 /// Hint printed when the launcher cannot find the HUD binary.
 pub fn missing_bin_message() -> &'static str {
     "ljos-hud is not installed. Install it with:\n  cargo install ljos-hud"
@@ -73,11 +82,13 @@ pub fn missing_bin_message() -> &'static str {
 /// Dispatch `ljos hud`. `--help` is answered by clap before this runs.
 pub fn run(opts: HudLaunch) -> i32 {
     // Hide with no HUD binary is success (compositor bind miss).
+    // The check uses the path resolved before the park, not the parked
+    // directory.
     if opts.hide
         && !opts.show
         && !opts.toggle
         && !opts.install_desktop
-        && !resolve_hud_bin().is_some_and(|p| p.is_file())
+        && !resolve_hud_bin().is_some_and(|p| program_exists(&absolute_program(&p)))
     {
         return 0;
     }
@@ -86,10 +97,10 @@ pub fn run(opts: HudLaunch) -> i32 {
         return 127;
     };
     // `execvp` resolves a relative program after `chdir`. The file check
-    // uses the directory this process started in, which is the current
-    // directory when it did not park.
+    // uses the path resolved before the park, and does not state the
+    // start directory again.
     let bin = absolute_program(&bin);
-    if !bin.is_file() {
+    if !program_exists(&bin) {
         say!("{}", missing_bin_message());
         return 127;
     }
