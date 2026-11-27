@@ -291,6 +291,28 @@ fn a_move_that_fails_is_reported_and_claims_nothing() {
     assert!(leftovers(&bin).is_empty(), "{:?}", leftovers(&bin));
 }
 
+/// `kill(pid, 0)` is zero when the process exists. EPERM means it exists
+/// and this user cannot signal it, which is still alive. ESRCH is gone.
+fn process_alive(pid: &str) -> bool {
+    let Ok(pid) = pid.parse::<i32>() else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 does not deliver a signal.
+        let rc = unsafe { libc::kill(pid, 0) };
+        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 /// Two launchers both read the same dead pid. The later one used to
 /// remove the lock the earlier one had just taken, stage and all.
 #[test]
@@ -322,9 +344,7 @@ fn two_launchers_over_one_dead_lock_both_start_the_server() {
     loop {
         let held = std::fs::read_to_string(&lock).unwrap_or_default();
         let pid = held.trim();
-        let live = !pid.is_empty()
-            && pid != "4194303"
-            && std::path::Path::new(&format!("/proc/{pid}")).is_dir();
+        let live = !pid.is_empty() && pid != "4194303" && process_alive(pid);
         if live {
             break;
         }
