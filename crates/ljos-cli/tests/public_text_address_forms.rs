@@ -240,7 +240,6 @@ fn assert_linear_scan(short: &str, long: &str) {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = scale;
-        return;
     }
     #[cfg(target_os = "linux")]
     {
