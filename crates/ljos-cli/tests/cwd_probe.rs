@@ -367,3 +367,40 @@ fn an_umbrella_file_does_not_open_every_child_board() {
     assert!(out.status.success(), "{said}");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Software-abcd");
 }
+
+#[test]
+fn a_parked_working_directory_is_removed_when_the_command_ends() {
+    let seat = Seat::new();
+    script(
+        &seat.bin,
+        "vissue",
+        "#!/bin/sh\nprintf '%s\\n' 'demo-abcd  TODO  [#C]  a title'\n",
+    );
+    let cwd = seat.dir.path().join("fast");
+    let tmp = seat.dir.path().join("tmp");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&tmp).unwrap();
+    let tmp_env = tmp.to_str().unwrap();
+    let (ok_out, _) = seat.run(
+        &cwd,
+        &["file", "-p", "demo", "--top", "a title"],
+        &[("TMPDIR", tmp_env)],
+    );
+    assert!(ok_out.status.success(), "file: {}", text(&ok_out));
+    let (err_out, _) = seat.run(&cwd, &["file", "-p", "demo"], &[("TMPDIR", tmp_env)]);
+    assert!(
+        !err_out.status.success(),
+        "file without a title exited 0: {}",
+        text(&err_out)
+    );
+    let left: Vec<String> = std::fs::read_dir(&tmp)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("ljos-cwd-"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "parked working directories remained: {left:?}"
+    );
+}

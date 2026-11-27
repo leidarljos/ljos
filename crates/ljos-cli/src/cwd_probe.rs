@@ -14,7 +14,8 @@
 //! that refused to answer.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::{Mutex, Once};
 use std::time::Duration;
 
 /// How long a probe of the working directory may take. A quiet local
@@ -140,6 +141,11 @@ fn remember_skip(dir: &Path) {
 /// configuration names, when it is not inside a product checkout, is
 /// named on the environment so the command still writes there. Staying
 /// in `here` is what lets a later stat wait.
+///
+/// The empty directory is required. A child inherits the working directory,
+/// and a relative path this process did not rewrite would otherwise be
+/// read from `/` or from the tracker. The directory is one this process
+/// just created, and it is removed when the process exits.
 fn park(here: &Path, move_process_cwd: bool) {
     if !move_process_cwd {
         return;
@@ -159,10 +165,80 @@ fn park(here: &Path, move_process_cwd: bool) {
         }
     }
     remember_skip(here);
-    let park = std::env::temp_dir().join(format!("ljos-cwd-{}", std::process::id()));
-    if std::fs::create_dir_all(&park).is_ok() {
-        let _ = std::env::set_current_dir(&park);
+    let Some(guard) = ParkedCwd::create() else {
+        return;
+    };
+    if std::env::set_current_dir(guard.path()).is_err() {
+        return;
     }
+    guard.hold_until_exit();
+}
+
+/// The empty directory [`park`] created. Dropping it removes that directory
+/// and nothing else. `std::process::exit` skips destructors, so the process
+/// drops it from an `atexit` handler. An unwinding panic that leaves `main`
+/// reaches that handler too. A caught panic does not: the command is still
+/// using the directory.
+struct ParkedCwd {
+    path: PathBuf,
+}
+
+impl ParkedCwd {
+    /// `create_dir`, not `create_dir_all`. A path that already exists was
+    /// not created here and is left in place.
+    fn create() -> Option<Self> {
+        let path = std::env::temp_dir().join(format!("ljos-cwd-{}", std::process::id()));
+        if std::fs::create_dir(&path).is_err() {
+            return None;
+        }
+        Some(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn hold_until_exit(self) {
+        register_park_cleanup();
+        let ptr = Box::into_raw(Box::new(self));
+        let previous = PARKED_CWD.swap(ptr, Ordering::SeqCst);
+        if !previous.is_null() {
+            // SAFETY: `previous` came from `Box::into_raw` and this swap is
+            // the only take. A second park replaces the first.
+            drop(unsafe { Box::from_raw(previous) });
+        }
+    }
+}
+
+impl Drop for ParkedCwd {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.path);
+    }
+}
+
+/// The parked directory, held until exit. Null when this process did not
+/// create one, or after it has been dropped.
+static PARKED_CWD: AtomicPtr<ParkedCwd> = AtomicPtr::new(std::ptr::null_mut());
+
+extern "C" fn release_parked_cwd() {
+    let ptr = PARKED_CWD.swap(std::ptr::null_mut(), Ordering::SeqCst);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: `ptr` came from `Box::into_raw` and this swap is the only
+    // take. A second call finds null.
+    drop(unsafe { Box::from_raw(ptr) });
+}
+
+fn register_park_cleanup() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: the handler has C linkage, captures nothing, and only
+        // drops the directory this process created.
+        unsafe {
+            libc::atexit(release_parked_cwd);
+        }
+    });
 }
 
 /// Whether `args`, after the program name, are `ljos git-hook`.
