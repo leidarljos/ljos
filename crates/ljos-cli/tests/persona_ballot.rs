@@ -1555,3 +1555,172 @@ fn a_pin_that_stood_is_that_seat() {
         rig.ballots()
     );
 }
+
+#[test]
+fn a_choice_with_a_control_character_writes_nothing() {
+    let rig = Rig::new();
+    write_text(&rig.home.join("gitconfig"), b"");
+    let (ok, said) = rig.ljos(
+        "tls",
+        &[
+            "vote",
+            "cr1",
+            "--for",
+            "aa\rbb",
+            "--used",
+            "deed-file-two",
+            "--as",
+            "omar",
+        ],
+    );
+    assert!(!ok, "{said}");
+    assert!(said.contains("control character"), "{said}");
+    assert!(!rig.ballots().contains("cr1"), "{}", rig.ballots());
+    assert!(!rig.notes().contains("aa bb"), "{}", rig.notes());
+    let (ok, said) = rig.ljos(
+        "tls",
+        &[
+            "vote",
+            "cr2",
+            "--for",
+            "nit\rused=not-a-deed",
+            "--used",
+            "deed-file-two",
+            "--as",
+            "omar",
+        ],
+    );
+    assert!(!ok, "{said}");
+    assert!(said.contains("control character"), "{said}");
+    assert!(!rig.ballots().contains("cr2"), "{}", rig.ballots());
+    let (ok, said) = rig.ljos(
+        "tls",
+        &[
+            "vote",
+            "cr1",
+            "--for",
+            "hold",
+            "--used",
+            "deed-file-two",
+            "--as",
+            "nina",
+        ],
+    );
+    assert!(ok, "{said}");
+    assert!(
+        said.contains("recorded on the tracker: nina for hold"),
+        "{said}"
+    );
+    let notes = rig.notes();
+    assert!(notes.contains("ballot-sig: nina hold "), "{notes}");
+}
+
+#[test]
+fn mcp_vote_refuses_the_same_modes_as_the_cli() {
+    let rig = Rig::new();
+    write_text(&rig.home.join("gitconfig"), b"");
+    let (ok, said) = rig.ljos("tls", &["vote", "keep", "--for", "yes", "--used", "none"]);
+    assert!(ok, "{said}");
+    let kept = rig.ballots();
+    let (ok, said) = rig.ljos("tls", &["vote", "keep", "--withdraw", "--used", "none"]);
+    assert!(!ok, "{said}");
+    assert!(
+        said.contains("the argument '--withdraw' cannot be used with '--used <USED>'"),
+        "{said}"
+    );
+    assert_eq!(rig.ballots(), kept);
+    let said = rig.mcp(
+        "tls",
+        &[serde_json::json!({"issue": "keep", "withdraw": true, "used": "none"})],
+    );
+    assert!(
+        said.contains("the argument '--withdraw' cannot be used with '--used <USED>'"),
+        "{said}"
+    );
+    assert_eq!(rig.ballots(), kept);
+
+    let (ok, said) = rig.ljos(
+        "tls",
+        &[
+            "vote",
+            "mix",
+            "--for",
+            "yes",
+            "--used",
+            "none",
+            "--withdraw",
+        ],
+    );
+    assert!(!ok, "{said}");
+    assert!(
+        said.contains("the argument '--for <CHOICE>' cannot be used with '--withdraw'"),
+        "{said}"
+    );
+    assert!(!rig.ballots().contains("mix"), "{}", rig.ballots());
+    let said = rig.mcp(
+        "tls",
+        &[serde_json::json!({
+            "issue": "mix", "choice": "yes", "used": "none", "withdraw": true
+        })],
+    );
+    assert!(
+        said.contains("the argument '--for <CHOICE>' cannot be used with '--withdraw'"),
+        "{said}"
+    );
+    assert!(!rig.ballots().contains("mix"), "{}", rig.ballots());
+
+    let (ok, said) = rig.ljos(
+        "tls",
+        &[
+            "vote", "jc3", "--for", "yes", "--used", "deed-c", "--as", "omar", "--jev",
+        ],
+    );
+    assert!(!ok, "{said}");
+    assert!(
+        said.contains("the argument '--for <CHOICE>' cannot be used with '--jev'"),
+        "{said}"
+    );
+    let said = rig.mcp(
+        "tls",
+        &[serde_json::json!({
+            "issue": "jc3", "choice": "yes", "used": "deed-c", "as": "omar", "jev": true
+        })],
+    );
+    assert!(
+        said.contains("the argument '--for <CHOICE>' cannot be used with '--jev'"),
+        "{said}"
+    );
+    assert!(!rig.ballots().contains("omar"), "{}", rig.ballots());
+    assert!(!rig.ballots().contains("jc3"), "{}", rig.ballots());
+
+    let (ok, said) = rig.ljos("tls", &["vote", "jev1", "--jev"]);
+    assert!(!ok, "{said}");
+    assert!(said.contains("vote needs --as <AS_PERSONA>"), "{said}");
+    let said = rig.mcp("tls", &[serde_json::json!({"issue": "jev1", "jev": true})]);
+    assert!(said.contains("vote needs --as <AS_PERSONA>"), "{said}");
+
+    let said = rig.mcp(
+        "tls",
+        &[serde_json::json!({"issue": "keep", "withdraw": true})],
+    );
+    assert!(said.contains("withdrawn"), "{said}");
+    assert!(
+        said.contains("ballot withdrawn; the forecast for"),
+        "{said}"
+    );
+    assert!(!said.contains("packset url missing"), "{said}");
+
+    let said = rig.mcp(
+        "tls",
+        &[serde_json::json!({
+            "issue": "ex1", "choice": "yes", "used": "none", "expect": "yes"
+        })],
+    );
+    assert!(said.contains("ballot cast; forecast for"), "{said}");
+    assert!(
+        said.contains("PACKSET_URL=off: this seat has no pack on purpose"),
+        "{said}"
+    );
+    assert!(!said.contains("packset url missing"), "{said}");
+    assert!(rig.ballots().contains("ex1"), "{}", rig.ballots());
+}

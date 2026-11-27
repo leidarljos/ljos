@@ -6177,6 +6177,25 @@ fn choice_hides_used(choice: &str) -> bool {
     choice.contains(" used=")
 }
 
+/// The choice bytes a ballot stores and a signature covers. The tally's
+/// count uses this same text.
+pub(crate) fn ballot_choice(choice: &str) -> &str {
+    choice.trim()
+}
+
+/// Refuse a choice the ballot and the signature cannot store as the same
+/// bytes. A control character would be a line break in the note and a
+/// different choice in the drawer.
+fn choice_is_storable(choice: &str) -> Result<()> {
+    if choice.chars().any(char::is_control) {
+        bail!("a ballot choice cannot contain a control character; nothing was cast");
+    }
+    if choice_hides_used(choice) {
+        bail!("a ballot choice cannot contain ` used=`; nothing was cast");
+    }
+    Ok(())
+}
+
 /// One cast, from the CLI and from MCP.
 pub struct CastBallot<'a> {
     pub issue: &'a str,
@@ -6196,6 +6215,85 @@ pub struct CastReport {
     pub session_label: Option<String>,
 }
 
+/// The fields `ljos vote` and `ljos_vote` share. Modes exclude each other
+/// the way the CLI flags do.
+pub struct VoteFields<'a> {
+    pub choice: Option<&'a str>,
+    pub confidence: Option<f64>,
+    pub used: Option<&'a str>,
+    pub expect: Option<&'a str>,
+    pub as_persona: Option<&'a str>,
+    pub jev: bool,
+    pub withdraw: bool,
+}
+
+/// One vote the CLI and MCP both run. A conflict is refused before a write.
+pub enum VoteRequest<'a> {
+    /// No ballot: print the tally.
+    Tally,
+    /// Cast `choice`.
+    Cast(CastBallot<'a>),
+    /// Take the ballot back.
+    Withdraw { as_persona: Option<&'a str> },
+    /// Ask Jev, as this persona.
+    Jev { as_persona: &'a str },
+}
+
+/// The mode `fields` names. A combination the CLI rejects is an error here,
+/// before the caller writes.
+///
+/// # Errors
+///
+/// Two modes at once, or `--jev` with no `--as`.
+pub fn vote_request<'a>(issue: &'a str, fields: VoteFields<'a>) -> Result<VoteRequest<'a>> {
+    if fields.choice.is_some() && fields.jev {
+        bail!("error: the argument '--for <CHOICE>' cannot be used with '--jev'");
+    }
+    if fields.choice.is_some() && fields.withdraw {
+        bail!("error: the argument '--for <CHOICE>' cannot be used with '--withdraw'");
+    }
+    if fields.withdraw {
+        if fields.jev {
+            bail!("error: the argument '--withdraw' cannot be used with '--jev'");
+        }
+        if fields.confidence.is_some() {
+            bail!(
+                "error: the argument '--withdraw' cannot be used with '--confidence <CONFIDENCE>'"
+            );
+        }
+        if fields.used.is_some() {
+            bail!("error: the argument '--withdraw' cannot be used with '--used <USED>'");
+        }
+        if fields.expect.is_some() {
+            bail!("error: the argument '--withdraw' cannot be used with '--expect <EXPECT>'");
+        }
+        return Ok(VoteRequest::Withdraw {
+            as_persona: fields.as_persona,
+        });
+    }
+    if fields.jev {
+        let Some(name) = fields
+            .as_persona
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            bail!("vote needs --as <AS_PERSONA>. `ljos vote --help` lists what to pass.");
+        };
+        return Ok(VoteRequest::Jev { as_persona: name });
+    }
+    if let Some(choice) = fields.choice {
+        return Ok(VoteRequest::Cast(CastBallot {
+            issue,
+            choice,
+            used: fields.used.unwrap_or(""),
+            confidence: fields.confidence,
+            expect: fields.expect,
+            as_persona: fields.as_persona,
+        }));
+    }
+    Ok(VoteRequest::Tally)
+}
+
 /// Cast one ballot. A voter who already holds one is `repeated-ballot`
 /// before `--used` is required, which is how a seat repeats when `--used`
 /// is omitted. A persona is refused unless `--used` resolves to a deed.
@@ -6208,20 +6306,19 @@ pub struct CastReport {
 /// hides a used field, the deed does not resolve, or the tracker does not
 /// show the row afterwards.
 pub fn cast_ballot(args: &CastBallot<'_>) -> Result<CastReport> {
+    choice_is_storable(args.choice)?;
+    let choice = ballot_choice(args.choice);
     let resolved = resolve_ballot(args.as_persona)?;
     let who = resolved.voter.clone();
     let cast = hook_timed("vote_claim", || {
         panel_gate::claim_session_ballot(args.issue, &who)
     })?;
-    if choice_hides_used(args.choice) {
-        bail!("a ballot choice cannot contain ` used=`; nothing was cast");
-    }
     let stored = stored_used(args.issue, &who, args.used, resolved.persona)?;
     let mut argv = vec![
         "vote".to_string(),
         args.issue.to_string(),
         "--for".into(),
-        args.choice.to_string(),
+        choice.to_string(),
         "--used".into(),
         stored.clone(),
     ];
@@ -6235,20 +6332,22 @@ pub fn cast_ballot(args: &CastBallot<'_>) -> Result<CastReport> {
     });
     let matches = rows.iter().any(|row| {
         let agent = row["agent"].as_str().map(str::trim) == Some(who.as_str());
-        let choice = row["choice"].as_str().map(str::trim) == Some(args.choice.trim());
+        let same_choice = row["choice"]
+            .as_str()
+            .is_some_and(|stored| panel_gate::same_counted_choice(stored, choice));
         let used = row
             .get("used")
             .and_then(|value| value.as_str())
             .map(str::trim)
             .unwrap_or(stored.as_str())
             == stored.as_str();
-        agent && choice && used
+        agent && same_choice && used
     });
     if !matches {
         let _ = run_captured_as("vissue", &["vote", args.issue, "--withdraw"], Some(&who));
         bail!(
             "the tracker does not hold a ballot from {who} for {} on {}: nothing was cast",
-            args.choice,
+            choice,
             args.issue
         );
     }
@@ -6267,12 +6366,12 @@ pub fn cast_ballot(args: &CastBallot<'_>) -> Result<CastReport> {
     }
     text.push_str(&format!(
         "recorded on the tracker: {who} for {} on {}\n",
-        args.choice, args.issue
+        choice, args.issue
     ));
     let session_label = cast.label.clone();
     cast.keep();
     match hook_timed("vote_sign", || {
-        ballot_sig::sign_ballot(args.issue, &who, args.choice)
+        ballot_sig::sign_ballot(args.issue, &who, choice)
     }) {
         Ok(line) => text.push_str(&line),
         Err(e) => text.push_str(&format!("ljos vote: {e:#}\n")),

@@ -1955,6 +1955,16 @@ fn argument_reason(rest: &str) -> String {
 
 /// A refusal. `call_tool` hands it to the model as a tool result with
 /// `isError`, so the model reads the reason.
+/// A vote failure in the words the CLI prints. A policy label keeps its
+/// `label` line. Other faults use the CLI's one-cause line, not the
+/// whole error chain.
+fn vote_fault(e: anyhow::Error) -> McpError {
+    if let Some(label) = ljos_cli::policy_label::as_policy(&e) {
+        return McpError::internal_error(format!("label {}: {}", label.label, label.detail), None);
+    }
+    McpError::internal_error(ljos_cli::user_fault_line(&e), None)
+}
+
 fn refused(e: anyhow::Error) -> McpError {
     if let Some(label) = ljos_cli::policy_label::as_policy(&e) {
         return McpError::internal_error(format!("label {}: {}", label.label, label.detail), None);
@@ -3112,41 +3122,44 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<VoteArgs>,
     ) -> Result<Json<Said>, McpError> {
-        match &args.choice {
-            Some(c) => {
-                let forecast = args.expect.as_ref().and_then(expect_text);
-                let report = ljos_cli::cast_ballot(&ljos_cli::CastBallot {
-                    issue: &args.issue,
-                    choice: c,
-                    used: args.used.as_deref().unwrap_or(""),
-                    confidence: args.confidence,
-                    expect: forecast.as_deref(),
-                    as_persona: args.as_persona.as_deref(),
-                })
-                .map_err(refused)?;
+        let forecast = args.expect.as_ref().and_then(expect_text);
+        let request = ljos_cli::vote_request(
+            &args.issue,
+            ljos_cli::VoteFields {
+                choice: args.choice.as_deref(),
+                confidence: args.confidence,
+                used: args.used.as_deref(),
+                expect: forecast.as_deref(),
+                as_persona: args.as_persona.as_deref(),
+                jev: args.jev,
+                withdraw: args.withdraw,
+            },
+        )
+        .map_err(vote_fault)?;
+        match request {
+            ljos_cli::VoteRequest::Cast(ballot) => {
+                let report = ljos_cli::cast_ballot(&ballot).map_err(vote_fault)?;
                 let mut text = report.text;
                 if let Some(why) = report.session_label {
                     text = format!("ljos: session-authored: {why}\n{text}");
                 }
                 Ok(Json(Said { text, aside: None }))
             }
-            None if args.withdraw => {
-                let who = ljos_cli::ballot_voter_on(&args.issue, args.as_persona.as_deref())
-                    .map_err(refused)?;
+            ljos_cli::VoteRequest::Withdraw { as_persona } => {
+                let who = ljos_cli::ballot_voter_on(&args.issue, as_persona).map_err(vote_fault)?;
                 let ballot_issue = ljos_cli::panel_gate::standing_ballot_issue(&args.issue, &who);
-                let mut said =
+                let mut text =
                     match habitat_as("vissue", &["vote", &args.issue, "--withdraw"], Some(&who)) {
                         Ok(said) => {
                             ljos_cli::panel_gate::release_session_ballot(&args.issue, &who);
-                            said
+                            said.0.text
                         }
                         Err(e) if format!("{e:#}").contains("holds no ballot") => {
                             ljos_cli::panel_gate::release_session_ballot(&args.issue, &who);
-                            let text = format!(
+                            format!(
                                 "{}: {who} holds no ballot; withdrawing the forecast\n",
                                 args.issue
-                            );
-                            Json(Said { text, aside: None })
+                            )
                         }
                         Err(e) => return Err(e),
                     };
@@ -3154,27 +3167,31 @@ impl LjosServer {
                     if let Err(e) =
                         ljos_cli::ballot_sig::note_withdrawn_on(ballot_issue, &who, &args.issue)
                     {
-                        said.0.text.push_str(&format!("ljos vote: {e:#}\n"));
+                        text.push_str(&format!("ljos withdraw: {e:#}\n"));
                     }
                 }
-                let n = ljos_cli::withdraw_prediction(&args.issue, &who).map_err(refused)?;
-                said.0
-                    .text
-                    .push_str(&format!("{n} forecast(s) withdrawn for {who}\n"));
-                said.0
-                    .text
-                    .push_str(&ljos_cli::persist_tracker(&args.issue, "ballot withdrawn"));
-                Ok(said)
-            }
-            None if args.jev => {
-                let Some(name) = args.as_persona.as_deref() else {
-                    return Err(refused(anyhow::anyhow!(
-                        "jev: a Jev ballot is cast as a persona; pass as"
-                    )));
+                let n = match ljos_cli::withdraw_prediction(&args.issue, &who) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        let fault = ljos_cli::user_fault_line(
+                            &e.context(format!("ballot withdrawn; the forecast for {who} was not")),
+                        );
+                        text.push_str(&fault);
+                        if !text.ends_with('\n') {
+                            text.push('\n');
+                        }
+                        return Err(McpError::internal_error(text, None));
+                    }
                 };
+                text.push_str(&format!("{n} forecast(s) withdrawn for {who}\n"));
+                text.push_str(&ljos_cli::persist_tracker(&args.issue, "ballot withdrawn"));
+                Ok(Json(Said { text, aside: None }))
+            }
+            ljos_cli::VoteRequest::Jev { as_persona } => {
+                let name = as_persona;
                 let cast = ljos_cli::panel_gate::claim_session_ballot(&args.issue, name)
-                    .map_err(refused)?;
-                let text = match ljos_cli::jev_vote(name, &args.issue).map_err(refused)? {
+                    .map_err(vote_fault)?;
+                let text = match ljos_cli::jev_vote(name, &args.issue).map_err(vote_fault)? {
                     ljos_cli::JevVote::Cast(b) => {
                         cast.keep();
                         format!(
@@ -3194,8 +3211,8 @@ impl LjosServer {
                 let text = text + &ljos_cli::persist_tracker(&args.issue, "Jev ballot");
                 Ok(Json(Said { text, aside: None }))
             }
-            None => {
-                let text = ljos_cli::panel_gate::tally_report(&args.issue).map_err(refused)?;
+            ljos_cli::VoteRequest::Tally => {
+                let text = ljos_cli::panel_gate::tally_report(&args.issue).map_err(vote_fault)?;
                 Ok(Json(Said { text, aside: None }))
             }
         }

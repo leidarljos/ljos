@@ -1283,7 +1283,11 @@ fn a_family_ballot_names_where_to_withdraw_over_mcp() {
         .unwrap_or_default()
         .to_string();
     assert!(done["result"]["isError"] == true, "{done:?}");
-    assert!(said.contains("packset url missing"), "{done:?}");
+    assert!(
+        said.contains("withdrawn")
+            && said.contains("ballot withdrawn; the forecast for saddle was not"),
+        "{done:?}"
+    );
     let pass = serde_json::json!({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {
         "name": "ljos_vote",
         "arguments": {"issue": "child-a", "choice": "hold", "used": "none"}}});
@@ -1457,7 +1461,11 @@ fn a_withdraw_on_child_keeps_parents_row_over_mcp() {
         .unwrap_or_default()
         .to_string();
     assert!(found["result"]["isError"] == true, "{said}");
-    assert!(said.contains("packset url missing"), "{said}");
+    assert!(
+        said.contains("withdrawn")
+            && said.contains("ballot withdrawn; the forecast for saddle was not"),
+        "{said}"
+    );
     let ballots: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(world.state.join("ballots.json")).unwrap())
             .unwrap();

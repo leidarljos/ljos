@@ -7388,13 +7388,25 @@ fn run_command() -> Result<()> {
             } else {
                 choice
             };
-            match choice {
-                None if withdraw => {
-                    let who = ljos_cli::ballot_voter_on(&issue, as_persona.as_deref())?;
+            let request = ljos_cli::vote_request(
+                &issue,
+                ljos_cli::VoteFields {
+                    choice: choice.as_deref(),
+                    confidence,
+                    used: used.as_deref(),
+                    expect: expect.as_deref(),
+                    as_persona: as_persona.as_deref(),
+                    jev,
+                    withdraw,
+                },
+            )?;
+            match request {
+                ljos_cli::VoteRequest::Withdraw { as_persona } => {
+                    let who = ljos_cli::ballot_voter_on(&issue, as_persona)?;
                     ljos_cli::tell_raw!("{}", ljos_cli::undo::withdraw_ballot(&issue, &who)?);
                 }
-                None if jev => {
-                    let name = as_persona.as_deref().unwrap_or_default();
+                ljos_cli::VoteRequest::Jev { as_persona } => {
+                    let name = as_persona;
                     let cast = ljos_cli::panel_gate::claim_session_ballot(&issue, name)?;
                     match ljos_cli::jev_vote(name, &issue)? {
                         ljos_cli::JevVote::Cast(b) => {
@@ -7439,15 +7451,8 @@ fn run_command() -> Result<()> {
                         }
                     }
                 }
-                Some(c) => {
-                    let report = ljos_cli::cast_ballot(&ljos_cli::CastBallot {
-                        issue: &issue,
-                        choice: &c,
-                        used: used.as_deref().unwrap_or(""),
-                        confidence,
-                        expect: expect.as_deref(),
-                        as_persona: as_persona.as_deref(),
-                    })?;
+                ljos_cli::VoteRequest::Cast(ballot) => {
+                    let report = ljos_cli::cast_ballot(&ballot)?;
                     ljos_cli::tell_raw!("{}", report.text);
                     if let Some((reason, child_id)) = &against_note {
                         let who = &report.voter;
@@ -7459,7 +7464,9 @@ fn run_command() -> Result<()> {
                     );
                     }
                 }
-                None => ljos_cli::tell_raw!("{}", ljos_cli::panel_gate::tally_report(&issue)?),
+                ljos_cli::VoteRequest::Tally => {
+                    ljos_cli::tell_raw!("{}", ljos_cli::panel_gate::tally_report(&issue)?)
+                }
             }
         }
         Cmd::Brief { name, issue } => {

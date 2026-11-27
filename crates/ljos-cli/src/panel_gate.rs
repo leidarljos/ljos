@@ -321,6 +321,27 @@ fn same_voter(signed: &str, voter: &str) -> bool {
     !signed.is_empty() && signed == voter
 }
 
+/// Whether `stored` and `choice` are the one choice a ballot counts.
+/// The cast writes this text and the signature covers it.
+#[must_use]
+pub(crate) fn same_counted_choice(stored: &str, choice: &str) -> bool {
+    stored.trim() == crate::ballot_choice(choice)
+}
+
+/// Whether a standing signature covers `choice` for `voter`. The tally
+/// counts a row only when this is so, or when the row has no signature.
+/// The cast stores [`crate::ballot_choice`], which this compares.
+#[must_use]
+pub(crate) fn signature_covers(
+    voter: &str,
+    choice: &str,
+    sigs: &[(bool, ballot_sig::SigNote)],
+) -> bool {
+    sigs.iter().any(|(standing, sig)| {
+        *standing && same_voter(&sig.voter, voter) && same_counted_choice(&sig.choice, choice)
+    })
+}
+
 fn matching_ballot_issue(
     issue: &str,
     voter: &str,
@@ -1289,11 +1310,8 @@ fn tally_voices(
             let Some(choice) = oldest.clone() else {
                 continue;
             };
-            let drawer = row["choice"].as_str().unwrap_or("").trim();
-            let signed = sigs.iter().any(|(standing, sig)| {
-                *standing && same_voter(&sig.voter, &id) && sig.choice == drawer
-            });
-            if !signed {
+            let drawer = row["choice"].as_str().unwrap_or("");
+            if !signature_covers(&id, drawer, &sigs) {
                 continue;
             }
             let mut row = row.clone();
@@ -1301,6 +1319,13 @@ fn tally_voices(
                 obj.insert("choice".into(), Value::String(choice));
             }
             counted.push(row);
+            continue;
+        }
+        let drawer = row["choice"].as_str().unwrap_or("");
+        let saw_signature = sigs
+            .iter()
+            .any(|(standing, sig)| *standing && same_voter(&sig.voter, &id));
+        if saw_signature && !signature_covers(&id, drawer, &sigs) {
             continue;
         }
         counted.push(row.clone());
