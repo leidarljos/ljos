@@ -134,6 +134,13 @@ pub fn child_work_dir() -> std::path::PathBuf {
     cwd_probe::stable_child_dir()
 }
 
+/// [`Some`] when this process should leave the parked directory it
+/// created. The path is searchable. [`None`] when the process is not in
+/// that directory, and the caller keeps its current directory.
+pub fn parked_replacement_dir() -> Option<std::path::PathBuf> {
+    cwd_probe::parked_replacement_dir()
+}
+
 /// Working directory for code in this process.
 ///
 /// After the process parks, `getcwd` names a directory that may already

@@ -3,7 +3,7 @@
 //! The musl CLI stays thin: this module never depends on iced. The HUD is a
 //! glibc workspace crate (`crates/ljos-hud`) and is not in a musl tarball.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Env override for the HUD binary this launcher execs.
 pub const HUD_BIN_ENV: &str = "LJOS_HUD_BIN";
@@ -49,6 +49,22 @@ pub fn resolve_hud_bin() -> Option<PathBuf> {
     None
 }
 
+/// `path` as an absolute program path. A relative `LJOS_HUD_BIN` is
+/// joined to the directory this process started in, which is the current
+/// directory when it did not park.
+fn absolute_program(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    let from = crate::cwd_probe::from_start(path);
+    if from.is_absolute() {
+        return from;
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or(from)
+}
+
 /// Hint printed when the launcher cannot find the HUD binary.
 pub fn missing_bin_message() -> &'static str {
     "ljos-hud is not installed. Install it with:\n  cargo install ljos-hud"
@@ -65,10 +81,18 @@ pub fn run(opts: HudLaunch) -> i32 {
     {
         return 0;
     }
-    let Some(bin) = resolve_hud_bin().filter(|p| p.is_file()) else {
+    let Some(bin) = resolve_hud_bin() else {
         say!("{}", missing_bin_message());
         return 127;
     };
+    // `execvp` resolves a relative program after `chdir`. The file check
+    // uses the directory this process started in, which is the current
+    // directory when it did not park.
+    let bin = absolute_program(&bin);
+    if !bin.is_file() {
+        say!("{}", missing_bin_message());
+        return 127;
+    }
     #[expect(
         clippy::disallowed_methods,
         reason = "starts a program outside git hook code"
@@ -90,14 +114,16 @@ pub fn run(opts: HudLaunch) -> i32 {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // `exec` skips `atexit`, so a parked directory would stay and the
-        // new image would keep it as its working directory. Leave first.
-        // The directory the HUD keeps is the one the other background
-        // children use, and it outlives this process.
-        let stand = crate::cwd_probe::stable_child_dir();
-        let _ = std::env::set_current_dir(&stand);
-        crate::cwd_probe::release_parked_dir();
-        cmd.current_dir(&stand);
+        // `exec` skips `atexit`. Leave only when this process is still in
+        // the parked directory it created. A fast local directory is not
+        // that directory: the new image keeps it, and a relative `TMPDIR`,
+        // `VISSUE_ROOT`, or HUD path still names the start directory. The
+        // replacement is searchable, or `/` when the tracker is not.
+        if let Some(stand) = crate::cwd_probe::parked_replacement_dir() {
+            let _ = std::env::set_current_dir(&stand);
+            crate::cwd_probe::release_parked_dir();
+            cmd.current_dir(&stand);
+        }
         let err = cmd.exec();
         say!("ljos: exec {}: {err}", bin.display());
         1

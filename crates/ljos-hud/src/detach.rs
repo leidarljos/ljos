@@ -56,10 +56,15 @@ pub fn start_detached(cli: &HudCli) -> anyhow::Result<i32> {
     )]
     let mut cmd = Command::new(&exe);
     cmd.args(child_args(cli))
-        .current_dir(ljos_cli::child_work_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(log_file));
+    // The child keeps this process's directory unless that directory is
+    // the parked one. A relative `TMPDIR` or `VISSUE_ROOT` is resolved
+    // before the move, in the same place `ljos hud` uses.
+    if let Some(dir) = ljos_cli::parked_replacement_dir() {
+        cmd.current_dir(dir);
+    }
     if let Some(tok) = &token {
         cmd.env("XDG_ACTIVATION_TOKEN", tok);
     }
