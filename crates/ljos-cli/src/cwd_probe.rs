@@ -561,7 +561,7 @@ fn default_temp_dir() -> PathBuf {
     }
     #[cfg(target_os = "macos")]
     {
-        return darwin_user_temp().unwrap_or_else(|| PathBuf::from("/tmp"));
+        darwin_user_temp().unwrap_or_else(|| PathBuf::from("/tmp"))
     }
     #[cfg(not(target_os = "macos"))]
     {
