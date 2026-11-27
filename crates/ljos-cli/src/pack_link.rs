@@ -1090,7 +1090,27 @@ fn io_is_quiet(err: &std::io::Error) -> bool {
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    /// When set, a connect fails the way Darwin fails a dropped SYN:
+    /// [`std::io::ErrorKind::TimedOut`], no os code, "connection timed out".
+    static FAIL_HANDSHAKE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Make the next connects on this thread fail as a dropped SYN.
+#[cfg(test)]
+pub(crate) fn fail_handshake_for_test(on: bool) {
+    FAIL_HANDSHAKE.with(|cell| cell.set(on));
+}
+
 fn connect(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
+    #[cfg(test)]
+    if FAIL_HANDSHAKE.with(std::cell::Cell::get) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "connection timed out",
+        ));
+    }
     if pack_quiet() {
         return Err(quiet_io());
     }

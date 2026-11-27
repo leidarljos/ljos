@@ -18451,27 +18451,20 @@ pub fn refine_default_hits(hits: &mut Vec<Hit>, query: &str, attempts: bool) {
 /// prints is this fact alone, not the chain under it.
 #[must_use]
 pub fn pack_unreachable(err: &anyhow::Error) -> bool {
+    if handshake_miss(err) {
+        return matches!(connect_state(err), Some(degraded::State::Down));
+    }
     let text = err.to_string().to_ascii_lowercase();
     let chain = format!("{err:#}").to_ascii_lowercase();
-    text.contains("connection refused")
-        || chain.contains("connection refused")
-        || connect_timed_out(err)
+    text.contains("connection refused") || chain.contains("connection refused")
 }
 
-/// Whether `err` is the handshake wait, not a read that went quiet.
-///
-/// `TcpStream::connect_timeout` builds this error itself: kind
-/// [`std::io::ErrorKind::TimedOut`], no os code, and the words
-/// "connection timed out". A later read that the kernel times out carries
-/// an os code and is not this. On Linux a closed port is
-/// `ECONNREFUSED` before the wait, so this stays false there.
-#[cfg(target_os = "linux")]
-fn connect_timed_out(_err: &anyhow::Error) -> bool {
-    false
-}
-
-#[cfg(not(target_os = "linux"))]
-fn connect_timed_out(err: &anyhow::Error) -> bool {
+/// A connect that did not finish. `TcpStream::connect_timeout` builds a
+/// [`std::io::ErrorKind::TimedOut`] with no os code and the words
+/// "connection timed out". A refused connect is
+/// [`std::io::ErrorKind::ConnectionRefused`]. A later read that goes quiet
+/// carries an os code and is not this.
+fn handshake_miss(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         let io = cause.downcast_ref::<std::io::Error>().or_else(|| {
             cause
@@ -18481,12 +18474,88 @@ fn connect_timed_out(err: &anyhow::Error) -> bool {
                     _ => None,
                 })
         });
-        io.is_some_and(|io| {
-            io.kind() == std::io::ErrorKind::TimedOut
-                && io.raw_os_error().is_none()
-                && io.to_string().contains("connection timed out")
+        io.is_some_and(|io| match io.kind() {
+            std::io::ErrorKind::ConnectionRefused => true,
+            std::io::ErrorKind::TimedOut => {
+                io.raw_os_error().is_none() && io.to_string() == "connection timed out"
+            }
+            _ => false,
         })
     })
+}
+
+/// Where this seat's writer is, from the same variables the client uses.
+enum PackAim {
+    Off,
+    Remote,
+    Loopback(u16),
+}
+
+fn pack_aim() -> PackAim {
+    let named = std::env::var("PACKSET_URL")
+        .ok()
+        .filter(|url| !url.is_empty());
+    let Some(named) = named else {
+        return PackAim::Loopback(packset_client::default_port());
+    };
+    if named == "off" {
+        return PackAim::Off;
+    }
+    let Ok(url) = url::Url::parse(&named) else {
+        return PackAim::Remote;
+    };
+    let Some(port) = url.port_or_known_default() else {
+        return PackAim::Remote;
+    };
+    match url.host() {
+        Some(url::Host::Domain("localhost")) => PackAim::Loopback(port),
+        Some(url::Host::Ipv4(ip)) if ip.is_loopback() => PackAim::Loopback(port),
+        Some(url::Host::Ipv6(ip)) if ip.is_loopback() => PackAim::Loopback(port),
+        _ => PackAim::Remote,
+    }
+}
+
+/// Whether a socket is listening on `port`. `None` when the tables cannot
+/// be read, so a guess does not start a second writer.
+fn port_listening(port: u16) -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        let tables: Vec<String> = ["/proc/net/tcp", "/proc/net/tcp6"]
+            .iter()
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .collect();
+        if tables.is_empty() {
+            return None;
+        }
+        Some(listener_uid_in(&tables, port).is_some())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_port_listening(port)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = port;
+        None
+    }
+}
+
+/// Down when the handshake failed and nothing is listening. Busy when a
+/// listener is up and did not accept in time. `None` when this is not a
+/// handshake failure, packs are off, or the tables could not be read.
+fn connect_state(err: &anyhow::Error) -> Option<degraded::State> {
+    if !handshake_miss(err) {
+        return None;
+    }
+    match pack_aim() {
+        PackAim::Off => None,
+        PackAim::Remote => Some(degraded::State::Down),
+        PackAim::Loopback(port) => match port_listening(port) {
+            Some(true) => Some(degraded::State::Busy),
+            Some(false) => Some(degraded::State::Down),
+            None => None,
+        },
+    }
 }
 
 /// [`packset_search_opts`] without the rerank, chosen by relevance, see
@@ -21704,6 +21773,129 @@ fn listener_uid(_port: u16) -> Option<u32> {
     None
 }
 
+/// `Some(true)` when a TCP socket is listening on `port`. `Some(false)`
+/// when this user can read process sockets and none of them listen there.
+/// `None` when the list itself cannot be read.
+#[cfg(target_os = "macos")]
+fn macos_port_listening(port: u16) -> Option<bool> {
+    let pids = macos_pids()?;
+    let mut saw = false;
+    for pid in pids {
+        let Some(fds) = macos_socket_fds(pid) else {
+            continue;
+        };
+        saw = true;
+        for fd in fds {
+            if macos_fd_listens(pid, fd, port) {
+                return Some(true);
+            }
+        }
+    }
+    saw.then_some(false)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_pids() -> Option<Vec<i32>> {
+    let mut cap = 256usize;
+    for _ in 0..8 {
+        let mut pids = vec![0i32; cap];
+        let bytes = i32::try_from(pids.len().saturating_mul(4)).ok()?;
+        // SAFETY: `pids` is `bytes` of writable i32. A short list is grown
+        // below. The call writes pids and nothing else.
+        let wrote = unsafe { libc::proc_listpids(1, 0, pids.as_mut_ptr().cast(), bytes) };
+        if wrote <= 0 {
+            return None;
+        }
+        let n = usize::try_from(wrote).unwrap_or(0) / 4;
+        if n < cap {
+            pids.truncate(n);
+            pids.retain(|pid| *pid > 0);
+            return Some(pids);
+        }
+        cap = cap.saturating_mul(2);
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_socket_fds(pid: i32) -> Option<Vec<i32>> {
+    let mut cap = 64usize;
+    for _ in 0..8 {
+        let mut fds = vec![
+            libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0
+            };
+            cap
+        ];
+        let bytes = i32::try_from(
+            fds.len()
+                .saturating_mul(std::mem::size_of::<libc::proc_fdinfo>()),
+        )
+        .ok()?;
+        // SAFETY: `fds` is `bytes` of writable `proc_fdinfo`. The call
+        // writes that many and returns how many bytes it filled.
+        let wrote = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                fds.as_mut_ptr().cast(),
+                bytes,
+            )
+        };
+        if wrote <= 0 {
+            return None;
+        }
+        let width = std::mem::size_of::<libc::proc_fdinfo>();
+        let n = usize::try_from(wrote).unwrap_or(0) / width;
+        if n < cap {
+            fds.truncate(n);
+            let sockets = fds
+                .into_iter()
+                .filter(|fd| fd.proc_fdtype == 2)
+                .map(|fd| fd.proc_fd)
+                .collect();
+            return Some(sockets);
+        }
+        cap = cap.saturating_mul(2);
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_fd_listens(pid: i32, fd: i32, port: u16) -> bool {
+    // Offsets inside `struct socket_fdinfo`: TCP kind, local port, state.
+    const SOCKET_BYTES: usize = 792;
+    const KIND_AT: usize = 256;
+    const PORT_AT: usize = 268;
+    const STATE_AT: usize = 344;
+    const SOCKINFO_TCP: i32 = 2;
+    const TSI_S_LISTEN: i32 = 1;
+    let mut buf = vec![0u8; SOCKET_BYTES];
+    // SAFETY: `buf` is the size of `struct socket_fdinfo`. A short write
+    // is ignored below, so a newer record is not read past its end.
+    let wrote = unsafe {
+        libc::proc_pidfdinfo(
+            pid,
+            fd,
+            3,
+            buf.as_mut_ptr().cast(),
+            i32::try_from(buf.len()).unwrap_or(0),
+        )
+    };
+    if wrote <= 0 || usize::try_from(wrote).unwrap_or(0) < STATE_AT + 4 {
+        return false;
+    }
+    let word = |at: usize| i32::from_le_bytes(buf[at..at + 4].try_into().unwrap_or([0; 4]));
+    if word(KIND_AT) != SOCKINFO_TCP || word(STATE_AT) != TSI_S_LISTEN {
+        return false;
+    }
+    // The port is an int in network order. The first two bytes are it.
+    let found = u16::from_be_bytes(buf[PORT_AT..PORT_AT + 2].try_into().unwrap_or([0; 2]));
+    found == port
+}
+
 /// [`listener_uid`] over the text of the tables. A row is `sl local remote
 /// state ... uid ...`; the local address ends in `:PORT` in hex, and state
 /// `0A` is a listening socket.
@@ -21819,17 +22011,19 @@ fn wake_writer() {
         Err(err) if pack_warming(&format!("{err:#}")) => {
             clear_health_fails();
         }
-        Err(err) if writer_slow(&err) => {}
-        Err(err) if writer_port_down(&err) => {
-            clear_health_fails();
-            let _ = ensure_writer();
-        }
-        Err(_) => {
-            if note_health_fail() >= PACK_HEALTH_FAILS_BEFORE_RESTART {
+        Err(err) => match degraded::of_error(&err) {
+            Some(degraded::State::Busy | degraded::State::Starting) => {}
+            Some(degraded::State::Down) => {
                 clear_health_fails();
                 let _ = ensure_writer();
             }
-        }
+            None => {
+                if note_health_fail() >= PACK_HEALTH_FAILS_BEFORE_RESTART {
+                    clear_health_fails();
+                    let _ = ensure_writer();
+                }
+            }
+        },
     }
 }
 
@@ -22945,7 +23139,21 @@ pub(crate) fn seat_binary() -> bool {
     )
 }
 
-/// Start the default writer when a memory verb could not connect.
+#[cfg(test)]
+thread_local! {
+    static WRITER_STARTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_writer_start() {
+    WRITER_STARTS.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+fn writer_start_count() -> u32 {
+    WRITER_STARTS.with(std::cell::Cell::get)
+}
+
 /// `PACKSET_URL=off` is left alone. A URL pointed somewhere else is not
 /// replaced with the default writer. `LJOS_OFF` gets no daemon and no
 /// word. A temporary `HOME` gets no daemon either, since the daemon would
@@ -22975,7 +23183,10 @@ fn ensure_writer() -> Result<()> {
     // writer on the default port. The binary a seat runs is not built this
     // way. A test that needs a writer starts it and stops it with the test.
     #[cfg(test)]
-    bail!("the memory writer does not start from a test");
+    {
+        note_writer_start();
+        bail!("the memory writer does not start from a test");
+    }
     #[cfg(not(test))]
     {
         if !seat_binary() {
@@ -23019,28 +23230,47 @@ fn skip_writer_ensure() -> bool {
 
 fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
     admit::note_list_lock();
+    let start = |op: &dyn Fn() -> Result<T>| match ensure_writer() {
+        Ok(()) => match op() {
+            // The start did not bring a writer up. A later miss is that
+            // same down writer, not a pack that is busy.
+            Err(err) if degraded::of_error(&err).is_some() || writer_unreachable(&err) => {
+                mark_writer_down();
+                Err(anyhow::anyhow!("{}", pack_down_line()))
+            }
+            other => other,
+        },
+        Err(err) => {
+            mark_writer_down();
+            Err(err)
+        }
+    };
     // A shed or a passed deadline already had its one retry. Asking again
-    // here is what turned one timeout into a minute.
+    // here is what turned one timeout into a minute. A handshake with
+    // nothing listening is down and starts the writer. A listener that is
+    // up, or a writer that answered busy, stays that error and is not
+    // started again. Only a clocked timeout or a 503 is rewritten to the
+    // busy line, so a shed is not queued as a missed connect.
     match op() {
         Err(err) if is_read_shed(&err) || is_write_shed(&err) || is_deadline_miss(&err) => Err(err),
+        Err(err)
+            if degraded::of_error(&err) == Some(degraded::State::Down) && !skip_writer_ensure() =>
+        {
+            start(&op)
+        }
         Err(err) if pack_link::clock_armed() && (is_pack_busy(&err) || writer_busy(&err)) => {
             Err(pack_busy_err())
         }
-        Err(err) if writer_unreachable(&err) && !skip_writer_ensure() => match ensure_writer() {
-            Ok(()) => match op() {
-                // The start did not bring a writer up. A timeout on the
-                // retry is that same down writer, not a pack that is busy.
-                Err(err) if writer_unreachable(&err) || is_pack_busy(&err) => {
-                    mark_writer_down();
-                    Err(anyhow::anyhow!("{}", pack_down_line()))
-                }
-                other => other,
-            },
-            Err(err) => {
-                mark_writer_down();
-                Err(err)
-            }
-        },
+        Err(err)
+            if writer_busy(&err)
+                || matches!(
+                    degraded::of_error(&err),
+                    Some(degraded::State::Busy | degraded::State::Starting)
+                ) =>
+        {
+            Err(err)
+        }
+        Err(err) if writer_unreachable(&err) && !skip_writer_ensure() => start(&op),
         other => other,
     }
 }
@@ -23864,7 +24094,15 @@ fn listed_of<T: Listed>(
         pack_timeout().min(atoms_timeout())
     };
     let answered = match client.roundtrip("GET", "/v1/atoms", &query, None, token, slice) {
-        Err(err) if armed && pack_link::error_is_timeout(&err) => return Err(pack_busy_err()),
+        Err(err) if armed && pack_link::error_is_timeout(&err) => {
+            let err = anyhow::Error::from(err).context(url.clone());
+            // Nothing listening is down, so the caller can start the
+            // writer. A listener that is up stays the busy line.
+            if degraded::of_error(&err) == Some(degraded::State::Down) {
+                return Err(err);
+            }
+            return Err(pack_busy_err());
+        }
         Err(err) if matches!(err, packset_client::Error::Unavailable(_)) => {
             return Err(anyhow::Error::from(err));
         }
@@ -37879,16 +38117,29 @@ pub fn doctor_seat() -> Vec<Habitat> {
                         state: where_,
                         ok: true,
                     },
-                    Err(e) if is_read_shed(&e) => Habitat {
-                        name: "pack",
-                        state: format!("{}; {where_}", pack_fault_line(&e)),
-                        ok: true,
-                    },
-                    Err(e) if writer_slow(&e) => Habitat {
-                        name: "pack",
-                        state: format!("{}; {}", pack_busy_sentence(), where_),
-                        ok: true,
-                    },
+                    Err(e)
+                        if is_read_shed(&e)
+                            || matches!(
+                                degraded::of_error(&e),
+                                Some(degraded::State::Busy | degraded::State::Starting)
+                            )
+                            || (writer_slow(&e)
+                                && degraded::of_error(&e) != Some(degraded::State::Down)) =>
+                    {
+                        if is_read_shed(&e) {
+                            Habitat {
+                                name: "pack",
+                                state: format!("{}; {where_}", pack_fault_line(&e)),
+                                ok: true,
+                            }
+                        } else {
+                            Habitat {
+                                name: "pack",
+                                state: format!("{}; {}", pack_busy_sentence(), where_),
+                                ok: true,
+                            }
+                        }
+                    }
                     Err(e) => Habitat {
                         name: "pack",
                         state: doctor_fix::hint_pack(match pack_down_message(&e) {
@@ -45380,9 +45631,14 @@ fn recall_memories_with(issue: &str, include_notes: bool, width: Width) -> Resul
         match what() {
             Err(err) if is_memory_starting(&err) || is_reported_busy(&err) => Err(err),
             Err(err) if is_deadline_miss(&err) || is_read_shed(&err) => Err(err),
-            // A timeout before the start is a busy pack. A timeout after
-            // the start left the writer down, and the line names the command.
-            Err(err) if is_pack_busy(&err) => {
+            // Busy stays busy and does not start a writer. Down falls
+            // through and starts one, the same as a refused connect.
+            Err(err)
+                if matches!(
+                    degraded::of_error(&err),
+                    Some(degraded::State::Busy | degraded::State::Starting)
+                ) =>
+            {
                 if woke {
                     Err(anyhow::anyhow!("{}", pack_down_line()))
                 } else {
@@ -48638,7 +48894,13 @@ fn sitting_pack_read(client: &PacksetClient, ticket: &str) -> Result<(Vec<Value>
             let err = anyhow::Error::from(err);
             let spent = pack_link::clock_left()
                 .is_some_and(|left| left <= std::time::Duration::from_millis(50));
-            if spent || is_pack_busy(&err) || is_deadline_miss(&err) {
+            // A handshake with nothing listening is down, so the bounded
+            // listing is still tried, the same as a refused connect. A
+            // listener that is up and slow is not asked again. A 503 that
+            // is not a timeout still has that listing.
+            let slow =
+                is_pack_busy(&err) && degraded::of_error(&err) != Some(degraded::State::Down);
+            if spent || is_deadline_miss(&err) || slow {
                 return Err(err);
             }
             sitting_limited_listing(client).map(|atoms| (atoms, false))
@@ -94684,7 +94946,7 @@ lesson, due yesterday, seat ada
 
     #[test]
     fn a_busy_writer_is_not_an_absent_one() {
-        let _env_read = crate::test_env_read_lock();
+        let _env = env_guard();
         let refused = anyhow::Error::new(packset_client::Error::Bad(
             "http://127.0.0.1:8761/v1/search: 503: packsetd is busy".into(),
         ));
@@ -94722,6 +94984,111 @@ lesson, due yesterday, seat ada
             "warn\tmemory\thttp://127.0.0.1:9 workspace seat; pack responded in 4ms; \
              busy, retrying, so run `ljos doctor`."
         );
+        dropped_syn_timeout_starts_the_writer();
+    }
+
+    /// A connect cap on a port with no listener is down and starts the
+    /// writer. The same timeout against a listener that is up stays busy.
+    fn dropped_syn_timeout_starts_the_writer() {
+        let held = ljos_test_boot::ClosedPort::bind().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let live = listener.local_addr().unwrap().port();
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::remove_var("PACKSET_URL");
+            std::env::remove_var("PACKSET_TOKEN");
+            std::env::remove_var("PACKSET_TOKEN_FILE");
+            std::env::remove_var("LJOS_OFF");
+            std::env::set_var("PACKSET_HOME", home.path());
+            std::env::set_var("PACKSET_PORT", held.port().to_string());
+        }
+        let _fail = HandshakeGuard::enter();
+        let missed = anyhow::Error::from(
+            pack_link::PacksetClient::from_env()
+                .unwrap()
+                .health()
+                .unwrap_err(),
+        );
+        assert_eq!(
+            crate::degraded::of_error(&missed),
+            Some(crate::degraded::State::Down),
+            "{missed:?}"
+        );
+        let started = |label: &str, run: &dyn Fn()| {
+            let before = super::writer_start_count();
+            run();
+            assert!(
+                super::writer_start_count() > before,
+                "{label} did not start the writer"
+            );
+        };
+        started("wake", &super::wake_writer);
+        started("with_writer", &|| {
+            let _clock = pack_link::PackClock::enter(std::time::Duration::from_secs(2));
+            let err = super::with_writer(|| {
+                pack_link::PacksetClient::from_env()
+                    .map_err(anyhow::Error::from)?
+                    .health()
+                    .map(|_| ())
+                    .map_err(anyhow::Error::from)
+            })
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("does not start from a test"),
+                "{err}"
+            );
+            assert!(!err.to_string().contains(PACK_BUSY_LINE), "{err}");
+        });
+        started("recall", &|| {
+            let _ = super::recall_memories("closed-port", HOOK_WIDTH);
+        });
+        started("inbox", &|| {
+            let _ = crate::mail::inbox(false);
+        });
+        unsafe { std::env::set_var("PACKSET_PORT", live.to_string()) };
+        let slow = anyhow::Error::from(
+            pack_link::PacksetClient::from_env()
+                .unwrap()
+                .health()
+                .unwrap_err(),
+        );
+        assert_eq!(
+            crate::degraded::of_error(&slow),
+            Some(crate::degraded::State::Busy),
+            "{slow:?}"
+        );
+        let before = super::writer_start_count();
+        super::wake_writer();
+        let _clock = pack_link::PackClock::enter(std::time::Duration::from_secs(2));
+        let err = super::with_writer(|| {
+            pack_link::PacksetClient::from_env()
+                .map_err(anyhow::Error::from)?
+                .health()
+                .map(|_| ())
+                .map_err(anyhow::Error::from)
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), pack_busy_err().to_string(), "{err}");
+        assert_eq!(
+            super::writer_start_count(),
+            before,
+            "a live listener was started again"
+        );
+    }
+
+    struct HandshakeGuard;
+
+    impl HandshakeGuard {
+        fn enter() -> Self {
+            pack_link::fail_handshake_for_test(true);
+            Self
+        }
+    }
+
+    impl Drop for HandshakeGuard {
+        fn drop(&mut self) {
+            pack_link::fail_handshake_for_test(false);
+        }
     }
 
     #[test]
