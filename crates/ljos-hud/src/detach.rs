@@ -56,6 +56,7 @@ pub fn start_detached(cli: &HudCli) -> anyhow::Result<i32> {
     )]
     let mut cmd = Command::new(&exe);
     cmd.args(child_args(cli))
+        .current_dir(ljos_cli::child_work_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(log_file));

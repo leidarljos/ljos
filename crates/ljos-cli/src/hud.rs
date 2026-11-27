@@ -90,6 +90,14 @@ pub fn run(opts: HudLaunch) -> i32 {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        // `exec` skips `atexit`, so a parked directory would stay and the
+        // new image would keep it as its working directory. Leave first.
+        // The directory the HUD keeps is the one the other background
+        // children use, and it outlives this process.
+        let stand = crate::cwd_probe::stable_child_dir();
+        let _ = std::env::set_current_dir(&stand);
+        crate::cwd_probe::release_parked_dir();
+        cmd.current_dir(&stand);
         let err = cmd.exec();
         say!("ljos: exec {}: {err}", bin.display());
         1

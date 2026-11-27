@@ -127,7 +127,10 @@ pub mod config_diag;
 pub mod converge;
 mod cwd_probe;
 
-pub(crate) fn child_work_dir() -> std::path::PathBuf {
+/// Directory a background child keeps after this process removes the
+/// parked working directory. The tracker when that directory is present,
+/// otherwise `/`.
+pub fn child_work_dir() -> std::path::PathBuf {
     cwd_probe::stable_child_dir()
 }
 

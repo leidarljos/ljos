@@ -186,8 +186,13 @@ impl Seat {
             cmd.stdin(Stdio::null());
         }
         std::fs::create_dir_all(self.dir.path().join("run")).unwrap();
+        // An empty value removes the variable, which is how a test clears
+        // one Seat set above. `"\u{1}"` sets it to an empty string so a
+        // test can leave `TMPDIR` set and empty.
         for (key, value) in extra {
-            if value.is_empty() {
+            if *value == "\u{1}" {
+                cmd.env(key, "");
+            } else if value.is_empty() {
                 cmd.env_remove(key);
             } else {
                 cmd.env(key, value);
@@ -696,5 +701,140 @@ fn an_unreadable_tmpdir_does_not_keep_the_parked_directory() {
     assert!(
         left.is_empty(),
         "parked working directories remained: {left:?}"
+    );
+}
+
+/// `TMPDIR` that is relative, empty, or a missing relative path, with
+/// `XDG_RUNTIME_DIR` unset. The runtime directory must not be created
+/// inside the parked directory, and that directory must be gone on exit.
+#[test]
+fn an_unresolved_tmpdir_does_not_keep_the_parked_directory() {
+    let seat = Seat::new();
+    script(
+        &seat.bin,
+        "vissue",
+        r#"#!/bin/sh
+printf '%s\n' "$TMPDIR" > "$VISSUE_ROOT/seen-tmpdir"
+name="ljos-cwd-$PPID"
+for base in "$LJOS_PARK_WATCH" /tmp; do
+  if [ -d "$base/$name" ]; then
+    printf '%s\n' "$base/$name" > "$VISSUE_ROOT/seen-park"
+    break
+  fi
+done
+printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
+"#,
+    );
+    let cwd = seat.dir.path().join("fast");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let rel = cwd.join("reltmp");
+    std::fs::create_dir_all(&rel).unwrap();
+    check_unresolved_tmpdir(&seat, &cwd, "reltmp", &rel, &rel);
+    check_unresolved_tmpdir(&seat, &cwd, "\u{1}", Path::new("/tmp"), Path::new("/tmp"));
+    check_unresolved_tmpdir(
+        &seat,
+        &cwd,
+        "missing-rel",
+        Path::new("/tmp"),
+        Path::new("/tmp"),
+    );
+}
+
+fn check_unresolved_tmpdir(seat: &Seat, cwd: &Path, tmpdir: &str, watch: &Path, expect_tmp: &Path) {
+    let seen_tmp_path = seat.tracker.join("seen-tmpdir");
+    let seen_park_path = seat.tracker.join("seen-park");
+    let _ = std::fs::remove_file(&seen_tmp_path);
+    let _ = std::fs::remove_file(&seen_park_path);
+    let (out, _) = seat.run(
+        cwd,
+        &["file", "-p", "demo", "--top", "a title"],
+        &[
+            ("XDG_RUNTIME_DIR", ""),
+            ("TMPDIR", tmpdir),
+            ("LJOS_PARK_WATCH", watch.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "tmpdir {tmpdir:?}: {}", text(&out));
+    let seen_tmp = std::fs::read_to_string(&seen_tmp_path).unwrap_or_default();
+    let seen_tmp = seen_tmp.trim();
+    assert_eq!(
+        Path::new(seen_tmp),
+        expect_tmp,
+        "TMPDIR left as {seen_tmp:?} for {tmpdir:?}"
+    );
+    assert!(
+        !seen_tmp
+            .split('/')
+            .any(|part| part.starts_with("ljos-cwd-")),
+        "runtime temp is inside the parked directory: {seen_tmp}"
+    );
+    let parked = std::fs::read_to_string(&seen_park_path).unwrap_or_default();
+    let parked = parked.trim();
+    assert!(
+        Path::new(parked)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("ljos-cwd-")),
+        "did not park with TMPDIR {tmpdir:?}: {}",
+        text(&out)
+    );
+    assert!(
+        !Path::new(parked).exists(),
+        "parked directory remained: {parked}"
+    );
+}
+
+/// `ljos hud` parks and then execs, which skips atexit. The parked
+/// directory must already be gone, and the exec'd process must be in the
+/// stable directory the other background children use.
+#[test]
+fn hud_exec_drops_the_parked_directory() {
+    let seat = Seat::new();
+    let hud = seat.bin.join("ljos-hud");
+    script(
+        &seat.bin,
+        "ljos-hud",
+        "#!/bin/sh\npwd -P > \"$VISSUE_ROOT/hud-cwd\"\nexit 0\n",
+    );
+    let tmp = seat.dir.path().join("tmp");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let (out, _) = seat.run(
+        &seat.slow,
+        &["hud", "--foreground"],
+        &[
+            ("TMPDIR", tmp.to_str().unwrap()),
+            ("LJOS_HUD_BIN", hud.to_str().unwrap()),
+            ("LD_PRELOAD", seat.so.to_str().unwrap()),
+            ("LJOS_SLOW_HIT", seat.hit.to_str().unwrap()),
+        ],
+    );
+    let marked = seat.tracker.join("hud-cwd");
+    let recorded = std::fs::read_to_string(&marked).unwrap_or_default();
+    assert!(
+        marked.is_file(),
+        "hud did not exec: {}\n{recorded}",
+        text(&out)
+    );
+    let cwd = recorded.trim();
+    assert!(
+        !Path::new(cwd)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("ljos-cwd-")),
+        "exec kept the parked directory: {cwd}"
+    );
+    let got = std::fs::canonicalize(cwd).unwrap_or_else(|err| panic!("exec cwd {cwd}: {err}"));
+    let expect = std::fs::canonicalize(&seat.tracker).unwrap();
+    assert_eq!(got, expect, "exec cwd is not the stable directory");
+    let left: Vec<String> = std::fs::read_dir(&tmp)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("ljos-cwd-"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "parked working directories remained: {left:?}\n{}",
+        text(&out)
     );
 }

@@ -311,6 +311,15 @@ fn park(here: &Path, move_process_cwd: bool) {
     let Some(guard) = ParkedCwd::create() else {
         return;
     };
+    // `TMPDIR` is still the value the process was given. A relative, empty,
+    // or missing relative value is what `temp_dir` returns, and after the
+    // chdir below that path is inside the directory just created.
+    // `runtime_dir` would then create `ljos-<uid>` there and the directory
+    // could not be removed. An absolute value is left as set, and an unset
+    // `TMPDIR` is left unset.
+    if let Some(parent) = guard.path().parent() {
+        pin_relative_tmpdir(parent);
+    }
     if std::env::set_current_dir(guard.path()).is_err() {
         return;
     }
@@ -530,6 +539,22 @@ fn directory_flags() -> &'static [libc::c_int] {
     &FLAGS
 }
 
+/// Point `TMPDIR` at `parent` when the variable is set and not absolute.
+///
+/// `parent` is the directory the parked cwd was created in, resolved
+/// before this process leaves the directory it started in. A relative
+/// value is that directory. An empty value, or a relative value that is
+/// not a directory, is the platform default (`/tmp` on Linux).
+fn pin_relative_tmpdir(parent: &Path) {
+    let Some(raw) = std::env::var_os("TMPDIR") else {
+        return;
+    };
+    if Path::new(&raw).is_absolute() {
+        return;
+    }
+    std::env::set_var("TMPDIR", parent);
+}
+
 /// Absolute temp directory for the parked cwd. An empty `TMPDIR`, or one
 /// that does not name a directory, uses the platform default (`/tmp` when
 /// `TMPDIR` is unset on Linux). A relative `TMPDIR` is joined to the
@@ -621,6 +646,14 @@ static PARKED_CWD: AtomicPtr<ParkedCwd> = AtomicPtr::new(std::ptr::null_mut());
 /// Process that armed [`PARKED_CWD`]. A fork copies the guard and this
 /// handler; `exit` in the child must not remove the parent's directory.
 static PARK_OWNER: AtomicU32 = AtomicU32::new(0);
+
+/// Remove the parked directory before a call that skips `atexit`.
+///
+/// `exec` replaces this process, so the handler registered at park does
+/// not run. The directory is removed the same way that handler removes it.
+pub(crate) fn release_parked_dir() {
+    release_parked_cwd();
+}
 
 extern "C" fn release_parked_cwd() {
     // SAFETY: `getpid` takes no pointers and only reads the caller.
