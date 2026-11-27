@@ -8,27 +8,17 @@
 
 use std::io;
 use std::os::fd::RawFd;
+use std::os::unix::process::CommandExt;
+use std::process::Command;
 
-/// `SOCK_CLOEXEC` where `socket` applies it, else zero so the caller
-/// sets the flag with `fcntl` immediately after.
+/// `SOCK_CLOEXEC` on Linux and Android, where `socket` applies it.
+/// Elsewhere zero, and the caller sets `FD_CLOEXEC` with `fcntl`.
 fn cloexec_flag() -> libc::c_int {
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "tvos",
-        target_os = "watchos",
-    ))]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         libc::SOCK_CLOEXEC
     }
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "tvos",
-        target_os = "watchos",
-    )))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         0
     }
@@ -45,7 +35,7 @@ impl ClosedPort {
     /// Bind `127.0.0.1:0` and keep the socket.
     ///
     /// The descriptor is close-on-exec. [`Self::inherit`] clears that
-    /// flag so a child started afterwards can listen on it.
+    /// flag in the one child that should listen on it.
     ///
     /// # Errors
     ///
@@ -115,28 +105,29 @@ impl ClosedPort {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    /// The descriptor a child of this process keeps across `exec`.
+    /// The descriptor `cmd`'s child keeps across `exec`.
     ///
-    /// Close-on-exec is cleared. The number is the same in the child.
-    /// The socket is still bound and not listening, so the child can
-    /// `listen` on it without binding again.
-    ///
-    /// # Errors
-    ///
-    /// The kernel refuses the flag change.
-    pub fn inherit(&self) -> io::Result<i32> {
-        // SAFETY: `fd` is the socket this value owns. The calls read and
-        // replace that descriptor's flags.
+    /// Close-on-exec stays set on this process's descriptor. It is
+    /// cleared in that child only, after fork and before exec, so a
+    /// later child of this process does not inherit the socket. The
+    /// number is the same in the child. The socket is still bound and
+    /// not listening, so the child can `listen` on it without binding
+    /// again.
+    pub fn inherit(&self, cmd: &mut Command) -> i32 {
+        let fd = self.fd;
+        // SAFETY: `pre_exec` runs in the forked child before exec. The
+        // closure only changes this socket's close-on-exec flag in that
+        // child. `fd` stays open until this value is dropped.
         unsafe {
-            let flags = libc::fcntl(self.fd, libc::F_GETFD);
-            if flags < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if libc::fcntl(self.fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                return Err(io::Error::last_os_error());
-            }
+            cmd.pre_exec(move || {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
         }
-        Ok(self.fd)
+        fd
     }
 }
 
@@ -170,19 +161,30 @@ mod tests {
     }
 
     #[test]
-    fn bind_is_close_on_exec_and_inherit_clears_it() {
+    fn bind_is_close_on_exec_and_inherit_clears_it_for_one_child() {
         let held = ClosedPort::bind().unwrap();
         assert_ne!(fd_flags(held.fd) & libc::FD_CLOEXEC, 0);
         #[cfg(target_os = "linux")]
         assert!(!child_has_fd(held.fd), "exec kept the socket");
-        let fd = held.inherit().unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        let mut cmd = std::process::Command::new("/bin/sh");
+        let script = format!("test -e /dev/fd/{}", held.fd);
+        cmd.args(["-c", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let fd = held.inherit(&mut cmd);
         assert_eq!(fd, held.fd);
-        assert_eq!(fd_flags(held.fd) & libc::FD_CLOEXEC, 0);
+        assert_ne!(fd_flags(held.fd) & libc::FD_CLOEXEC, 0);
         #[cfg(target_os = "linux")]
-        assert!(
-            child_has_fd(held.fd),
-            "inherit left the socket closed on exec"
-        );
+        {
+            let status = cmd.status().unwrap();
+            assert!(status.success(), "the armed child did not keep the socket");
+            assert!(!child_has_fd(held.fd), "a later child inherited the socket");
+        }
         let refused = std::net::TcpStream::connect(("127.0.0.1", held.port())).unwrap_err();
         assert_eq!(
             refused.raw_os_error(),

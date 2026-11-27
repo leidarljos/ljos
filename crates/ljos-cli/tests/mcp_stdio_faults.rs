@@ -513,23 +513,11 @@ fn listen_loopback(port: u16) -> TcpListener {
 /// The returned fd is open and not owned by any other safe wrapper.
 unsafe fn listen_loopback_fd(port: u16) -> std::io::Result<std::os::fd::RawFd> {
     let cloexec: libc::c_int = {
-        #[cfg(any(
-            target_os = "linux",
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "tvos",
-            target_os = "watchos",
-        ))]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             libc::SOCK_CLOEXEC
         }
-        #[cfg(not(any(
-            target_os = "linux",
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "tvos",
-            target_os = "watchos",
-        )))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             0
         }

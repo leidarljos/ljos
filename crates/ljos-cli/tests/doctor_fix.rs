@@ -377,7 +377,6 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
     std::fs::write(seat.config(), CONFIG_KEEP).unwrap();
     let held = ljos_test_boot::ClosedPort::bind().unwrap();
     let port = held.port();
-    let pack_fd = held.inherit().unwrap().to_string();
     let log = seat.home.join("packset.log");
     let pid = seat.home.join("pack.pid");
     let py = seat.home.join("pack.py");
@@ -397,7 +396,9 @@ fn doctor_fix_starts_packsetd_with_packset_ensure() {
             clippy::disallowed_methods,
             reason = "starts a program outside git hook code"
         )]
-        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        let pack_fd = held.inherit(&mut cmd).to_string();
+        let out = cmd
             .args(args)
             .env_clear()
             .env("PATH", format!("{}:/usr/bin:/bin", seat.bin.display()))
