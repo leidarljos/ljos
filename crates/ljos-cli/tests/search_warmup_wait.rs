@@ -1,11 +1,11 @@
 //! A short reported encoder load is waited out. A long one is not.
 //!
 //! The fake writer answers HTTP only. `remaining_ms` is the load it
-//! reports. When `ready_after` is set, the second warm-up status poll
-//! is the ready signal. The first warm-up poll stays cold, and so does
-//! every status read before that loop. A search served while cold
-//! leaves the later status cold. `None` stays cold. The clock is not
-//! the signal.
+//! reports. When `ready_after` is set, status stays cold until that
+//! long after bind, and until the warm-up poll after the sizing reads.
+//! The first warm-up poll stays cold, and so does every status read
+//! before that loop. A search served while cold leaves the later
+//! status cold. `None` stays cold.
 //!
 //! A tracker ticket whose title matches the query is on both pages:
 //! the meaning page after a short load, and the word-match page when
@@ -45,9 +45,9 @@ fn content_length(head: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// `remaining_ms` is what a cold status reports. `ready_after` asks the
-/// writer to answer ready on the second warm-up status poll. The reads
-/// before that loop stay cold. `None` stays cold.
+/// `remaining_ms` is what a cold status reports. `ready_after` is how
+/// long after bind the writer may first answer ready, and only on a
+/// warm-up poll after the sizing reads. `None` stays cold.
 fn serve(remaining_ms: u64, ready_after: Option<Duration>) -> Seat {
     serve_as(remaining_ms, ready_after, false)
 }
@@ -65,6 +65,7 @@ fn serve_as(remaining_ms: u64, ready_after: Option<Duration>, older_status: bool
     let status_polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let polls = std::sync::Arc::clone(&status_polls);
     let searched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opened = Instant::now();
     thread::spawn(move || {
         for conn in listener.incoming().flatten() {
             let polls = std::sync::Arc::clone(&polls);
@@ -100,8 +101,8 @@ fn serve_as(remaining_ms: u64, ready_after: Option<Duration>, older_status: bool
                 if path == "/v1/search" {
                     searched.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
-                let ready = older_status
-                    || (ready_after.is_some() && !searched_before && seen > COLD_STATUS_POLLS);
+                let due = ready_after.is_some_and(|delay| opened.elapsed() >= delay);
+                let ready = older_status || (due && !searched_before && seen > COLD_STATUS_POLLS);
                 let body = if path == "/v1/status" {
                     if older_status {
                         r#"{"embedder":{"available":true,"enabled":true},"search":{"ranks":["fused","relevance"]}}"#

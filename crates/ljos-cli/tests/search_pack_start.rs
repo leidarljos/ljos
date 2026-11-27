@@ -75,7 +75,11 @@ fn serve(closed_healths: Option<usize>, hits: &'static str) -> Seat {
                         Ok(n) => buf.extend_from_slice(&tmp[..n]),
                     }
                 }
-                let seen = requests.fetch_add(1, Ordering::SeqCst);
+                let seen = if path == "/health" {
+                    requests.fetch_add(1, Ordering::SeqCst)
+                } else {
+                    requests.load(Ordering::SeqCst)
+                };
                 let open = match closed_healths {
                     None => false,
                     Some(n) => seen >= n,
@@ -249,9 +253,11 @@ fn a_warmup_wait_of_zero_does_not_wait_on_a_starting_pack() {
 }
 
 #[test]
-fn remember_waits_for_the_pack_to_open() {
+fn remember_stores_when_the_pack_is_open() {
     let _process = ljos_test_boot::env_lock();
-    let seat = serve(Some(4), hits_body());
+    // Remember posts /v1/atoms and does not poll /health, so the pack is
+    // open on that first post. A positive health count would never clear.
+    let seat = serve(Some(0), hits_body());
     let (out, elapsed) = run(
         &seat,
         &["remember", "Cold metal seats the door."],

@@ -151,7 +151,7 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
     let stdout = child.stdout.take().unwrap();
     let seen = Arc::new(Mutex::new(String::new()));
     let reading = Arc::clone(&seen);
-    thread::spawn(move || {
+    let reader = thread::spawn(move || {
         let mut stdout = stdout;
         let mut buf = [0u8; 1024];
         loop {
@@ -166,18 +166,14 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
     });
     let started = Instant::now();
     let status = loop {
-        let saw_claim = seen.lock().unwrap().contains("== claim");
         if let Some(status) = child.try_wait().unwrap() {
-            if saw_claim || seen.lock().unwrap().contains("== claim") {
-                break status;
-            }
-        } else if saw_claim {
-            // The claim is the event. Wait for the child to exit on its
-            // own budget; the kill below is only a hang backstop.
+            // The child is done. A missing claim is the assertion below.
+            break status;
         }
         if started.elapsed() > Duration::from_secs(30) {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = reader.join();
             panic!(
                 "sitting still running after {:?}; stdout:\n{}",
                 started.elapsed(),
@@ -186,6 +182,7 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
         }
         thread::sleep(Duration::from_millis(20));
     };
+    let _ = reader.join();
     let stdout = seen.lock().unwrap().clone();
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
