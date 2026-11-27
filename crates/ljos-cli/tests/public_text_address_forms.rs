@@ -202,11 +202,14 @@ fn every_non_public_literal_is_refused_whatever_surrounds_it() {
     );
 }
 
-/// User time of this process. A loaded core changes wall time and leaves
-/// this alone, so a linear scan is compared here rather than to a wall cap.
+/// User time of this thread. `RUSAGE_SELF` sums every test thread, so a
+/// linear scan is compared to `RUSAGE_THREAD` on Linux. Other targets
+/// skip that bound and keep the wall cap.
+#[cfg(target_os = "linux")]
 fn user_cpu() -> std::time::Duration {
     let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
-    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    // SAFETY: `usage` is zeroed storage this call owns.
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut usage) };
     assert_eq!(rc, 0, "getrusage");
     let secs = u64::try_from(usage.ru_utime.tv_sec).unwrap_or(0);
     let micros = u64::try_from(usage.ru_utime.tv_usec).unwrap_or(0);
@@ -219,28 +222,40 @@ fn user_cpu() -> std::time::Duration {
 fn assert_linear_scan(short: &str, long: &str) {
     let scale = long.len() as f64 / short.len() as f64;
     let wall = std::time::Instant::now();
+    #[cfg(target_os = "linux")]
     let before = user_cpu();
     assert_eq!(classify(short, &Screen::default()), None);
+    #[cfg(target_os = "linux")]
     let short_cpu = user_cpu().saturating_sub(before);
+    #[cfg(target_os = "linux")]
     let before = user_cpu();
     assert_eq!(classify(long, &Screen::default()), None);
+    #[cfg(target_os = "linux")]
     let long_cpu = user_cpu().saturating_sub(before);
     assert!(
         wall.elapsed() < std::time::Duration::from_secs(30),
         "the scan hung after {:?}",
         wall.elapsed()
     );
-    if long_cpu <= std::time::Duration::from_millis(20) {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = scale;
         return;
     }
-    let base = short_cpu.max(std::time::Duration::from_millis(5));
-    let limit = base.mul_f64(scale * 1.75);
-    assert!(
-        long_cpu <= limit,
-        "user cpu {long_cpu:?} on {} bytes is past {limit:?}, scaled from {short_cpu:?} on {} bytes",
-        long.len(),
-        short.len()
-    );
+    #[cfg(target_os = "linux")]
+    {
+        if long_cpu <= std::time::Duration::from_millis(20) {
+            return;
+        }
+        let base = short_cpu.max(std::time::Duration::from_millis(5));
+        let limit = base.mul_f64(scale * 1.75);
+        assert!(
+            long_cpu <= limit,
+            "user cpu {long_cpu:?} on {} bytes is past {limit:?}, scaled from {short_cpu:?} on {} bytes",
+            long.len(),
+            short.len()
+        );
+    }
 }
 
 #[test]
