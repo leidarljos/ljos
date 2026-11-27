@@ -529,6 +529,27 @@ struct Gate {
     cap: usize,
 }
 
+/// Discard the peer's bytes until it closes, errors, or `deadline`.
+/// Each read waits only for the time still left, so an interrupted read
+/// is tried again against that same deadline and does not start the hold
+/// over.
+fn drain_held(stream: &UnixStream, deadline: Instant) {
+    let mut buf = [0u8; 4096];
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let _ = stream.set_read_timeout(Some(left));
+        match (&mut &*stream).read(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+}
+
 impl Gate {
     fn lock(&self) -> std::sync::MutexGuard<'_, Turns> {
         self.turns
@@ -597,11 +618,10 @@ impl Gate {
         self.moved.notify_all();
         let waited = asked.elapsed().as_millis();
         if writeln!(&mut &*stream, "go {waited}").is_ok() {
-            let _ = stream.set_read_timeout(Some(HOLD));
-            // `copy` retries Interrupted and discards the bytes. End of
-            // file and a real error, including the hold timeout, still
-            // release the slot.
-            let _ = std::io::copy(&mut &*stream, &mut std::io::sink());
+            // One deadline for every read. Interrupted is tried again
+            // against the time left. End of file and a real error,
+            // including the hold timeout, still release the slot.
+            drain_held(stream, Instant::now() + HOLD);
         }
         let mut turns = self.lock();
         turns.running -= 1;
@@ -977,5 +997,113 @@ mod tests {
         drop(took);
         drop(leaked);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No `SA_RESTART`: a hold read returns [`std::io::ErrorKind::Interrupted`].
+    #[cfg(target_os = "linux")]
+    extern "C" fn hold_signal_wakes(_: libc::c_int) {}
+
+    /// The SIGUSR1 action this test replaced.
+    #[cfg(target_os = "linux")]
+    struct SavedUsr1(libc::sigaction);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for SavedUsr1 {
+        fn drop(&mut self) {
+            // SAFETY: `0` is the SIGUSR1 disposition saved when the test started.
+            unsafe {
+                libc::sigaction(libc::SIGUSR1, &self.0, std::ptr::null_mut());
+            }
+        }
+    }
+
+    /// A peer that never closes, and a hold read interrupted over and over,
+    /// still gives the slot back at [`HOLD`]. On a drain that starts the
+    /// timeout again after each interrupt, this stays taken until `bound`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_signalled_hold_still_ends_at_the_deadline() {
+        let _env_read = crate::test_env_read_lock();
+        // SAFETY: SIGUSR1 is installed for this test and restored on drop.
+        let saved = unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = hold_signal_wakes as extern "C" fn(libc::c_int) as usize;
+            libc::sigemptyset(&mut action.sa_mask);
+            action.sa_flags = 0;
+            let mut old: libc::sigaction = std::mem::zeroed();
+            assert_eq!(
+                libc::sigaction(libc::SIGUSR1, &action, &mut old),
+                0,
+                "SIGUSR1 was not installed"
+            );
+            SavedUsr1(old)
+        };
+        let gate = Arc::new(Gate {
+            turns: Mutex::new(Turns {
+                running: 0,
+                queue: std::collections::VecDeque::new(),
+                next: 0,
+                last: Instant::now(),
+            }),
+            moved: Condvar::new(),
+            slots: 1,
+            cap: 1,
+        });
+        let (mine, theirs) = UnixStream::pair().unwrap();
+        let (tid_tx, tid_rx) = std::sync::mpsc::channel();
+        let gate_call = Arc::clone(&gate);
+        let server = std::thread::spawn(move || {
+            // SAFETY: the id is only passed to pthread_kill for this thread.
+            let tid = unsafe { libc::pthread_self() };
+            let _ = tid_tx.send(tid);
+            gate_call.serve(&theirs);
+        });
+        let tid = tid_rx.recv().expect("the hold thread did not start");
+        writeln!(&mut &mine, "wait 1000").unwrap();
+        mine.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut line = String::new();
+        BufReader::new(mine.try_clone().unwrap())
+            .read_line(&mut line)
+            .expect("hook slot hung");
+        assert!(line.starts_with("go "), "{line}");
+        assert!(!gate.drained(), "the slot was free after go");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_signal = std::sync::Arc::clone(&stop);
+        let signals = std::thread::spawn(move || {
+            while !stop_signal.load(Ordering::Relaxed) {
+                // SAFETY: `tid` is the hold thread and SIGUSR1 has a handler.
+                let rc = unsafe { libc::pthread_kill(tid, libc::SIGUSR1) };
+                if rc != 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let started = Instant::now();
+        let bound = HOLD + Duration::from_secs(2);
+        let mut released = None;
+        while started.elapsed() <= bound {
+            if gate.drained() {
+                released = Some(started.elapsed());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        stop.store(true, Ordering::Relaxed);
+        let _ = signals.join();
+        drop(mine);
+        let _ = server.join();
+        drop(saved);
+        match released {
+            Some(took) => assert!(
+                took + Duration::from_secs(1) >= HOLD,
+                "the slot was released at {} ms, before the hold deadline",
+                took.as_millis()
+            ),
+            None => panic!(
+                "the slot stayed held for {} ms, past the deadline",
+                started.elapsed().as_millis()
+            ),
+        }
     }
 }
