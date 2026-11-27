@@ -270,6 +270,7 @@ fn a_search_that_stays_not_ready_ranks_by_words() {
     assert!(said.contains(STARTING_WORDS), "{said}");
     assert!(!said.contains(STARTING), "{said}");
     assert!(!said.contains(HIT), "{said}");
+    assert!(elapsed < Duration::from_secs(4), "{elapsed:?}\n{said}");
     assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
 }
 

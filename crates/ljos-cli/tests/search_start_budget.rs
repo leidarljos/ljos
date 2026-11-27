@@ -145,8 +145,16 @@ fn the_health_wait_and_the_search_wait_share_one_budget() {
         String::from_utf8_lossy(&stdout),
         String::from_utf8_lossy(&stderr)
     );
+    let first = probes.iter().map(|(_, at)| *at).min().unwrap_or_default();
+    let last_search = probes
+        .iter()
+        .filter(|(path, _)| path == "/v1/search")
+        .map(|(_, at)| *at)
+        .max()
+        .unwrap_or(first);
+    let span = last_search.saturating_sub(first);
     assert!(
-        (1..=8).contains(&searches),
-        "one warmup budget of {BUDGET_SECS}s fits 7 searches after {CLOSED_HEALTHS} closed health polls; saw {searches}\nprobes: {probes:?}\n{said}"
+        (1..=8).contains(&searches) && span < Duration::from_secs(3),
+        "one warmup budget of {BUDGET_SECS}s fits 7 searches after {CLOSED_HEALTHS} closed health polls; saw {searches} over {span:?}\nprobes: {probes:?}\n{said}"
     );
 }

@@ -221,7 +221,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text
     });
     release_after_busy_exec(watch, held, &started);
     let answer = rx
-        .recv_timeout(std::time::Duration::from_secs(15))
+        .recv_timeout(std::time::Duration::from_secs(5))
         .expect("the forward did not finish")
         .unwrap();
     assert!(answer.to_string().contains("busy-ok"), "{answer}");

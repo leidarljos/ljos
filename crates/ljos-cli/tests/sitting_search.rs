@@ -165,12 +165,16 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
         }
     });
     let started = Instant::now();
+    let mut claimed_at = None;
     let status = loop {
+        if claimed_at.is_none() && seen.lock().unwrap().contains("== claim") {
+            claimed_at = Some(started.elapsed());
+        }
         if let Some(status) = child.try_wait().unwrap() {
             // The child is done. A missing claim is the assertion below.
             break status;
         }
-        if started.elapsed() > Duration::from_secs(30) {
+        if started.elapsed() > Duration::from_secs(10) {
             let _ = child.kill();
             let _ = child.wait();
             let _ = reader.join();
@@ -182,12 +186,22 @@ fn a_stalled_search_still_claims_and_exits_inside_the_budget() {
         }
         thread::sleep(Duration::from_millis(20));
     };
+    let exited = started.elapsed();
     let _ = reader.join();
+    if claimed_at.is_none() && seen.lock().unwrap().contains("== claim") {
+        // The reader can deliver the line after the child has gone. The
+        // claim was printed before that exit.
+        claimed_at = Some(exited);
+    }
     let stdout = seen.lock().unwrap().clone();
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        stdout.contains("== claim"),
-        "claim was not printed:\n{stdout}\ncalls:\n{calls}"
+        claimed_at.is_some_and(|took| took <= Duration::from_secs(5)),
+        "claim was not printed within 5s ({claimed_at:?}):\n{stdout}\ncalls:\n{calls}"
+    );
+    assert!(
+        exited <= Duration::from_secs(10),
+        "sitting took {exited:?}\n{stdout}"
     );
     assert!(
         status.success(),
