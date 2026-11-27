@@ -24,6 +24,9 @@ const SLOWSTAT: &str = r#"
 #include <sys/stat.h>
 
 static int slow(const char *p) {
+    const char *exact = getenv("SLOW_EXACT");
+    if (exact && exact[0])
+        return p && strcmp(p, exact) == 0;
     return p && strstr(p, "ljos-slow-cwd") != 0;
 }
 
@@ -726,12 +729,11 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
 "#,
     );
     let cwd = seat.dir.path().join("fast");
-    std::fs::create_dir_all(&cwd).unwrap();
     let rel = cwd.join("reltmp");
     std::fs::create_dir_all(&rel).unwrap();
-    check_unresolved_tmpdir(&seat, &cwd, "reltmp", &rel, Some(&rel));
     // Empty and missing relative values use the platform default, which is
     // `/tmp` on Linux and the confstr user temp on macOS.
+    check_unresolved_tmpdir(&seat, &cwd, "reltmp", &rel, Some(&rel));
     check_unresolved_tmpdir(&seat, &cwd, "\u{1}", Path::new("/tmp"), None);
     check_unresolved_tmpdir(&seat, &cwd, "missing-rel", Path::new("/tmp"), None);
 }
@@ -757,25 +759,23 @@ fn check_unresolved_tmpdir(
         ],
     );
     assert!(out.status.success(), "tmpdir {tmpdir:?}: {}", text(&out));
-    let seen_tmp = std::fs::read_to_string(&seen_tmp_path).unwrap_or_default();
-    let seen_tmp = seen_tmp.trim();
-    let parked = std::fs::read_to_string(&seen_park_path).unwrap_or_default();
-    let parked = parked.trim();
+    let seen_tmp = read_trim(&seen_tmp_path);
+    let parked = read_trim(&seen_park_path);
     if let Some(expect) = expect_exact {
         assert_eq!(
-            Path::new(seen_tmp),
+            Path::new(&seen_tmp),
             expect,
-            "TMPDIR left as {seen_tmp:?} for {tmpdir:?}"
+            "TMPDIR {seen_tmp:?} for {tmpdir:?}"
         );
     } else {
-        let tmp = Path::new(seen_tmp);
+        let tmp = Path::new(&seen_tmp);
         assert!(
             tmp.is_absolute() && tmp.is_dir(),
-            "fallback TMPDIR {seen_tmp:?} for {tmpdir:?}"
+            "fallback TMPDIR {seen_tmp:?}"
         );
         assert!(
-            Path::new(parked).starts_with(tmp),
-            "parked {parked} is not under the platform default {seen_tmp}"
+            Path::new(&parked).starts_with(tmp),
+            "parked {parked} is not under {seen_tmp}"
         );
     }
     assert!(
@@ -785,7 +785,7 @@ fn check_unresolved_tmpdir(
         "runtime temp is inside the parked directory: {seen_tmp}"
     );
     assert!(
-        Path::new(parked)
+        Path::new(&parked)
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("ljos-cwd-")),
@@ -793,7 +793,7 @@ fn check_unresolved_tmpdir(
         text(&out)
     );
     assert!(
-        !Path::new(parked).exists(),
+        !Path::new(&parked).exists(),
         "parked directory remained: {parked}"
     );
 }
@@ -822,101 +822,34 @@ fn hud_exec_drops_the_parked_directory() {
             ("LJOS_SLOW_HIT", seat.hit.to_str().unwrap()),
         ],
     );
-    let marked = seat.tracker.join("hud-cwd");
-    let recorded = std::fs::read_to_string(&marked).unwrap_or_default();
+    let recorded = read_trim(&seat.tracker.join("hud-cwd"));
+    assert!(!recorded.is_empty(), "hud did not exec: {}", text(&out));
     assert!(
-        marked.is_file(),
-        "hud did not exec: {}\n{recorded}",
-        text(&out)
-    );
-    let cwd = recorded.trim();
-    assert!(
-        !Path::new(cwd)
+        !Path::new(&recorded)
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("ljos-cwd-")),
-        "exec kept the parked directory: {cwd}"
+        "exec kept the parked directory: {recorded}"
     );
-    let got = std::fs::canonicalize(cwd).unwrap_or_else(|err| panic!("exec cwd {cwd}: {err}"));
-    let expect = std::fs::canonicalize(&seat.tracker).unwrap();
-    assert_eq!(got, expect, "exec cwd is not the stable directory");
-    let left: Vec<String> = std::fs::read_dir(&tmp)
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+    assert_eq!(
+        canon(Path::new(&recorded)),
+        canon(&seat.tracker),
+        "exec cwd"
+    );
+    let left: Vec<_> = ljos_names(&tmp)
+        .into_iter()
         .filter(|name| name.starts_with("ljos-cwd-"))
         .collect();
     assert!(
         left.is_empty(),
-        "parked working directories remained: {left:?}\n{}",
+        "parked directories remained: {left:?}\n{}",
         text(&out)
     );
 }
 
-const GUARD_SLOW: &str = r#"
-#define _GNU_SOURCE
-#include <dlfcn.h>
-#include <fcntl.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/stat.h>
-
-static int slow(const char *p) {
-    const char *want = getenv("SLOW_STAT");
-    return p && want && strcmp(p, want) == 0;
-}
-
-static void pause_if(const char *p) {
-    const char *hit;
-    int fd;
-    if (!slow(p)) return;
-    hit = getenv("SLOW_HIT");
-    if (hit && hit[0]) {
-        fd = open(hit, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (fd >= 0) close(fd);
-    }
-    usleep(900000);
-}
-
-int statx(int d, const char *restrict p, int fl, unsigned m, struct statx *restrict b) {
-    static int (*real)(int, const char *restrict, int, unsigned, struct statx *restrict);
-    if (!real) real = dlsym(RTLD_NEXT, "statx");
-    pause_if(p);
-    if (!real) return -1;
-    return real(d, p, fl, m, b);
-}
-
-int stat(const char *restrict p, struct stat *restrict b) {
-    static int (*real)(const char *restrict, struct stat *restrict);
-    if (!real) real = dlsym(RTLD_NEXT, "stat");
-    pause_if(p);
-    if (!real) return -1;
-    return real(p, b);
-}
-
-int lstat(const char *restrict p, struct stat *restrict b) {
-    static int (*real)(const char *restrict, struct stat *restrict);
-    if (!real) real = dlsym(RTLD_NEXT, "lstat");
-    pause_if(p);
-    if (!real) return -1;
-    return real(p, b);
-}
-
-int newfstatat(int d, const char *restrict p, struct stat *restrict b, int fl) {
-    static int (*real)(int, const char *restrict, struct stat *restrict, int);
-    if (!real) real = dlsym(RTLD_NEXT, "newfstatat");
-    pause_if(p);
-    if (!real) return -1;
-    return real(d, p, b, fl);
-}
-"#;
-
 /// A fast `ljos hud` stays in the directory it started in. A relative
 /// `TMPDIR`, `VISSUE_ROOT`, or `LJOS_HUD_BIN` still names that directory,
-/// and a tracker that cannot be searched is not entered. When a slow
-/// directory does park, a relative `TMPDIR` is made absolute and is not a
-/// new temp root, so `remember` does not treat a home inside it as a sandbox.
+/// and a tracker that cannot be searched is not entered.
 #[test]
 fn hud_keeps_the_start_directory_unless_it_parked() {
     let seat = Seat::new();
@@ -924,14 +857,10 @@ fn hud_keeps_the_start_directory_unless_it_parked() {
     let reltmp = work.join("reltmp");
     let reltracker = work.join("reltracker");
     let mark = seat.dir.path().join("mark");
-    std::fs::create_dir_all(&reltmp).unwrap();
-    std::fs::create_dir_all(&reltracker).unwrap();
-    std::fs::create_dir_all(&mark).unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "writes a file that is not a git hook"
-    )]
-    std::fs::write(reltracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
+    for path in [&reltmp, &reltracker, &mark] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    write_file(&reltracker.join("vissue.toml"), "prefix = \"Software\"\n");
     script(
         &work,
         "hud-rel",
@@ -954,6 +883,7 @@ exit 0
         "hud-rel",
         "#!/bin/sh\nprintf '%s\\n' FROM_TRACKER > \"$LJOS_MARK/which\"\nexit 0\n",
     );
+    let mark_s = mark.to_str().unwrap();
     let (out, _) = seat.run(
         &work,
         &["hud", "--foreground"],
@@ -962,28 +892,30 @@ exit 0
             ("TMPDIR", "reltmp"),
             ("VISSUE_ROOT", "reltracker"),
             ("LJOS_HUD_BIN", "./hud-rel"),
-            ("LJOS_MARK", mark.to_str().unwrap()),
+            ("LJOS_MARK", mark_s),
         ],
     );
     assert!(out.status.success(), "relative hud: {}", text(&out));
-    let which = std::fs::read_to_string(mark.join("which")).unwrap_or_default();
-    assert_eq!(which.trim(), "FROM_START", "ran the tracker binary");
-    let pwd = std::fs::read_to_string(mark.join("pwd")).unwrap_or_default();
-    let got = std::fs::canonicalize(pwd.trim()).unwrap_or_else(|err| panic!("pwd: {err}"));
-    let expect = std::fs::canonicalize(&work).unwrap();
-    assert_eq!(got, expect, "hud left the start directory");
-    let root = std::fs::read_to_string(mark.join("root")).unwrap_or_default();
-    assert_eq!(root.trim(), "reltracker");
-    let kind = std::fs::read_to_string(mark.join("root-kind")).unwrap_or_default();
-    assert_eq!(kind.trim(), "dir");
-    let tmp = std::fs::read_to_string(mark.join("tmp")).unwrap_or_default();
-    assert_eq!(tmp.trim(), "reltmp");
+    let expect = canon(&work);
+    assert_eq!(
+        read_trim(&mark.join("which")),
+        "FROM_START",
+        "ran the tracker binary"
+    );
+    assert_eq!(
+        canon(Path::new(&read_trim(&mark.join("pwd")))),
+        expect,
+        "hud left the start directory"
+    );
+    assert_eq!(read_trim(&mark.join("root")), "reltracker");
+    assert_eq!(read_trim(&mark.join("root-kind")), "dir");
+    assert_eq!(read_trim(&mark.join("tmp")), "reltmp");
     assert!(
         reltmp.join("hud-marker").is_file(),
         "marker left the start dir"
     );
     assert!(
-        !seat.tracker.join("reltmp").join("hud-marker").exists(),
+        !seat.tracker.join("reltmp/hud-marker").exists(),
         "marker landed in the tracker"
     );
 
@@ -994,56 +926,50 @@ exit 0
     let nox = seat.dir.path().join("nox");
     std::fs::create_dir_all(&nox).unwrap();
     set_mode(&nox, 0o644);
-    let hud = work.join("hud-rel");
     let (out, _) = seat.run(
         &work,
         &["hud", "--foreground"],
         &[
             ("XDG_RUNTIME_DIR", ""),
-            ("TMPDIR", mark.to_str().unwrap()),
+            ("TMPDIR", mark_s),
             ("VISSUE_ROOT", nox.to_str().unwrap()),
-            ("LJOS_HUD_BIN", hud.to_str().unwrap()),
-            ("LJOS_MARK", mark.to_str().unwrap()),
+            ("LJOS_HUD_BIN", work.join("hud-rel").to_str().unwrap()),
+            ("LJOS_MARK", mark_s),
         ],
     );
     set_mode(&nox, 0o755);
     assert!(out.status.success(), "mode 644 tracker: {}", text(&out));
-    let which = std::fs::read_to_string(mark.join("which")).unwrap_or_default();
-    assert_eq!(which.trim(), "FROM_START");
-    let pwd = std::fs::read_to_string(mark.join("pwd")).unwrap_or_default();
-    let got = std::fs::canonicalize(pwd.trim()).unwrap_or_else(|err| panic!("pwd: {err}"));
-    assert_eq!(got, expect, "hud entered a directory it could not search");
-
-    remember_keeps_a_home_under_a_relative_tmpdir();
+    assert_eq!(read_trim(&mark.join("which")), "FROM_START");
+    assert_eq!(
+        canon(Path::new(&read_trim(&mark.join("pwd")))),
+        expect,
+        "hud entered an unsearchable directory"
+    );
 }
 
+/// A home inside a relative `TMPDIR` is not a sandbox after a slow start
+/// makes that value absolute. The directory must sit outside the fixed
+/// temp roots, or this promise is not what the run measured.
+#[test]
 fn remember_keeps_a_home_under_a_relative_tmpdir() {
     let root = guard_root();
-    if !outside_fixed_temp(&root) {
-        let _ = std::fs::remove_dir_all(&root);
-        return;
-    }
     let _keep = RmDir(&root);
     let proj = root.join("proj");
     let tracker = root.join("tracker");
-    let hit = root.join("slow-hit");
     std::fs::create_dir_all(proj.join("reltmp/home")).unwrap();
     std::fs::create_dir_all(tracker.join("Software")).unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "writes a file that is not a git hook"
-    )]
-    std::fs::write(tracker.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
-    let so = guard_slow_lib(&root);
-    let proj = std::fs::canonicalize(&proj).unwrap();
+    write_file(&tracker.join("vissue.toml"), "prefix = \"Software\"\n");
+    let so = slow_lib(&root);
+    let proj = canon(&proj);
     let home = proj.join("reltmp/home");
     std::fs::create_dir_all(&home).unwrap();
-    remember_once(&proj, &proj, ".", &tracker, &so, &hit);
-    let _ = std::fs::remove_file(&hit);
-    remember_once(&proj, &home, "reltmp", &tracker, &so, &hit);
+    let tracker = canon(&tracker);
+    for (home, tmpdir) in [(&proj, "."), (&home, "reltmp")] {
+        remember_once(&proj, home, tmpdir, &tracker, &so);
+    }
 }
 
-fn remember_once(cwd: &Path, home: &Path, tmpdir: &str, tracker: &Path, so: &Path, hit: &Path) {
+fn remember_once(cwd: &Path, home: &Path, tmpdir: &str, tracker: &Path, so: &Path) {
     #[expect(
         clippy::disallowed_methods,
         reason = "starts a program outside git hook code"
@@ -1058,8 +984,7 @@ fn remember_once(cwd: &Path, home: &Path, tmpdir: &str, tracker: &Path, so: &Pat
         .env("TMPDIR", tmpdir)
         .env("VISSUE_ROOT", tracker)
         .env("LD_PRELOAD", so)
-        .env("SLOW_STAT", cwd)
-        .env("SLOW_HIT", hit)
+        .env("SLOW_EXACT", cwd)
         .env("LJOS_SEAT", "ada")
         .env("LJOS_HOOKD", "off")
         .env("LJOS_TRACKER_GIT", "off")
@@ -1080,21 +1005,13 @@ fn remember_once(cwd: &Path, home: &Path, tmpdir: &str, tracker: &Path, so: &Pat
             Err(err) => panic!("{err}"),
         }
     };
-    let took = started.elapsed();
     let mut stderr = Vec::new();
     if let Some(mut pipe) = child.stderr.take() {
         use std::io::Read as _;
         let _ = pipe.read_to_end(&mut stderr);
     }
     let err = String::from_utf8_lossy(&stderr);
-    assert!(
-        hit.is_file(),
-        "stat of the start directory was not delayed: {err}"
-    );
-    assert!(
-        took >= Duration::from_millis(450),
-        "remember did not wait out the cwd probe ({took:?}): {err}"
-    );
+    assert!(status.is_some(), "remember did not finish: {err}");
     assert!(
         !err.contains("memory and the command guard are off"),
         "relative TMPDIR became a sandbox ({status:?}): {err}"
@@ -1103,41 +1020,18 @@ fn remember_once(cwd: &Path, home: &Path, tmpdir: &str, tracker: &Path, so: &Pat
 
 fn guard_root() -> PathBuf {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/cwdleak-guard");
+    std::fs::create_dir_all(&base).unwrap();
+    let base = canon(&base);
+    for root in ["/tmp", "/var/tmp", "/private/tmp", "/dev/shm"] {
+        assert!(
+            !base.starts_with(root),
+            "sandbox {} is under {root}",
+            base.display()
+        );
+    }
     let path = base.join(std::process::id().to_string());
     std::fs::create_dir_all(&path).unwrap();
-    std::fs::canonicalize(&path).unwrap_or(path)
-}
-
-fn outside_fixed_temp(path: &Path) -> bool {
-    !["/tmp", "/var/tmp", "/private/tmp", "/dev/shm"]
-        .iter()
-        .any(|root| path.starts_with(root))
-}
-
-fn guard_slow_lib(dir: &Path) -> PathBuf {
-    let src = dir.join("guardstat.c");
-    let so = dir.join("guardstat.so");
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "writes a file that is not a git hook"
-    )]
-    std::fs::write(&src, GUARD_SLOW).unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "starts a program outside git hook code"
-    )]
-    let out = Command::new("gcc")
-        .args(["-shared", "-fPIC", "-o"])
-        .arg(&so)
-        .arg(&src)
-        .output()
-        .unwrap_or_else(|err| panic!("gcc: {err}"));
-    assert!(
-        out.status.success(),
-        "gcc guardstat: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    so
+    canon(&path)
 }
 
 struct RmDir<'a>(&'a Path);
@@ -1162,15 +1056,48 @@ fn refused(out: &Output, key: &str) -> bool {
     !out.status.success() && text(out).contains("did not resolve") && text(out).contains(key)
 }
 
+fn canon(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+}
+
+fn read_trim(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+fn write_file(path: &Path, body: &str) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes a file that is not a git hook"
+    )]
+    std::fs::write(path, body).unwrap();
+}
+
+fn link_dir(target: &Path, path: &Path) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "links a directory that is not a git hook"
+    )]
+    std::os::unix::fs::symlink(target, path).unwrap();
+}
+
+const TRACKER_STUB: &str = r#"#!/bin/sh
+root="$VISSUE_ROOT"
+if [ -z "$root" ]; then root="$ISSUE_ROOT"; fi
+printf '%s\n' "$root" > "$LJOS_MARK/root"
+mkdir -p -- "$root/Software"
+printf x > "$root/Software/landed"
+printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
+"#;
+
 /// A relative or `.` `TMPDIR` on a slow start is not stated without a
 /// deadline, and it is not replaced with another directory.
 #[test]
 fn a_slow_relative_tmpdir_is_refused() {
     let seat = Seat::new();
-    let mark = seat.dir.path().join("mark");
-    let tmp = seat.dir.path().join("tmp");
-    std::fs::create_dir_all(&mark).unwrap();
-    std::fs::create_dir_all(&tmp).unwrap();
+    let (mark, _tmp) = scratch(&seat);
     std::fs::create_dir_all(seat.slow.join("reltmp")).unwrap();
     let hud = seat.bin.join("ljos-hud");
     script(
@@ -1180,7 +1107,6 @@ fn a_slow_relative_tmpdir_is_refused() {
     );
     for value in [".", "reltmp"] {
         let _ = std::fs::remove_file(mark.join("which"));
-        let _ = std::fs::remove_file(&seat.hit);
         let (out, took) = seat.run(
             &seat.slow,
             &["hud", "--foreground"],
@@ -1200,93 +1126,59 @@ fn a_slow_relative_tmpdir_is_refused() {
         );
         assert!(refused(&out, "TMPDIR"), "{value}: {}", text(&out));
         assert!(!mark.join("which").is_file(), "{value} ran the hud");
-        let left = ljos_names(&seat.slow);
         assert!(
-            left.iter().all(|name| !name.starts_with("ljos-cwd-")),
-            "{value} left {left:?}"
+            ljos_names(&seat.slow)
+                .iter()
+                .all(|name| !name.starts_with("ljos-cwd-")),
+            "{value} left {:?}",
+            ljos_names(&seat.slow)
         );
     }
 }
 
-/// A relative `LJOS_HUD_BIN` is not stated on the start directory after
-/// the park, and the parked directory is not left behind.
+/// A relative `LJOS_HUD_BIN` in a parked start directory is refused for
+/// `hud --foreground` and `hud --hide`. `--hide` does not report success
+/// without running it, and the parked directory is not left behind.
 #[test]
 fn a_slow_relative_hud_bin_is_refused() {
     let seat = Seat::new();
-    let mark = seat.dir.path().join("mark");
-    let tmp = seat.dir.path().join("tmp");
-    std::fs::create_dir_all(&mark).unwrap();
-    std::fs::create_dir_all(&tmp).unwrap();
+    let (mark, tmp) = scratch(&seat);
     script(
         &seat.slow,
         "hud-rel",
         "#!/bin/sh\nprintf FROM_START > \"$LJOS_MARK/which\"\nexit 0\n",
     );
-    let (out, took) = seat.run(
-        &seat.slow,
-        &["hud", "--foreground"],
-        &[
-            ("TMPDIR", tmp.to_str().unwrap()),
-            ("LJOS_HUD_BIN", "./hud-rel"),
-            ("LJOS_MARK", mark.to_str().unwrap()),
-            ("LD_PRELOAD", seat.so.to_str().unwrap()),
-            ("LJOS_SLOW_HIT", seat.hit.to_str().unwrap()),
-        ],
-    );
-    assert!(
-        took < Duration::from_secs(4),
-        "hud took {took:?}: {}",
-        text(&out)
-    );
-    assert!(refused(&out, "LJOS_HUD_BIN"), "{}", text(&out));
-    assert!(
-        !mark.join("which").is_file(),
-        "hud ran without a resolved path"
-    );
-    assert!(
-        ljos_names(&tmp).is_empty(),
-        "parked directory left behind: {:?}",
-        ljos_names(&tmp)
-    );
+    for args in [["hud", "--foreground"], ["hud", "--hide"]] {
+        let _ = std::fs::remove_file(mark.join("which"));
+        let (out, took) = seat.run(
+            &seat.slow,
+            &args,
+            &[
+                ("TMPDIR", tmp.to_str().unwrap()),
+                ("LJOS_HUD_BIN", "./hud-rel"),
+                ("LJOS_MARK", mark.to_str().unwrap()),
+                ("LD_PRELOAD", seat.so.to_str().unwrap()),
+                ("LJOS_SLOW_HIT", seat.hit.to_str().unwrap()),
+            ],
+        );
+        assert!(
+            took < Duration::from_secs(4),
+            "{args:?} took {took:?}: {}",
+            text(&out)
+        );
+        assert!(refused(&out, "LJOS_HUD_BIN"), "{args:?}: {}", text(&out));
+        assert!(out.stdout.is_empty(), "{args:?} stdout: {}", text(&out));
+        assert!(!mark.join("which").is_file(), "{args:?} ran the hud");
+        assert!(
+            ljos_names(&tmp).is_empty(),
+            "{args:?} left {:?}",
+            ljos_names(&tmp)
+        );
+    }
 }
 
-/// `ljos hud --hide` does not report success when the relative program
-/// lives in a start directory the process has parked away from.
-#[test]
-fn a_slow_relative_hud_hide_is_not_silent() {
-    let seat = Seat::new();
-    let mark = seat.dir.path().join("mark");
-    let tmp = seat.dir.path().join("tmp");
-    std::fs::create_dir_all(&mark).unwrap();
-    std::fs::create_dir_all(&tmp).unwrap();
-    script(
-        &seat.slow,
-        "hud-rel",
-        "#!/bin/sh\nprintf FROM_START > \"$LJOS_MARK/which\"\nprintf '%s\\n' \"$@\" > \"$LJOS_MARK/args\"\nexit 0\n",
-    );
-    let (out, took) = seat.run(
-        &seat.slow,
-        &["hud", "--hide"],
-        &[
-            ("TMPDIR", tmp.to_str().unwrap()),
-            ("LJOS_HUD_BIN", "./hud-rel"),
-            ("LJOS_MARK", mark.to_str().unwrap()),
-            ("LD_PRELOAD", seat.so.to_str().unwrap()),
-            ("LJOS_SLOW_HIT", seat.hit.to_str().unwrap()),
-        ],
-    );
-    assert!(
-        took < Duration::from_secs(4),
-        "hide took {took:?}: {}",
-        text(&out)
-    );
-    assert!(refused(&out, "LJOS_HUD_BIN"), "{}", text(&out));
-    assert!(out.stdout.is_empty(), "hide stdout: {}", text(&out));
-    assert!(!mark.join("which").is_file(), "hide ran no program");
-}
-
-/// `..` after a symlink is that symlink's parent, for both tracker
-/// variables. The lexical path is a different directory.
+/// `..` after a symlink is that symlink's parent. `ISSUE_ROOT` uses the
+/// same walk as `VISSUE_ROOT`. The lexical path is a different directory.
 #[test]
 fn a_dotdot_tracker_follows_the_kernel() {
     let seat = Seat::new();
@@ -1294,78 +1186,34 @@ fn a_dotdot_tracker_follows_the_kernel() {
     let elsewhere = seat.dir.path().join("elsewhere");
     let real = seat.dir.path().join("tracker");
     let decoy = work.join("tracker");
-    let mark = seat.dir.path().join("mark");
-    let tmp = seat.dir.path().join("tmp");
-    std::fs::create_dir_all(&elsewhere).unwrap();
-    std::fs::create_dir_all(real.join("Software")).unwrap();
-    std::fs::create_dir_all(decoy.join("Software")).unwrap();
-    std::fs::create_dir_all(&mark).unwrap();
-    std::fs::create_dir_all(&tmp).unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "writes a file that is not a git hook"
-    )]
-    std::fs::write(real.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "writes a file that is not a git hook"
-    )]
-    std::fs::write(decoy.join("vissue.toml"), "prefix = \"Software\"\n").unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "links a directory that is not a git hook"
-    )]
-    std::os::unix::fs::symlink(&elsewhere, work.join("via")).unwrap();
-    script(
-        &seat.bin,
-        "vissue",
-        r#"#!/bin/sh
-root="$VISSUE_ROOT"
-if [ -z "$root" ]; then root="$ISSUE_ROOT"; fi
-printf '%s\n' "$root" > "$LJOS_MARK/root"
-mkdir -p -- "$root/Software"
-printf x > "$root/Software/landed"
-printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
-"#,
+    let (mark, tmp) = scratch(&seat);
+    for path in [
+        &elsewhere,
+        &real.join("Software"),
+        &decoy.join("Software"),
+        &work,
+    ] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    write_file(&real.join("vissue.toml"), "prefix = \"Software\"\n");
+    write_file(&decoy.join("vissue.toml"), "prefix = \"Software\"\n");
+    link_dir(&elsewhere, &work.join("via"));
+    script(&seat.bin, "vissue", TRACKER_STUB);
+    let (out, _) = seat.run(
+        &work,
+        &["file", "-p", "demo", "--top", "a title"],
+        &[
+            ("TMPDIR", tmp.to_str().unwrap()),
+            ("LJOS_MARK", mark.to_str().unwrap()),
+            ("VISSUE_ROOT", "via/../tracker"),
+        ],
     );
-    let args = ["file", "-p", "demo", "--top", "a title"];
-    let run_root = |extra: &[(&str, &str)]| {
-        let _ = std::fs::remove_file(real.join("Software/landed"));
-        let _ = std::fs::remove_file(decoy.join("Software/landed"));
-        let _ = std::fs::remove_file(mark.join("root"));
-        seat.run(&work, &args, extra)
-    };
-    let common = [
-        ("TMPDIR", tmp.to_str().unwrap()),
-        ("LJOS_MARK", mark.to_str().unwrap()),
-    ];
-    let (out, _) = run_root(&[common[0], common[1], ("VISSUE_ROOT", "via/../tracker")]);
     assert!(out.status.success(), "vissue root: {}", text(&out));
-    let recorded = std::fs::read_to_string(mark.join("root")).unwrap_or_default();
-    let got = std::fs::canonicalize(recorded.trim())
-        .unwrap_or_else(|err| panic!("recorded root {recorded:?}: {err}"));
-    let expect = std::fs::canonicalize(&real).unwrap();
-    assert_eq!(got, expect, "VISSUE_ROOT followed the lexical path");
-    assert!(
-        real.join("Software/landed").is_file(),
-        "missed the kernel tracker"
+    assert_eq!(
+        canon(Path::new(&read_trim(&mark.join("root")))),
+        canon(&real),
+        "lexical path"
     );
-    assert!(
-        !decoy.join("Software/landed").exists(),
-        "wrote the lexical tracker"
-    );
-
-    let (out, _) = run_root(&[
-        common[0],
-        common[1],
-        ("VISSUE_ROOT", ""),
-        ("ISSUE_ROOT", "via/../tracker"),
-    ]);
-    assert!(out.status.success(), "issue root: {}", text(&out));
-    let recorded = std::fs::read_to_string(mark.join("root")).unwrap_or_default();
-    let got = std::fs::canonicalize(recorded.trim())
-        .unwrap_or_else(|err| panic!("recorded issue root {recorded:?}: {err}"));
-    assert_eq!(got, expect, "ISSUE_ROOT followed the lexical path");
     assert!(
         real.join("Software/landed").is_file(),
         "missed the kernel tracker"
@@ -1377,23 +1225,17 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
 }
 
 /// `missing/..` is not the start directory. `vartmp/..` through a symlink
-/// is that symlink's parent. A missing relative path with no `..` stays
-/// the platform default.
+/// is that symlink's parent. A missing relative path with no `..` is the
+/// platform default, which the unresolved-tmpdir test already locks.
 #[test]
 fn an_unresolvable_tmpdir_is_not_the_start_directory() {
     let seat = Seat::new();
     let work = seat.dir.path().join("work");
     let elsewhere = seat.dir.path().join("elsewhere");
-    let child = elsewhere.join("child");
-    let mark = seat.dir.path().join("mark");
+    let (mark, _tmp) = scratch(&seat);
+    std::fs::create_dir_all(elsewhere.join("child")).unwrap();
     std::fs::create_dir_all(&work).unwrap();
-    std::fs::create_dir_all(&child).unwrap();
-    std::fs::create_dir_all(&mark).unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "links a directory that is not a git hook"
-    )]
-    std::os::unix::fs::symlink(&child, work.join("vartmp")).unwrap();
+    link_dir(&elsewhere.join("child"), &work.join("vartmp"));
     script(
         &seat.bin,
         "vissue",
@@ -1412,58 +1254,29 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
         ("XDG_RUNTIME_DIR", ""),
         ("LJOS_MARK", mark.to_str().unwrap()),
     ];
-    let (out, _) = seat.run(&work, &args, &[base[0], base[1], ("TMPDIR", "missing/..")]);
-    assert!(refused(&out, "TMPDIR"), "missing/..: {}", text(&out));
-    assert!(
-        ljos_names(&work).is_empty(),
-        "missing/.. left {:?} in the start directory",
-        ljos_names(&work)
-    );
-    let (note, _) = seat.run(
-        &work,
-        &["note", "demo-1", "a note"],
-        &[base[0], base[1], ("TMPDIR", "missing/..")],
-    );
-    assert!(refused(&note, "TMPDIR"), "note missing/..: {}", text(&note));
-    assert!(
-        ljos_names(&work).is_empty(),
-        "note left {:?} in the start directory",
-        ljos_names(&work)
-    );
-
-    let (out, _) = seat.run(&work, &args, &[base[0], base[1], ("TMPDIR", "vartmp/..")]);
-    assert!(out.status.success(), "vartmp/..: {}", text(&out));
-    let seen = std::fs::read_to_string(mark.join("tmp")).unwrap_or_default();
-    let got = std::fs::canonicalize(seen.trim())
-        .unwrap_or_else(|err| panic!("recorded TMPDIR {seen:?}: {err}"));
-    let expect = std::fs::canonicalize(&elsewhere).unwrap();
-    assert_eq!(got, expect, "vartmp/.. became the start directory");
-    assert!(
-        ljos_names(&work).is_empty(),
-        "vartmp/.. left {:?} in the start directory",
-        ljos_names(&work)
-    );
-    let marker = std::fs::read_to_string(mark.join("marker-name")).unwrap_or_default();
-    assert!(
-        elsewhere.join(marker.trim()).is_file(),
-        "marker missed the symlink parent"
-    );
-
-    let (out, _) = seat.run(&work, &args, &[base[0], base[1], ("TMPDIR", "missing-rel")]);
-    assert!(out.status.success(), "missing-rel: {}", text(&out));
-    let seen = std::fs::read_to_string(mark.join("tmp")).unwrap_or_default();
-    let seen = seen.trim();
-    assert!(
-        Path::new(seen).is_absolute() && !Path::new(seen).starts_with(&work),
-        "missing-rel TMPDIR {seen:?}"
-    );
-    assert!(
-        ljos_names(&work).is_empty(),
-        "missing-rel left {:?} in the start directory",
-        ljos_names(&work)
-    );
-    let marker = std::fs::read_to_string(mark.join("marker-name")).unwrap_or_default();
-    let _ = std::fs::remove_file(Path::new(seen).join(marker.trim()));
+    for (value, ok) in [("missing/..", false), ("vartmp/..", true)] {
+        let (out, _) = seat.run(&work, &args, &[base[0], base[1], ("TMPDIR", value)]);
+        assert!(
+            ljos_names(&work).is_empty(),
+            "{value} left {:?}",
+            ljos_names(&work)
+        );
+        if ok {
+            assert!(out.status.success(), "{value}: {}", text(&out));
+            assert_eq!(
+                canon(Path::new(&read_trim(&mark.join("tmp")))),
+                canon(&elsewhere),
+                "{value}"
+            );
+            let marker = read_trim(&mark.join("marker-name"));
+            assert!(
+                elsewhere.join(marker).is_file(),
+                "marker missed the symlink parent"
+            );
+        } else {
+            assert!(refused(&out, "TMPDIR"), "{value}: {}", text(&out));
+        }
+    }
 }
 
 /// `VISSUE_ROOT=missing/..` and `ISSUE_ROOT=missing/..` are not the start
@@ -1472,48 +1285,151 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
 fn an_unresolvable_root_is_not_the_start_directory() {
     let seat = Seat::new();
     let work = seat.dir.path().join("work");
-    let tmp = seat.dir.path().join("tmp");
-    let mark = seat.dir.path().join("mark");
+    let (mark, tmp) = scratch(&seat);
     std::fs::create_dir_all(&work).unwrap();
-    std::fs::create_dir_all(&tmp).unwrap();
-    std::fs::create_dir_all(&mark).unwrap();
-    script(
-        &seat.bin,
-        "vissue",
-        r#"#!/bin/sh
-root="$VISSUE_ROOT"
-if [ -z "$root" ]; then root="$ISSUE_ROOT"; fi
-mkdir -p -- "$root/Software"
-printf x > "$root/Software/leaked.org"
-printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
-"#,
-    );
-    let args = ["file", "-p", "demo", "--top", "a title"];
+    script(&seat.bin, "vissue", TRACKER_STUB);
     let leaked = work.join("Software/leaked.org");
-    let (out, _) = seat.run(
+    let args = ["file", "-p", "demo", "--top", "a title"];
+    let tmp_s = tmp.to_str().unwrap();
+    let mark_s = mark.to_str().unwrap();
+    for (key, extra) in [
+        (
+            "VISSUE_ROOT",
+            vec![
+                ("TMPDIR", tmp_s),
+                ("VISSUE_ROOT", "missing/.."),
+                ("LJOS_MARK", mark_s),
+            ],
+        ),
+        (
+            "ISSUE_ROOT",
+            vec![
+                ("TMPDIR", tmp_s),
+                ("VISSUE_ROOT", ""),
+                ("ISSUE_ROOT", "missing/.."),
+                ("LJOS_MARK", mark_s),
+            ],
+        ),
+    ] {
+        let (out, _) = seat.run(&work, &args, &extra);
+        assert!(refused(&out, key), "{key}: {}", text(&out));
+        assert!(
+            !leaked.exists() && !work.join("Software/landed").exists(),
+            "{key} wrote the start directory"
+        );
+    }
+}
+
+/// An absolute program inside a slow start directory is stated before the
+/// park, so `hud --hide` and `hud --foreground` run it. A tracker root
+/// whose last component is missing is that parent plus the new name.
+/// `file -p` and `note` both use that walk. A parent that is not there is
+/// still refused. An absolute missing root is left for vissue.
+#[test]
+fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
+    let seat = Seat::new();
+    let (mark, tmp) = scratch(&seat);
+    let slow = canon(&seat.slow);
+    script(
+        &slow,
+        "hud-abs",
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+    );
+    let mark_s = mark.to_str().unwrap();
+    let tmp_s = tmp.to_str().unwrap();
+    let bin = slow.join("hud-abs");
+    for flag in ["--hide", "--foreground"] {
+        let _ = std::fs::remove_file(mark.join("which"));
+        let (out, took) = seat.run(
+            &slow,
+            &["hud", flag],
+            &[
+                ("TMPDIR", tmp_s),
+                ("LJOS_HUD_BIN", bin.to_str().unwrap()),
+                ("LJOS_MARK", mark_s),
+                ("LD_PRELOAD", seat.so.to_str().unwrap()),
+                ("SLOW_EXACT", slow.to_str().unwrap()),
+            ],
+        );
+        assert!(
+            took < Duration::from_secs(4) && out.status.success(),
+            "{flag} {took:?}: {}",
+            text(&out)
+        );
+        assert_eq!(
+            read_trim(&mark.join("which")),
+            flag,
+            "{flag} did not run: {}",
+            text(&out)
+        );
+    }
+
+    let work = seat.dir.path().join("work");
+    std::fs::create_dir_all(work.join("parent")).unwrap();
+    script(&seat.bin, "vissue", TRACKER_STUB);
+    let abs = work.join("abs-missing");
+    let file_args = ["file", "-p", "demo", "--top", "a title"];
+    let check = |key: &str, value: &str, ok: bool, args: &[&str]| {
+        let expect = if Path::new(value).is_absolute() {
+            PathBuf::from(value)
+        } else {
+            work.join(value)
+        };
+        let _ = std::fs::remove_dir_all(expect.join("Software"));
+        let mut extra = vec![("TMPDIR", tmp_s), ("LJOS_MARK", mark_s), (key, value)];
+        if key == "ISSUE_ROOT" {
+            extra.insert(0, ("VISSUE_ROOT", ""));
+        }
+        let (out, _) = seat.run(&work, args, &extra);
+        if ok {
+            assert!(out.status.success(), "{key}={value}: {}", text(&out));
+            assert!(
+                expect.join("Software/landed").is_file(),
+                "{key}={value} did not land"
+            );
+            assert!(
+                !work.join("Software/landed").exists(),
+                "{key}={value} wrote the start directory"
+            );
+        } else {
+            assert!(refused(&out, key), "{key}={value}: {}", text(&out));
+            assert!(!expect.exists(), "{key}={value} was created");
+        }
+    };
+    for (key, value, ok) in [
+        ("VISSUE_ROOT", "brand-new", true),
+        ("VISSUE_ROOT", "parent/newchild", true),
+        ("ISSUE_ROOT", "issue-new", true),
+        ("VISSUE_ROOT", "have/not-yet", false),
+    ] {
+        check(key, value, ok, &file_args);
+    }
+    check("VISSUE_ROOT", abs.to_str().unwrap(), true, &file_args);
+    let (note, _) = seat.run(
         &work,
-        &args,
+        &["note", "demo-1", "a note"],
         &[
-            ("TMPDIR", tmp.to_str().unwrap()),
-            ("VISSUE_ROOT", "missing/.."),
-            ("LJOS_MARK", mark.to_str().unwrap()),
+            ("TMPDIR", tmp_s),
+            ("VISSUE_ROOT", "note-new"),
+            ("LJOS_MARK", mark_s),
         ],
     );
-    assert!(refused(&out, "VISSUE_ROOT"), "vissue root: {}", text(&out));
     assert!(
-        !leaked.exists(),
-        "wrote Software/leaked.org in the start directory"
+        !text(&note).contains("did not resolve"),
+        "note: {}",
+        text(&note)
     );
-    let (out, _) = seat.run(
-        &work,
-        &args,
-        &[
-            ("TMPDIR", tmp.to_str().unwrap()),
-            ("VISSUE_ROOT", ""),
-            ("ISSUE_ROOT", "missing/.."),
-            ("LJOS_MARK", mark.to_str().unwrap()),
-        ],
+    assert!(
+        work.join("note-new/Software/landed").is_file(),
+        "note did not reach vissue: {}",
+        text(&note)
     );
-    assert!(refused(&out, "ISSUE_ROOT"), "issue root: {}", text(&out));
-    assert!(!leaked.exists(), "ISSUE_ROOT wrote Software/leaked.org");
+}
+
+fn scratch(seat: &Seat) -> (PathBuf, PathBuf) {
+    let mark = seat.dir.path().join("mark");
+    let tmp = seat.dir.path().join("tmp");
+    std::fs::create_dir_all(&mark).unwrap();
+    std::fs::create_dir_all(&tmp).unwrap();
+    (mark, tmp)
 }

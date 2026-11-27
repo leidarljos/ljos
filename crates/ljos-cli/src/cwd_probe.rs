@@ -604,18 +604,21 @@ fn lives_under_start(path: &Path) -> bool {
 /// Set on the one call that walks relative environment paths.
 static ENV_RESOLVED: AtomicBool = AtomicBool::new(false);
 
-/// Make relative `TMPDIR`, `VISSUE_ROOT`, `ISSUE_ROOT`, and `LJOS_HUD_BIN`
-/// absolute from the directory this process started in.
+/// Make `TMPDIR`, `VISSUE_ROOT`, `ISSUE_ROOT`, and `LJOS_HUD_BIN` safe to
+/// use after this process leaves the directory it started in.
 ///
 /// Called once, before the chdir into the parked directory. A fast command
 /// does not park and does not call this, so those variables stay as given.
-/// One walk resolves every relative value: `..` after a symlink is that
-/// symlink's parent, and a component that is not there does not collapse
-/// onto the start directory. The walk gives up after [`CWD_PROBE`]. A path
-/// that does not answer, or a `..` walk through a missing component, is an
-/// error. A relative `TMPDIR` with no `..` that is not a directory uses
-/// [`default_temp_dir`]. An empty `TMPDIR` uses that default. An absolute
-/// value is left as set. An unset `TMPDIR` is left unset.
+/// A relative value, and an absolute value that lies under the start
+/// directory, is walked once. `..` after a symlink is that symlink's
+/// parent. A missing final component of a tracker root is the parent's
+/// resolved path plus that name, which is the path a create would use.
+/// The walk gives up after [`CWD_PROBE`]. A path that does not answer, a
+/// parent that does not resolve, or a `..` walk through a missing
+/// component, is an error. A relative `TMPDIR` with no `..` that is not a
+/// directory uses [`default_temp_dir`]. An empty `TMPDIR` uses that
+/// default. An absolute value outside the start directory is left as set.
+/// An unset `TMPDIR` is left unset.
 fn resolve_relative_dirs() {
     let Some(start) = start_dir_for_env() else {
         return;
@@ -648,19 +651,28 @@ fn resolve_tmpdir(start: &Path) {
         return;
     };
     let given = PathBuf::from(&raw);
-    if given.is_absolute() {
-        return;
-    }
     if raw.is_empty() {
         adopt_tmpdir(default_temp_dir());
         return;
     }
-    match resolve_from_start(start, &given) {
-        Ok(hit) if hit.is_dir => adopt_tmpdir(hit.path),
-        Ok(_) => adopt_tmpdir(default_temp_dir()),
+    let Some(rel) = under_start(start, &given) else {
+        return;
+    };
+    let wrote_relative = !given.is_absolute();
+    match resolve_from_start(start, &rel, false) {
+        Ok(hit) if hit.is_dir => {
+            // A relative directory is rewritten. An absolute directory was
+            // only stated: the value the process was given stays a temp root.
+            if wrote_relative {
+                adopt_tmpdir(hit.path);
+            }
+        }
+        Ok(_) if wrote_relative => adopt_tmpdir(default_temp_dir()),
+        Ok(_) => {}
         Err(Fault::TimedOut) => refuse_env("TMPDIR", &raw),
-        Err(Fault::Unresolvable) if climbs(&given) => refuse_env("TMPDIR", &raw),
-        Err(Fault::Unresolvable) => adopt_tmpdir(default_temp_dir()),
+        Err(Fault::Unresolvable) if climbs(&rel) => refuse_env("TMPDIR", &raw),
+        Err(Fault::Unresolvable) if wrote_relative => adopt_tmpdir(default_temp_dir()),
+        Err(Fault::Unresolvable) => {}
     }
 }
 
@@ -669,10 +681,10 @@ fn resolve_root(key: &str, start: &Path) {
         return;
     };
     let given = PathBuf::from(&raw);
-    if given.as_os_str().is_empty() || given.is_absolute() {
+    let Some(rel) = under_start(start, &given) else {
         return;
-    }
-    match resolve_from_start(start, &given) {
+    };
+    match resolve_from_start(start, &rel, true) {
         Ok(hit) => std::env::set_var(key, hit.path),
         Err(_) => refuse_env(key, &raw),
     }
@@ -683,10 +695,10 @@ fn resolve_hud(start: &Path) {
         return;
     };
     let given = PathBuf::from(&raw);
-    if given.as_os_str().is_empty() || given.is_absolute() {
+    let Some(rel) = under_start(start, &given) else {
         return;
-    }
-    match resolve_from_start(start, &given) {
+    };
+    match resolve_from_start(start, &rel, false) {
         Ok(hit) if !hit.is_dir => {
             std::env::set_var("LJOS_HUD_BIN", &hit.path);
             *RESOLVED_HUD
@@ -696,6 +708,25 @@ fn resolve_hud(start: &Path) {
         Ok(_) | Err(Fault::Unresolvable) => {}
         Err(Fault::TimedOut) => refuse_env("LJOS_HUD_BIN", &raw),
     }
+}
+
+/// `given` relative to `start` when the park must state it first.
+///
+/// A relative path is already that form. An absolute path that is `start`,
+/// or a path inside it, may be slow to state after the park. An absolute
+/// path outside `start` is `None` and stays as set. An empty value is
+/// `None`: the caller has nothing to walk.
+fn under_start(start: &Path, given: &Path) -> Option<PathBuf> {
+    if given.as_os_str().is_empty() {
+        return None;
+    }
+    if !given.is_absolute() {
+        return Some(given.to_path_buf());
+    }
+    if given == start {
+        return Some(PathBuf::new());
+    }
+    given.strip_prefix(start).ok().map(PathBuf::from)
 }
 
 fn adopt_tmpdir(path: PathBuf) {
@@ -736,28 +767,55 @@ fn joined_for_kernel(start: &Path, rel: &Path) -> PathBuf {
 
 /// Canonical path of `rel` from `start`, or why that walk failed.
 ///
-/// The walk runs on another thread and stops after [`CWD_PROBE`]. A missing
-/// component and a walk that does not answer are different failures. Neither
-/// one is a path this function invents.
-fn resolve_from_start(start: &Path, rel: &Path) -> Result<Hit, Fault> {
+/// The walk runs on another thread and stops after [`CWD_PROBE`]. When
+/// `missing_leaf` is set and the final component is a normal name whose
+/// parent resolves, the result is that parent plus the name. That is the
+/// path a create would use, not a guess at the start directory. A `..`
+/// component is not created that way. A parent that does not resolve is
+/// `Fault::Unresolvable`, and a walk that does not answer is
+/// `Fault::TimedOut`.
+fn resolve_from_start(start: &Path, rel: &Path, missing_leaf: bool) -> Result<Hit, Fault> {
     let path = joined_for_kernel(start, rel);
+    let create_leaf =
+        missing_leaf && matches!(rel.components().next_back(), Some(Component::Normal(_)));
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let answer = match std::fs::canonicalize(&path) {
-            Ok(abs) => {
-                let is_dir = std::fs::metadata(&abs)
-                    .map(|meta| meta.is_dir())
-                    .unwrap_or(false);
-                Ok(Hit { path: abs, is_dir })
-            }
-            Err(_) => Err(Fault::Unresolvable),
-        };
-        let _ = tx.send(answer);
+        let _ = tx.send(walk_path(&path, create_leaf));
     });
     match rx.recv_timeout(CWD_PROBE) {
         Ok(answer) => answer,
         Err(_) => Err(Fault::TimedOut),
     }
+}
+
+/// Canonical `path`, or the parent's canonical path plus a missing final
+/// name when `create_leaf` is set.
+fn walk_path(path: &Path, create_leaf: bool) -> Result<Hit, Fault> {
+    if let Ok(abs) = std::fs::canonicalize(path) {
+        let is_dir = std::fs::metadata(&abs)
+            .map(|meta| meta.is_dir())
+            .unwrap_or(false);
+        return Ok(Hit { path: abs, is_dir });
+    }
+    if !create_leaf {
+        return Err(Fault::Unresolvable);
+    }
+    let Some(name) = path.file_name() else {
+        return Err(Fault::Unresolvable);
+    };
+    let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
+        return Err(Fault::Unresolvable);
+    };
+    let Ok(dir) = std::fs::canonicalize(parent) else {
+        return Err(Fault::Unresolvable);
+    };
+    if !dir.is_dir() {
+        return Err(Fault::Unresolvable);
+    }
+    Ok(Hit {
+        path: dir.join(name),
+        is_dir: false,
+    })
 }
 
 fn refuse_env(key: &str, raw: &std::ffi::OsStr) -> ! {
