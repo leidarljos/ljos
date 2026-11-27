@@ -1064,7 +1064,7 @@ fn cursor_assign(rest: &str) -> bool {
 /// the user's own and is not judged.
 fn dropped_refusal(name: &str) -> Option<String> {
     let raw = git_line(&["rev-parse", "--git-path", &format!("hooks/{name}")])?;
-    let path = std::env::current_dir().ok()?.join(raw);
+    let path = crate::process_cwd().ok()?.join(raw);
     let text = fs::read_to_string(&path).ok()?;
     if !text.contains(BLOCK_BEGIN) || carries_block(&text, name) {
         return None;
@@ -1395,7 +1395,7 @@ fn config_files() -> Vec<PathBuf> {
     if let Some(path) = std::env::var_os("LJOS_CONFIG").filter(|value| !value.is_empty()) {
         out.push(PathBuf::from(path));
     }
-    if let Ok(cwd) = std::env::current_dir() {
+    if let Ok(cwd) = crate::process_cwd() {
         out.push(cwd.join("ljos.toml"));
     }
     out
@@ -1512,7 +1512,7 @@ fn git_dir() -> Option<PathBuf> {
     if path.is_absolute() {
         Some(path)
     } else {
-        std::env::current_dir().ok().map(|cwd| cwd.join(path))
+        crate::process_cwd().ok().map(|cwd| cwd.join(path))
     }
 }
 

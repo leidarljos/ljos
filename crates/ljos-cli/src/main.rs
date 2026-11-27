@@ -5330,10 +5330,11 @@ fn run_hook(hook: HookArgs) -> Result<()> {
                 };
             }
             if call.event == "UserPromptSubmit" && ljos_cli::asks_decision(&call.cue) {
+                let panel_cwd = ljos_cli::detached_panel_cwd(input.trim());
                 let line = ljos_cli::start_decision_panel(
                     &call.cue,
                     call.session.as_deref(),
-                    cwd.as_ref().and_then(|p| p.to_str()),
+                    Some(&panel_cwd),
                 )
                 .unwrap_or_else(|e| {
                     format!("{}\npanel did not open: {e:#}", ljos_cli::decision_hold())
@@ -7810,7 +7811,7 @@ fn run_command() -> Result<()> {
                 let joined = if dir.is_absolute() {
                     dir.clone()
                 } else {
-                    std::env::current_dir()
+                    ljos_cli::process_cwd()
                         .map(|cwd| cwd.join(&dir))
                         .unwrap_or_else(|_| dir.clone())
                 };
@@ -7999,7 +8000,7 @@ fn run_command() -> Result<()> {
                 ljos_cli::push_cite_reading_on_roster(&id, &ballots, &ljos_cli::seat_name())
             });
             let (protected, protected_json) = ljos_cli::hook_timed("consensus_protected", || {
-                ljos_cli::protected_push_reading(&id, std::env::current_dir().ok().as_deref())
+                ljos_cli::protected_push_reading(&id, ljos_cli::process_cwd().ok().as_deref())
             });
             // The named outcomes show which voters err together, and
             // those voters are discounted. Each model family weighs as one

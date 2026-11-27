@@ -129,7 +129,7 @@ fn tracker_root() -> Option<PathBuf> {
             return path.is_dir().then_some(path);
         }
     }
-    if let Ok(here) = std::env::current_dir() {
+    if let Ok(here) = ljos_cli::process_cwd() {
         if here.join("vissue.toml").is_file() {
             return Some(here);
         }

@@ -5963,7 +5963,7 @@ pub fn user_rule_trackers() -> Vec<PathBuf> {
     if let Some(root) = seat_tracker() {
         return vec![root];
     }
-    if let Ok(cwd) = std::env::current_dir() {
+    if let Ok(cwd) = crate::process_cwd() {
         if cwd.join("vissue.toml").is_file() {
             return vec![cwd];
         }

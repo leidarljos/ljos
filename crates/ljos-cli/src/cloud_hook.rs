@@ -317,7 +317,7 @@ pub(crate) fn dir_is_recorded_seat(dir: &Path) -> bool {
     let dir = if dir.is_absolute() {
         dir.to_path_buf()
     } else {
-        let Ok(cwd) = std::env::current_dir() else {
+        let Ok(cwd) = crate::process_cwd() else {
             return false;
         };
         cwd.join(dir)
@@ -366,7 +366,7 @@ fn read_lists() -> StoredLists {
 /// a directory inside it. A test that `set_current_dir`s into a fixture
 /// is a seat and is recorded.
 fn invoked_from_package_under_test() -> bool {
-    let (Ok(manifest), Ok(cwd)) = (std::env::var("CARGO_MANIFEST_DIR"), std::env::current_dir())
+    let (Ok(manifest), Ok(cwd)) = (std::env::var("CARGO_MANIFEST_DIR"), crate::process_cwd())
     else {
         return false;
     };
@@ -375,9 +375,7 @@ fn invoked_from_package_under_test() -> bool {
 }
 
 fn work_tree() -> Option<PathBuf> {
-    std::env::current_dir()
-        .ok()
-        .and_then(|cwd| work_tree_of(&cwd))
+    crate::process_cwd().ok().and_then(|cwd| work_tree_of(&cwd))
 }
 
 fn work_tree_of(dir: &Path) -> Option<PathBuf> {
@@ -1056,7 +1054,7 @@ fn local_key(path: &str) -> String {
     let absolute = if Path::new(&path).is_absolute() {
         path
     } else {
-        std::env::current_dir()
+        crate::process_cwd()
             .map(|cwd| cwd.join(&path).display().to_string())
             .unwrap_or(path)
     };

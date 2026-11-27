@@ -1541,7 +1541,7 @@ impl PacksetClient {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from)
-            .or_else(|| std::env::current_dir().ok())
+            .or_else(|| crate::process_cwd().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         let abs = cwd.canonicalize().unwrap_or(cwd);
         let shown = abs.to_string_lossy().into_owned();

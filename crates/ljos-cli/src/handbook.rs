@@ -620,7 +620,7 @@ fn absolute(path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir()
+        crate::process_cwd()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
     }

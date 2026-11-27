@@ -14,7 +14,8 @@
 //! that refused to answer.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use std::sync::{Mutex, Once};
 use std::time::Duration;
 
 /// How long a probe of the working directory may take. A quiet local
@@ -59,7 +60,7 @@ pub(crate) fn settle() {
     if command_is_git_hook(&args) {
         return;
     }
-    let Ok(here) = std::env::current_dir() else {
+    let Ok(here) = process_cwd() else {
         return;
     };
     settle_at(&here, &args, true);
@@ -134,14 +135,162 @@ fn remember_skip(dir: &Path) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(dir.to_path_buf());
 }
 
+/// A directory a detached or background child can keep after this process
+/// removes the parked directory.
+///
+/// The tracker root when that directory is present. Otherwise `/`. The
+/// parked directory is never returned: it is removed when this process
+/// exits.
+pub(crate) fn stable_child_dir() -> PathBuf {
+    if let Some(root) = absolute_tracker() {
+        if usable_dir(&root) {
+            return root;
+        }
+    }
+    PathBuf::from("/")
+}
+
+/// Whether `path` is the empty directory this process created and may
+/// remove. A directory that only shares the `ljos-cwd-` name is not.
+pub(crate) fn parked_work_dir(path: &Path) -> bool {
+    parked_leaf(path)
+}
+
+/// Directory this process should read as its working directory.
+///
+/// `park` chdirs into a directory it may remove while the process is
+/// still running. `getcwd` then fails. While that directory is still the
+/// cwd, callers get the tracker: the directory the process left is not
+/// stated. Once `getcwd` fails, callers get the directory captured before
+/// the chdir.
+pub(crate) fn process_cwd() -> std::io::Result<PathBuf> {
+    let saved = {
+        let held = SKIP_FROM
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.clone()
+    };
+    match std::env::current_dir() {
+        Ok(path) if !parked_leaf(&path) => Ok(path),
+        Ok(_) => Ok(parked_stand_in()),
+        Err(err) => match saved {
+            Some(start) => Ok(start),
+            None => Err(err),
+        },
+    }
+}
+
+/// Tracker, or `/`, while the process cwd is still the parked directory.
+///
+/// The directory captured before `park` is not stated. A named command
+/// must not wait on it.
+fn parked_stand_in() -> PathBuf {
+    static CACHED: Mutex<Option<PathBuf>> = Mutex::new(None);
+    let mut slot = CACHED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(path) = slot.as_ref() {
+        return path.clone();
+    }
+    let path = stable_child_dir();
+    *slot = Some(path.clone());
+    path
+}
+
+fn started_dir() -> Option<PathBuf> {
+    let held = SKIP_FROM
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(start) = held.as_ref() {
+        return Some(start.clone());
+    }
+    drop(held);
+    std::env::current_dir()
+        .ok()
+        .filter(|path| !parked_leaf(path))
+}
+
+/// Whether `path` is the directory this process parked in.
+///
+/// A final component that does not start with `ljos-cwd-` is not that
+/// directory, so this does not stat it. The name is not enough. The
+/// directory is ours only when its device and inode are the ones stored
+/// at create. Before that directory exists, a working directory the
+/// person named `ljos-cwd-` is not ours, and a relative `TMPDIR` there
+/// is still used.
+fn parked_leaf(path: &Path) -> bool {
+    let ptr = PARKED_CWD.load(Ordering::SeqCst);
+    if ptr.is_null() {
+        return false;
+    }
+    if !path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("ljos-cwd-"))
+    {
+        return false;
+    }
+    // SAFETY: `ptr` was published by `hold_until_exit` and is dropped only
+    // from the atexit handler. Callers run before that handler.
+    let parked = unsafe { &*ptr };
+    if !parked.armed {
+        return false;
+    }
+    directory_id(path).is_some_and(|(dev, ino)| dev == parked.dev && ino == parked.ino)
+}
+
+fn directory_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    meta.file_type()
+        .is_dir()
+        .then_some((meta.dev(), meta.ino()))
+}
+
+fn usable_dir(path: &Path) -> bool {
+    path.is_absolute() && !remote_or_fuse(path) && stated_dir(path)
+}
+
+/// `true` when `path` is a directory and the stat returns within
+/// [`CWD_PROBE`]. A mount that does not answer is not a place to put a
+/// child: `chdir` would wait there.
+fn stated_dir(path: &Path) -> bool {
+    let path = path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(path.is_dir());
+    });
+    rx.recv_timeout(CWD_PROBE).unwrap_or(false)
+}
+
+fn absolute_tracker() -> Option<PathBuf> {
+    let root = env_tracker().or_else(crate::tracker_place::configured)?;
+    if root.is_absolute() {
+        return Some(root);
+    }
+    started_dir()
+        .filter(|path| path.is_absolute())
+        .map(|base| base.join(root))
+}
+
 /// Leave `here` for an empty directory on the local temp filesystem.
 ///
 /// A tracker the environment already names is kept. A tracker the seat's
 /// configuration names, when it is not inside a product checkout, is
 /// named on the environment so the command still writes there. Staying
 /// in `here` is what lets a later stat wait.
+///
+/// The empty directory is required. A child inherits the working directory,
+/// and a relative path this process did not rewrite would otherwise be
+/// read from `/` or from the tracker. The directory is one this process
+/// just created, and it is removed when the process exits.
 fn park(here: &Path, move_process_cwd: bool) {
     if !move_process_cwd {
+        return;
+    }
+    // A second call would drop the first guard and remove the directory
+    // this process just entered. Keep that guard.
+    if !PARKED_CWD.load(Ordering::SeqCst).is_null() {
         return;
     }
     // The environment did not name a tracker. The seat's configuration
@@ -159,10 +308,345 @@ fn park(here: &Path, move_process_cwd: bool) {
         }
     }
     remember_skip(here);
-    let park = std::env::temp_dir().join(format!("ljos-cwd-{}", std::process::id()));
-    if std::fs::create_dir_all(&park).is_ok() {
-        let _ = std::env::set_current_dir(&park);
+    let Some(guard) = ParkedCwd::create() else {
+        return;
+    };
+    if std::env::set_current_dir(guard.path()).is_err() {
+        return;
     }
+    guard.hold_until_exit();
+}
+
+/// The empty directory [`park`] created. Dropping it removes that directory
+/// and nothing else. `std::process::exit` skips destructors, so the process
+/// drops it from an `atexit` handler. An unwinding panic that leaves `main`
+/// reaches that handler too. A caught panic does not: the command is still
+/// using the directory.
+struct ParkedCwd {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+    /// Directory fd for the temp directory, opened before `chdir`. Removal
+    /// uses it so a later replacement of that path is not the parent.
+    /// Linux opens it with `O_PATH` and Darwin with `O_SEARCH`, so a
+    /// directory without read permission still yields a fd. `None` when
+    /// that open failed.
+    parent: Option<std::os::unix::io::RawFd>,
+    /// Set when this value is the guard that may remove `path`. A second
+    /// guard is disarmed so its drop cannot remove the first directory.
+    armed: bool,
+}
+
+impl ParkedCwd {
+    /// `create_dir`, not `create_dir_all`. A path that already exists was
+    /// not created here and is left in place.
+    ///
+    /// The stored path is absolute. A relative or empty `TMPDIR`, or one
+    /// whose directory is missing, would otherwise be resolved again after
+    /// `chdir` and the directory this process created would be left behind.
+    fn create() -> Option<Self> {
+        let parent_path = parked_parent()?;
+        let parent = open_directory(&parent_path);
+        let path = parent_path.join(format!("ljos-cwd-{}", std::process::id()));
+        if std::fs::create_dir(&path).is_err() {
+            close_fd(parent);
+            return None;
+        }
+        use std::os::unix::fs::MetadataExt as _;
+        let Some(meta) = std::fs::symlink_metadata(&path)
+            .ok()
+            .filter(|meta| meta.file_type().is_dir())
+        else {
+            let _ = std::fs::remove_dir(&path);
+            close_fd(parent);
+            return None;
+        };
+        Some(Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            path,
+            parent,
+            armed: true,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn hold_until_exit(self) {
+        register_park_cleanup();
+        let ptr = Box::into_raw(Box::new(self));
+        if PARKED_CWD
+            .compare_exchange(
+                std::ptr::null_mut(),
+                ptr,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            // SAFETY: `ptr` came from `Box::into_raw` and was not stored.
+            // Disarming it keeps Drop from removing the first directory.
+            unsafe {
+                (*ptr).armed = false;
+                drop(Box::from_raw(ptr));
+            }
+        } else {
+            PARK_OWNER.store(std::process::id(), Ordering::SeqCst);
+        }
+    }
+
+    /// Remove the parked name through the temp-directory fd when that name
+    /// is still the directory created here. The stored path is not resolved
+    /// again. When that fd is missing, the directory's own fd is checked
+    /// the same way and the path is removed only if it still matches.
+    fn unlink_at_parent(&self) {
+        let Some(name) = self.path.file_name().and_then(|name| name.to_str()) else {
+            return;
+        };
+        let Ok(c_name) = std::ffi::CString::new(name) else {
+            return;
+        };
+        if let Some(parent) = self.parent {
+            self.unlink_name(parent, &c_name);
+            return;
+        }
+        self.unlink_own();
+    }
+
+    fn unlink_name(&self, parent: std::os::unix::io::RawFd, c_name: &std::ffi::CStr) {
+        // SAFETY: `parent` is the directory opened at create. `c_name` is
+        // the single component created in it. The buffer is zeroed and only
+        // read when `fstatat` fills it. `AT_SYMLINK_NOFOLLOW` does not follow
+        // a symlink at this name.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let rc =
+            unsafe { libc::fstatat(parent, c_name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+        if rc != 0 || !stat_matches(&st, self.dev, self.ino) {
+            return;
+        }
+        // The residual race needs a writer in the parent dir (same uid
+        // under sticky /tmp) and can only hit an empty dir.
+        // SAFETY: same fd and name as the `fstatat` above.
+        // `AT_REMOVEDIR` does not follow a symlink.
+        unsafe {
+            libc::unlinkat(parent, c_name.as_ptr(), libc::AT_REMOVEDIR);
+        }
+    }
+
+    fn unlink_own(&self) {
+        let Some(fd) = open_directory(&self.path) else {
+            return;
+        };
+        // SAFETY: `fd` refers to `path`. The buffer is zeroed and only read
+        // when `fstat` fills it.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::fstat(fd, &mut st) };
+        if rc == 0 && stat_matches(&st, self.dev, self.ino) {
+            if let Some(c_path) = c_string(&self.path) {
+                // SAFETY: `c_path` is the directory this process created,
+                // and the `fstat` above matched its device and inode.
+                unsafe {
+                    libc::rmdir(c_path.as_ptr());
+                }
+            }
+        }
+        close_fd(Some(fd));
+    }
+}
+
+#[cfg_attr(
+    target_os = "macos",
+    allow(
+        clippy::cast_sign_loss,
+        reason = "Apple dev_t is i32; MetadataExt::dev casts that field to u64"
+    )
+)]
+#[allow(
+    clippy::unnecessary_cast,
+    reason = "Apple dev_t is i32; other targets already use u64"
+)]
+fn stat_matches(st: &libc::stat, dev: u64, ino: u64) -> bool {
+    (st.st_mode & libc::S_IFMT) == libc::S_IFDIR
+        && (st.st_dev as u64) == dev
+        && (st.st_ino as u64) == ino
+}
+
+fn c_string(path: &Path) -> Option<std::ffi::CString> {
+    std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str())).ok()
+}
+
+fn close_fd(fd: Option<std::os::unix::io::RawFd>) {
+    let Some(fd) = fd else {
+        return;
+    };
+    // SAFETY: `fd` is an open descriptor this process owns. `close` only
+    // releases it.
+    unsafe {
+        libc::close(fd);
+    }
+}
+
+/// Open `path` as a directory fd.
+///
+/// Linux and Android use `O_PATH`, which does not need read permission.
+/// Darwin tries `O_SEARCH`, then `O_RDONLY` with `O_DIRECTORY`.
+fn open_directory(path: &Path) -> Option<std::os::unix::io::RawFd> {
+    let c_path = c_string(path)?;
+    for flags in directory_flags() {
+        // SAFETY: `c_path` is NUL-terminated. The flags do not include
+        // `O_CREAT`, so this does not create a file.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens a directory fd to remove the parked cwd; it does not publish a file"
+        )]
+        let fd = unsafe { libc::open(c_path.as_ptr(), *flags, 0) };
+        if fd >= 0 {
+            return Some(fd);
+        }
+    }
+    None
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn directory_flags() -> &'static [libc::c_int] {
+    const FLAGS: [libc::c_int; 1] = [libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC];
+    &FLAGS
+}
+
+#[cfg(target_os = "macos")]
+fn directory_flags() -> &'static [libc::c_int] {
+    const FLAGS: [libc::c_int; 2] = [
+        libc::O_SEARCH | libc::O_CLOEXEC,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+    ];
+    &FLAGS
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+fn directory_flags() -> &'static [libc::c_int] {
+    const FLAGS: [libc::c_int; 1] = [libc::O_RDONLY | libc::O_CLOEXEC];
+    &FLAGS
+}
+
+/// Absolute temp directory for the parked cwd. An empty `TMPDIR`, or one
+/// that does not name a directory, uses the platform default (`/tmp` when
+/// `TMPDIR` is unset on Linux). A relative `TMPDIR` is joined to the
+/// current directory before this process leaves it.
+fn parked_parent() -> Option<PathBuf> {
+    let raw = std::env::var_os("TMPDIR").unwrap_or_default();
+    if !raw.is_empty() {
+        let given = PathBuf::from(raw);
+        let absolute = if given.is_absolute() {
+            Some(given)
+        } else {
+            process_cwd().ok().map(|cwd| cwd.join(given))
+        };
+        if let Some(path) = absolute.filter(|path| path.is_dir()) {
+            return Some(path);
+        }
+    }
+    let fallback = default_temp_dir();
+    fallback.is_dir().then_some(fallback)
+}
+
+fn default_temp_dir() -> PathBuf {
+    // `temp_dir` returns `TMPDIR` as set, including an empty string (Rust
+    // 1.89). When `TMPDIR` is unset it is already the platform default, and
+    // reading it does not change the environment. A stat of a slow working
+    // directory may still be running, so this does not clear `TMPDIR`.
+    if std::env::var_os("TMPDIR").is_none() {
+        return std::env::temp_dir();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return darwin_user_temp().unwrap_or_else(|| PathBuf::from("/tmp"));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        PathBuf::from(if cfg!(target_os = "android") {
+            "/data/local/tmp"
+        } else {
+            "/tmp"
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_user_temp() -> Option<PathBuf> {
+    let mut buf = vec![0u8; 1024];
+    // SAFETY: `buf` is writable and its length is the size passed to confstr.
+    let mut n = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    if n > buf.len() {
+        buf.resize(n, 0);
+        // SAFETY: `buf` was resized to the size confstr reported, and that
+        // length is what this second call passes.
+        n = unsafe {
+            libc::confstr(
+                libc::_CS_DARWIN_USER_TEMP_DIR,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+    }
+    if n <= 1 || n > buf.len() {
+        return None;
+    }
+    let end = n - 1;
+    let text = std::str::from_utf8(&buf[..end]).ok()?;
+    let path = PathBuf::from(text.trim_end_matches('\0'));
+    path.is_absolute().then_some(path)
+}
+
+impl Drop for ParkedCwd {
+    fn drop(&mut self) {
+        if self.armed {
+            self.unlink_at_parent();
+        }
+        close_fd(self.parent.take());
+    }
+}
+
+/// The parked directory, held until exit. Null when this process did not
+/// create one, or after it has been dropped.
+static PARKED_CWD: AtomicPtr<ParkedCwd> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Process that armed [`PARKED_CWD`]. A fork copies the guard and this
+/// handler; `exit` in the child must not remove the parent's directory.
+static PARK_OWNER: AtomicU32 = AtomicU32::new(0);
+
+extern "C" fn release_parked_cwd() {
+    // SAFETY: `getpid` takes no pointers and only reads the caller.
+    let pid = unsafe { libc::getpid() };
+    if u32::try_from(pid).ok() != Some(PARK_OWNER.load(Ordering::SeqCst)) {
+        return;
+    }
+    let ptr = PARKED_CWD.swap(std::ptr::null_mut(), Ordering::SeqCst);
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: `ptr` came from `Box::into_raw` and this swap is the only
+    // take. A second call finds null.
+    drop(unsafe { Box::from_raw(ptr) });
+}
+
+fn register_park_cleanup() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // Signals, abort and _exit skip atexit, so the directory can remain.
+        // SAFETY: the handler has C linkage, captures nothing, and only
+        // drops the directory this process created.
+        unsafe {
+            libc::atexit(release_parked_cwd);
+        }
+    });
 }
 
 /// Whether `args`, after the program name, are `ljos git-hook`.

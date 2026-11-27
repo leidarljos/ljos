@@ -117,7 +117,7 @@ fn git_in(dir: &Path, args: &[&str]) -> Option<String> {
     // Git discovery from the working directory is the probe a slow mount
     // or a `.git` that does not open used to hold. Elsewhere the longer
     // budget still applies.
-    if std::env::current_dir().ok().as_deref() == Some(dir) {
+    if crate::process_cwd().ok().as_deref() == Some(dir) {
         return crate::cwd_probe::git_line(Some(dir), args);
     }
     let mut cmd = crate::git_cmd();
@@ -257,7 +257,7 @@ pub fn bind_root(cmd: &mut std::process::Command) {
     if named_in_env() {
         return;
     }
-    let here = std::env::current_dir().unwrap_or_default();
+    let here = crate::process_cwd().unwrap_or_default();
     if here.join("vissue.toml").is_file() && is_tracker(&here) {
         return;
     }
@@ -291,7 +291,7 @@ pub fn pin_root() {
     {
         return;
     }
-    let Ok(here) = std::env::current_dir() else {
+    let Ok(here) = crate::process_cwd() else {
         return;
     };
     let standing = here.join("vissue.toml").is_file();
@@ -477,7 +477,7 @@ fn root_vissue_would_use(here: &Path) -> (PathBuf, bool) {
 /// command was run from.
 #[must_use]
 pub fn vissue_would_init_cwd() -> bool {
-    let Ok(here) = std::env::current_dir() else {
+    let Ok(here) = crate::process_cwd() else {
         return false;
     };
     root_vissue_would_use(&here).1
@@ -549,7 +549,7 @@ pub fn product_write_refusal(repo: &Path) -> String {
 /// The write would enter a product checkout and the seat has no tracker
 /// outside it. The error is one line.
 pub fn aim_tracker() -> Result<(), String> {
-    let here = std::env::current_dir().map_err(|err| err.to_string())?;
+    let here = crate::process_cwd().map_err(|err| err.to_string())?;
     aim_tracker_from(&here)
 }
 
@@ -611,7 +611,7 @@ pub fn pinned(value: &str) -> bool {
 /// whether or not it exists yet.
 #[must_use]
 pub fn no_tracker_to_write() -> bool {
-    let Ok(here) = std::env::current_dir() else {
+    let Ok(here) = crate::process_cwd() else {
         return false;
     };
     let (root, guessed) = root_vissue_would_use(&here);
@@ -649,7 +649,7 @@ pub fn missing_tracker_line() -> Option<&'static str> {
     if named_in_env() || configured().is_some() {
         return None;
     }
-    let standing = std::env::current_dir()
+    let standing = crate::process_cwd()
         .ok()
         .is_some_and(|here| here.join("vissue.toml").is_file());
     if standing {

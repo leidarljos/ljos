@@ -893,6 +893,7 @@ fn start_daemon(tailscaled: &Path, dir: &Path, kernel: bool) -> Result<Child> {
     cmd.stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)
+        .current_dir(crate::child_work_dir())
         .process_group(0);
     let child = cmd.spawn().context("could not start")?;
     record(dir, child.id(), started(child.id()))?;

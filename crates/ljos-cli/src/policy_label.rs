@@ -213,7 +213,7 @@ mod tests {
     fn an_empty_state_home_does_not_write_the_package() {
         let _env = crate::test_env_lock();
         let package = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let previous = std::env::current_dir().expect("working directory");
+        let previous = crate::process_cwd().expect("working directory");
         struct Back(std::path::PathBuf);
         impl Drop for Back {
             fn drop(&mut self) {

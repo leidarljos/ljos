@@ -347,6 +347,7 @@ fn start_server(dir: &Path) -> Option<std::fs::File> {
     )]
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("hookd")
+        .current_dir(crate::child_work_dir())
         .env_clear()
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

@@ -126,7 +126,7 @@ pub fn read_graph(path: &Path) -> Result<Graph> {
 /// repository root for `graphify-out/graph.json` and stops at `.git`.
 #[must_use]
 pub fn located_graph() -> Option<PathBuf> {
-    let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let start = crate::process_cwd().unwrap_or_else(|_| PathBuf::from("."));
     match configured(&start) {
         Some(Setting::Off) => None,
         Some(Setting::Path(path)) => path.is_file().then_some(path),
