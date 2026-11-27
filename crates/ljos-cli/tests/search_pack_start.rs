@@ -277,7 +277,7 @@ fn a_search_that_stays_not_ready_ranks_by_words() {
 fn a_warmup_wait_of_zero_does_not_wait_on_a_starting_pack() {
     let _process = ljos_test_boot::env_lock();
     let seat = serve(None, hits_body());
-    let (out, _) = run(
+    let (out, elapsed) = run(
         &seat,
         &["search", "kiln"],
         &[("LJOS_SEARCH_WARMUP_WAIT", "0"), ("LJOS_SEARCH_WAIT", "0")],
@@ -286,6 +286,12 @@ fn a_warmup_wait_of_zero_does_not_wait_on_a_starting_pack() {
     assert!(out.status.success(), "{said}");
     assert!(said.contains(STARTING_WORDS), "{said}");
     assert!(!said.contains(STARTING), "{said}");
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}\n{said}");
+    let polls = seat.requests.load(Ordering::SeqCst);
+    assert!(
+        polls < 4,
+        "a zero warmup wait polled /health {polls} times\n{said}"
+    );
 }
 
 #[test]
