@@ -9,8 +9,10 @@ ljos_test_boot::harness!();
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -202,8 +204,103 @@ fn run(seat: &Seat, args: &[&str], env: &[(&str, &str)]) -> (Output, Duration) {
     for (key, value) in env {
         cmd.env(key, value);
     }
-    let out = cmd.output().unwrap();
-    (out, started.elapsed())
+    // `output` returns only after the client exits. A search that never
+    // does is killed at the four-second ceiling and reaped, so the
+    // caller can fail with the elapsed time. Stdout and stderr are
+    // drained on reader threads while the child runs. A full pipe would
+    // otherwise stall the write, the ceiling would kill the child, and
+    // the capture would stop at the pipe's capacity. When the ceiling
+    // passes, the process group is killed whether or not the leader has
+    // already exited, and the reader joins stop there. A grandchild that
+    // still holds a pipe is reaped with the group, so the read cannot
+    // wait out that grandchild.
+    let mut child = cmd.process_group(0).spawn().unwrap();
+    let group = libc::pid_t::try_from(child.id()).unwrap();
+    let stdout_rx = spawn_drain(child.stdout.take());
+    let stderr_rx = spawn_drain(child.stderr.take());
+    let ceiling = Duration::from_secs(4);
+    let mut stdout = None;
+    let mut stderr = None;
+    let status = loop {
+        pull_pipe(&stdout_rx, &mut stdout);
+        pull_pipe(&stderr_rx, &mut stderr);
+        match child.try_wait().unwrap() {
+            Some(status) if stdout.is_some() && stderr.is_some() => break status,
+            found if started.elapsed() >= ceiling => {
+                // The leader may already have been reaped. Kill the group
+                // anyway, so a grandchild still holding a pipe cannot keep
+                // a reader blocked past the ceiling.
+                kill_group(group);
+                let status = match found {
+                    Some(status) => status,
+                    None => child.wait().unwrap(),
+                };
+                await_closed(&mut stdout, &mut stderr, &stdout_rx, &stderr_rx);
+                break status;
+            }
+            Some(_) | None => thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    (
+        Output {
+            status,
+            stdout: stdout.unwrap_or_default(),
+            stderr: stderr.unwrap_or_default(),
+        },
+        started.elapsed(),
+    )
+}
+
+fn await_closed(
+    stdout: &mut Option<Vec<u8>>,
+    stderr: &mut Option<Vec<u8>>,
+    stdout_rx: &mpsc::Receiver<Vec<u8>>,
+    stderr_rx: &mpsc::Receiver<Vec<u8>>,
+) {
+    let grace = Instant::now() + Duration::from_millis(200);
+    loop {
+        pull_pipe(stdout_rx, stdout);
+        pull_pipe(stderr_rx, stderr);
+        if (stdout.is_some() && stderr.is_some()) || Instant::now() >= grace {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn kill_group(group: libc::pid_t) {
+    // SAFETY: a negative pid names the process group this child leads.
+    unsafe {
+        libc::kill(-group, libc::SIGKILL);
+    }
+}
+
+fn spawn_drain<R>(pipe: Option<R>) -> mpsc::Receiver<Vec<u8>>
+where
+    R: Read + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        let _ = tx.send(buf);
+    });
+    rx
+}
+
+fn pull_pipe(rx: &mpsc::Receiver<Vec<u8>>, slot: &mut Option<Vec<u8>>) {
+    if slot.is_some() {
+        return;
+    }
+    match rx.try_recv() {
+        Ok(buf) => *slot = Some(buf),
+        Err(mpsc::TryRecvError::Empty) => {}
+        Err(mpsc::TryRecvError::Disconnected) => {
+            panic!("the pipe reader ended before it sent");
+        }
+    }
 }
 
 fn text(out: &Output) -> String {
@@ -266,11 +363,11 @@ fn a_search_that_stays_not_ready_ranks_by_words() {
         &[("LJOS_SEARCH_WARMUP_WAIT", "1"), ("LJOS_SEARCH_WAIT", "0")],
     );
     let said = text(&out);
+    assert!(elapsed < Duration::from_secs(4), "{elapsed:?}\n{said}");
     assert!(out.status.success(), "{said}");
     assert!(said.contains(STARTING_WORDS), "{said}");
     assert!(!said.contains(STARTING), "{said}");
     assert!(!said.contains(HIT), "{said}");
-    assert!(elapsed < Duration::from_secs(4), "{elapsed:?}\n{said}");
     assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
 }
 
@@ -569,10 +666,10 @@ fn a_starting_code_ranks_by_words() {
         &[("LJOS_SEARCH_WARMUP_WAIT", "1"), ("LJOS_SEARCH_WAIT", "0")],
     );
     let said = text(&out);
+    assert!(elapsed < Duration::from_secs(4), "{elapsed:?}\n{said}");
     assert!(out.status.success(), "{said}");
     assert!(said.contains(STARTING_WORDS), "{said}");
     assert!(!said.contains(STARTING), "{said}");
-    assert!(elapsed < Duration::from_secs(4), "{elapsed:?}\n{said}");
     assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
 }
 
