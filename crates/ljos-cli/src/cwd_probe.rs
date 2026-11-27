@@ -577,6 +577,18 @@ pub(crate) fn tmpdir_rewritten_from_relative() -> bool {
     held.as_ref().is_some_and(|path| path.as_os_str() == raw)
 }
 
+/// HUD program found under the start directory before the park.
+///
+/// `LJOS_HUD_BIN`, the sibling beside this binary, and `PATH` are walked
+/// once. A later lookup returns this path and does not state the start
+/// directory again.
+pub(crate) fn resolved_hud() -> Option<PathBuf> {
+    RESOLVED_HUD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 /// Whether `path` is the HUD program resolved before the park.
 ///
 /// `Some(true)` when it is: the caller must not state it again. `Some(false)`
@@ -618,7 +630,9 @@ static ENV_RESOLVED: AtomicBool = AtomicBool::new(false);
 /// component, is an error. A relative `TMPDIR` with no `..` that is not a
 /// directory uses [`default_temp_dir`]. An empty `TMPDIR` uses that
 /// default. An absolute value outside the start directory is left as set.
-/// An unset `TMPDIR` is left unset.
+/// An unset `TMPDIR` is left unset. When `LJOS_HUD_BIN` is unset, the
+/// `ljos-hud` beside this binary and each `PATH` entry under the start
+/// directory are walked the same way.
 fn resolve_relative_dirs() {
     let Some(start) = start_dir_for_env() else {
         return;
@@ -691,23 +705,92 @@ fn resolve_root(key: &str, start: &Path) {
 }
 
 fn resolve_hud(start: &Path) {
-    let Some(raw) = std::env::var_os("LJOS_HUD_BIN") else {
-        return;
-    };
-    let given = PathBuf::from(&raw);
-    let Some(rel) = under_start(start, &given) else {
+    if let Some(raw) = std::env::var_os("LJOS_HUD_BIN") {
+        if let Some(given) = trimmed_hud(&raw) {
+            resolve_hud_override(start, &raw, &given);
+            return;
+        }
+    }
+    resolve_hud_search(start);
+}
+
+/// `LJOS_HUD_BIN` with surrounding whitespace removed.
+///
+/// The launcher trims this variable. The walk has to see that same path,
+/// or a trailing space is stated and the file itself never is. A value
+/// that is empty after trimming is unset, and the sibling and `PATH`
+/// search runs.
+fn trimmed_hud(raw: &std::ffi::OsStr) -> Option<PathBuf> {
+    let text = raw.to_str()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+fn resolve_hud_override(start: &Path, raw: &std::ffi::OsStr, given: &Path) {
+    let Some(rel) = under_start(start, given) else {
         return;
     };
     match resolve_from_start(start, &rel, false) {
         Ok(hit) if !hit.is_dir => {
             std::env::set_var("LJOS_HUD_BIN", &hit.path);
-            *RESOLVED_HUD
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hit.path);
+            remember_hud(hit.path);
         }
         Ok(_) | Err(Fault::Unresolvable) => {}
-        Err(Fault::TimedOut) => refuse_env("LJOS_HUD_BIN", &raw),
+        Err(Fault::TimedOut) => refuse_env("LJOS_HUD_BIN", raw),
     }
+}
+
+/// Sibling `ljos-hud`, then each `PATH` entry, when `LJOS_HUD_BIN` is unset.
+///
+/// A candidate under `start` is walked on the deadline. The first file is
+/// remembered. A candidate outside `start` that is already a file stops
+/// the search, which is the order the launcher uses later. A walk that
+/// does not answer is an error: stating it on this thread would wait out
+/// the park.
+fn resolve_hud_search(start: &Path) {
+    if let Some(sibling) = sibling_hud() {
+        if claim_hud(start, &sibling, "ljos-hud") {
+            return;
+        }
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return;
+    };
+    for dir in std::env::split_paths(&path) {
+        if claim_hud(start, &dir.join("ljos-hud"), "PATH") {
+            return;
+        }
+    }
+}
+
+fn sibling_hud() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.join("ljos-hud"))
+}
+
+/// `true` when `candidate` is the program the launcher would run.
+fn claim_hud(start: &Path, candidate: &Path, key: &str) -> bool {
+    let Some(rel) = under_start(start, candidate) else {
+        return candidate.is_file();
+    };
+    match resolve_from_start(start, &rel, false) {
+        Ok(hit) if !hit.is_dir => {
+            remember_hud(hit.path);
+            true
+        }
+        Ok(_) | Err(Fault::Unresolvable) => false,
+        Err(Fault::TimedOut) => refuse_env(key, candidate.as_os_str()),
+    }
+}
+
+fn remember_hud(path: PathBuf) {
+    *RESOLVED_HUD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
 }
 
 /// `given` relative to `start` when the park must state it first.
@@ -809,13 +892,30 @@ fn walk_path(path: &Path, create_leaf: bool) -> Result<Hit, Fault> {
     let Ok(dir) = std::fs::canonicalize(parent) else {
         return Err(Fault::Unresolvable);
     };
-    if !dir.is_dir() {
+    // The start directory is a directory: this process began there.
+    // `is_dir` would state that path, and the deadline would refuse a
+    // missing leaf whose parent is the directory we already left unread.
+    if !parent_is_start(&dir) && !dir.is_dir() {
         return Err(Fault::Unresolvable);
     }
     Ok(Hit {
         path: dir.join(name),
         is_dir: false,
     })
+}
+
+/// `dir` is the directory this process started in.
+///
+/// `realpath` of that directory does not state it. Comparing the two
+/// paths is enough to know the parent of a missing leaf is a directory.
+fn parent_is_start(dir: &Path) -> bool {
+    let Some(start) = started_dir() else {
+        return false;
+    };
+    if dir == start {
+        return true;
+    }
+    std::fs::canonicalize(&start).is_ok_and(|canon| canon == dir)
 }
 
 fn refuse_env(key: &str, raw: &std::ffi::OsStr) -> ! {

@@ -31,10 +31,13 @@ pub fn resolve_hud_bin() -> Option<PathBuf> {
             return Some(PathBuf::from(t));
         }
     }
+    if let Some(found) = crate::cwd_probe::resolved_hud() {
+        return Some(found);
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let sibling = dir.join("ljos-hud");
-            if sibling.is_file() {
+            if program_exists(&sibling) {
                 return Some(sibling);
             }
         }
@@ -42,7 +45,7 @@ pub fn resolve_hud_bin() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join("ljos-hud");
-        if candidate.is_file() {
+        if program_exists(&candidate) {
             return Some(candidate);
         }
     }

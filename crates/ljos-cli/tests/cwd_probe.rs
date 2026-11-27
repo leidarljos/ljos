@@ -151,11 +151,47 @@ impl Seat {
     }
 
     fn run(&self, cwd: &Path, args: &[&str], extra: &[(&str, &str)]) -> (Output, Duration) {
-        self.run_io(cwd, args, extra, None)
+        self.launch(
+            Path::new(env!("CARGO_BIN_EXE_ljos")),
+            cwd,
+            args,
+            extra,
+            None,
+        )
+    }
+
+    /// `program` is the `ljos` this row runs. A sibling `ljos-hud` is the
+    /// file beside that binary, so a row that promises the sibling copies
+    /// `ljos` into the start directory first.
+    fn run_at(
+        &self,
+        program: &Path,
+        cwd: &Path,
+        args: &[&str],
+        extra: &[(&str, &str)],
+    ) -> (Output, Duration) {
+        self.launch(program, cwd, args, extra, None)
     }
 
     fn run_io(
         &self,
+        cwd: &Path,
+        args: &[&str],
+        extra: &[(&str, &str)],
+        input: Option<&[u8]>,
+    ) -> (Output, Duration) {
+        self.launch(
+            Path::new(env!("CARGO_BIN_EXE_ljos")),
+            cwd,
+            args,
+            extra,
+            input,
+        )
+    }
+
+    fn launch(
+        &self,
+        program: &Path,
         cwd: &Path,
         args: &[&str],
         extra: &[(&str, &str)],
@@ -166,7 +202,7 @@ impl Seat {
             clippy::disallowed_methods,
             reason = "starts a program outside git hook code"
         )]
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        let mut cmd = Command::new(program);
         cmd.args(args)
             .current_dir(cwd)
             .env_clear()
@@ -1424,6 +1460,145 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
         "note did not reach vissue: {}",
         text(&note)
     );
+
+    // One row per parked-start miss: a missing tracker leaf, a HUD on
+    // PATH, the sibling HUD, a HUD path with a trailing space, and a PATH
+    // stat that never answers.
+    let neutral = seat.dir.path().join("exe");
+    std::fs::create_dir_all(&neutral).unwrap();
+    let copied = neutral.join("ljos");
+    ljos_cli::copy_executable(Path::new(env!("CARGO_BIN_EXE_ljos")), &copied).unwrap();
+    let beside = slow.join("ljos");
+    ljos_cli::copy_executable(Path::new(env!("CARGO_BIN_EXE_ljos")), &beside).unwrap();
+    script(
+        &slow,
+        "ljos-hud",
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+    );
+    let slow_s = slow.to_str().unwrap();
+    let so_s = seat.so.to_str().unwrap();
+    let path_in = format!("{slow_s}:/usr/bin:/bin");
+    let spaced = format!("{slow_s}/hud-abs ");
+    let mut missed = Vec::new();
+    for row in [
+        "missing-root",
+        "path-hud",
+        "sibling-hud",
+        "hud-space",
+        "path-hang",
+    ] {
+        let _ = std::fs::remove_file(mark.join("which"));
+        let err = match row {
+            "missing-root" => {
+                let root = slow.join("brand-new");
+                let _ = std::fs::remove_dir_all(&root);
+                let (out, took) = seat.run(
+                    &slow,
+                    &["file", "-p", "demo", "--top", "a title"],
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("VISSUE_ROOT", "brand-new"),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_EXACT", slow_s),
+                    ],
+                );
+                parked_ok(
+                    took < Duration::from_secs(4) && out.status.success(),
+                    root.join("Software/landed").is_file(),
+                    &format!("{row} {took:?}: {}", text(&out)),
+                )
+            }
+            "path-hud" | "sibling-hud" | "hud-space" => {
+                let program = if row == "sibling-hud" {
+                    &beside
+                } else {
+                    &copied
+                };
+                let (out, took) = seat.run_at(
+                    program,
+                    &slow,
+                    &["hud", "--foreground"],
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_EXACT", slow_s),
+                        (
+                            "PATH",
+                            if row == "path-hud" {
+                                path_in.as_str()
+                            } else {
+                                "/usr/bin:/bin"
+                            },
+                        ),
+                        (
+                            "LJOS_HUD_BIN",
+                            if row == "hud-space" {
+                                spaced.as_str()
+                            } else {
+                                ""
+                            },
+                        ),
+                    ],
+                );
+                parked_ok(
+                    took < Duration::from_secs(4) && out.status.success(),
+                    read_trim(&mark.join("which")) == "--foreground",
+                    &format!("{row} {took:?}: {}", text(&out)),
+                )
+            }
+            "path-hang" => {
+                // The unrepaired lookup states this path on the main thread.
+                // The harness kills that at 6s. Catch it so the other rows
+                // still report.
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    seat.run_at(
+                        &copied,
+                        &slow,
+                        &["hud", "--foreground"],
+                        &[
+                            ("TMPDIR", tmp_s),
+                            ("LJOS_MARK", mark_s),
+                            ("LD_PRELOAD", so_s),
+                            ("PATH", path_in.as_str()),
+                            ("LJOS_HUD_BIN", ""),
+                        ],
+                    )
+                }));
+                let Ok((out, took)) = caught else {
+                    missed.push(format!("{row}: still running"));
+                    continue;
+                };
+                let gone = ljos_names(&tmp)
+                    .iter()
+                    .all(|name| !name.starts_with("ljos-cwd-"));
+                parked_ok(
+                    took < Duration::from_secs(4)
+                        && !out.status.success()
+                        && text(&out).contains("did not resolve")
+                        && out.stdout.is_empty()
+                        && gone
+                        && !mark.join("which").is_file(),
+                    true,
+                    &format!("{row} {took:?}: {}", text(&out)),
+                )
+            }
+            _ => unreachable!(),
+        };
+        if let Err(why) = err {
+            missed.push(why);
+        }
+    }
+    assert!(missed.is_empty(), "{}", missed.join("\n"));
+}
+
+fn parked_ok(passed: bool, marker: bool, why: &str) -> Result<(), String> {
+    if passed && marker {
+        Ok(())
+    } else {
+        Err(why.to_string())
+    }
 }
 
 fn scratch(seat: &Seat) -> (PathBuf, PathBuf) {
