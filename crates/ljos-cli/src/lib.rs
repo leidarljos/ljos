@@ -5919,9 +5919,9 @@ pub fn canonical_persona(name: &str) -> String {
 /// No `--as`, or a spelling of this seat, is this seat's own ballot, stored
 /// as [`voter_id`]. A legacy holder of a seat that has stood is that seat
 /// (`inky-n9o` is `inky` when `inky` stood). Another seat that has stood is
-/// refused. Any other plain name is a persona, the same [`voter_id`] for
-/// the drawer, the dedup key and the pin. A leading `persona:` is stripped
-/// once and takes that same path.
+/// refused. Any other plain name is a persona, stored as the same
+/// [`voter_id`]. A leading `persona:` is stripped once and takes that
+/// same path.
 ///
 /// # Errors
 ///
@@ -5952,12 +5952,31 @@ fn nfkc_name(name: &str) -> String {
     name.trim().nfkc().collect()
 }
 
-/// The one id a seat or a persona is cast, folded, tallied, withdrawn,
-/// stored and signed under. NFKC, ASCII case fold, then the seat slug:
-/// each run of non-alphanumerics becomes one hyphen.
+/// The slug a persona is stored under. NFKC, ASCII case fold, then each
+/// run of non-alphanumerics becomes one hyphen. A conversation tag is not
+/// dropped here: [`voter_key`] does that before this slug, so a pin
+/// `inky@39u` stays a different voter from `inky`.
 #[must_use]
 pub fn voter_id(name: &str) -> String {
     canonical_persona(name)
+}
+
+/// The key a seat ballot is stored, signed, withdrawn and cited under.
+/// A conversation tag is dropped the way [`holder_parts`] drops it, then
+/// [`voter_id`] slugs what remains. `inky@sha` is `inky`, not `inky-sha`.
+/// A pid suffix stays, so `tls-rev1` is still `tls-rev1`.
+fn voter_key(name: &str) -> String {
+    let folded = nfkc_name(name);
+    let seat = match folded.split_once('@') {
+        Some((seat, tag)) if !seat.is_empty() && !tag.is_empty() => seat,
+        _ => folded.as_str(),
+    };
+    let id = voter_id(seat);
+    if id.is_empty() {
+        name.trim().to_string()
+    } else {
+        id
+    }
 }
 
 /// Whether `id` is a seat that has stood: the frozen list, or a pin that
@@ -6017,13 +6036,26 @@ fn persona_chars_ok(name: &str) -> bool {
         })
 }
 
-fn persona_name_sentence() -> &'static str {
-    "a persona name may use only letters, digits, '.', '_' and '-'"
+fn persona_name_sentence(name: &str) -> String {
+    let allowed = "a persona name may use only letters, digits, '.', '_' and '-'";
+    let key = canonical_persona(name);
+    if key.is_empty() {
+        format!("{allowed}; {name} has no canonical key")
+    } else {
+        format!("{allowed}; {name} would be stored as {key}")
+    }
 }
 
 fn resolve_ballot(named: Option<&str>) -> Result<ResolvedBallot> {
+    resolve_named(named, true)
+}
+
+/// Resolve `named` the way a cast does. When `store` is false the name is
+/// not written as a new persona, so a spelling a persona cannot be, such
+/// as `judge:stub-judge`, is kept for the forecast key.
+fn resolve_named(named: Option<&str>, store: bool) -> Result<ResolvedBallot> {
     let seat = seat_name();
-    let seat_id = voter_id(&seat);
+    let seat_id = voter_key(&seat);
     let Some(raw) = named.map(str::trim).filter(|n| !n.is_empty()) else {
         return Ok(ResolvedBallot {
             voter: seat_id,
@@ -6035,37 +6067,140 @@ fn resolve_ballot(named: Option<&str>) -> Result<ResolvedBallot> {
     let name = if let Some(rest) = raw.strip_prefix(ballot_sig::PERSONA_VOTER) {
         let rest = rest.trim();
         if rest.is_empty() {
-            bail!("{}", persona_name_sentence());
+            bail!("{}", persona_name_sentence(raw));
         }
         rest
     } else {
         raw
     };
-    let id = voter_id(name);
-    if !seat_id.is_empty() && id == seat_id {
-        return Ok(ResolvedBallot {
-            voter: seat_id,
-            persona: false,
-        });
-    }
-    // A stood seat is that seat. The caster may cast it only as itself.
-    // `mina-n9o`, fullwidth `inky` and a Kelvin `disk-saver` land here.
-    if let Some(stood) = stood_seat_id(name) {
-        if stood == seat_id {
+    // This seat's own ballot, stored as [`voter_key`]. A spelling whose
+    // key is the seat's (`Disk Saver`, `INKY`, `inky@sha`) is that
+    // ballot. So is a legacy holder of this stood seat (`inky-n9o`,
+    // `disk-saver-t4t`). A suffix that is its own voter id (`tls-rev1`)
+    // stays a persona: the slug that drops a pid tag is not this match.
+    let folded = nfkc_name(name);
+    if !folded.contains(':') {
+        if !seat_id.is_empty() && voter_key(&folded) == seat_id {
             return Ok(ResolvedBallot {
-                voter: seat_id,
+                voter: seat_id.clone(),
                 persona: false,
             });
         }
+        if let (Some(named_seat), Some(our_seat)) = (stood_seat_id(&folded), stood_seat_id(&seat)) {
+            if named_seat == our_seat {
+                return Ok(ResolvedBallot {
+                    voter: seat_id,
+                    persona: false,
+                });
+            }
+        }
+    }
+    // Another seat that has stood is refused. Fullwidth `inky` and a
+    // Kelvin `disk-saver` land here.
+    if let Some(stood) = stood_seat_id(name) {
         bail!("a seat cannot cast a ballot for {stood}");
     }
+    let id = voter_id(name);
     if !persona_chars_ok(name) || id.is_empty() {
-        bail!("{}", persona_name_sentence());
+        if store {
+            bail!("{}", persona_name_sentence(name));
+        }
+        return Ok(ResolvedBallot {
+            voter: name.to_string(),
+            persona: false,
+        });
     }
     Ok(ResolvedBallot {
         voter: id,
         persona: true,
     })
+}
+
+/// The drawer agent whose [`voter_id`] is `want`, preferring an exact
+/// spelling when the row still holds one.
+fn stored_ballot_agent(issue: &str, want: &str) -> Option<String> {
+    let want_id = voter_key(want);
+    let rows = raw_ballot_rows(issue).ok()?;
+    for row in &rows {
+        let Some(agent) = row["agent"].as_str().map(str::trim) else {
+            continue;
+        };
+        if agent == want {
+            return Some(agent.to_string());
+        }
+    }
+    if want_id.is_empty() {
+        return None;
+    }
+    rows.iter().find_map(|row| {
+        let agent = row["agent"].as_str()?.trim();
+        (voter_key(agent) == want_id).then(|| agent.to_string())
+    })
+}
+
+/// A `judge:` row whose logbook says the ballot was cast for `persona`.
+fn judge_row_for_persona(issue: &str, persona: &str) -> Option<String> {
+    let persona = persona.trim();
+    if persona.is_empty() || persona.starts_with("judge:") {
+        return None;
+    }
+    let notes = issue_record(issue)
+        .ok()
+        .map(|v| ballot_sig::notes_of(&v))
+        .unwrap_or_default();
+    let rows = raw_ballot_rows(issue).ok()?;
+    let persona_id = voter_id(persona);
+    for note in &notes {
+        let Some((voter, rest)) = note.split_once(": ballot for ") else {
+            continue;
+        };
+        let voter = voter.trim();
+        if !voter.starts_with("judge:") {
+            continue;
+        }
+        let name = rest.split([',', ' ', '\n']).next().unwrap_or("").trim();
+        if name != persona && voter_id(name) != persona_id {
+            continue;
+        }
+        if rows
+            .iter()
+            .any(|row| row["agent"].as_str().map(str::trim) == Some(voter))
+        {
+            return Some(voter.to_string());
+        }
+    }
+    None
+}
+
+/// The voter a withdrawal names. The drawer, the signature and the tally
+/// share [`voter_id`], so `Tls` and `tls` are one row. A `judge:` ballot
+/// cast for a persona withdraws by that judge id as well as by the persona.
+///
+/// # Errors
+///
+/// The name is another seat that has stood.
+pub fn withdraw_voter(issue: &str, named: Option<&str>) -> Result<String> {
+    // A stored row wins before the persona grammar, so `Tls` matches a
+    // `tls` row and the printed judge id `judge:stub-judge` is withdrawable.
+    // Persona-name checks apply only to a name this call will newly store.
+    // A withdrawal stores nothing, so a second call after the row is gone
+    // still names that forecast.
+    if let Some(name) = named.map(str::trim).filter(|n| !n.is_empty()) {
+        if let Some(agent) = stored_ballot_agent(issue, name) {
+            return Ok(agent);
+        }
+        if let Some(judge) = judge_row_for_persona(issue, name) {
+            return Ok(judge);
+        }
+    }
+    let want = resolve_named(named, false)?.voter;
+    if let Some(agent) = stored_ballot_agent(issue, &want) {
+        return Ok(agent);
+    }
+    if let Some(judge) = judge_row_for_persona(issue, &want) {
+        return Ok(judge);
+    }
+    Ok(want)
 }
 
 fn ignored_used_char(c: char) -> bool {
@@ -6110,11 +6245,8 @@ fn deed_held_by_other(issue: &str, persona: &str, ids: &[String]) -> Option<Stri
             if part.is_empty() || used_is_none(part) {
                 continue;
             }
-            let Ok(id) = resolve_deed(part) else {
-                continue;
-            };
-            if ids.iter().any(|want| want == &id) {
-                return Some(id);
+            if ids.iter().any(|want| want == part) {
+                return Some(part.to_string());
             }
         }
     }
@@ -6123,9 +6255,30 @@ fn deed_held_by_other(issue: &str, persona: &str, ids: &[String]) -> Option<Stri
 
 const USED_RECORD: &str = "a ballot records what it used (doi:10.1007/3-540-44503-X_20); pass --used deed-.... This seat's own ballot may pass --used none. A persona needs a real deed, and one deed backs one persona on an issue";
 
+/// The accession to store for one `--used` part. A `deed-` id is that
+/// id, including a superseded one: existence is checked, and the
+/// successor `deedar current` would print is not written. Any other
+/// token (a content digest) is the deed id the store names for it.
+fn cited_accession(part: &str) -> Result<String> {
+    let token = deed_token(part);
+    if token.is_empty() {
+        bail!("deed: an accession is required");
+    }
+    if token.starts_with("deed-") {
+        run_captured("deedar", &["current", &token]).map_err(|e| {
+            anyhow::anyhow!(
+                "deed: {token} is not in the deed store: {e:#} (cite the `id=` line `deedar create` prints)"
+            )
+        })?;
+        return Ok(token);
+    }
+    resolve_deed(part)
+}
+
 /// The deed ids to store. A persona needs each part to resolve, and one
-/// deed backs one persona on `issue`. A seat may pass `none`. The drawer
-/// stores these ids, not the text the caller typed.
+/// deed backs one persona on `issue`. A seat may pass `none`. A deed id
+/// is stored as the caster named it. A content digest is stored as the
+/// deed id it names.
 fn stored_used(issue: &str, persona: &str, used: &str, is_persona: bool) -> Result<String> {
     if used.trim().is_empty() {
         bail!("{USED_RECORD}");
@@ -6148,7 +6301,7 @@ fn stored_used(issue: &str, persona: &str, used: &str, is_persona: bool) -> Resu
             }
             bail!("{USED_RECORD}");
         }
-        let id = match resolve_deed(part) {
+        let id = match cited_accession(part) {
             Ok(id) => id,
             Err(_) if is_persona => bail!("{}", persona_needs_sentence(persona)),
             Err(err) => return Err(err),
@@ -6178,19 +6331,27 @@ fn choice_hides_used(choice: &str) -> bool {
 }
 
 /// The choice bytes a ballot stores and a signature covers. The tally's
-/// count uses this same text.
-pub(crate) fn ballot_choice(choice: &str) -> &str {
-    choice.trim()
+/// count uses this same text. Whitespace runs, including a no-break
+/// space, become one ASCII space, and a double quote becomes a single
+/// quote: the same fold the note store applies to the line.
+pub(crate) fn ballot_choice(choice: &str) -> String {
+    choice
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('"', "'")
 }
 
 /// Refuse a choice the ballot and the signature cannot store as the same
-/// bytes. A control character would be a line break in the note and a
-/// different choice in the drawer.
-fn choice_is_storable(choice: &str) -> Result<()> {
-    if choice.chars().any(char::is_control) {
+/// bytes. A control on the raw text is refused before folding, so a
+/// vertical tab is not turned into a space. [`choice_hides_used`] runs on
+/// the folded choice: a no-break space before `used=` is the same refusal
+/// as an ASCII space, and nothing is written.
+fn choice_is_storable(raw: &str, folded: &str) -> Result<()> {
+    if raw.chars().any(char::is_control) {
         bail!("a ballot choice cannot contain a control character; nothing was cast");
     }
-    if choice_hides_used(choice) {
+    if choice_hides_used(folded) {
         bail!("a ballot choice cannot contain ` used=`; nothing was cast");
     }
     Ok(())
@@ -6306,8 +6467,8 @@ pub fn vote_request<'a>(issue: &'a str, fields: VoteFields<'a>) -> Result<VoteRe
 /// hides a used field, the deed does not resolve, or the tracker does not
 /// show the row afterwards.
 pub fn cast_ballot(args: &CastBallot<'_>) -> Result<CastReport> {
-    choice_is_storable(args.choice)?;
     let choice = ballot_choice(args.choice);
+    choice_is_storable(args.choice, &choice)?;
     let resolved = resolve_ballot(args.as_persona)?;
     let who = resolved.voter.clone();
     let cast = hook_timed("vote_claim", || {
@@ -6334,7 +6495,7 @@ pub fn cast_ballot(args: &CastBallot<'_>) -> Result<CastReport> {
         let agent = row["agent"].as_str().map(str::trim) == Some(who.as_str());
         let same_choice = row["choice"]
             .as_str()
-            .is_some_and(|stored| panel_gate::same_counted_choice(stored, choice));
+            .is_some_and(|stored| panel_gate::same_counted_choice(stored, &choice));
         let used = row
             .get("used")
             .and_then(|value| value.as_str())
@@ -6371,7 +6532,7 @@ pub fn cast_ballot(args: &CastBallot<'_>) -> Result<CastReport> {
     let session_label = cast.label.clone();
     cast.keep();
     match hook_timed("vote_sign", || {
-        ballot_sig::sign_ballot(args.issue, &who, choice)
+        ballot_sig::sign_ballot(args.issue, &who, &choice)
     }) {
         Ok(line) => text.push_str(&line),
         Err(e) => text.push_str(&format!("ljos vote: {e:#}\n")),
@@ -30152,6 +30313,26 @@ pub fn judge_voter(model: &str) -> String {
     format!("judge:{}", model.trim())
 }
 
+/// The voter a Jev ballot claims and stores before the model answers.
+/// The same string [`jev_stored_voter`] prints when the ballot's model is
+/// the configured one.
+#[must_use]
+pub fn jev_drawer_voter() -> String {
+    judge_voter(jev::ballot_model().as_deref().unwrap_or("jev"))
+}
+
+/// The drawer agent [`cast_jev`] writes for `b`. The success line prints
+/// this string, and a withdrawal names it unchanged.
+#[must_use]
+pub fn jev_stored_voter(b: &jev::Ballot) -> String {
+    let model = if b.model.is_empty() {
+        jev::ballot_model().unwrap_or_else(|| "jev".into())
+    } else {
+        b.model.clone()
+    };
+    judge_voter(&model)
+}
+
 /// One effective voter per model. An all-one-model panel is one voter.
 #[must_use]
 pub fn panel_voters(models: &[&str]) -> Vec<String> {
@@ -30198,12 +30379,12 @@ pub fn cast_jev(name: &str, issue: &str, b: &jev::Ballot) -> Result<()> {
         .copied()
         .unwrap_or(b.confidence);
     let p = format!("{:.3}", p.clamp(0.01, 1.0));
-    let model = if b.model.is_empty() {
-        jev::ballot_model().unwrap_or_else(|| "jev".into())
+    let voter = if b.model.is_empty() {
+        jev_drawer_voter()
     } else {
-        b.model.clone()
+        judge_voter(&b.model)
     };
-    let voter = judge_voter(&model);
+    let model = voter.strip_prefix("judge:").unwrap_or(voter.as_str());
     // The forecast first: a ballot cast with its forecast refused would
     // stand half recorded, and the command would still say it failed.
     write_prediction(issue, &voter, &serde_json::to_string(&b.forecast)?)?;
@@ -30221,7 +30402,7 @@ pub fn cast_jev(name: &str, issue: &str, b: &jev::Ballot) -> Result<()> {
         ],
         Some(&voter),
     )?;
-    let _ = write_trust(&judge_trust_row(&model), &[]);
+    let _ = write_trust(&judge_trust_row(model), &[]);
     let _ = ballot_sig::sign_ballot(issue, &voter, &b.choice);
     note_jev(
         issue,
@@ -33389,7 +33570,7 @@ pub fn require_deed(accession: &str) -> Result<()> {
 /// The accession a citation names, out of what a caller pastes: the id
 /// itself, `id=ID` (the line `deedar create` prints) or `accession=ID`, a
 /// whole `deedar create` output, or `file=sha256:HEX` (the product line,
-/// which `deedar current` resolves to its deed once the prefix is gone).
+/// which `deedar get` resolves to its deed once the prefix is gone).
 #[must_use]
 pub fn deed_token(raw: &str) -> String {
     let raw = raw.trim();
@@ -33413,7 +33594,8 @@ pub fn deed_token(raw: &str) -> String {
 
 /// [`require_deed`] that hands back the deed's own id, so a tracker cite
 /// carries `deed-<kind>-<slug>` even when the caller named the deed by its
-/// content digest.
+/// content digest. A superseded deed stays that deed: `deedar get` names
+/// it, and `deedar current` is not asked to follow the successor.
 ///
 /// # Errors
 ///
@@ -33423,11 +33605,17 @@ pub fn resolve_deed(accession: &str) -> Result<String> {
     if token.is_empty() {
         bail!("deed: an accession is required");
     }
-    let said = run_captured("deedar", &["current", &token]).map_err(|e| {
+    // `deedar current` follows a superseded deed to its successor.
+    // `deedar get` names the deed that was cited, by id or by the digest
+    // of that deed's bytes.
+    let said = run_captured("deedar", &["get", &token]).map_err(|e| {
         anyhow::anyhow!(
             "deed: {token} is not in the deed store: {e:#} (cite the `id=` line `deedar create` prints)"
         )
     })?;
+    if token.starts_with("deed-") {
+        return Ok(token);
+    }
     let named = said
         .stdout
         .lines()
@@ -33700,7 +33888,7 @@ fn protected_decision(
     }
     let mut seats = std::collections::BTreeMap::new();
     for (agent, _) in seat_ballots(counted, personas) {
-        seats.entry(holder_parts(agent).0).or_insert(agent);
+        seats.entry(voter_key(agent)).or_insert(agent);
     }
     if seats.len() < quorum {
         return Err(format!(
@@ -33709,7 +33897,7 @@ fn protected_decision(
             d.counted
         ));
     }
-    let own = holder_parts(pusher).0;
+    let own = voter_key(pusher);
     if seats.keys().all(|seat| *seat == own) {
         return Err(format!(
             "the only seat that voted on {issue} is {own}, the seat pushing; counted {}",
@@ -33754,11 +33942,13 @@ fn seat_ballots<'a>(
     ballots: &'a [Value],
     personas: &std::collections::BTreeSet<String>,
 ) -> Vec<(&'a str, &'a str)> {
+    let roster: std::collections::BTreeSet<String> =
+        personas.iter().map(|name| voter_key(name)).collect();
     ballots
         .iter()
         .filter_map(|b| Some((b["agent"].as_str()?.trim(), b["choice"].as_str()?)))
         .filter(|(agent, _)| {
-            !personas.contains(*agent)
+            !roster.contains(&voter_key(agent))
                 && !agent.starts_with("judge:")
                 && ballot_sig::parse_caster_persona_voter(agent).is_none()
         })
@@ -33821,7 +34011,7 @@ pub fn seats_decide(
             "the seats on {cite} split, so it decides nothing for a push: counted {counted}{left_out}"
         ));
     }
-    if seats.iter().all(|(a, _)| *a == pusher) {
+    if seats.iter().all(|(a, _)| voter_key(a) == voter_key(pusher)) {
         return Err(format!(
             "the only seat ballot on {cite} is from {pusher}, the seat pushing: counted {counted}{left_out}; \
              another seat votes {choice}, or the person approves this push"
@@ -33845,8 +34035,9 @@ fn cite_ballots(
     Ok((ballots, cite_roster(cite)?))
 }
 
-/// The persona names a push cite leaves out: the pack's roster. An empty
-/// roster is an answer from the pack. `PACKSET_URL=off` is not an answer.
+/// The persona names a push cite leaves out: the pack's roster, each
+/// name as [`voter_id`]. An empty roster is an answer from the pack.
+/// `PACKSET_URL=off` is not an answer.
 ///
 /// # Errors
 ///
@@ -33855,10 +34046,7 @@ fn cite_ballots(
 /// answers.
 pub fn cite_roster(cite: &str) -> std::result::Result<std::collections::BTreeSet<String>, String> {
     match personas_from_pack() {
-        Ok(personas) => Ok(personas
-            .into_iter()
-            .map(|p| p.name.trim().to_string())
-            .collect()),
+        Ok(personas) => Ok(personas.into_iter().map(|p| voter_key(&p.name)).collect()),
         Err(e) => Err(format!(
             "{cite}: the roster is not readable, so persona ballots cannot be left out: {e:#}"
         )),
@@ -47382,8 +47570,10 @@ workflow. The stage and the next step, the same reading as `ljos workflow`.",
         name: "panel",
         optional: true,
         step: "`== panel`, left out unless the issue is a decision. One brief per persona\n   \
-the issue speaks to. A session casts `ljos vote --as NAME --used DEED` for each.\n   \
-This seat's own ballots are one voice per session. A persona is its own voice,\n   \
+the issue speaks to. A session casts\n   \
+`ljos vote --as NAME --used DEED` for each.\n   \
+This seat's own ballots are one voice per session.\n   \
+A persona is its own voice,\n   \
 needs a real deed, and one deed backs one persona on an issue.",
     },
     SittingSection {
@@ -85552,8 +85742,9 @@ lesson, due yesterday, seat ada
         );
         assert_eq!(
             decide(&tags, "inky", 1).unwrap_err(),
-            "the only seat that voted on surf-ab12 is inky, the seat pushing; \
-             counted inky@a1 for approve, inky@b2 for approve"
+            "the only seat ballot on surf-ab12 is from inky, the seat pushing: \
+             counted inky@a1 for approve, inky@b2 for approve; \
+             another seat votes approve, or the person approves this push"
         );
         let unrecorded = [ballot("inky", "approve"), ballot("moss", "approve")];
         assert_eq!(

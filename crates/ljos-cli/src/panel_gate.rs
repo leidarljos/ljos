@@ -325,7 +325,7 @@ fn same_voter(signed: &str, voter: &str) -> bool {
 /// The cast writes this text and the signature covers it.
 #[must_use]
 pub(crate) fn same_counted_choice(stored: &str, choice: &str) -> bool {
-    stored.trim() == crate::ballot_choice(choice)
+    crate::ballot_choice(stored) == crate::ballot_choice(choice)
 }
 
 /// Whether a standing signature covers `choice` for `voter`. The tally

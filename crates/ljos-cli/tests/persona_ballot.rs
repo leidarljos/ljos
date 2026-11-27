@@ -936,6 +936,9 @@ elif cmd == "note":
     rows.setdefault(issue, []).append(" ".join(args[2:]))
     save(notes, rows)
     print("noted")
+elif cmd == "deed" and "--add" in args:
+    added = args[args.index("--add") + 1]
+    print(f"{{issue}}: deeds += {{added}}")
 else:
     print("ok")
 "#
@@ -1204,6 +1207,24 @@ fn canonical_names_share_one_voter_and_a_bad_choice_writes_nothing() {
     assert!(said.contains("1 ballot counts"), "{said}");
     assert!(said.contains("tls  yes"), "{said}");
     assert!(!said.contains("hold"), "{said}");
+    let (_ok, withdrawn) = rig.ljos("tls", &["vote", "case1", "--withdraw"]);
+    assert!(
+        withdrawn.contains("withdrawn") && !withdrawn.contains("holds no ballot"),
+        "{withdrawn}"
+    );
+    let (ok, said) = rig.ljos("TLS", &["vote", "case1"]);
+    assert!(ok && said.contains("0 ballots count"), "{said}");
+    let (ok, said) = rig.ljos("tls", &["vote", "case1", "--for", "no", "--used", "none"]);
+    assert!(ok, "{said}");
+    assert!(
+        said.contains("recorded on the tracker: tls for no"),
+        "{said}"
+    );
+    let (ok, said) = rig.ljos("TLS", &["vote", "case1"]);
+    assert!(
+        ok && said.contains("1 ballot counts") && said.contains("tls  no"),
+        "{said}"
+    );
 
     let (ok, said) = rig.ljos(
         "disk-saver",
@@ -1227,6 +1248,55 @@ fn canonical_names_share_one_voter_and_a_bad_choice_writes_nothing() {
     assert!(ok, "{said}");
     assert!(said.contains("1 ballot counts"), "{said}");
     assert!(said.contains("disk-saver  yes"), "{said}");
+
+    let (ok, said) = rig.ljos(
+        "Disk Saver",
+        &["vote", "space", "--for", "hold", "--used", "none"],
+    );
+    assert!(ok, "{said}");
+    let (ok, said) = rig.ljos("inky", &["vote", "space", "--for", "yes", "--used", "none"]);
+    assert!(ok, "{said}");
+    let (ok, said) = rig.ljos("inky", &["vote", "space"]);
+    assert!(
+        ok && said.contains("1 ballot counts")
+            && said.contains("folded into one voice")
+            && said.contains("inky")
+            && !said.contains("Saver hold")
+            && !said.contains("Saver yes"),
+        "{said}"
+    );
+    let (ok, said) = rig.ljos(
+        "Disk Saver",
+        &["vote", "hit", "--for", "hold", "--used", "none"],
+    );
+    assert!(ok, "{said}");
+    let (ok, said) = rig.ljos("disk", &["vote", "hit", "--for", "yes", "--used", "none"]);
+    assert!(ok, "{said}");
+    let bare = rig.ballots();
+    assert!(
+        bare.contains("\"agent\": \"disk-saver\"")
+            && bare.contains("\"choice\": \"hold\"")
+            && bare.contains("\"agent\": \"disk\"")
+            && bare.contains("\"choice\": \"yes\"")
+            && !bare.contains("Saver"),
+        "{bare}"
+    );
+    let (ok, said) = rig.ljos("disk", &["vote", "hit"]);
+    assert!(
+        ok && !said.contains("Saver hold") && !said.contains("Saver yes"),
+        "{said}"
+    );
+    let key = ljos_cli::ballot_sig::load_or_create(&rig.home.join("seat.key")).unwrap();
+    let note =
+        ljos_cli::ballot_sig::sign_bound(&key, "probe-space", "Disk Saver", "hold", "sess-1", "-");
+    let parsed = ljos_cli::ballot_sig::parse_note(&note).expect("quoted voter");
+    assert!(
+        note.contains("\"Disk Saver\"")
+            && parsed.voter == "Disk Saver"
+            && ljos_cli::ballot_sig::verifies("probe-space", &parsed)
+            && ljos_cli::voter_id(&parsed.voter) != ljos_cli::voter_id("disk"),
+        "{note}"
+    );
 
     let fullwidth_inky = "\u{FF49}\u{FF4E}\u{FF4B}\u{FF59}";
     let (ok, said) = rig.ljos(
@@ -1699,6 +1769,28 @@ fn mcp_vote_refuses_the_same_modes_as_the_cli() {
     let said = rig.mcp("tls", &[serde_json::json!({"issue": "jev1", "jev": true})]);
     assert!(said.contains("vote needs --as <AS_PERSONA>"), "{said}");
 
+    let (ok, said) = rig.ljos("tls", &["vote", "blank", "--for", "yes", "--used", "none"]);
+    assert!(ok, "{said}");
+    let kept = rig.ballots();
+    let (ok, said) = rig.ljos("tls", &["vote", "blank", "--withdraw", "--expect", " "]);
+    assert!(!ok, "{said}");
+    assert!(
+        said.contains("the argument '--withdraw' cannot be used with '--expect <EXPECT>'"),
+        "{said}"
+    );
+    assert_eq!(rig.ballots(), kept);
+    for blank in [" ", ""] {
+        let said = rig.mcp(
+            "tls",
+            &[serde_json::json!({"issue": "blank", "withdraw": true, "expect": blank})],
+        );
+        assert!(
+            said.contains("the argument '--withdraw' cannot be used with '--expect <EXPECT>'"),
+            "{blank:?}: {said}"
+        );
+        assert_eq!(rig.ballots(), kept, "{blank:?}");
+    }
+
     let said = rig.mcp(
         "tls",
         &[serde_json::json!({"issue": "keep", "withdraw": true})],
@@ -1723,4 +1815,520 @@ fn mcp_vote_refuses_the_same_modes_as_the_cli() {
     );
     assert!(!said.contains("packset url missing"), "{said}");
     assert!(rig.ballots().contains("ex1"), "{}", rig.ballots());
+}
+
+#[test]
+fn a_folded_choice_is_what_the_ballot_and_the_note_store() {
+    let rig = Rig::new();
+    let cases = [
+        ("fold-sp", "xdg  home", "xdg home"),
+        ("fold-qu", "say \"yes\"", "say 'yes'"),
+        ("fold-nb", "ship\u{00a0}it", "ship it"),
+    ];
+    for (issue, raw, stored) in cases {
+        let (ok, said) = rig.ljos("tls", &["vote", issue, "--for", raw, "--used", "none"]);
+        assert!(ok, "{raw:?}: {said}");
+        let (ok, tally) = rig.ljos("tls", &["vote", issue]);
+        assert!(
+            ok && tally.contains("1 ballot counts") && tally.contains(stored),
+            "{raw:?}: {tally}"
+        );
+    }
+    let bare = rig.ballots();
+    let notes = rig.notes();
+    assert!(
+        bare.contains("\"choice\": \"xdg home\"")
+            && !bare.contains("xdg  home")
+            && bare.contains("say 'yes'")
+            && bare.contains("ship it")
+            && notes.contains("xdg home")
+            && !notes.contains("xdg  home")
+            && notes.contains("say 'yes'")
+            && notes.contains("ship it"),
+        "ballots={bare}\nnotes={notes}"
+    );
+
+    let before_ballots = rig.ballots();
+    let before_notes = rig.notes();
+    let (ok, said) = rig.ljos(
+        "inky",
+        &[
+            "vote",
+            "hide-nbsp",
+            "--for",
+            "nit\u{00a0}used=not-a-deed",
+            "--used",
+            "none",
+        ],
+    );
+    assert!(!ok, "{said}");
+    assert!(said.contains("nothing was cast"), "{said}");
+    assert_eq!(rig.ballots(), before_ballots);
+    assert_eq!(rig.notes(), before_notes);
+
+    let unfolded_ballots = rig
+        .ballots()
+        .replace("xdg home", "xdg  home")
+        .replace("say 'yes'", "say \\\"yes\\\"");
+    let unfolded_notes = rig
+        .notes()
+        .replace("xdg home", "xdg  home")
+        .replace("say 'yes'", "say \\\"yes\\\"");
+    write_text(&rig.state.join("ballots.json"), &unfolded_ballots);
+    write_text(&rig.state.join("notes.json"), &unfolded_notes);
+    for issue in ["fold-sp", "fold-qu"] {
+        let (ok, tally) = rig.ljos("tls", &["vote", issue]);
+        assert!(ok && tally.contains("1 ballot counts"), "{issue}: {tally}");
+    }
+}
+
+#[test]
+fn a_named_deed_is_stored_without_following_its_successor() {
+    let rig = Rig::new();
+    let bin = rig.path.split(':').next().unwrap();
+    script(
+        Path::new(bin),
+        "deedar",
+        r#"#!/usr/bin/env python3
+import sys
+cmd = sys.argv[1] if len(sys.argv) >= 2 else ""
+token = sys.argv[2] if len(sys.argv) >= 3 else ""
+stale = "deed-file-fuse-v1"
+nxt = "deed-file-fuse-v2"
+digest = "sha256:" + ("ab" * 32)
+if cmd == "current" and token in {stale, digest, "file=" + digest}:
+    print(f"id={nxt}")
+    raise SystemExit(0)
+if cmd == "current" and token == nxt:
+    print(f"id={nxt}")
+    raise SystemExit(0)
+if cmd == "get" and token in {stale, digest, "file=" + digest}:
+    print(f"id={stale} kind=file")
+    raise SystemExit(0)
+if cmd == "get" and token == nxt:
+    print(f"id={nxt} kind=file")
+    raise SystemExit(0)
+raise SystemExit(1)
+"#,
+    );
+    let (reviewer_ok, reviewer) = rig.ljos(
+        "mina",
+        &[
+            "vote",
+            "fuse",
+            "--for",
+            "ship",
+            "--used",
+            "deed-file-fuse-v1",
+            "--as",
+            "reviewer",
+        ],
+    );
+    let after_reviewer = rig.ballots();
+    let (clerk_ok, clerk) = rig.ljos(
+        "mina",
+        &[
+            "vote",
+            "fuse",
+            "--for",
+            "pass",
+            "--used",
+            "deed-file-fuse-v2",
+            "--as",
+            "clerk",
+        ],
+    );
+    let after_clerk = rig.ballots();
+    assert!(
+        reviewer_ok
+            && after_reviewer.contains("\"used\": \"deed-file-fuse-v1\"")
+            && !after_reviewer.contains("deed-file-fuse-v2")
+            && clerk_ok
+            && after_clerk.contains("\"used\": \"deed-file-fuse-v2\""),
+        "reviewer {reviewer}\nclerk {clerk}\n{after_clerk}"
+    );
+    let digest = format!("sha256:{}", "ab".repeat(32));
+    let (hash_ok, hash_said) = rig.ljos(
+        "mina",
+        &[
+            "vote",
+            "hash",
+            "--for",
+            "pass",
+            "--used",
+            &digest,
+            "--as",
+            "historian",
+        ],
+    );
+    let file_used = format!("file={digest}");
+    let (file_ok, file_said) = rig.ljos(
+        "mina",
+        &[
+            "vote",
+            "filehash",
+            "--for",
+            "hold",
+            "--used",
+            &file_used,
+            "--as",
+            "archivist",
+        ],
+    );
+    let (add_ok, added) = rig.ljos("mina", &["deed", "demo-e5", "--add", "deed-file-fuse-v1"]);
+    let ballots = rig.ballots();
+    assert!(
+        hash_ok
+            && ballots.contains("\"used\": \"deed-file-fuse-v1\"")
+            && file_ok
+            && !hash_said.contains("deed-file-fuse-v2")
+            && !file_said.contains("deed-file-fuse-v2")
+            && add_ok
+            && added.contains("deeds += deed-file-fuse-v1")
+            && !added.contains("deed-file-fuse-v2"),
+        "hash {hash_said}\nfile {file_said}\nadd {added}\n{ballots}"
+    );
+}
+
+#[test]
+fn a_base_seat_row_withdraws_and_recasts() {
+    let rig = Rig::new();
+    write_text(
+        &rig.state.join("ballots.json"),
+        r#"{"keep":[{"agent":"Disk Saver","choice":"nit","used":"none"}]}"#,
+    );
+    let (_withdraw_ok, withdrawn) = rig.ljos("Disk Saver", &["vote", "keep", "--withdraw"]);
+    let gone = rig.ballots();
+    let (recast_ok, recast) = rig.ljos(
+        "Disk Saver",
+        &["vote", "keep", "--for", "no", "--used", "none"],
+    );
+    let bare = rig.ballots();
+    let key = ljos_cli::ballot_sig::load_or_create(&rig.home.join("seat.key")).unwrap();
+    let spellings = ["Tls", "INKY", "disk_saver", "Disk-Saver"];
+    let signed = spellings.iter().all(|voter| {
+        let note =
+            ljos_cli::ballot_sig::sign_bound(&key, "probe-case", voter, "nit", "sess-1", "-");
+        ljos_cli::ballot_sig::parse_note(&note).is_some_and(|parsed| {
+            parsed.voter == *voter && ljos_cli::ballot_sig::verifies("probe-case", &parsed)
+        })
+    });
+    assert!(
+        withdrawn.contains("withdrawn")
+            && !withdrawn.contains("holds no ballot")
+            && !gone.contains("Disk Saver")
+            && recast_ok
+            && recast.contains("recorded on the tracker: disk-saver for no")
+            && bare.contains("\"agent\": \"disk-saver\"")
+            && bare.contains("\"choice\": \"no\"")
+            && signed,
+        "signed={signed}\nwithdraw={withdrawn}\ngone={gone}\nrecast={recast}\nballots={bare}"
+    );
+}
+
+#[test]
+fn a_jev_ballot_withdraws_by_the_printed_name() {
+    let rig = Rig::new();
+    let bin = Path::new(rig.path.split(':').next().unwrap());
+    let state_s = rig.state.display().to_string();
+    script(
+        bin,
+        "vissue",
+        &format!(
+            r#"#!/usr/bin/env python3
+import json, os, sys, pathlib
+root = pathlib.Path({state_s:?})
+ballots = root / "ballots.json"
+notes = root / "notes.json"
+def load(path):
+    return json.loads(path.read_text()) if path.exists() else {{}}
+def save(path, value):
+    path.write_text(json.dumps(value))
+args = sys.argv[1:]
+cmd = args[0] if args else ""
+issue = args[1] if len(args) > 1 else ""
+agent = os.environ.get("VISSUE_AGENT", "")
+if cmd == "vote" and "--json" in args:
+    print(json.dumps(load(ballots).get(issue, [])))
+elif cmd == "vote" and "--withdraw" in args:
+    rows = load(ballots)
+    rows[issue] = [r for r in rows.get(issue, []) if r.get("agent") != agent]
+    save(ballots, rows)
+    print("withdrawn")
+elif cmd == "vote" and "--for" in args:
+    choice = args[args.index("--for") + 1]
+    used = args[args.index("--used") + 1] if "--used" in args else ""
+    rows = load(ballots)
+    kept = [r for r in rows.get(issue, []) if r.get("agent") != agent]
+    kept.append({{"agent": agent, "choice": choice, "used": used}})
+    rows[issue] = kept
+    save(ballots, rows)
+    print("ok")
+elif cmd == "show":
+    kept = load(notes).get(issue, [])
+    logbook = [{{"note": note}} for note in reversed(kept)]
+    print(json.dumps({{"id": issue, "title": "rig", "body": "Options: yes, no", "logbook": logbook}}))
+elif cmd == "note":
+    rows = load(notes)
+    rows.setdefault(issue, []).append(" ".join(args[2:]))
+    save(notes, rows)
+    print("noted")
+else:
+    print("ok")
+"#
+        ),
+    );
+    let stub = bin.join("jev-stub");
+    script(
+        bin,
+        "jev-stub",
+        r#"#!/usr/bin/env python3
+import json, sys
+json.load(sys.stdin)
+print(json.dumps({"answers": {
+    "ballot": {"choice": "yes", "probabilities": {"yes": 0.99, "no": 0.01}},
+    "forecast": {"choice": "yes", "probabilities": {"yes": 0.99, "no": 0.01}}
+}}))
+"#,
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let pack = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut sock) = stream else { break };
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 2048];
+            loop {
+                let n = std::io::Read::read(&mut sock, &mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = String::from_utf8_lossy(&buf);
+            let body = if head.contains("kind=persona") {
+                r#"{"atoms":[{"kind":"persona","name":"ada","anchor":0.5,"text":"careful","entities":["cipher"],"ts":"2026-01-01T00:00:00Z"}]}"#
+            } else {
+                r#"{"atoms":[],"ok":true}"#
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut sock, resp.as_bytes());
+        }
+    });
+    let cfg = rig.home.join(".config/ljos");
+    std::fs::create_dir_all(&cfg).unwrap();
+    write_text(
+        &cfg.join("jev.toml"),
+        format!(
+            "enabled = true\nbackend = \"command\"\nmodel = \"stub-judge\"\ncache_days = 0\ncommand = [\"{}\"]\n",
+            stub.display()
+        ),
+    );
+    let run = |args: &[&str]| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "starts a program outside git hook code"
+        )]
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_ljos"))
+            .args(args)
+            .env_clear()
+            .env("PATH", &rig.path)
+            .env("HOME", &rig.home)
+            .env("XDG_CONFIG_HOME", rig.home.join(".config"))
+            .env("XDG_DATA_HOME", rig.home.join(".local/share"))
+            .env("XDG_STATE_HOME", rig.home.join(".local/state"))
+            .env("XDG_RUNTIME_DIR", rig._dir.path().join("run"))
+            .env("GIT_CONFIG_GLOBAL", rig.home.join("gitconfig"))
+            .env("GIT_CONFIG_SYSTEM", rig.home.join("gitconfig"))
+            .env("VISSUE_ROOT", &rig.root)
+            .env("VISSUE_STATE", &rig.state)
+            .env("VISSUE_NO_ROUTE", "1")
+            .env("LJOS_SEAT", "mina")
+            .env("VISSUE_AGENT", "mina")
+            .env("SEAT_SESSION_ID", "sess-jev-0001")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("PACKSET_URL", &pack)
+            .env("PACKSET_WORKSPACE", "seat")
+            .output()
+            .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), said)
+    };
+    let (ok, cast) = run(&["vote", "demo-ajqr", "--jev", "--as", "ada"]);
+    let printed = cast
+        .lines()
+        .find(|line| line.contains(": cast "))
+        .and_then(|line| line.split(": cast ").next())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let cast_rows = rig.ballots();
+    let (withdraw_ok, withdrawn) = run(&["vote", "demo-ajqr", "--withdraw", "--as", &printed]);
+    let (tally_ok, tally) = run(&["vote", "demo-ajqr"]);
+    let (recast_ok, recast) = run(&[
+        "vote",
+        "demo-ajqr",
+        "--for",
+        "no",
+        "--used",
+        "deed-alice",
+        "--as",
+        "ada",
+    ]);
+    let (stray_ok, stray_cast) = run(&["vote", "demo-stray", "--jev", "--as", "ada"]);
+    let stray_rows = rig.ballots();
+    let (persona_withdraw_ok, persona_withdrawn) =
+        run(&["vote", "demo-stray", "--withdraw", "--as", "ada"]);
+    let after_persona = rig.ballots();
+    let (stray_tally_ok, stray_tally) = run(&["vote", "demo-stray"]);
+    let (again_ok, again) = run(&[
+        "vote",
+        "demo-stray",
+        "--for",
+        "yes",
+        "--used",
+        "deed-alice",
+        "--as",
+        "ada",
+    ]);
+    let (again_tally_ok, again_tally) = run(&["vote", "demo-stray"]);
+    assert!(
+        ok && printed == "judge:stub-judge"
+            && cast_rows.contains("\"agent\": \"judge:stub-judge\"")
+            && !cast_rows.contains("\"agent\": \"ada\"")
+            && withdraw_ok
+            && withdrawn.contains("withdrawn")
+            && tally_ok
+            && tally.contains("0 ballots count")
+            && recast_ok
+            && !recast.contains("already cast")
+            && stray_ok
+            && stray_rows.contains("\"agent\": \"judge:stub-judge\"")
+            && persona_withdraw_ok
+            && persona_withdrawn.contains("withdrawn")
+            && !after_persona.contains("judge:stub-judge")
+            && stray_tally_ok
+            && stray_tally.contains("0 ballots count")
+            && again_ok
+            && again_tally_ok
+            && again_tally.contains("1 ballot counts")
+            && !again_tally.contains("2 ballots"),
+        "cast={cast}\nwithdraw={withdrawn}\ntally={tally}\nrecast={recast}\nstray={stray_cast}\npersona_withdraw={persona_withdrawn}\nstray_tally={stray_tally}\nagain={again}\nagain_tally={again_tally}\nballots={}",
+        rig.ballots()
+    );
+}
+
+#[test]
+fn a_judge_id_withdraws_by_both_commands() {
+    let rig = Rig::new();
+    let row = r#"{"keep":[{"agent":"judge:stub-judge","choice":"yes","used":"judge:stub-judge"}]}"#;
+    let judge = "judge:stub-judge";
+    let refusal = "a persona name may use only";
+    write_text(&rig.state.join("ballots.json"), row);
+    let (_cli_ok, cli) = rig.ljos("mina", &["withdraw", "keep", "--as", judge]);
+    let after_cli = rig.ballots();
+    write_text(&rig.state.join("ballots.json"), row);
+    let (_vote_ok, vote) = rig.ljos("mina", &["vote", "keep", "--withdraw", "--as", judge]);
+    let after_vote = rig.ballots();
+    let (_again_ok, again) = rig.ljos("mina", &["vote", "keep", "--withdraw", "--as", judge]);
+    assert!(
+        !cli.contains(refusal)
+            && !after_cli.contains(judge)
+            && cli.contains("forecast for judge:stub-judge")
+            && !vote.contains(refusal)
+            && !after_vote.contains(judge)
+            && vote.contains("forecast for judge:stub-judge")
+            && !again.contains(refusal)
+            && again.contains("forecast for judge:stub-judge"),
+        "cli={cli}\nafter_cli={after_cli}\nvote={vote}\nafter_vote={after_vote}\nagain={again}"
+    );
+}
+
+/// One voter key: the pusher's spelling, a roster spelling, and a
+/// conversation tag. `Tls` is the stored `tls`. `Alice` is the stored
+/// `alice`. `inky@sha` is the seat `inky`, and a spaced name stays one
+/// quoted token on a signature note.
+#[test]
+fn one_voter_key_folds_the_pusher_the_roster_and_the_seat() {
+    let mut misses = Vec::new();
+    let none = std::collections::BTreeSet::new();
+    let lone = vec![serde_json::json!({"agent": "tls", "choice": "ship"})];
+    match ljos_cli::seats_decide("cite-r1", &lone, &none, "Tls") {
+        Err(err) if err.contains("the only seat ballot") && err.contains("Tls") => {}
+        other => misses.push(format!("pusher Tls: {other:?}")),
+    }
+    match ljos_cli::seats_decide("cite-r1", &lone, &none, "tls") {
+        Err(err) if err.contains("the only seat ballot") => {}
+        other => misses.push(format!("pusher tls: {other:?}")),
+    }
+
+    let roster: std::collections::BTreeSet<String> = ["Alice".to_string()].into();
+    let rows = vec![
+        serde_json::json!({"agent": "alice", "choice": "ship"}),
+        serde_json::json!({"agent": "tls", "choice": "ship"}),
+    ];
+    match ljos_cli::seats_decide("cite-r2", &rows, &roster, "tls") {
+        Err(err) if err.contains("the only seat ballot") && !err.contains("alice for") => {}
+        other => misses.push(format!("roster Alice: {other:?}")),
+    }
+
+    let (seat, _) = ljos_cli::holder_parts("inky@sha");
+    let tagged = vec![serde_json::json!({"agent": "inky@sha", "choice": "yes"})];
+    for pusher in ["inky", "inky@sha"] {
+        match ljos_cli::seats_decide("cite-r3", &tagged, &none, pusher) {
+            Err(err) if err.contains("the only seat ballot") => {}
+            other => misses.push(format!("tag {pusher} holder {seat}: {other:?}")),
+        }
+    }
+    if seat != "inky" {
+        misses.push(format!("holder {seat}"));
+    }
+    if ljos_cli::voter_id("tls-rev1") != "tls-rev1" {
+        misses.push(format!("pid suffix {}", ljos_cli::voter_id("tls-rev1")));
+    }
+    if ljos_cli::voter_id("inky@39u") == ljos_cli::voter_id("inky") {
+        misses.push("a pin inky@39u must stay a different voter from inky".to_string());
+    }
+
+    let rig = Rig::new();
+    write_text(&rig.home.join("gitconfig"), b"");
+    let (ok, said) = rig.ljos(
+        "inky@sha",
+        &["vote", "tag", "--for", "yes", "--used", "none"],
+    );
+    let bare = rig.ballots();
+    let notes = rig.notes();
+    if !ok
+        || !bare.contains("\"agent\": \"inky\"")
+        || bare.contains("inky-sha")
+        || bare.contains("inky@")
+        || !notes.contains("ballot-sig: inky ")
+        || notes.contains("inky-sha")
+    {
+        misses.push(format!(
+            "stored seat: ok={ok} said={said} ballots={bare} notes={notes}"
+        ));
+    }
+
+    let key = ljos_cli::ballot_sig::load_or_create(&rig.home.join("seat.key")).unwrap();
+    let note =
+        ljos_cli::ballot_sig::sign_bound(&key, "probe-space", "Disk Saver", "hold", "sess-1", "-");
+    let quoted = ljos_cli::ballot_sig::parse_note(&note).is_some_and(|parsed| {
+        parsed.voter == "Disk Saver" && ljos_cli::ballot_sig::verifies("probe-space", &parsed)
+    });
+    if !note.contains("\"Disk Saver\"") || !quoted {
+        misses.push(format!("quoted seat: {note}"));
+    }
+
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
 }

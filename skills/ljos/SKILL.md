@@ -172,8 +172,10 @@ sitting that gets that far.
 10. `== workflow`, left out when neither the issue nor its parent carries a
    workflow. The stage and the next step, the same reading as `ljos workflow`.
 11. `== panel`, left out unless the issue is a decision. One brief per persona
-   the issue speaks to. A session casts `ljos vote --as NAME --used DEED` for each.
-   This seat's own ballots are one voice per session. A persona is its own voice,
+   the issue speaks to. A session casts
+   `ljos vote --as NAME --used DEED` for each.
+   This seat's own ballots are one voice per session.
+   A persona is its own voice,
    needs a real deed, and one deed backs one persona on an issue.
 12. `== recall`. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
    cited so far.
@@ -184,11 +186,11 @@ A decision is handed to the panel by the sitting. An issue tagged
 `decision`, typed `decision`, or with a body line opening `Options:`
 binds the `company-panel` recipe, and the sitting writes one brief per
 persona the issue speaks to under `== panel`. A session casts
-`ljos vote ISSUE --for OPTION --used DEED --as NAME` for each persona. The ballot
-records the casting seat, the parent session and the persona.
+`ljos vote ISSUE --for OPTION --used DEED --as NAME`
+for each persona. The ballot records the casting seat, the parent
+session and the persona.
 This seat's own ballots are one voice per session. A persona is its
-own voice, needs a real deed, and one deed backs one persona on an
-issue.
+own voice, needs a real deed, and one deed backs one persona on an issue.
 `ljos consensus ISSUE` records each ballot.
 A close of a decision is refused
 with fewer than two ballots. Put any choice with more than one defensible
@@ -389,16 +391,18 @@ cloud seat git runs only the hooks the repository and the login name.
   for a broad audience beside a domain expert, write each once:
   `ljos persona NAME --anchor A --view "..." --about DOMAIN...`, and
   `ljos personas` prints the roster in the pack. A session casts
-  `ljos vote ISSUE --for OPTION --used DEED --as NAME` for each persona. The anchor in
-  `[0, 1]` is how far it moves off its ballot in the settle; 0 never moves.
+  `ljos vote ISSUE --for OPTION --used DEED --as NAME`
+  for each persona. The anchor in `[0, 1]` is how far it
+  moves off its ballot in the settle; 0 never moves.
   A trust row scoped with `--about DOMAIN` applies when the issue's title
   carries that word; `learn` writes its rows scoped to what the issue's
   island is about, so being wrong on one topic costs nothing elsewhere.
   A panel starts from
   `ljos brief NAME ISSUE` (the view, the bound playbook's full recipe,
   the five named principles, the arena rubric, what the seat knows on its
-  domains, the working set). Each persona casts `ljos vote --used DEED --as NAME`,
-  then the seat runs `ljos consensus`; over MCP the `run_a_panel` prompt
+  domains, the working set). Each persona casts
+  `ljos vote --used DEED --as NAME`, then the seat runs
+  `ljos consensus`; over MCP the `run_a_panel` prompt
   orders it, and without MCP `ljos panel ISSUE --out DIR` writes one brief
   per persona.
   `ljos panel ISSUE --cloud` writes one prompt file per persona in that
@@ -419,8 +423,9 @@ cloud seat git runs only the hooks the repository and the login name.
   many after it, or a comma list). A panel that seats everyone is a
   count. Model names on a
   playbook are optional spawn hints; every member still casts its own
-  `ljos vote --used DEED --as NAME`, then the seat runs `ljos consensus`. One playbook
-  step per subagent; no resume across phases. Each brief is a file to start a
+  `ljos vote --used DEED --as NAME`, then the seat runs
+  `ljos consensus`. One playbook step per subagent; no resume
+  across phases. Each brief is a file to start a
   subagent from. A panel
   member's own lesson is `ljos note ISSUE "..."`, an unreviewed note the
   prompt does not treat as a fact; the seat still reads it. A ballot
@@ -454,8 +459,8 @@ cloud seat git runs only the hooks the repository and the login name.
   row. This seat's own ballots that
   share a parent stay recorded and count as one voice. A persona that
   shares that parent is its own voice and is not folded into the seat
-  or into another persona. One shell is one
-  voice for this seat's own ballots, and one agent runner's root session
+  or into another persona. One shell is one voice
+  for this seat's own ballots, and one agent runner's root session
   is one voice for those ballots. A subagent of
   that root counts with its parent. The tally names
   that parent, that shell or that runner, and the ballots folded into it. A subagent
@@ -472,8 +477,7 @@ cloud seat git runs only the hooks the repository and the login name.
   session is recorded. This seat's own ballots that share a shell or an
   agent runner's root session are one voice. A persona is not folded
   into that voice, even when it shares the parent. Consensus counts the
-  seat voice
-  once, including for a protected push, and it
+  seat voice once, including for a protected push, and it
   names the ballots it folded and why.
   Persona ballots and Jev
   ballots are advisory. The push check counts seat ballots from another seat. A
@@ -861,9 +865,10 @@ release the first. `ljos seat` prints both names
 and where they came from. `LJOS_SEAT` names the seat; a `*_SESSION_ID` still
 names the holder. `VISSUE_AGENT` is
 the tracker's own name for the same thing; a person at a terminal is
-their login user. `--as` on a ballot or a withdrawal names a persona
-only when `--used` names a deed that resolves. This seat's own ballot
-may pass `--used none`. Another seat that has stood is refused.
+their login user. `--as` names a persona for a cast only when `--used`
+names a deed that resolves. A withdrawal names a persona only when it
+matches a stored voter. This seat's own ballot may pass `--used none`.
+Another seat that has stood is refused.
 
 A tracker write needs a seat somebody named, as a ballot does: `note`,
 `claim`, `sitting`, `finish`, `release`, `complete`, `file`, `options`,

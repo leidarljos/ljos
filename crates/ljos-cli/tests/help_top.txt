@@ -74,7 +74,7 @@ Coordination:
   reply        Answer a message. The reply goes to its sender and keeps its issue
   group        List a group of seats, or change who is in it
   wake         Set how an idle seat is told that mail arrived
-  vote         Cast this seat's vote, or a persona's, or show the tally when `--for` is omitted
+  vote         Cast a seat or persona vote, or show the tally
   consensus    Show what the votes decide, and whether a push may proceed
   panel        Write one brief per persona for an issue, or start those personas
   persona      Define a persona, a voter that keeps its own view

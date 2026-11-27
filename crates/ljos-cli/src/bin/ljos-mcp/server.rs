@@ -1202,16 +1202,18 @@ pub struct PreferArgs {
 }
 
 /// An option name, or a JSON object of option to share.
-/// Empty and null are absent, so a ballot without a forecast still stands.
+/// Null is absent, so a ballot without a forecast still stands. A blank
+/// or whitespace string is present and empty: a cast records no forecast,
+/// and a withdrawal is refused the way the CLI refuses `--expect`.
 fn expect_text(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::Null => None,
         serde_json::Value::String(s) => {
-            let s = s.trim();
-            if s.is_empty() {
-                None
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Some(String::new())
             } else {
-                Some(s.to_string())
+                Some(trimmed.to_string())
             }
         }
         other => Some(other.to_string()),
@@ -3146,7 +3148,7 @@ impl LjosServer {
                 Ok(Json(Said { text, aside: None }))
             }
             ljos_cli::VoteRequest::Withdraw { as_persona } => {
-                let who = ljos_cli::ballot_voter_on(&args.issue, as_persona).map_err(vote_fault)?;
+                let who = ljos_cli::withdraw_voter(&args.issue, as_persona).map_err(vote_fault)?;
                 let ballot_issue = ljos_cli::panel_gate::standing_ballot_issue(&args.issue, &who);
                 let mut text =
                     match habitat_as("vissue", &["vote", &args.issue, "--withdraw"], Some(&who)) {
@@ -3189,13 +3191,15 @@ impl LjosServer {
             }
             ljos_cli::VoteRequest::Jev { as_persona } => {
                 let name = as_persona;
-                let cast = ljos_cli::panel_gate::claim_session_ballot(&args.issue, name)
+                let voter = ljos_cli::jev_drawer_voter();
+                let cast = ljos_cli::panel_gate::claim_session_ballot(&args.issue, &voter)
                     .map_err(vote_fault)?;
                 let text = match ljos_cli::jev_vote(name, &args.issue).map_err(vote_fault)? {
                     ljos_cli::JevVote::Cast(b) => {
                         cast.keep();
+                        let voter = ljos_cli::jev_stored_voter(&b);
                         format!(
-                            "{name}: Jev cast {} at confidence {:.2}\n",
+                            "{voter}: cast {} for {name} at confidence {:.2}\n",
                             b.choice, b.confidence
                         )
                     }

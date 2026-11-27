@@ -1885,7 +1885,7 @@ enum Cmd {
         #[arg(long)]
         apply: bool,
     },
-    /// Cast this seat's vote, or a persona's, or show the tally when `--for` is omitted.
+    /// Cast a seat or persona vote, or show the tally.
     ///
     /// This seat's own ballots, with no `--as` or with `--as` this seat, are one
     /// voice per session. A persona is its own voice. It needs `--used` naming a
@@ -1904,9 +1904,8 @@ enum Cmd {
         /// or push cite weighs it.
         #[arg(long)]
         confidence: Option<f64>,
-        /// Ids of stored files this ballot used, comma-separated.
-        /// This seat's own ballot may pass `none`. A persona needs a real
-        /// deed accession, not `none`. Required when `--for` is set.
+        /// Deed ids, comma-separated. This seat may pass `none`.
+        /// A persona needs a real deed. Required with `--for` or `--against`.
         #[arg(long)]
         used: Option<String>,
         /// The option you expect the others to pick, or a JSON object of
@@ -7402,20 +7401,17 @@ fn run_command() -> Result<()> {
             )?;
             match request {
                 ljos_cli::VoteRequest::Withdraw { as_persona } => {
-                    let who = ljos_cli::ballot_voter_on(&issue, as_persona)?;
+                    let who = ljos_cli::withdraw_voter(&issue, as_persona)?;
                     ljos_cli::tell_raw!("{}", ljos_cli::undo::withdraw_ballot(&issue, &who)?);
                 }
                 ljos_cli::VoteRequest::Jev { as_persona } => {
                     let name = as_persona;
-                    let cast = ljos_cli::panel_gate::claim_session_ballot(&issue, name)?;
+                    let voter = ljos_cli::jev_drawer_voter();
+                    let cast = ljos_cli::panel_gate::claim_session_ballot(&issue, &voter)?;
                     match ljos_cli::jev_vote(name, &issue)? {
                         ljos_cli::JevVote::Cast(b) => {
                             cast.keep();
-                            let voter = if b.model.is_empty() {
-                                name.to_string()
-                            } else {
-                                ljos_cli::judge_voter(&b.model)
-                            };
+                            let voter = ljos_cli::jev_stored_voter(&b);
                             ljos_cli::tell!(
                                 "{voter}: cast {} for {name} at confidence {:.2}",
                                 b.choice,
@@ -8606,7 +8602,7 @@ fn run_command() -> Result<()> {
                     ljos_cli::tell_raw!("{}", ljos_cli::undo::withdraw_note(&issue, &seat, &text)?);
                 }
                 None => {
-                    let who = ljos_cli::ballot_voter("withdraw", as_persona.as_deref())?;
+                    let who = ljos_cli::withdraw_voter(&issue, as_persona.as_deref())?;
                     ljos_cli::tell_raw!("{}", ljos_cli::undo::withdraw_ballot(&issue, &who)?);
                 }
             }
