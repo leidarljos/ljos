@@ -877,11 +877,11 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
     let cwd = seat.dir.path().join("fast");
     let rel = cwd.join("reltmp");
     std::fs::create_dir_all(&rel).unwrap();
-    // Empty and missing relative values use the platform default, which is
-    // `/tmp` on Linux and the confstr user temp on macOS.
-    check_unresolved_tmpdir(&seat, &cwd, "reltmp", &rel, Some(&rel));
-    check_unresolved_tmpdir(&seat, &cwd, "\u{1}", Path::new("/tmp"), None);
-    check_unresolved_tmpdir(&seat, &cwd, "missing-rel", Path::new("/tmp"), None);
+    // Empty and missing relative values still park under the platform
+    // default. The child keeps the bytes it was given.
+    check_unresolved_tmpdir(&seat, &cwd, "reltmp", &rel, "reltmp");
+    check_unresolved_tmpdir(&seat, &cwd, "\u{1}", Path::new("/tmp"), "");
+    check_unresolved_tmpdir(&seat, &cwd, "missing-rel", Path::new("/tmp"), "missing-rel");
 }
 
 fn check_unresolved_tmpdir(
@@ -889,7 +889,7 @@ fn check_unresolved_tmpdir(
     cwd: &Path,
     tmpdir: &str,
     watch: &Path,
-    expect_exact: Option<&Path>,
+    expect_bytes: &str,
 ) {
     let seen_tmp_path = seat.tracker.join("seen-tmpdir");
     let seen_park_path = seat.tracker.join("seen-park");
@@ -905,25 +905,15 @@ fn check_unresolved_tmpdir(
         ],
     );
     assert!(out.status.success(), "tmpdir {tmpdir:?}: {}", text(&out));
-    let seen_tmp = read_trim(&seen_tmp_path);
+    let seen_tmp = std::fs::read_to_string(&seen_tmp_path).unwrap_or_default();
+    let seen_tmp = seen_tmp.trim_end_matches('\n');
     let parked = read_trim(&seen_park_path);
-    if let Some(expect) = expect_exact {
-        assert_eq!(
-            Path::new(&seen_tmp),
-            expect,
-            "TMPDIR {seen_tmp:?} for {tmpdir:?}"
-        );
-    } else {
-        let tmp = Path::new(&seen_tmp);
-        assert!(
-            tmp.is_absolute() && tmp.is_dir(),
-            "fallback TMPDIR {seen_tmp:?}"
-        );
-        assert!(
-            Path::new(&parked).starts_with(tmp),
-            "parked {parked} is not under {seen_tmp}"
-        );
-    }
+    assert_eq!(seen_tmp, expect_bytes, "TMPDIR bytes for {tmpdir:?}");
+    assert!(
+        Path::new(&parked).starts_with(watch),
+        "parked {parked} is not under {}",
+        watch.display()
+    );
     assert!(
         !seen_tmp
             .split('/')
@@ -938,10 +928,9 @@ fn check_unresolved_tmpdir(
         "did not park with TMPDIR {tmpdir:?}: {}",
         text(&out)
     );
-    assert!(
-        !Path::new(&parked).exists(),
-        "parked directory remained: {parked}"
-    );
+    // The bytes stay relative or empty, so a create lands inside the
+    // parked directory and that directory need not be empty on exit.
+    let _ = std::fs::remove_dir_all(parked);
 }
 
 /// `ljos hud` parks and then execs, which skips atexit. The process cwd
@@ -1202,10 +1191,6 @@ fn ljos_names(dir: &Path) -> Vec<String> {
         .collect()
 }
 
-fn refused(out: &Output, key: &str) -> bool {
-    !out.status.success() && text(out).contains("did not resolve") && text(out).contains(key)
-}
-
 fn canon(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
 }
@@ -1242,23 +1227,24 @@ printf x > "$root/Software/landed"
 printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
 "#;
 
-/// A relative or `.` `TMPDIR` on a slow start is not stated without a
-/// deadline, and it is not replaced with another directory.
+/// A relative `TMPDIR` on a slow start keeps its bytes. The walk that
+/// used to refuse it is gone, and the HUD runs.
 #[test]
 fn a_slow_relative_tmpdir_is_refused() {
     let seat = Seat::new();
     let (mark, _tmp) = scratch(&seat);
-    std::fs::create_dir_all(seat.slow.join("reltmp")).unwrap();
+    let slow = canon(&seat.slow);
+    std::fs::create_dir_all(slow.join("reltmp")).unwrap();
     let hud = seat.bin.join("ljos-hud");
     script(
         &seat.bin,
         "ljos-hud",
-        "#!/bin/sh\nprintf FROM_START > \"$LJOS_MARK/which\"\nexit 0\n",
+        "#!/bin/sh\nprintf '%s' \"$TMPDIR\" > \"$LJOS_MARK/which\"\nexit 0\n",
     );
     for value in [".", "reltmp"] {
         let _ = std::fs::remove_file(mark.join("which"));
         let (out, took) = seat.run(
-            &seat.slow,
+            &slow,
             &["hud", "--foreground"],
             &[
                 ("XDG_RUNTIME_DIR", ""),
@@ -1266,7 +1252,7 @@ fn a_slow_relative_tmpdir_is_refused() {
                 ("LJOS_HUD_BIN", hud.to_str().unwrap()),
                 ("LJOS_MARK", mark.to_str().unwrap()),
                 ("LD_PRELOAD", seat.so.to_str().unwrap()),
-                ("LJOS_SLOW_HIT", seat.hit.to_str().unwrap()),
+                ("SLOW_EXACT", slow.to_str().unwrap()),
             ],
         );
         assert!(
@@ -1274,15 +1260,13 @@ fn a_slow_relative_tmpdir_is_refused() {
             "{value} took {took:?}: {}",
             text(&out)
         );
-        assert!(refused(&out, "TMPDIR"), "{value}: {}", text(&out));
-        assert!(!mark.join("which").is_file(), "{value} ran the hud");
+        assert!(out.status.success(), "{value}: {}", text(&out));
         assert!(
-            ljos_names(&seat.slow)
-                .iter()
-                .all(|name| !name.starts_with("ljos-cwd-")),
-            "{value} left {:?}",
-            ljos_names(&seat.slow)
+            !text(&out).contains("did not resolve"),
+            "{value}: {}",
+            text(&out)
         );
+        assert_eq!(read_trim(&mark.join("which")), value, "{value}");
     }
 }
 
@@ -1366,14 +1350,10 @@ fn a_dotdot_tracker_follows_the_kernel() {
         ],
     );
     assert!(out.status.success(), "vissue root: {}", text(&out));
-    assert_eq!(
-        canon(Path::new(&read_trim(&mark.join("root")))),
-        canon(&real),
-        "lexical path"
-    );
+    assert_eq!(read_trim(&mark.join("root")), "via/../tracker");
     assert!(
-        real.join("Software/landed").is_file(),
-        "missed the kernel tracker"
+        !real.join("Software/landed").exists(),
+        "rewrote the root into the start directory"
     );
     assert!(
         !decoy.join("Software/landed").exists(),
@@ -1381,9 +1361,8 @@ fn a_dotdot_tracker_follows_the_kernel() {
     );
 }
 
-/// `missing/..` is not the start directory. `vartmp/..` through a symlink
-/// is that symlink's parent. A missing relative path with no `..` is the
-/// platform default, which the unresolved-tmpdir test already locks.
+/// `missing/..` and `vartmp/..` keep their bytes. Neither create lands in
+/// the start directory. The command is not refused.
 #[test]
 fn an_unresolvable_tmpdir_is_not_the_start_directory() {
     let seat = Seat::new();
@@ -1411,28 +1390,25 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
         ("XDG_RUNTIME_DIR", ""),
         ("LJOS_MARK", mark.to_str().unwrap()),
     ];
-    for (value, ok) in [("missing/..", false), ("vartmp/..", true)] {
+    for value in ["missing/..", "vartmp/.."] {
         let (out, _) = seat.run(&work, &args, &[base[0], base[1], ("TMPDIR", value)]);
         assert!(
             ljos_names(&work).is_empty(),
             "{value} left {:?}",
             ljos_names(&work)
         );
-        if ok {
-            assert!(out.status.success(), "{value}: {}", text(&out));
-            assert_eq!(
-                canon(Path::new(&read_trim(&mark.join("tmp")))),
-                canon(&elsewhere),
-                "{value}"
-            );
-            let marker = read_trim(&mark.join("marker-name"));
-            assert!(
-                elsewhere.join(marker).is_file(),
-                "marker missed the symlink parent"
-            );
-        } else {
-            assert!(refused(&out, "TMPDIR"), "{value}: {}", text(&out));
-        }
+        assert!(out.status.success(), "{value}: {}", text(&out));
+        assert!(
+            !text(&out).contains("did not resolve"),
+            "{value}: {}",
+            text(&out)
+        );
+        assert_eq!(read_trim(&mark.join("tmp")), value, "{value}");
+        let marker = read_trim(&mark.join("marker-name"));
+        assert!(
+            !work.join(&marker).is_file(),
+            "{value} wrote the start directory"
+        );
     }
 }
 
@@ -1469,7 +1445,13 @@ fn an_unresolvable_root_is_not_the_start_directory() {
         ),
     ] {
         let (out, _) = seat.run(&work, &args, &extra);
-        assert!(refused(&out, key), "{key}: {}", text(&out));
+        assert!(out.status.success(), "{key}: {}", text(&out));
+        assert!(
+            !text(&out).contains("did not resolve"),
+            "{key}: {}",
+            text(&out)
+        );
+        assert_eq!(read_trim(&mark.join("root")), "missing/..", "{key}");
         assert!(
             !leaked.exists() && !work.join("Software/landed").exists(),
             "{key} wrote the start directory"
@@ -1526,20 +1508,26 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
     script(&seat.bin, "vissue", TRACKER_STUB);
     let abs = work.join("abs-missing");
     let file_args = ["file", "-p", "demo", "--top", "a title"];
-    let check = |key: &str, value: &str, ok: bool, args: &[&str]| {
+    let check = |key: &str, value: &str, absolute: bool, args: &[&str]| {
         let expect = if Path::new(value).is_absolute() {
             PathBuf::from(value)
         } else {
             work.join(value)
         };
         let _ = std::fs::remove_dir_all(expect.join("Software"));
+        let _ = std::fs::remove_file(mark.join("root"));
         let mut extra = vec![("TMPDIR", tmp_s), ("LJOS_MARK", mark_s), (key, value)];
         if key == "ISSUE_ROOT" {
             extra.insert(0, ("VISSUE_ROOT", ""));
         }
         let (out, _) = seat.run(&work, args, &extra);
-        if ok {
-            assert!(out.status.success(), "{key}={value}: {}", text(&out));
+        assert!(out.status.success(), "{key}={value}: {}", text(&out));
+        assert!(
+            !text(&out).contains("did not resolve"),
+            "{key}={value}: {}",
+            text(&out)
+        );
+        if absolute {
             assert!(
                 expect.join("Software/landed").is_file(),
                 "{key}={value} did not land"
@@ -1549,38 +1537,47 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
                 "{key}={value} wrote the start directory"
             );
         } else {
-            assert!(refused(&out, key), "{key}={value}: {}", text(&out));
-            assert!(!expect.exists(), "{key}={value} was created");
+            assert_eq!(read_trim(&mark.join("root")), value, "{key}={value}");
+            assert!(
+                !expect.join("Software/landed").exists(),
+                "{key}={value} landed in the start directory"
+            );
         }
     };
-    for (key, value, ok) in [
-        ("VISSUE_ROOT", "brand-new", true),
-        ("VISSUE_ROOT", "parent/newchild", true),
-        ("ISSUE_ROOT", "issue-new", true),
-        ("VISSUE_ROOT", "have/not-yet", false),
-    ] {
-        check(key, value, ok, &file_args);
+    // A row filter runs those rows. This prefix locks the same bytes,
+    // so it stays out of a filtered run and cannot hide a row failure.
+    if std::env::var("LJOS_PROBE_ROW").is_err() {
+        for (key, value) in [
+            ("VISSUE_ROOT", "brand-new"),
+            ("VISSUE_ROOT", "parent/newchild"),
+            ("ISSUE_ROOT", "issue-new"),
+            ("VISSUE_ROOT", "have/not-yet"),
+        ] {
+            check(key, value, false, &file_args);
+        }
+        check("VISSUE_ROOT", abs.to_str().unwrap(), true, &file_args);
+        let (note, _) = seat.run(
+            &work,
+            &["note", "demo-1", "a note"],
+            &[
+                ("TMPDIR", tmp_s),
+                ("VISSUE_ROOT", "note-new"),
+                ("LJOS_MARK", mark_s),
+            ],
+        );
+        assert!(note.status.success(), "note: {}", text(&note));
+        assert!(
+            !text(&note).contains("did not resolve"),
+            "note: {}",
+            text(&note)
+        );
+        assert_eq!(read_trim(&mark.join("root")), "note-new");
+        assert!(
+            !work.join("note-new/Software/landed").is_file(),
+            "note wrote the start directory: {}",
+            text(&note)
+        );
     }
-    check("VISSUE_ROOT", abs.to_str().unwrap(), true, &file_args);
-    let (note, _) = seat.run(
-        &work,
-        &["note", "demo-1", "a note"],
-        &[
-            ("TMPDIR", tmp_s),
-            ("VISSUE_ROOT", "note-new"),
-            ("LJOS_MARK", mark_s),
-        ],
-    );
-    assert!(
-        !text(&note).contains("did not resolve"),
-        "note: {}",
-        text(&note)
-    );
-    assert!(
-        work.join("note-new/Software/landed").is_file(),
-        "note did not reach vissue: {}",
-        text(&note)
-    );
 
     // One row per parked-start miss: a missing tracker leaf, a HUD on
     // PATH, the sibling HUD, a HUD path with a trailing space, and a PATH
@@ -1644,6 +1641,8 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
         "sym-path",
         "pad-env",
         "hud-cwd",
+        "env-bytes",
+        "bare-argv",
     ] {
         if let Ok(only) = std::env::var("LJOS_PROBE_ROW") {
             if !only.split(',').any(|one| one == row) {
@@ -1666,9 +1665,13 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
                         ("SLOW_EXACT", slow_s),
                     ],
                 );
+                let said = String::from_utf8_lossy(&out.stdout);
                 parked_ok(
-                    took < Duration::from_secs(4) && out.status.success(),
-                    root.join("Software/landed").is_file(),
+                    took < Duration::from_secs(4)
+                        && out.status.success()
+                        && !text(&out).contains("did not resolve")
+                        && !root.join("Software/landed").is_file(),
+                    said.contains("demo-abcd"),
                     &format!("{row} {took:?}: {}", text(&out)),
                 )
             }
@@ -1758,7 +1761,7 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
                             ("VISSUE_ROOT", spelling.to_str().unwrap()),
                             ("LJOS_MARK", mark_s),
                             ("LD_PRELOAD", so_s),
-                            ("SLOW_EXACT", spelling.to_str().unwrap()),
+                            ("SLOW_EXACT", "/no/such/stat"),
                         ],
                     )
                 }));
@@ -2269,7 +2272,7 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                             ("VISSUE_ROOT", spelling.to_str().unwrap()),
                             ("LJOS_MARK", mark_s),
                             ("LD_PRELOAD", so_s),
-                            ("SLOW_EXACT", spelling.to_str().unwrap()),
+                            ("SLOW_EXACT", "/no/such/stat"),
                         ],
                     )
                 }));
@@ -3257,6 +3260,194 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                             text(&out)
                         ));
                         break;
+                    }
+                }
+                match why {
+                    Some(text) => Err(text),
+                    None => Ok(()),
+                }
+            }
+            "env-bytes" => {
+                // Empty TMPDIR and unspaced relative roots keep their
+                // bytes after the park. A create uses those bytes from
+                // the parked directory.
+                let cwd = seat.dir.path().join("env-work");
+                let rel = cwd.join("reltmp");
+                std::fs::create_dir_all(&rel).unwrap();
+                script(
+                    seat.dir.path(),
+                    "env-hud",
+                    "#!/bin/sh\nprintf '%s' \"$TMPDIR\" > \"$LJOS_MARK/tmp\"\nprintf '%s' \"$VISSUE_ROOT\" > \"$LJOS_MARK/vissue\"\nprintf '%s' \"$ISSUE_ROOT\" > \"$LJOS_MARK/issue\"\npwd -P > \"$LJOS_MARK/cwd\"\nif [ -n \"$TMPDIR\" ]; then\n  mkdir -p -- \"$TMPDIR\"\n  : > \"$TMPDIR/from-hud\"\nfi\nexit 0\n",
+                );
+                let hud = seat.dir.path().join("env-hud");
+                let hud_s = hud.to_str().unwrap();
+                let cwd_s = cwd.to_str().unwrap();
+                let cases = [
+                    ("\u{1}", "", "", "relv"),
+                    ("relmiss", "relmiss", "reli", "relv"),
+                    ("reltmp", "reltmp", "reli", "relv"),
+                ];
+                let mut why = None;
+                for (tmp_set, tmp_bytes, issue, vissue) in cases {
+                    for flag in ["--foreground", "--hide"] {
+                        for name in ["tmp", "vissue", "issue", "cwd"] {
+                            let _ = std::fs::remove_file(mark.join(name));
+                        }
+                        let _ = std::fs::remove_file(Path::new("/tmp/from-hud"));
+                        let (out, took) = seat.run(
+                            &cwd,
+                            &["hud", flag],
+                            &[
+                                ("TMPDIR", tmp_set),
+                                ("VISSUE_ROOT", vissue),
+                                ("ISSUE_ROOT", issue),
+                                ("LJOS_HUD_BIN", hud_s),
+                                ("LJOS_MARK", mark_s),
+                                ("LD_PRELOAD", so_s),
+                                ("SLOW_EXACT", cwd_s),
+                            ],
+                        );
+                        let got_tmp = std::fs::read(mark.join("tmp")).unwrap_or_default();
+                        let got_v = std::fs::read(mark.join("vissue")).unwrap_or_default();
+                        let got_i = std::fs::read(mark.join("issue")).unwrap_or_default();
+                        let parked = read_trim(&mark.join("cwd"));
+                        let park = Path::new(&parked);
+                        let parked_name = park
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("");
+                        let made = !tmp_bytes.is_empty()
+                            && park.join(tmp_bytes).join("from-hud").is_file();
+                        let leaked =
+                            Path::new("/tmp/from-hud").exists() || rel.join("from-hud").is_file();
+                        if took >= Duration::from_secs(4)
+                            || !out.status.success()
+                            || got_tmp != tmp_bytes.as_bytes()
+                            || got_v != vissue.as_bytes()
+                            || got_i != issue.as_bytes()
+                            || !parked_name.starts_with("ljos-cwd-")
+                            || (!tmp_bytes.is_empty() && !made)
+                            || leaked
+                        {
+                            why = Some(format!(
+                                "{row} {flag} tmp {tmp_set:?} {took:?} code {:?} bytes {got_tmp:?} v {got_v:?} i {got_i:?} cwd {parked:?} made {made} leaked {leaked}: {}",
+                                out.status.code(),
+                                text(&out)
+                            ));
+                            break;
+                        }
+                    }
+                    if why.is_some() {
+                        break;
+                    }
+                }
+                match why {
+                    Some(text) => Err(text),
+                    None => Ok(()),
+                }
+            }
+            "bare-argv" => {
+                // An empty PATH entry holds a mode 644 ljos-hud. The later
+                // ELF, relative or absolute, sees argv[0] ljos-hud.
+                let cwd = seat.dir.path().join("argv-cwd");
+                let relbin = cwd.join("bin");
+                let absbin = seat.dir.path().join("argv-abs");
+                std::fs::create_dir_all(&relbin).unwrap();
+                std::fs::create_dir_all(&absbin).unwrap();
+                script(
+                    &cwd,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'DECOY\\n' > \"$LJOS_MARK/argv0\"\nexit 0\n",
+                );
+                set_mode(&cwd.join("ljos-hud"), 0o644);
+                let src = seat.dir.path().join("argv0.c");
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "writes a file that is not a git hook"
+                )]
+                std::fs::write(
+                    &src,
+                    r#"#include <stdio.h>
+#include <stdlib.h>
+int main(int argc, char **argv) {
+    const char *mark = getenv("LJOS_MARK");
+    char path[4096];
+    FILE *f;
+    if (!mark || !argv[0]) return 2;
+    if (snprintf(path, sizeof path, "%s/argv0", mark) >= (int)sizeof path) return 2;
+    f = fopen(path, "w");
+    if (!f) return 3;
+    fputs(argv[0], f);
+    if (argc > 1 && argv[1]) {
+        fputc('\n', f);
+        fputs(argv[1], f);
+    }
+    fclose(f);
+    return 0;
+}
+"#,
+                )
+                .unwrap();
+                let mut why = None;
+                for (dir, label) in [(&relbin, "bin"), (&absbin, "abs")] {
+                    let bin = dir.join("ljos-hud");
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "starts a program outside git hook code"
+                    )]
+                    let compiled = Command::new("gcc")
+                        .args(["-O2", "-o"])
+                        .arg(&bin)
+                        .arg(&src)
+                        .output()
+                        .unwrap_or_else(|err| panic!("gcc: {err}"));
+                    if !compiled.status.success() {
+                        why = Some(format!(
+                            "{row} gcc {label}: {}",
+                            String::from_utf8_lossy(&compiled.stderr)
+                        ));
+                        break;
+                    }
+                }
+                let rel_path = ":bin:/usr/bin:/bin";
+                let abs_path = format!(":{}:/usr/bin:/bin", absbin.display());
+                if why.is_none() {
+                    for (path, label) in [(rel_path, "bin"), (abs_path.as_str(), "abs")] {
+                        for flag in ["--foreground", "--hide"] {
+                            let _ = std::fs::remove_file(mark.join("argv0"));
+                            let (out, took) = seat.run_at(
+                                &copied,
+                                &cwd,
+                                &["hud", flag],
+                                &[
+                                    ("TMPDIR", tmp_s),
+                                    ("LJOS_MARK", mark_s),
+                                    ("PATH", path),
+                                    ("LJOS_HUD_BIN", ""),
+                                    ("VISSUE_ROOT", ""),
+                                ],
+                            );
+                            let body =
+                                std::fs::read_to_string(mark.join("argv0")).unwrap_or_default();
+                            let mut lines = body.lines();
+                            let argv0 = lines.next().unwrap_or("");
+                            let arg = lines.next().unwrap_or("");
+                            if took >= Duration::from_secs(4)
+                                || !out.status.success()
+                                || argv0 != "ljos-hud"
+                                || arg != flag
+                            {
+                                why = Some(format!(
+                                    "{row} {label} {flag} {took:?} code {:?} argv0 {body:?}: {}",
+                                    out.status.code(),
+                                    text(&out)
+                                ));
+                                break;
+                            }
+                        }
+                        if why.is_some() {
+                            break;
+                        }
                     }
                 }
                 match why {

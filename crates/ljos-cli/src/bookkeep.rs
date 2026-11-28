@@ -501,13 +501,9 @@ pub(crate) fn temp_roots() -> Vec<PathBuf> {
     if let Some(roots) = TEST_TEMP_ROOTS.with(|r| r.borrow().clone()) {
         return roots;
     }
-    // A relative or empty `TMPDIR` is not a temp root. Making that value
-    // absolute so a later chdir does not move it must not change the check.
-    let tmpdir = if crate::cwd_probe::tmpdir_rewritten_from_relative() {
-        None
-    } else {
-        std::env::var_os("TMPDIR")
-    };
+    // A relative or empty `TMPDIR` is not a temp root. The bytes stay as
+    // given, so this read is that value and not a path this process stored.
+    let tmpdir = std::env::var_os("TMPDIR");
     temp_roots_for(tmpdir.as_deref(), crate::proc_tree::own_home().as_deref())
 }
 

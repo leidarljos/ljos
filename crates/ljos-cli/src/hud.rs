@@ -34,6 +34,16 @@ struct HudHit {
     path: Option<std::ffi::OsString>,
     exe: PathBuf,
     found: Option<PathBuf>,
+    /// `argv[0]` when it is not the path `Command::new` would pass.
+    /// Base gives `execvp` a slash-free name. The file that runs can be a
+    /// later `PATH` entry, and `execve` of that file keeps this name.
+    argv0: Option<std::ffi::OsString>,
+}
+
+/// The file to exec, and `argv[0]` when that name is not the file's path.
+struct HudPick {
+    path: PathBuf,
+    argv0: Option<std::ffi::OsString>,
 }
 
 static HUD_HIT: std::sync::Mutex<Option<HudHit>> = std::sync::Mutex::new(None);
@@ -74,9 +84,10 @@ pub fn resolve_hud_bin() -> Option<PathBuf> {
         hud,
         path,
         exe,
-        found: found.clone(),
+        found: found.as_ref().map(|hit| hit.path.clone()),
+        argv0: found.as_ref().and_then(|hit| hit.argv0.clone()),
     });
-    found
+    found.map(|hit| hit.path)
 }
 
 /// `LJOS_HUD_BIN`, then the sibling, then `PATH`, in that order.
@@ -88,7 +99,7 @@ pub fn resolve_hud_bin() -> Option<PathBuf> {
 /// starts. A stat that has not started is waited for. A stat that has
 /// finished is the program. A stat that is still running and does not
 /// answer is skipped and is not the program.
-fn walk_hud(hud: &std::ffi::OsString, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+fn walk_hud(hud: &std::ffi::OsString, path: Option<&std::ffi::OsStr>) -> Option<HudPick> {
     if let Some(text) = hud.to_str() {
         let trimmed = text.trim();
         if !trimmed.is_empty() {
@@ -101,9 +112,15 @@ fn walk_hud(hud: &std::ffi::OsString, path: Option<&std::ffi::OsStr>) -> Option<
             // A miss, or a stat that does not answer, is not a program and
             // does not fall through.
             if path_has_slash(&chosen) {
-                return Some(chosen);
+                return Some(HudPick {
+                    path: chosen,
+                    argv0: None,
+                });
             }
-            return first_ready(vec![chosen.clone()], false).map(|_| chosen);
+            return first_ready(vec![chosen.clone()], false).map(|_| HudPick {
+                path: chosen,
+                argv0: None,
+            });
         }
     }
     let mut cands = Vec::new();
@@ -158,7 +175,9 @@ enum Note {
 }
 
 enum Step {
-    Hit(usize),
+    /// The program is this candidate. The second index is the slash-free
+    /// name base passed to `execvp`, when that file is not the program.
+    Hit(usize, Option<usize>),
     /// Wait for the next note. `None` means the blocking stat has not started.
     Hold(Option<std::time::Duration>),
     /// No executable program. The index is a slash-free non-executable file,
@@ -180,7 +199,7 @@ enum Step {
 /// not a stat that is still running. Only a stat that is still running
 /// when the budget ends is skipped, and a later one that did answer
 /// can win.
-fn first_ready(cands: Vec<PathBuf>, bare: bool) -> Option<PathBuf> {
+fn first_ready(cands: Vec<PathBuf>, bare: bool) -> Option<HudPick> {
     if cands.is_empty() {
         return None;
     }
@@ -199,13 +218,25 @@ fn collect(
     tx: &std::sync::mpsc::Sender<Note>,
     rx: &std::sync::mpsc::Receiver<Note>,
     bare: bool,
-) -> Option<PathBuf> {
+) -> Option<HudPick> {
     let mut phase = vec![Phase::Pending; cands.len()];
     let mut spawned = vec![false; cands.len()];
     loop {
         match step(&mut phase, bare) {
-            Step::Hit(index) => return Some(cands[index].clone()),
-            Step::Miss(denied) => return denied.map(|index| cands[index].clone()),
+            Step::Hit(index, argv0) => {
+                let path = cands[index].clone();
+                let name = argv0.and_then(|slot| {
+                    let name = cands[slot].as_os_str();
+                    (name != path.as_os_str()).then(|| name.to_os_string())
+                });
+                return Some(HudPick { path, argv0: name });
+            }
+            Step::Miss(denied) => {
+                return denied.map(|index| HudPick {
+                    path: cands[index].clone(),
+                    argv0: None,
+                });
+            }
             Step::Hold(None) => {
                 if !take_note(&mut phase, rx) && !start_next(cands, tx, &phase, &mut spawned) {
                     match rx.recv() {
@@ -344,7 +375,10 @@ fn step(phase: &mut [Phase], bare: bool) -> Step {
     let mut execvp = bare;
     for (index, slot) in phase.iter().enumerate() {
         match *slot {
-            Phase::Yes => return Step::Hit(index),
+            Phase::Yes => {
+                let name = if execvp { denied } else { None };
+                return Step::Hit(index, name);
+            }
             Phase::No | Phase::Skip => continue,
             Phase::Denied => {
                 execvp = true;
@@ -354,7 +388,7 @@ fn step(phase: &mut [Phase], bare: bool) -> Step {
             }
             Phase::Blocked => {
                 if !execvp {
-                    return Step::Hit(index);
+                    return Step::Hit(index, None);
                 }
                 if denied.is_none() {
                     denied = Some(index);
@@ -441,6 +475,15 @@ pub fn missing_bin_message() -> &'static str {
     "ljos-hud is not installed. Install it with:\n  cargo install ljos-hud"
 }
 
+/// `argv[0]` saved by the last [`resolve_hud_bin`] when it is not the path.
+fn hud_argv0() -> Option<std::ffi::OsString> {
+    HUD_HIT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(|hit| hit.argv0.clone())
+}
+
 /// Dispatch `ljos hud`. `--help` is answered by clap before this runs.
 pub fn run(opts: HudLaunch) -> i32 {
     // Hide with no HUD binary is success (compositor bind miss).
@@ -462,6 +505,7 @@ pub fn run(opts: HudLaunch) -> i32 {
         say!("{}", missing_bin_message());
         return 127;
     };
+    let argv0 = hud_argv0();
     #[expect(
         clippy::disallowed_methods,
         reason = "starts a program outside git hook code"
@@ -487,6 +531,12 @@ pub fn run(opts: HudLaunch) -> i32 {
         // the command started in when it did not park. Base execs from
         // that cwd for every spelling. `execve` keeps it. Moving onto
         // the tracker would land a relative create there.
+        // `execvp` of a slash-free name keeps that name as `argv[0]`
+        // when a later `PATH` entry is the file that runs. Both flags
+        // use the same name.
+        if let Some(name) = argv0 {
+            cmd.arg0(name);
+        }
         let err = cmd.exec();
         say!("ljos: exec {}: {err}", bin.display());
         1
@@ -589,15 +639,14 @@ mod tests {
         tx.send(Note::Started(0, started)).unwrap();
         tx.send(Note::Done(0, HudFile::Yes)).unwrap();
         assert_eq!(
-            collect(std::slice::from_ref(&path), &tx, &rx, false),
+            collect(std::slice::from_ref(&path), &tx, &rx, false).map(|hit| hit.path),
             Some(path)
         );
 
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(Note::Started(0, started)).unwrap();
-        assert_eq!(
-            collect(&[PathBuf::from("ljos-hud")], &tx, &rx, false),
-            None,
+        assert!(
+            collect(&[PathBuf::from("ljos-hud")], &tx, &rx, false).is_none(),
             "a stat that has not finished is not a program once the budget is over"
         );
     }
