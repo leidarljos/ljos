@@ -89,6 +89,35 @@ int newfstatat(int d, const char *restrict p, struct stat *restrict b, int fl) {
     return real(d, p, b, fl);
 }
 
+static char *(*real_realpath)(const char *restrict, char *restrict);
+
+static int exe_is_ljos(void) {
+    char buf[256];
+    ssize_t n;
+    const char *base;
+    n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+    if (n < 0 || n >= (ssize_t)sizeof buf - 1) return 0;
+    buf[n] = 0;
+    base = strrchr(buf, '/');
+    base = base ? base + 1 : buf;
+    return strcmp(base, "ljos") == 0;
+}
+
+/* Resolve the next realpath before main. A dlsym from inside realpath
+   deadlocks when the loader calls realpath while its lock is held. */
+__attribute__((constructor)) static void init_slow_realpath(void) {
+    real_realpath = dlsym(RTLD_NEXT, "realpath");
+}
+
+char *realpath(const char *restrict p, char *restrict resolved) {
+    const char *slow;
+    if (!real_realpath) return 0;
+    slow = getenv("SLOW_REAL");
+    if (slow && slow[0] && p && exe_is_ljos() && strcmp(p, slow) == 0)
+        sleep(30);
+    return real_realpath(p, resolved);
+}
+
 #include <pthread.h>
 
 struct slow_wrap {
@@ -1574,7 +1603,14 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
         "bare-unset",
         "bare-park",
         "bare-park-unset",
+        "sib-real",
+        "abs-real",
     ] {
+        if let Ok(only) = std::env::var("LJOS_PROBE_ROW") {
+            if !only.split(',').any(|one| one == row) {
+                continue;
+            }
+        }
         let _ = std::fs::remove_file(mark.join("which"));
         let err = match row {
             "missing-root" => {
@@ -2899,6 +2935,65 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                         ("LD_PRELOAD", so_s),
                         ("SLOW_EXACT", cwd_s),
                     ],
+                )
+            }
+            "sib-real" | "abs-real" => {
+                // realpath of this candidate does not answer. Base never
+                // calls it: the sibling, or the absolute PATH entry, is
+                // the program the stat already accepted. A later PATH
+                // program must not run, and the command returns inside
+                // the deadline.
+                let raw = seat.dir.path().join(row);
+                let later = seat.dir.path().join(format!("{row}-later"));
+                let cwd = seat.dir.path().join(format!("{row}-cwd"));
+                std::fs::create_dir_all(&raw).unwrap();
+                std::fs::create_dir_all(&later).unwrap();
+                std::fs::create_dir_all(&cwd).unwrap();
+                let dir = canon(&raw);
+                let label = if row == "sib-real" { "SIB" } else { "ABS" };
+                script(
+                    &dir,
+                    "ljos-hud",
+                    &format!(
+                        "#!/bin/sh\nprintf '{label} %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n"
+                    ),
+                );
+                script(
+                    &later,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'LATER %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let program = if row == "sib-real" {
+                    let program = dir.join("ljos");
+                    ljos_cli::copy_executable(Path::new(env!("CARGO_BIN_EXE_ljos")), &program)
+                        .unwrap();
+                    program
+                } else {
+                    copied.clone()
+                };
+                let candidate = dir.join("ljos-hud");
+                // The sibling row must not also find that file on PATH.
+                // A miss has to be the later program, which is the wrong one.
+                let path = if row == "sib-real" {
+                    format!("{}:/usr/bin:/bin", later.display())
+                } else {
+                    format!("{}:{}:/usr/bin:/bin", dir.display(), later.display())
+                };
+                both_flags(
+                    &seat,
+                    &program,
+                    &cwd,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_REAL", candidate.to_str().unwrap()),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    label,
+                    Duration::from_secs(4),
                 )
             }
             "bare-park-unset" => {
