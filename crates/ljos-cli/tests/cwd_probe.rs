@@ -68,9 +68,23 @@ static void watch_path(const char *p) {
     }
 }
 
+/* The Nth stat of one path. A second stat of a HUD the walk already
+   accepted must not become "missing". */
+static void nth_pause(const char *p) {
+    const char *nth = getenv("SLOW_NTH");
+    const char *exact = getenv("SLOW_NTH_PATH");
+    static int seen;
+    if (!nth || !nth[0] || !exact || !exact[0] || !p || strcmp(p, exact) != 0)
+        return;
+    seen++;
+    if (seen == atoi(nth))
+        sleep(2);
+}
+
 static void block(const char *p) {
     const char *once = getenv("SLOW_ONCE");
     static int used;
+    nth_pause(p);
     if (once && once[0] && p && strcmp(p, once) == 0) {
         if (!used) {
             used = 1;
@@ -1643,6 +1657,8 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
         "hud-cwd",
         "env-bytes",
         "bare-argv",
+        "second-stat",
+        "bad-interp",
     ] {
         if let Ok(only) = std::env::var("LJOS_PROBE_ROW") {
             if !only.split(',').any(|one| one == row) {
@@ -3448,6 +3464,164 @@ int main(int argc, char **argv) {
                         if why.is_some() {
                             break;
                         }
+                    }
+                }
+                match why {
+                    Some(text) => Err(text),
+                    None => Ok(()),
+                }
+            }
+            "second-stat" => {
+                // The first stat of this PATH ljos-hud succeeds. The
+                // second stat sleeps. Both flags still run it: a deadline
+                // on that second stat is not an answer.
+                let good = seat.dir.path().join("second-good");
+                std::fs::create_dir_all(&good).unwrap();
+                script(
+                    &good,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'GOOD %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let hud = good.join("ljos-hud");
+                let path = format!("{}:/usr/bin:/bin", good.display());
+                both_flags(
+                    &seat,
+                    &copied,
+                    &good,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_NTH", "2"),
+                        ("SLOW_NTH_PATH", hud.to_str().unwrap()),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    "GOOD",
+                    Duration::from_secs(4),
+                )
+            }
+            "bad-interp" => {
+                // An empty PATH entry holds a mode 644 ljos-hud. The next
+                // file is mode 755 and its interpreter is missing, or mode
+                // 644. execvp of ljos-hud keeps searching and runs the ELF
+                // with argv[0] ljos-hud. Both flags do.
+                let cwd = seat.dir.path().join("interp-cwd");
+                let bad_missing = seat.dir.path().join("interp-missing");
+                let bad_mode = seat.dir.path().join("interp-mode");
+                let good = seat.dir.path().join("interp-good");
+                std::fs::create_dir_all(&cwd).unwrap();
+                std::fs::create_dir_all(&bad_missing).unwrap();
+                std::fs::create_dir_all(&bad_mode).unwrap();
+                std::fs::create_dir_all(&good).unwrap();
+                script(
+                    &cwd,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'DECOY\\n' > \"$LJOS_MARK/argv0\"\nexit 0\n",
+                );
+                set_mode(&cwd.join("ljos-hud"), 0o644);
+                script(
+                    &bad_missing,
+                    "ljos-hud",
+                    "#!/no/such/hud-interp\nprintf 'BAD\\n' > \"$LJOS_MARK/argv0\"\nexit 0\n",
+                );
+                let interp = bad_mode.join("interp");
+                write_file(&interp, "#!/bin/sh\nexit 0\n");
+                set_mode(&interp, 0o644);
+                script(
+                    &bad_mode,
+                    "ljos-hud",
+                    &format!(
+                        "#!{}\nprintf 'BAD\\n' > \"$LJOS_MARK/argv0\"\nexit 0\n",
+                        interp.display()
+                    ),
+                );
+                let src = seat.dir.path().join("interp-argv0.c");
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "writes a file that is not a git hook"
+                )]
+                std::fs::write(
+                    &src,
+                    r#"#include <stdio.h>
+#include <stdlib.h>
+int main(int argc, char **argv) {
+    const char *mark = getenv("LJOS_MARK");
+    char path[4096];
+    FILE *f;
+    if (!mark || !argv[0]) return 2;
+    if (snprintf(path, sizeof path, "%s/argv0", mark) >= (int)sizeof path) return 2;
+    f = fopen(path, "w");
+    if (!f) return 3;
+    fputs(argv[0], f);
+    if (argc > 1 && argv[1]) {
+        fputc('\n', f);
+        fputs(argv[1], f);
+    }
+    fclose(f);
+    return 0;
+}
+"#,
+                )
+                .unwrap();
+                let bin = good.join("ljos-hud");
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "starts a program outside git hook code"
+                )]
+                let compiled = Command::new("gcc")
+                    .args(["-O2", "-o"])
+                    .arg(&bin)
+                    .arg(&src)
+                    .output()
+                    .unwrap_or_else(|err| panic!("gcc: {err}"));
+                let mut why = if compiled.status.success() {
+                    None
+                } else {
+                    Some(format!(
+                        "{row} gcc: {}",
+                        String::from_utf8_lossy(&compiled.stderr)
+                    ))
+                };
+                for (dir, label) in [(&bad_missing, "enoent"), (&bad_mode, "eacces")] {
+                    if why.is_some() {
+                        break;
+                    }
+                    let path = format!(":{}:{}:/usr/bin:/bin", dir.display(), good.display());
+                    for flag in ["--foreground", "--hide"] {
+                        let _ = std::fs::remove_file(mark.join("argv0"));
+                        let (out, took) = seat.run_at(
+                            &copied,
+                            &cwd,
+                            &["hud", flag],
+                            &[
+                                ("TMPDIR", tmp_s),
+                                ("LJOS_MARK", mark_s),
+                                ("PATH", path.as_str()),
+                                ("LJOS_HUD_BIN", ""),
+                                ("VISSUE_ROOT", ""),
+                            ],
+                        );
+                        let body = std::fs::read_to_string(mark.join("argv0")).unwrap_or_default();
+                        let mut lines = body.lines();
+                        let argv0 = lines.next().unwrap_or("");
+                        let arg = lines.next().unwrap_or("");
+                        if took >= Duration::from_secs(4)
+                            || !out.status.success()
+                            || argv0 != "ljos-hud"
+                            || arg != flag
+                        {
+                            why = Some(format!(
+                                "{row} {label} {flag} {took:?} code {:?} argv0 {body:?}: {}",
+                                out.status.code(),
+                                text(&out)
+                            ));
+                            break;
+                        }
+                    }
+                    if why.is_some() {
+                        break;
                     }
                 }
                 match why {
