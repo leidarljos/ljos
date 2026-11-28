@@ -1569,6 +1569,9 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
         "bare-hud",
         "bare-space",
         "empty-two",
+        "bare-absent",
+        "bare-trail",
+        "bare-unset",
     ] {
         let _ = std::fs::remove_file(mark.join("which"));
         let err = match row {
@@ -2776,6 +2779,89 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                     Duration::from_secs(4),
                 )
             }
+            "bare-absent" => {
+                // A slash-free name with no regular file in the start
+                // directory is missing. The PATH program does not run.
+                let cwd = seat.dir.path().join("absent-cwd");
+                let good = seat.dir.path().join("absent-good");
+                std::fs::create_dir_all(&cwd).unwrap();
+                std::fs::create_dir_all(&good).unwrap();
+                script(
+                    &good,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'PATHBIN %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let path = format!("{}:/usr/bin:/bin", good.display());
+                one_budget_miss(
+                    &seat,
+                    &copied,
+                    &cwd,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", "ljos-hud"),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                )
+            }
+            "bare-trail" => {
+                // The trailing space stays in the variable. The trimmed
+                // name is not a regular file, so neither that spaced file
+                // nor the PATH program runs.
+                let cwd = seat.dir.path().join("trail-cwd");
+                let good = seat.dir.path().join("trail-good");
+                std::fs::create_dir_all(&cwd).unwrap();
+                std::fs::create_dir_all(&good).unwrap();
+                script(
+                    &cwd,
+                    "ljos-hud ",
+                    "#!/bin/sh\nprintf 'SPACED %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                script(
+                    &good,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'PATHBIN %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let path = format!("{}:/usr/bin:/bin", good.display());
+                one_budget_miss(
+                    &seat,
+                    &copied,
+                    &cwd,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", "ljos-hud "),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                )
+            }
+            "bare-unset" => {
+                // A mode 755 file of the slash-free name passes is_file.
+                // An unset PATH is /bin then /usr/bin, so that file is not
+                // executed. Both flags exit 1.
+                let cwd = seat.dir.path().join("unset-name");
+                std::fs::create_dir_all(&cwd).unwrap();
+                script(
+                    &cwd,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'CWD %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                set_mode(&cwd.join("ljos-hud"), 0o755);
+                exec_enoent(
+                    &seat,
+                    &copied,
+                    &cwd,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", ""),
+                        ("LJOS_HUD_BIN", "ljos-hud"),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                )
+            }
             _ => unreachable!(),
         };
         if let Err(why) = err {
@@ -2783,6 +2869,37 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
         }
     }
     assert!(missed.is_empty(), "{}", missed.join("\n"));
+}
+
+fn exec_enoent(
+    seat: &Seat,
+    program: &Path,
+    cwd: &Path,
+    extra: &[(&str, &str)],
+) -> Result<(), String> {
+    for flag in ["--foreground", "--hide"] {
+        let mark = extra
+            .iter()
+            .find(|(key, _)| *key == "LJOS_MARK")
+            .map(|(_, value)| PathBuf::from(value))
+            .unwrap();
+        let _ = std::fs::remove_file(mark.join("which"));
+        let (out, took) = seat.run_at(program, cwd, &["hud", flag], extra);
+        let body = read_trim(&mark.join("which"));
+        let reported = text(&out);
+        if took >= Duration::from_secs(4)
+            || out.status.code() != Some(1)
+            || !body.is_empty()
+            || !reported.contains("No such file or directory")
+            || reported.contains("is not installed")
+        {
+            return Err(format!(
+                "{flag} {took:?} code {:?} marker {body:?}: {reported}",
+                out.status.code()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn exec_denied(

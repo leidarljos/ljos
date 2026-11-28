@@ -40,19 +40,20 @@ static HUD_HIT: std::sync::Mutex<Option<HudHit>> = std::sync::Mutex::new(None);
 
 /// Locate `ljos-hud`. Missing means exit 127.
 ///
-/// The order is the base launcher's. A set `LJOS_HUD_BIN` is that path
-/// and nothing else; the bytes of the variable are not rewritten. A value
-/// with no slash is searched on `PATH` the way `execvp` searches it, and
-/// a file in the working directory is not that search. Otherwise the
-/// sibling beside this binary, then each `PATH` entry, including `.`,
-/// an empty component, and any other relative entry. An unset `PATH` is
-/// not searched. A path that contains a slash is the first regular file,
-/// which is what base execs, until a slash-free file has made the rest of
-/// the walk `execvp`. `execvp` skips a file this user cannot execute and
-/// tries the next entry. A stat that has not started is waited for. A stat
-/// that has finished is kept, however old its stamp is. A stat that is
-/// still running when the budget ends is skipped, and the walk tries the
-/// next entry. It does not stop the command.
+/// The order is the base launcher's. A set `LJOS_HUD_BIN` is the trimmed
+/// string and nothing else. The variable bytes are not rewritten. A
+/// slash-free string is not looked up on `PATH` in this walk: the start
+/// directory is stated, and only a regular file is returned, as that
+/// same string, for `execvp`. Otherwise the sibling beside this binary,
+/// then each `PATH` entry, including `.`, an empty component, and any
+/// other relative entry. An unset `PATH` adds no entry. A path that
+/// contains a slash is the first regular file, which is what base execs,
+/// until a slash-free file has made the rest of the walk `execvp`.
+/// `execvp` skips a file this user cannot execute and tries the next
+/// entry. A stat that has not started is waited for. A stat that has
+/// finished is kept, however old its stamp is. A stat that is still
+/// running when the budget ends is skipped, and the walk tries the next
+/// entry. It does not stop the command.
 pub fn resolve_hud_bin() -> Option<PathBuf> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let hud = std::env::var_os(HUD_BIN_ENV).unwrap_or_default();
@@ -91,12 +92,16 @@ fn walk_hud(hud: &std::ffi::OsString, path: Option<&std::ffi::OsStr>) -> Option<
         let trimmed = text.trim();
         if !trimmed.is_empty() {
             let chosen = PathBuf::from(trimmed);
-            // Base hands a slash-free value to `execvp`. Canonicalizing it
-            // would turn the working-directory file into the program.
+            // Base returns this trimmed string and does not search `PATH`.
+            // `is_file` of a slash-free name is the start directory. Only
+            // a regular file is returned, and the string itself is what
+            // `execvp` receives. A miss, or a stat that does not answer,
+            // is not a program and does not fall through.
             if path_has_slash(&chosen) {
                 return Some(chosen);
             }
-            return first_ready(path_entries(&chosen, path), true);
+            let stated = crate::cwd_probe::from_start(&chosen);
+            return first_ready(vec![stated], false).map(|_| chosen);
         }
     }
     let mut cands = Vec::new();
@@ -112,16 +117,6 @@ fn walk_hud(hud: &std::ffi::OsString, path: Option<&std::ffi::OsStr>) -> Option<
         }
     }
     first_ready(cands, false)
-}
-
-/// One candidate per `PATH` entry. An empty entry is the bare name.
-fn path_entries(name: &Path, path: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
-    let Some(listed) = path else {
-        return Vec::new();
-    };
-    std::env::split_paths(listed)
-        .map(|dir| dir.join(name))
-        .collect()
 }
 
 /// What a stated candidate is, in base's exec rules.
@@ -397,7 +392,15 @@ pub fn missing_bin_message() -> &'static str {
 pub fn run(opts: HudLaunch) -> i32 {
     // Hide with no HUD binary is success (compositor bind miss).
     // One lookup serves `--hide` and `--foreground`.
-    let bin = resolve_hud_bin().and_then(|path| absolute_ready(&path));
+    let bin = resolve_hud_bin().and_then(|path| {
+        if path_has_slash(&path) {
+            absolute_ready(&path)
+        } else {
+            // Already stated in the start directory. Canonicalizing it
+            // would exec that file. `execvp` must see the slash-free string.
+            Some(path)
+        }
+    });
     if opts.hide && !opts.show && !opts.toggle && !opts.install_desktop && bin.is_none() {
         return 0;
     }
