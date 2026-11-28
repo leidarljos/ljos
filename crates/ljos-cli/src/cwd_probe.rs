@@ -591,8 +591,10 @@ static ENV_RESOLVED: AtomicBool = AtomicBool::new(false);
 /// parent that does not resolve, or a `..` walk through a missing
 /// component, is an error. A relative `TMPDIR` with no `..` that is not a
 /// directory uses [`default_temp_dir`]. An empty `TMPDIR` uses that
-/// default. An absolute value outside the start directory is left as set,
-/// unless a symlink in that spelling lands inside the start directory. An
+/// default. A value with a leading or trailing space is left as set.
+/// Trimming it would store a different path. An absolute value outside
+/// the start directory is left as set, unless a symlink in that spelling
+/// lands inside the start directory. An
 /// unset `TMPDIR` is left unset. `PATH` is not walked here. A hung
 /// `ljos-hud` on `PATH` is not a reason to refuse the command.
 fn resolve_relative_dirs() {
@@ -636,6 +638,12 @@ fn resolve_tmpdir(start: &Path) {
         adopt_tmpdir(default_temp_dir());
         return;
     }
+    // The bytes base leaves, including `reltmp `. Walking them hits the
+    // fallback below and stores `/tmp`, or the start directory joined
+    // with the name when that directory exists.
+    if spaced_env(&raw) {
+        return;
+    }
     let Some(rel) = under_start(start, &given) else {
         return;
     };
@@ -663,6 +671,9 @@ fn resolve_root(key: &str, start: &Path) {
     let Some(raw) = std::env::var_os(key) else {
         return;
     };
+    if spaced_env(&raw) {
+        return;
+    }
     let given = PathBuf::from(&raw);
     if let Some(rel) = under_start(start, &given) {
         apply_root(key, &raw, resolve_from_start(start, &rel, true));
@@ -701,12 +712,13 @@ fn apply_root(key: &str, raw: &std::ffi::OsStr, result: Result<Hit, Fault>) {
 ///
 /// A relative path is already that form. An absolute path that is `start`,
 /// or a path inside it, may be slow to state after the park. An absolute
-/// path outside `start` is `None` and stays as set. An empty value, and a
-/// value that is only whitespace, is `None`. Base leaves those bytes.
-/// Joining them onto `start` would store a path inside the start directory.
+/// path outside `start` is `None` and stays as set. An empty value, a
+/// value that is only whitespace, and a value with a leading or trailing
+/// space are `None`. Base leaves those bytes. Joining them onto `start`,
+/// or trimming them first, would store a different path.
 fn under_start(start: &Path, given: &Path) -> Option<PathBuf> {
     let text = given.as_os_str();
-    if text.is_empty() || text.to_str().is_some_and(|raw| raw.trim().is_empty()) {
+    if text.is_empty() || spaced_env(text) {
         return None;
     }
     if !given.is_absolute() {
@@ -716,6 +728,26 @@ fn under_start(start: &Path, given: &Path) -> Option<PathBuf> {
         return Some(PathBuf::new());
     }
     given.strip_prefix(start).ok().map(PathBuf::from)
+}
+
+/// `true` when `raw` has a leading or trailing space.
+///
+/// Empty is not this. An empty `TMPDIR` still uses [`default_temp_dir`].
+/// The check is the edges, not a trim: trimming would name another
+/// directory, store `/tmp`, or refuse the command. Base keeps the bytes.
+fn spaced_env(raw: &std::ffi::OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = raw.as_bytes();
+    if bytes.first().is_some_and(u8::is_ascii_whitespace)
+        || bytes.last().is_some_and(u8::is_ascii_whitespace)
+    {
+        return true;
+    }
+    let Some(text) = raw.to_str() else {
+        return false;
+    };
+    text.chars().next().is_some_and(char::is_whitespace)
+        || text.chars().next_back().is_some_and(char::is_whitespace)
 }
 
 fn adopt_tmpdir(path: PathBuf) {
@@ -1115,14 +1147,6 @@ pub(crate) fn parked_replacement_dir() -> Option<PathBuf> {
         return None;
     }
     Some(stable_child_dir())
-}
-
-/// Remove the parked directory before a call that skips `atexit`.
-///
-/// `exec` replaces this process, so the handler registered at park does
-/// not run. The directory is removed the same way that handler removes it.
-pub(crate) fn release_parked_dir() {
-    release_parked_cwd();
 }
 
 extern "C" fn release_parked_cwd() {

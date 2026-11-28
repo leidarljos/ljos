@@ -41,6 +41,33 @@ static void hit(void) {
     close(fd);
 }
 
+/* A later PATH entry is not a hung mount. The walk must not state it
+   after an earlier program is the one execvp would run. */
+static void watch_path(const char *p) {
+    const char *watch;
+    const char *mark;
+    const char *syncp;
+    static int waited;
+    int i;
+    int fd;
+    if (!p) return;
+    watch = getenv("LJOS_STAT_WATCH");
+    mark = getenv("LJOS_STAT_MARK");
+    syncp = getenv("LJOS_STAT_SYNC");
+    if (!watch || !watch[0] || !mark || !mark[0] || !syncp || !syncp[0]) return;
+    if (strcmp(p, watch) == 0) {
+        fd = open(mark, O_CREAT | O_WRONLY | O_CLOEXEC, 0644);
+        if (fd >= 0) close(fd);
+        return;
+    }
+    if (strcmp(p, syncp) != 0 || waited) return;
+    waited = 1;
+    for (i = 0; i < 200; i++) {
+        if (access(mark, F_OK) == 0) return;
+        usleep(1000);
+    }
+}
+
 static void block(const char *p) {
     const char *once = getenv("SLOW_ONCE");
     static int used;
@@ -60,6 +87,7 @@ static void block(const char *p) {
 int statx(int d, const char *restrict p, int fl, unsigned m, struct statx *restrict b) {
     static int (*real)(int, const char *restrict, int, unsigned, struct statx *restrict);
     if (!real) real = dlsym(RTLD_NEXT, "statx");
+    watch_path(p);
     block(p);
     if (!real) return -1;
     return real(d, p, fl, m, b);
@@ -68,6 +96,7 @@ int statx(int d, const char *restrict p, int fl, unsigned m, struct statx *restr
 int stat(const char *restrict p, struct stat *restrict b) {
     static int (*real)(const char *restrict, struct stat *restrict);
     if (!real) real = dlsym(RTLD_NEXT, "stat");
+    watch_path(p);
     block(p);
     if (!real) return -1;
     return real(p, b);
@@ -76,6 +105,7 @@ int stat(const char *restrict p, struct stat *restrict b) {
 int lstat(const char *restrict p, struct stat *restrict b) {
     static int (*real)(const char *restrict, struct stat *restrict);
     if (!real) real = dlsym(RTLD_NEXT, "lstat");
+    watch_path(p);
     block(p);
     if (!real) return -1;
     return real(p, b);
@@ -84,6 +114,7 @@ int lstat(const char *restrict p, struct stat *restrict b) {
 int newfstatat(int d, const char *restrict p, struct stat *restrict b, int fl) {
     static int (*real)(int, const char *restrict, struct stat *restrict, int);
     if (!real) real = dlsym(RTLD_NEXT, "newfstatat");
+    watch_path(p);
     block(p);
     if (!real) return -1;
     return real(d, p, b, fl);
@@ -913,11 +944,11 @@ fn check_unresolved_tmpdir(
     );
 }
 
-/// `ljos hud` parks and then execs, which skips atexit. The parked
-/// directory must already be gone, and the exec'd process must be in the
-/// stable directory the other background children use.
+/// `ljos hud` parks and then execs, which skips atexit. The process cwd
+/// stays the parked directory. Base does not move it onto the tracker,
+/// and the directory remains.
 #[test]
-fn hud_exec_drops_the_parked_directory() {
+fn hud_exec_keeps_the_parked_directory() {
     let seat = Seat::new();
     let hud = seat.bin.join("ljos-hud");
     script(
@@ -940,13 +971,17 @@ fn hud_exec_drops_the_parked_directory() {
     let recorded = read_trim(&seat.tracker.join("hud-cwd"));
     assert!(!recorded.is_empty(), "hud did not exec: {}", text(&out));
     assert!(
-        !Path::new(&recorded)
+        Path::new(&recorded)
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("ljos-cwd-")),
-        "exec kept the parked directory: {recorded}"
+        "exec left the parked directory: {recorded}"
     );
-    assert_eq!(
+    assert!(
+        Path::new(&recorded).is_dir(),
+        "parked directory was removed: {recorded}"
+    );
+    assert_ne!(
         canon(Path::new(&recorded)),
         canon(&seat.tracker),
         "exec cwd"
@@ -956,8 +991,8 @@ fn hud_exec_drops_the_parked_directory() {
         .filter(|name| name.starts_with("ljos-cwd-"))
         .collect();
     assert!(
-        left.is_empty(),
-        "parked directories remained: {left:?}\n{}",
+        left.iter().any(|name| recorded.ends_with(name.as_str())),
+        "parked directory missing: {left:?} recorded {recorded}\n{}",
         text(&out)
     );
 }
@@ -1607,6 +1642,8 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
         "abs-real",
         "sym-hud",
         "sym-path",
+        "pad-env",
+        "hud-cwd",
     ] {
         if let Ok(only) = std::env::var("LJOS_PROBE_ROW") {
             if !only.split(',').any(|one| one == row) {
@@ -1989,9 +2026,12 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
                         ("SLOW_EXACT", slow_s),
                     ],
                 );
+                // A trailing space is not trimmed and not joined onto the
+                // start directory. Base leaves `rname `, so neither the
+                // spaced directory nor the trimmed name is that root.
                 let root_ok = root_took < Duration::from_secs(4)
                     && root_out.status.success()
-                    && spaced_root.join("Software/landed").is_file()
+                    && !spaced_root.join("Software/landed").exists()
                     && !plain_root.join("Software/landed").exists();
                 parked_ok(
                     hud_ok && root_ok,
@@ -3094,6 +3134,135 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                         ("SLOW_EXACT", cwd_s),
                     ],
                 )
+            }
+            "pad-env" => {
+                // Leading and trailing space on the three roots. Base
+                // leaves the bytes and runs the HUD. Trimming stores
+                // `/tmp` or refuses the command.
+                let cwd = seat.dir.path().join("pad-work");
+                std::fs::create_dir_all(&cwd).unwrap();
+                script(
+                    seat.dir.path(),
+                    "pad-hud",
+                    "#!/bin/sh\nprintf '%s' \"$TMPDIR\" > \"$LJOS_MARK/tmp\"\nprintf '%s' \"$VISSUE_ROOT\" > \"$LJOS_MARK/vissue\"\nprintf '%s' \"$ISSUE_ROOT\" > \"$LJOS_MARK/issue\"\nexit 0\n",
+                );
+                let tmp_pad = " reltmp ";
+                let root_pad = " rel ";
+                let cwd_s = cwd.to_str().unwrap();
+                let hud_path = seat.dir.path().join("pad-hud");
+                let hud_s = hud_path.to_str().unwrap();
+                let mut why = None;
+                for flag in ["--foreground", "--hide"] {
+                    for name in ["tmp", "vissue", "issue"] {
+                        let _ = std::fs::remove_file(mark.join(name));
+                    }
+                    let (out, took) = seat.run(
+                        &cwd,
+                        &["hud", flag],
+                        &[
+                            ("TMPDIR", tmp_pad),
+                            ("VISSUE_ROOT", root_pad),
+                            ("ISSUE_ROOT", root_pad),
+                            ("LJOS_HUD_BIN", hud_s),
+                            ("LJOS_MARK", mark_s),
+                            ("LD_PRELOAD", so_s),
+                            ("SLOW_EXACT", cwd_s),
+                        ],
+                    );
+                    let tmp_got = std::fs::read(mark.join("tmp")).unwrap_or_default();
+                    let v_got = std::fs::read(mark.join("vissue")).unwrap_or_default();
+                    let i_got = std::fs::read(mark.join("issue")).unwrap_or_default();
+                    if took >= Duration::from_secs(4)
+                        || !out.status.success()
+                        || tmp_got != tmp_pad.as_bytes()
+                        || v_got != root_pad.as_bytes()
+                        || i_got != root_pad.as_bytes()
+                    {
+                        why = Some(format!(
+                            "{row} {flag} {took:?} code {:?} tmp {tmp_got:?} vissue {v_got:?} issue {i_got:?}: {}",
+                            out.status.code(),
+                            text(&out)
+                        ));
+                        break;
+                    }
+                }
+                match why {
+                    Some(text) => Err(text),
+                    None => Ok(()),
+                }
+            }
+            "hud-cwd" => {
+                // The first PATH entry is the program. A later fifo is
+                // not stated. The program's cwd is the parked directory,
+                // so `wrote-here` lands there and not in the tracker.
+                let cwd = seat.dir.path().join("hud-park");
+                let good = seat.dir.path().join("path-good");
+                let fifo = seat.dir.path().join("path-fifo");
+                std::fs::create_dir_all(&cwd).unwrap();
+                std::fs::create_dir_all(&good).unwrap();
+                script(
+                    &good,
+                    "ljos-hud",
+                    "#!/bin/sh\ntouch wrote-here\npwd -P > \"$LJOS_MARK/cwd\"\nprintf '%s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                #[expect(clippy::disallowed_methods, reason = "creates a fifo, not a git hook")]
+                let made = Command::new("mkfifo").arg(&fifo).status().unwrap();
+                assert!(made.success(), "mkfifo {}", fifo.display());
+                let program = good.join("ljos-hud");
+                let watched = fifo.join("ljos-hud");
+                let probed = mark.join("probed");
+                let cwd_s = cwd.to_str().unwrap();
+                let path = format!("{}:{}:/usr/bin:/bin", good.display(), fifo.display());
+                let mut why = None;
+                for flag in ["--foreground", "--hide"] {
+                    let _ = std::fs::remove_file(&probed);
+                    let _ = std::fs::remove_file(mark.join("which"));
+                    let _ = std::fs::remove_file(mark.join("cwd"));
+                    let _ = std::fs::remove_file(seat.tracker.join("wrote-here"));
+                    let (out, took) = seat.run_at(
+                        &copied,
+                        &cwd,
+                        &["hud", flag],
+                        &[
+                            ("TMPDIR", tmp_s),
+                            ("LJOS_MARK", mark_s),
+                            ("LD_PRELOAD", so_s),
+                            ("SLOW_EXACT", cwd_s),
+                            ("PATH", path.as_str()),
+                            ("LJOS_HUD_BIN", " "),
+                            ("LJOS_STAT_SYNC", program.to_str().unwrap()),
+                            ("LJOS_STAT_WATCH", watched.to_str().unwrap()),
+                            ("LJOS_STAT_MARK", probed.to_str().unwrap()),
+                        ],
+                    );
+                    let body = read_trim(&mark.join("which"));
+                    let recorded = read_trim(&mark.join("cwd"));
+                    let parked = Path::new(&recorded);
+                    let wrote_parked = parked
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("ljos-cwd-"))
+                        && parked.join("wrote-here").is_file();
+                    if took >= Duration::from_secs(4)
+                        || !out.status.success()
+                        || body != flag
+                        || !wrote_parked
+                        || seat.tracker.join("wrote-here").exists()
+                        || probed.exists()
+                    {
+                        why = Some(format!(
+                            "{row} {flag} {took:?} code {:?} marker {body:?} cwd {recorded:?} probed {}: {}",
+                            out.status.code(),
+                            probed.exists(),
+                            text(&out)
+                        ));
+                        break;
+                    }
+                }
+                match why {
+                    Some(text) => Err(text),
+                    None => Ok(()),
+                }
             }
             _ => unreachable!(),
         };

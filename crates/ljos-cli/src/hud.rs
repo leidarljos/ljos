@@ -169,44 +169,51 @@ enum Step {
 /// First candidate base would exec, in order.
 ///
 /// `bare` is an `execvp` search: a non-executable file is never the
-/// program while a later executable exists. Every candidate is stated
-/// together. An earlier stat that has not started still blocks a later
-/// one. A stat that has finished is kept even when the stamp is already
-/// older than the budget: that age is how late this thread read the
-/// stamp, not a stat that is still running. Only a stat that is still
-/// running when the budget ends is skipped, and a later one that did
-/// answer can win.
+/// program while a later executable exists. The next entry is stated
+/// only after the earlier one is not the program. A hit stops the walk,
+/// and a later entry is not stated. `execve` waits in `de_thread` until
+/// every other thread has left its syscall, so a stat of that later
+/// entry would hold the exec. Base stops at the first regular file.
+/// An earlier stat that has not started still blocks a later one. A
+/// stat that has finished is kept even when the stamp is already older
+/// than the budget: that age is how late this thread read the stamp,
+/// not a stat that is still running. Only a stat that is still running
+/// when the budget ends is skipped, and a later one that did answer
+/// can win.
 fn first_ready(cands: Vec<PathBuf>, bare: bool) -> Option<PathBuf> {
     if cands.is_empty() {
         return None;
     }
     let (tx, rx) = std::sync::mpsc::channel();
-    for (index, path) in cands.iter().cloned().enumerate() {
-        let tx = tx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(Note::Started(index, std::time::Instant::now()));
-            let _ = tx.send(Note::Done(index, accept_hud(&path)));
-        });
-    }
-    drop(tx);
-    collect(&cands, &rx, bare)
+    collect(&cands, &tx, &rx, bare)
 }
 
 /// Read `rx` until one candidate is the program.
 ///
-/// A `Done` already in the queue is the program, even when the matching
-/// `Started` stamp is older than the budget. The budget waits out only a
-/// stat that has not finished.
-fn collect(cands: &[PathBuf], rx: &std::sync::mpsc::Receiver<Note>, bare: bool) -> Option<PathBuf> {
+/// Candidates are stated one at a time. A `Done` already in the queue is
+/// the program, even when the matching `Started` stamp is older than the
+/// budget. The budget waits out only a stat that has not finished. A
+/// prefix that is not a program states the next entry. A hit does not.
+fn collect(
+    cands: &[PathBuf],
+    tx: &std::sync::mpsc::Sender<Note>,
+    rx: &std::sync::mpsc::Receiver<Note>,
+    bare: bool,
+) -> Option<PathBuf> {
     let mut phase = vec![Phase::Pending; cands.len()];
+    let mut spawned = vec![false; cands.len()];
     loop {
         match step(&mut phase, bare) {
             Step::Hit(index) => return Some(cands[index].clone()),
             Step::Miss(denied) => return denied.map(|index| cands[index].clone()),
-            Step::Hold(None) => match rx.recv() {
-                Ok(note) => apply_note(&mut phase, note),
-                Err(_) => abandon(&mut phase),
-            },
+            Step::Hold(None) => {
+                if !take_note(&mut phase, rx) && !start_next(cands, tx, &phase, &mut spawned) {
+                    match rx.recv() {
+                        Ok(note) => apply_note(&mut phase, note),
+                        Err(_) => abandon(&mut phase),
+                    }
+                }
+            }
             Step::Hold(Some(limit)) => {
                 if !limit.is_zero() {
                     match rx.recv_timeout(limit) {
@@ -241,6 +248,50 @@ fn collect(cands: &[PathBuf], rx: &std::sync::mpsc::Receiver<Note>, bare: bool) 
             }
         }
     }
+}
+
+/// Apply a note that is already queued. `false` when the queue is empty.
+fn take_note(phase: &mut [Phase], rx: &std::sync::mpsc::Receiver<Note>) -> bool {
+    match rx.try_recv() {
+        Ok(note) => {
+            apply_note(phase, note);
+            true
+        }
+        Err(std::sync::mpsc::TryRecvError::Empty) => false,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            abandon(phase);
+            true
+        }
+    }
+}
+
+/// State the next entry that the walk has reached and has not stated.
+///
+/// A hit returns before this runs, so a later `PATH` entry is never
+/// stated. `false` when the walk is waiting on a stat that already started.
+fn start_next(
+    cands: &[PathBuf],
+    tx: &std::sync::mpsc::Sender<Note>,
+    phase: &[Phase],
+    spawned: &mut [bool],
+) -> bool {
+    for (index, slot) in phase.iter().enumerate() {
+        match *slot {
+            Phase::No | Phase::Skip | Phase::Denied | Phase::Blocked => continue,
+            Phase::Pending if !spawned[index] => {
+                spawned[index] = true;
+                let path = cands[index].clone();
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(Note::Started(index, std::time::Instant::now()));
+                    let _ = tx.send(Note::Done(index, accept_hud(&path)));
+                });
+                return true;
+            }
+            Phase::Pending | Phase::Running(_) | Phase::Yes => return false,
+        }
+    }
+    false
 }
 
 fn apply_note(phase: &mut [Phase], note: Note) {
@@ -432,18 +483,10 @@ pub fn run(opts: HudLaunch) -> i32 {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // `exec` skips `atexit`. An absolute path, and a slash-free name,
-        // can leave the parked directory: the spelling does not depend on
-        // it. A relative path is the spelling base execs, and the cwd is
-        // still that directory, so `..` after a symlink is the kernel's
-        // parent. Leaving first would resolve the same text elsewhere.
-        if bin.is_absolute() || !path_has_slash(&bin) {
-            if let Some(stand) = crate::cwd_probe::parked_replacement_dir() {
-                let _ = std::env::set_current_dir(&stand);
-                crate::cwd_probe::release_parked_dir();
-                cmd.current_dir(&stand);
-            }
-        }
+        // The cwd is the parked directory after settle, or the directory
+        // the command started in when it did not park. Base execs from
+        // that cwd for every spelling. `execve` keeps it. Moving onto
+        // the tracker would land a relative create there.
         let err = cmd.exec();
         say!("ljos: exec {}: {err}", bin.display());
         1
@@ -545,14 +588,15 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(Note::Started(0, started)).unwrap();
         tx.send(Note::Done(0, HudFile::Yes)).unwrap();
-        drop(tx);
-        assert_eq!(collect(std::slice::from_ref(&path), &rx, false), Some(path));
+        assert_eq!(
+            collect(std::slice::from_ref(&path), &tx, &rx, false),
+            Some(path)
+        );
 
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(Note::Started(0, started)).unwrap();
-        drop(tx);
         assert_eq!(
-            collect(&[PathBuf::from("ljos-hud")], &rx, false),
+            collect(&[PathBuf::from("ljos-hud")], &tx, &rx, false),
             None,
             "a stat that has not finished is not a program once the budget is over"
         );
