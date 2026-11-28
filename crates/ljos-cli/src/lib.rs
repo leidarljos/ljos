@@ -95592,11 +95592,17 @@ lesson, due yesterday, seat ada
 
     /// A connect cap on a port with no listener is down and starts the
     /// writer. The same timeout against a listener that is up stays busy.
+    /// The start is counted only when `packset` is on `PATH`. The stub
+    /// is not executed: a test build stops before `packset ensure`.
     fn dropped_syn_timeout_starts_the_writer() {
         let held = ljos_test_boot::ClosedPort::bind().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let live = listener.local_addr().unwrap().port();
         let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::install_executable(&bin.join("packset"), "#!/bin/sh\nexit 0\n").unwrap();
+        let _bins = super::prepend_path(&bin);
         unsafe {
             std::env::remove_var("PACKSET_URL");
             std::env::remove_var("PACKSET_TOKEN");
