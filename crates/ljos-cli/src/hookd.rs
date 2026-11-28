@@ -598,8 +598,10 @@ impl Gate {
         let waited = asked.elapsed().as_millis();
         if writeln!(&mut &*stream, "go {waited}").is_ok() {
             let _ = stream.set_read_timeout(Some(HOLD));
-            let mut buf = [0u8; 64];
-            while matches!((&mut &*stream).read(&mut buf), Ok(n) if n > 0) {}
+            // `copy` retries Interrupted and discards the bytes. End of
+            // file and a real error, including the hold timeout, still
+            // release the slot.
+            let _ = std::io::copy(&mut &*stream, &mut std::io::sink());
         }
         let mut turns = self.lock();
         turns.running -= 1;

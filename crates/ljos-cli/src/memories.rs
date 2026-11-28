@@ -1444,7 +1444,9 @@ fn term_size() -> (usize, usize) {
 fn read_key() -> Key {
     use std::io::Read;
     let mut b = [0u8; 1];
-    if std::io::stdin().read(&mut b).unwrap_or(0) == 0 {
+    // `read_exact` retries Interrupted. A real close or a real error
+    // still quits the viewer.
+    if std::io::stdin().read_exact(&mut b).is_err() {
         return Key::Char('q');
     }
     if b[0] == 0x1b {

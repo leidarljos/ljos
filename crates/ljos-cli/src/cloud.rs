@@ -1042,9 +1042,11 @@ impl JsonIn<'_> {
             return Some(byte);
         }
         let mut buf = [0u8; 1];
-        match self.reader.read(&mut buf) {
-            Ok(1) => Some(buf[0]),
-            _ => None,
+        // `read_exact` retries Interrupted. End of file and any other
+        // error still yield no byte.
+        match self.reader.read_exact(&mut buf) {
+            Ok(()) => Some(buf[0]),
+            Err(_) => None,
         }
     }
 
@@ -4908,6 +4910,44 @@ mod tests {
         let keys = json_seat_keys(&doc);
         assert!(keys.contains("ljos.seat"), "{keys:?}");
         assert!(keys.contains("ljos_seat"), "{keys:?}");
+    }
+
+    /// One `Interrupted` on a required byte is not end of input.
+    /// Whitespace skipping treats a failed peek as "no space" and reads
+    /// again, so the error is placed on the first byte of the key, which
+    /// `bump` must return or the value is lost.
+    #[test]
+    fn an_interrupted_read_still_yields_the_bytes_after_it() {
+        let _env_read = crate::test_env_read_lock();
+        struct Once {
+            rest: &'static [u8],
+            tripped: bool,
+        }
+        impl std::io::Read for Once {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if !self.tripped && self.rest.first() == Some(&b'm') {
+                    self.tripped = true;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "interrupted",
+                    ));
+                }
+                if buf.is_empty() || self.rest.is_empty() {
+                    return Ok(0);
+                }
+                buf[0] = self.rest[0];
+                self.rest = &self.rest[1..];
+                Ok(1)
+            }
+        }
+        let mut reader = Once {
+            rest: br#"{"mcpServers":{"ljos":{"command":"ljos-mcp"}}}"#,
+            tripped: false,
+        };
+        let ClaudeRead::Servers(text) = claude_mcp_servers_value(&mut reader) else {
+            panic!("mcpServers was not read after Interrupted");
+        };
+        assert!(text.contains("ljos-mcp"), "{text}");
     }
 
     #[test]
