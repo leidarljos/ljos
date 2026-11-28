@@ -701,10 +701,12 @@ fn apply_root(key: &str, raw: &std::ffi::OsStr, result: Result<Hit, Fault>) {
 ///
 /// A relative path is already that form. An absolute path that is `start`,
 /// or a path inside it, may be slow to state after the park. An absolute
-/// path outside `start` is `None` and stays as set. An empty value is
-/// `None`: the caller has nothing to walk.
+/// path outside `start` is `None` and stays as set. An empty value, and a
+/// value that is only whitespace, is `None`. Base leaves those bytes.
+/// Joining them onto `start` would store a path inside the start directory.
 fn under_start(start: &Path, given: &Path) -> Option<PathBuf> {
-    if given.as_os_str().is_empty() {
+    let text = given.as_os_str();
+    if text.is_empty() || text.to_str().is_some_and(|raw| raw.trim().is_empty()) {
         return None;
     }
     if !given.is_absolute() {

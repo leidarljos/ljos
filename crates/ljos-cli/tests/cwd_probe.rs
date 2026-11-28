@@ -1605,6 +1605,8 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
         "bare-park-unset",
         "sib-real",
         "abs-real",
+        "sym-hud",
+        "sym-path",
     ] {
         if let Ok(only) = std::env::var("LJOS_PROBE_ROW") {
             if !only.split(',').any(|one| one == row) {
@@ -2995,6 +2997,76 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                     label,
                     Duration::from_secs(4),
                 )
+            }
+            "sym-hud" | "sym-path" => {
+                // Parked cwd. `../a/link` points outside TMPDIR, and
+                // `../a/link/../ljos-hud` is the file beside that target.
+                // Folding `..` selects `a/ljos-hud` instead. A tracker
+                // root that is only whitespace keeps the bytes that were set.
+                let nest = seat.dir.path().join("sym-nest");
+                let outside = seat.dir.path().join("sym-else");
+                let start = seat.dir.path().join("sym-start");
+                std::fs::create_dir_all(nest.join("a")).unwrap();
+                std::fs::create_dir_all(outside.join("sub")).unwrap();
+                std::fs::create_dir_all(&start).unwrap();
+                let link = nest.join("a/link");
+                if !link.exists() {
+                    link_dir(&outside.join("sub"), &link);
+                }
+                script(
+                    &nest.join("a"),
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'LEX %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let root_key = if row == "sym-hud" {
+                    "VISSUE_ROOT"
+                } else {
+                    "ISSUE_ROOT"
+                };
+                let root_bytes = if row == "sym-hud" { "  " } else { "\t" };
+                script(
+                    &outside,
+                    "ljos-hud",
+                    &format!(
+                        "#!/bin/sh\nprintf 'KERN %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nprintf '%s' \"${root_key}\" > \"$LJOS_MARK/root\"\nexit 0\n"
+                    ),
+                );
+                let nest_s = nest.to_str().unwrap();
+                let start_s = start.to_str().unwrap();
+                let hud = "../a/link/../ljos-hud";
+                let path = "../a/link/..:/usr/bin:/bin";
+                let (hud_bin, path_val) = if row == "sym-hud" {
+                    (hud, "/usr/bin:/bin")
+                } else {
+                    ("", path)
+                };
+                let flags = both_flags(
+                    &seat,
+                    &copied,
+                    &start,
+                    &[
+                        ("TMPDIR", nest_s),
+                        ("LJOS_MARK", mark_s),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_EXACT", start_s),
+                        ("PATH", path_val),
+                        ("LJOS_HUD_BIN", hud_bin),
+                        (root_key, root_bytes),
+                    ],
+                    "KERN",
+                    Duration::from_secs(4),
+                );
+                match flags {
+                    Err(why) => Err(format!("{row} {why}")),
+                    Ok(()) => {
+                        let got = std::fs::read(mark.join("root")).unwrap_or_default();
+                        if got == root_bytes.as_bytes() {
+                            Ok(())
+                        } else {
+                            Err(format!("{row} root bytes {got:?}"))
+                        }
+                    }
+                }
             }
             "bare-park-unset" => {
                 // Same park, with PATH unset. Base still misses in the

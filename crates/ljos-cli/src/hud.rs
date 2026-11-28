@@ -375,44 +375,14 @@ fn user_can_exec(path: &Path) -> bool {
 
 /// `path` when it is a regular file, in the spelling base execs.
 ///
-/// Base states the path and execs that spelling. It does not call
-/// `realpath`. A `realpath` on this thread has no deadline, so a sibling,
-/// a `.` entry, a relative `bin`, or an absolute `PATH` entry can sit
-/// there after the stat has already answered. A relative path stated in
-/// the parked directory is joined to that directory. `.` and `..` are
-/// folded in the text: the parked directory is removed before `exec`,
-/// and a path that still names it does not open. The fold does not
-/// state the path. `getcwd` has already resolved the working directory,
-/// so `..` is that directory's parent.
+/// Base states the path and execs that spelling from the process cwd.
+/// It does not call `realpath`, and it does not fold `.` or `..`.
+/// A symlink is followed, then `..` is the parent of the directory that
+/// was reached. Popping those components in the text names a different
+/// file. A relative path keeps this spelling, and the cwd stays the
+/// parked directory, which is where base execs it.
 fn absolute_ready(path: &Path) -> Option<PathBuf> {
-    if !crate::cwd_probe::program_file(path) {
-        return None;
-    }
-    if path.is_absolute() {
-        return Some(path.to_path_buf());
-    }
-    let Ok(cwd) = std::env::current_dir() else {
-        return Some(path.to_path_buf());
-    };
-    if crate::cwd_probe::parked_work_dir(&cwd) {
-        return Some(lexical_from(&cwd, path));
-    }
-    Some(path.to_path_buf())
-}
-
-/// `cwd` joined with `rel`, with `.` and `..` removed. No filesystem walk.
-fn lexical_from(cwd: &Path, rel: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for comp in cwd.components().chain(rel.components()) {
-        match comp {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other),
-        }
-    }
-    out
+    crate::cwd_probe::program_file(path).then(|| path.to_path_buf())
 }
 
 /// Hint printed when the launcher cannot find the HUD binary.
@@ -462,15 +432,17 @@ pub fn run(opts: HudLaunch) -> i32 {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // `exec` skips `atexit`. Leave only when this process is still in
-        // the parked directory it created. A fast local directory is not
-        // that directory: the new image keeps it, and a relative `TMPDIR`,
-        // `VISSUE_ROOT`, or HUD path still names the start directory. The
-        // replacement is searchable, or `/` when the tracker is not.
-        if let Some(stand) = crate::cwd_probe::parked_replacement_dir() {
-            let _ = std::env::set_current_dir(&stand);
-            crate::cwd_probe::release_parked_dir();
-            cmd.current_dir(&stand);
+        // `exec` skips `atexit`. An absolute path, and a slash-free name,
+        // can leave the parked directory: the spelling does not depend on
+        // it. A relative path is the spelling base execs, and the cwd is
+        // still that directory, so `..` after a symlink is the kernel's
+        // parent. Leaving first would resolve the same text elsewhere.
+        if bin.is_absolute() || !path_has_slash(&bin) {
+            if let Some(stand) = crate::cwd_probe::parked_replacement_dir() {
+                let _ = std::env::set_current_dir(&stand);
+                crate::cwd_probe::release_parked_dir();
+                cmd.current_dir(&stand);
+            }
         }
         let err = cmd.exec();
         say!("ljos: exec {}: {err}", bin.display());
