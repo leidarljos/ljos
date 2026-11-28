@@ -1566,6 +1566,9 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
         "path-unset",
         "empty-mode",
         "same-answer",
+        "bare-hud",
+        "bare-space",
+        "empty-two",
     ] {
         let _ = std::fs::remove_file(mark.join("which"));
         let err = match row {
@@ -2658,6 +2661,120 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                     (_, _, Err(why), _) => Err(format!("{row} unset {why}")),
                     (_, _, _, Err(why)) => Err(format!("{row} mode {why}")),
                 }
+            }
+            "bare-hud" => {
+                // A slash-free LJOS_HUD_BIN is a PATH search. The mode 644
+                // file in the working directory is not the program.
+                let cwd = seat.dir.path().join("bare-cwd");
+                let good = seat.dir.path().join("bare-good");
+                std::fs::create_dir_all(&cwd).unwrap();
+                std::fs::create_dir_all(&good).unwrap();
+                script(
+                    &cwd,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'DECOY %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                set_mode(&cwd.join("ljos-hud"), 0o644);
+                script(
+                    &good,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'PATHBIN %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let path = format!("{}:/usr/bin:/bin", good.display());
+                both_flags(
+                    &seat,
+                    &copied,
+                    &cwd,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", "ljos-hud"),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    "PATHBIN",
+                    Duration::from_secs(4),
+                )
+            }
+            "bare-space" => {
+                // The trailing space is the byte base keeps. The lookup
+                // trims it, then searches PATH. The spaced file is not run.
+                let cwd = seat.dir.path().join("space-cwd");
+                let good = seat.dir.path().join("space-good");
+                std::fs::create_dir_all(&cwd).unwrap();
+                std::fs::create_dir_all(&good).unwrap();
+                script(
+                    &cwd,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'DECOY %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                set_mode(&cwd.join("ljos-hud"), 0o644);
+                script(
+                    &cwd,
+                    "ljos-hud ",
+                    "#!/bin/sh\nprintf 'SPACED %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                script(
+                    &good,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'PATHBIN %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let path = format!("{}:/usr/bin:/bin", good.display());
+                both_flags(
+                    &seat,
+                    &copied,
+                    &cwd,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", "ljos-hud "),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    "PATHBIN",
+                    Duration::from_secs(4),
+                )
+            }
+            "empty-two" => {
+                // An empty PATH component names a mode 644 file, then `bin`
+                // names another, then an executable. Both flags run that
+                // executable. execvp skips both mode 644 files.
+                let cwd = seat.dir.path().join("two644");
+                let good = seat.dir.path().join("two-good");
+                std::fs::create_dir_all(cwd.join("bin")).unwrap();
+                std::fs::create_dir_all(&good).unwrap();
+                script(
+                    &cwd,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'DOT %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                set_mode(&cwd.join("ljos-hud"), 0o644);
+                script(
+                    &cwd.join("bin"),
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'BIN %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                set_mode(&cwd.join("bin/ljos-hud"), 0o644);
+                script(
+                    &good,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'GOOD %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let path = format!(":bin:{}:/usr/bin:/bin", good.display());
+                both_flags(
+                    &seat,
+                    &copied,
+                    &cwd,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", ""),
+                        ("VISSUE_ROOT", ""),
+                    ],
+                    "GOOD",
+                    Duration::from_secs(4),
+                )
             }
             _ => unreachable!(),
         };
