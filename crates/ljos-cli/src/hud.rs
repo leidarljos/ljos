@@ -42,9 +42,10 @@ static HUD_HIT: std::sync::Mutex<Option<HudHit>> = std::sync::Mutex::new(None);
 ///
 /// The order is the base launcher's. A set `LJOS_HUD_BIN` is the trimmed
 /// string and nothing else. The variable bytes are not rewritten. A
-/// slash-free string is not looked up on `PATH` in this walk: the start
-/// directory is stated, and only a regular file is returned, as that
-/// same string, for `execvp`. Otherwise the sibling beside this binary,
+/// slash-free string is not looked up on `PATH` in this walk. Base calls
+/// `is_file` after the process has parked, so the stat is the process
+/// working directory, and only a regular file is returned, as that same
+/// string, for `execvp`. Otherwise the sibling beside this binary,
 /// then each `PATH` entry, including `.`, an empty component, and any
 /// other relative entry. An unset `PATH` adds no entry. A path that
 /// contains a slash is the first regular file, which is what base execs,
@@ -93,15 +94,16 @@ fn walk_hud(hud: &std::ffi::OsString, path: Option<&std::ffi::OsStr>) -> Option<
         if !trimmed.is_empty() {
             let chosen = PathBuf::from(trimmed);
             // Base returns this trimmed string and does not search `PATH`.
-            // `is_file` of a slash-free name is the start directory. Only
-            // a regular file is returned, and the string itself is what
-            // `execvp` receives. A miss, or a stat that does not answer,
-            // is not a program and does not fall through.
+            // `is_file` runs after settle. A start directory that did not
+            // answer has been left, and this relative name is the parked
+            // directory, where it is not a file. The deadline helper
+            // states that relative path. The start directory is not joined.
+            // A miss, or a stat that does not answer, is not a program and
+            // does not fall through.
             if path_has_slash(&chosen) {
                 return Some(chosen);
             }
-            let stated = crate::cwd_probe::from_start(&chosen);
-            return first_ready(vec![stated], false).map(|_| chosen);
+            return first_ready(vec![chosen.clone()], false).map(|_| chosen);
         }
     }
     let mut cands = Vec::new();
@@ -396,8 +398,9 @@ pub fn run(opts: HudLaunch) -> i32 {
         if path_has_slash(&path) {
             absolute_ready(&path)
         } else {
-            // Already stated in the start directory. Canonicalizing it
-            // would exec that file. `execvp` must see the slash-free string.
+            // Stated in the process cwd. Canonicalizing a slash-free name
+            // would exec a start-directory file. `execvp` must see the
+            // string base handed to `is_file`.
             Some(path)
         }
     });

@@ -1572,6 +1572,8 @@ fn an_absolute_program_and_a_missing_root_resolve_before_the_park() {
         "bare-absent",
         "bare-trail",
         "bare-unset",
+        "bare-park",
+        "bare-park-unset",
     ] {
         let _ = std::fs::remove_file(mark.join("which"));
         let err = match row {
@@ -2859,6 +2861,70 @@ printf '%s\n' 'demo-abcd  TODO  [#C]  a title'
                         ("PATH", ""),
                         ("LJOS_HUD_BIN", "ljos-hud"),
                         ("VISSUE_ROOT", ""),
+                    ],
+                )
+            }
+            "bare-park" => {
+                // The start directory does not answer, so settle parks
+                // before the slash-free check. The name is a regular file
+                // there and PATH has a program. The check is the parked
+                // directory: both flags miss, and nothing runs.
+                let cwd = seat.dir.path().join("park-bare");
+                let good = seat.dir.path().join("park-good");
+                std::fs::create_dir_all(&cwd).unwrap();
+                std::fs::create_dir_all(&good).unwrap();
+                script(
+                    &cwd,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'START %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                set_mode(&cwd.join("ljos-hud"), 0o755);
+                script(
+                    &good,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'PATHBIN %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                let path = format!("{}:/usr/bin:/bin", good.display());
+                let cwd_s = cwd.to_str().unwrap();
+                one_budget_miss(
+                    &seat,
+                    &copied,
+                    &cwd,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", path.as_str()),
+                        ("LJOS_HUD_BIN", "ljos-hud"),
+                        ("VISSUE_ROOT", ""),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_EXACT", cwd_s),
+                    ],
+                )
+            }
+            "bare-park-unset" => {
+                // Same park, with PATH unset. Base still misses in the
+                // parked directory. It does not exec the slash-free name.
+                let cwd = seat.dir.path().join("park-unset");
+                std::fs::create_dir_all(&cwd).unwrap();
+                script(
+                    &cwd,
+                    "ljos-hud",
+                    "#!/bin/sh\nprintf 'START %s\\n' \"$1\" > \"$LJOS_MARK/which\"\nexit 0\n",
+                );
+                set_mode(&cwd.join("ljos-hud"), 0o755);
+                let cwd_s = cwd.to_str().unwrap();
+                one_budget_miss(
+                    &seat,
+                    &copied,
+                    &cwd,
+                    &[
+                        ("TMPDIR", tmp_s),
+                        ("LJOS_MARK", mark_s),
+                        ("PATH", ""),
+                        ("LJOS_HUD_BIN", "ljos-hud"),
+                        ("VISSUE_ROOT", ""),
+                        ("LD_PRELOAD", so_s),
+                        ("SLOW_EXACT", cwd_s),
                     ],
                 )
             }
