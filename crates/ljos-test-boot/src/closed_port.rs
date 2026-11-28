@@ -7,8 +7,11 @@
 //! Nothing is listening. On Linux the kernel resets the connect, which
 //! is `ECONNREFUSED`. On other Unixes a bound socket that is not
 //! listening drops the SYN, so the connect waits out its own timeout
-//! and is `ETIMEDOUT` or `ECONNREFUSED`. The socket stays bound and not
-//! listening, so a child can `listen` on the inherited descriptor.
+//! and is `ETIMEDOUT` or `ECONNREFUSED`. The pack connect reports that
+//! loopback timeout as a refusal after its 800 ms probe. The socket
+//! stays bound and not listening, so a child can `listen` on the
+//! inherited descriptor. The tests check that the connect fails fast,
+//! and a second bind does not succeed.
 
 use std::io;
 use std::os::fd::RawFd;
@@ -188,14 +191,20 @@ mod tests {
     }
 
     /// A connect that stops on its own, short of the kernel's dropped-SYN
-    /// wait. Linux still has to be `ECONNREFUSED`. Other Unixes may be
-    /// that or `ETIMEDOUT`.
+    /// wait, and inside a second. Linux still has to be `ECONNREFUSED`.
+    /// Other Unixes may be that or `ETIMEDOUT`.
     fn assert_connect_fails(port: u16) {
+        let started = std::time::Instant::now();
         let refused = std::net::TcpStream::connect_timeout(
             &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
             std::time::Duration::from_millis(200),
         )
         .expect_err("a connect to a closed port should fail");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "connect to a held port took {elapsed:?}"
+        );
         let reset = refused.kind() == std::io::ErrorKind::ConnectionRefused
             || refused.raw_os_error() == Some(libc::ECONNREFUSED);
         #[cfg(target_os = "linux")]
