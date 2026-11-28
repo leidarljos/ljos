@@ -218,14 +218,16 @@ fn a_vote_on_a_long_tracker_matches_and_does_not_pickaxe() {
     ]);
     let mina_out = String::from_utf8_lossy(&mina.stdout);
     let mina_err = String::from_utf8_lossy(&mina.stderr);
+    let mina_said = format!("{mina_out}{mina_err}");
     assert!(
-        mina.status.success(),
-        "mina vote failed\n{mina_out}\n{mina_err}"
+        !mina.status.success(),
+        "a seat that stood is not a persona of the caster\n{mina_said}"
     );
     assert!(
-        mina_out.contains("recorded on the tracker: persona:ada:mina for ship on probe-humz"),
-        "a seat pinned before slots was not recorded as that persona\n{mina_out}\n{mina_err}"
+        mina_said.contains("a seat cannot cast a ballot for mina"),
+        "{mina_said}"
     );
+    assert!(!mina_said.contains("persona:ada:mina"), "{mina_said}");
     assert!(
         !mina_err.contains("slot history: partial"),
         "the lookup stopped early\n{mina_err}"
@@ -243,17 +245,18 @@ fn a_vote_on_a_long_tracker_matches_and_does_not_pickaxe() {
     ]);
     let eessi_out = String::from_utf8_lossy(&eessi.stdout);
     let eessi_err = String::from_utf8_lossy(&eessi.stderr);
+    let eessi_said = format!("{eessi_out}{eessi_err}");
     assert!(
-        eessi.status.success(),
-        "eessi vote failed\n{eessi_out}\n{eessi_err}"
+        !eessi.status.success(),
+        "a pin added after slots is a persona and needs a deed\n{eessi_said}"
     );
     assert!(
-        eessi_out.contains("recorded on the tracker: eessi for hold on probe-humz"),
-        "a pin added after slots was recorded as a standing seat\n{eessi_out}\n{eessi_err}"
+        eessi_said.contains("a ballot cast as eessi needs --used naming a deed"),
+        "{eessi_said}"
     );
     assert!(
-        !eessi_out.contains("persona:ada:eessi"),
-        "eessi stood\n{eessi_out}"
+        !eessi_said.contains("persona:ada:eessi"),
+        "eessi stood\n{eessi_said}"
     );
 
     let search = ljos(&["search", "slot"]);

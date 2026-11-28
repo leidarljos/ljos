@@ -122,6 +122,55 @@ impl SigNote {
     }
 }
 
+/// One voter field. A name that holds a space, a quote or a backslash is
+/// wrapped and escaped, so `Disk Saver` is one token. Any other name,
+/// including a `judge:` id, is written as itself.
+fn quote_voter(voter: &str) -> String {
+    let voter = voter.trim();
+    if !voter
+        .chars()
+        .any(|c| c.is_whitespace() || c == '"' || c == '\\')
+    {
+        return voter.to_string();
+    }
+    let mut out = String::from("\"");
+    for c in voter.chars() {
+        if c == '\\' || c == '"' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+/// The voter and the text after it. A leading `"` is one field, escapes
+/// included. Otherwise the first whitespace-separated token is the voter.
+fn take_voter(rest: &str) -> Option<(String, &str)> {
+    let rest = rest.trim_start();
+    if let Some(body) = rest.strip_prefix('"') {
+        let mut voter = String::new();
+        let mut chars = body.char_indices();
+        while let Some((i, c)) = chars.next() {
+            match c {
+                '\\' => {
+                    let (_, next) = chars.next()?;
+                    voter.push(next);
+                }
+                '"' => {
+                    let after = body[i + 1..].trim_start();
+                    return Some((voter, after));
+                }
+                _ => voter.push(c),
+            }
+        }
+        return None;
+    }
+    let at = spans(rest);
+    let (start, end) = *at.first()?;
+    Some((rest[start..end].to_string(), rest[end..].trim_start()))
+}
+
 /// `ballot-sig: VOTER CHOICE KEYHEX SIGHEX`, or the same plus
 /// `HARNESS NONCE` when the ballot is bound to a session. A ballot folded
 /// by the process tree adds `CLAIMED_HARNESS CLAIMED_NONCE LINK`. The
@@ -129,35 +178,41 @@ impl SigNote {
 /// found by their hex lengths, counted from the end, and the choice is
 /// the text between the voter and the key. A note whose key is not 64 hex
 /// digits parses only in the four- or six-field shape. A six-field note
-/// has no claimed session and no link.
+/// has no claimed session and no link. A voter with a space is one quoted
+/// token.
 #[must_use]
 pub fn parse_note(note: &str) -> Option<SigNote> {
     let rest = note.trim().strip_prefix(SIG_NOTE)?;
+    let (voter, rest) = take_voter(rest)?;
     let at = spans(rest);
     let n = at.len();
-    if n < 4 {
+    if n < 3 {
         return None;
     }
     let tok = |i: usize| &rest[at[i].0..at[i].1];
-    let key_at = |i: usize| is_hex_len(tok(i), 64) && is_hex_len(tok(i + 1), 128);
+    let key_at = |i: usize| i + 1 < n && is_hex_len(tok(i), 64) && is_hex_len(tok(i + 1), 128);
     // Where the key sits, and how many session fields follow the signature.
-    // 3: voice, claimed session, and link. 2: voice. 1: choice only.
-    let (k, kind) = if n >= 9 && key_at(n - 7) {
+    // The voter was already taken. 3: voice, claimed session, and link.
+    // 2: voice. 1: choice only.
+    let (k, kind) = if n >= 8 && key_at(n - 7) {
         (n - 7, 3)
-    } else if n >= 6 && key_at(n - 4) {
+    } else if n >= 5 && key_at(n - 4) {
         (n - 4, 2)
     } else if key_at(n - 2) {
         (n - 2, 1)
-    } else if n == 6 {
-        (2, 2)
-    } else if n == 4 {
-        (2, 1)
+    } else if n == 5 {
+        (1, 2)
+    } else if n == 3 {
+        (1, 1)
     } else {
         return None;
     };
-    let choice = rest[at[1].0..at[k - 1].1].trim();
+    if k == 0 {
+        return None;
+    }
+    let choice = rest[at[0].0..at[k - 1].1].trim();
     Some(SigNote {
-        voter: tok(0).to_string(),
+        voter,
         choice: choice.to_string(),
         key: tok(k).to_string(),
         sig: tok(k + 1).to_string(),
@@ -215,7 +270,7 @@ pub fn withdrawn_line_on(voter: &str, harness: &str, nonce: &str, issue: Option<
     if let Some(issue) = issue {
         return format!(
             "{WITHDRAWN_NOTE}{} {} {} {}",
-            field(voter),
+            noted_voter(voter),
             field(harness),
             field(nonce),
             issue
@@ -223,7 +278,7 @@ pub fn withdrawn_line_on(voter: &str, harness: &str, nonce: &str, issue: Option<
     }
     format!(
         "{WITHDRAWN_NOTE}{} {} {}",
-        field(voter),
+        noted_voter(voter),
         field(harness),
         field(nonce)
     )
@@ -241,7 +296,7 @@ pub fn parse_withdrawn(note: &str) -> Option<WithdrawnNote> {
         _ => return None,
     };
     Some(WithdrawnNote {
-        voter: voter.to_string(),
+        voter: noted_voter(voter),
         harness: harness.to_string(),
         nonce: nonce.to_string(),
         issue,
@@ -655,14 +710,10 @@ pub(crate) fn git_in(root: &Path, args: &[&str]) -> Option<String> {
 /// The note text for a ballot signed by `key` (v1, choice only).
 #[must_use]
 pub fn sign_with(key: &SigningKey, issue: &str, voter: &str, choice: &str) -> String {
+    let voter = voter.trim();
+    let shown = quote_voter(voter);
     let (public, sig) = signed_hex(key, &message(issue, voter, choice));
-    format!(
-        "{SIG_NOTE}{} {} {} {}",
-        voter.trim(),
-        choice.trim(),
-        public,
-        sig
-    )
+    format!("{SIG_NOTE}{shown} {} {} {}", choice.trim(), public, sig)
 }
 
 /// The note text for a ballot bound to a harness session and its marker.
@@ -675,12 +726,13 @@ pub fn sign_bound(
     harness: &str,
     nonce: &str,
 ) -> String {
+    let voter = voter.trim();
+    let shown = quote_voter(voter);
     let harness = field(harness);
     let nonce = field(nonce);
     let (public, sig) = signed_hex(key, &message_v2(issue, voter, choice, &harness, &nonce));
     format!(
-        "{SIG_NOTE}{} {} {} {} {} {}",
-        voter.trim(),
+        "{SIG_NOTE}{shown} {} {} {} {} {}",
         choice.trim(),
         public,
         sig,
@@ -709,6 +761,8 @@ pub(crate) fn sign_linked(
     choice: &str,
     fields: LinkedFields<'_>,
 ) -> String {
+    let voter = voter.trim();
+    let shown = quote_voter(voter);
     let harness = field(fields.harness);
     let nonce = field(fields.nonce);
     let claimed_harness = field(fields.claimed_harness);
@@ -730,8 +784,7 @@ pub(crate) fn sign_linked(
         ),
     );
     format!(
-        "{SIG_NOTE}{} {} {} {} {} {} {} {} {}",
-        voter.trim(),
+        "{SIG_NOTE}{shown} {} {} {} {} {} {} {} {}",
         choice.trim(),
         public,
         sig,
@@ -854,6 +907,22 @@ pub fn pins() -> BTreeMap<String, String> {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|t| parse_pins(&t))
         .unwrap_or_default()
+}
+
+/// The voter token written into a signature. A compound `persona:` id is
+/// already one token and stays as written so an older note still verifies.
+/// Every other name is [`crate::voter_id`], which has no spaces.
+fn noted_voter(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.contains(':') {
+        return raw.to_string();
+    }
+    let id = crate::voter_id(raw);
+    if id.is_empty() {
+        raw.to_string()
+    } else {
+        id
+    }
 }
 
 /// A token safe to put in a signature note: no whitespace.
@@ -1421,8 +1490,8 @@ pub fn provenance_line(persona: &str, caster: &str, parent: &str) -> String {
 pub fn caster_persona_voter(caster: &str, persona: &str) -> String {
     format!(
         "{PERSONA_VOTER}{}:{}",
-        field(&crate::canonical_seat_name(caster)),
-        field(&crate::canonical_seat_name(persona))
+        field(&crate::voter_id(caster)),
+        field(&crate::voter_id(persona))
     )
 }
 
@@ -1597,8 +1666,12 @@ fn current_public_hex(voter: &str) -> Option<String> {
     Some(hex::encode(key.verifying_key().to_bytes()))
 }
 
-fn same_voter(signed: &str, voter: &str) -> bool {
-    signed == voter.trim() || signed == field(voter)
+pub(crate) fn same_voter(signed: &str, voter: &str) -> bool {
+    let signed_id = crate::voter_id(signed);
+    let voter_id = crate::voter_id(voter);
+    (!signed_id.is_empty() && signed_id == voter_id)
+        || signed == voter.trim()
+        || signed == field(voter)
 }
 
 fn newest_sig(issue: &str, voter: &str) -> Option<(SigNote, bool)> {
@@ -1658,14 +1731,10 @@ pub fn sign_own_ballot(issue: &str) -> Result<String> {
         Some(ballots) => ballots,
         None => vissue_core::ops::ballots(&layout, issue)?,
     };
-    let Some(choice) = ballots
-        .iter()
-        .find(|b| b.agent == voter)
-        .map(|b| b.choice.clone())
-    else {
+    let Some(row) = ballots.iter().find(|b| same_voter(&b.agent, &voter)) else {
         return Ok(String::new());
     };
-    sign_ballot(issue, &voter, &choice)
+    sign_ballot(issue, &row.agent, &row.choice)
 }
 
 /// The name this process's seat casts and signs under: the seat its write
@@ -1863,7 +1932,7 @@ pub fn seat_check(
         let newest = notes
             .iter()
             .filter_map(|n| parse_note(n))
-            .find(|n| n.voter == *voter);
+            .find(|n| same_voter(&n.voter, voter));
         match newest {
             None if legacy(voter, choice) => old.push((*voter).to_string()),
             None => out.push(format!("{voter}'s ballot is unsigned")),
@@ -2180,14 +2249,14 @@ mod tests {
     fn a_withdrawn_note_is_three_fields() {
         let _env_read = crate::test_env_read_lock();
         let line = withdrawn_line("seat a", "sess-1", "-");
-        assert_eq!(line, "ballot-withdrawn: seat_a sess-1 -");
+        assert_eq!(line, "ballot-withdrawn: seat-a sess-1 -");
         let parsed = parse_withdrawn(&line).unwrap();
-        assert_eq!(parsed.voter, "seat_a");
+        assert_eq!(parsed.voter, "seat-a");
         assert_eq!(parsed.harness, "sess-1");
         assert_eq!(parsed.nonce, "-");
         assert_eq!(parsed.issue, None);
         let on = withdrawn_line_on("seat a", "sess-1", "-", Some("child-a"));
-        assert_eq!(on, "ballot-withdrawn: seat_a sess-1 - child-a");
+        assert_eq!(on, "ballot-withdrawn: seat-a sess-1 - child-a");
         let parsed = parse_withdrawn(&on).unwrap();
         assert_eq!(parsed.issue.as_deref(), Some("child-a"));
         assert!(parse_withdrawn("ballot-withdrawn: only-one").is_none());

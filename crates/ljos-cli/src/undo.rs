@@ -193,8 +193,12 @@ pub fn withdraw_ballot(issue: &str, who: &str) -> Result<String> {
     // soon as it lands, so a reader of a failure in the second still
     // sees which half went through.
     match crate::run_captured_as("vissue", &["vote", issue, "--withdraw"], Some(who)) {
-        Ok(said) => tell_raw!("{}", said.stdout),
+        Ok(said) => {
+            crate::panel_gate::release_session_ballot(issue, who);
+            tell_raw!("{}", said.stdout);
+        }
         Err(e) if format!("{e:#}").contains("holds no ballot") => {
+            crate::panel_gate::release_session_ballot(issue, who);
             tell!("{issue}: {who} holds no ballot; withdrawing the forecast");
         }
         Err(e) => return Err(e),

@@ -1,7 +1,8 @@
 //! A ballot records the persona, the seat or session that cast it, and
 //! the parent session. Ballots that share a session id, a parent, a
-//! calling shell or a harness root are all recorded. They count as one
-//! voice, the latest when they disagree. Consensus names the ballots it
+//! calling shell or a harness root are all recorded. A seat's own ballots
+//! count as one voice, the latest when they disagree. A persona other than
+//! the casting seat counts on its own. Consensus names the ballots it
 //! folded and why. A subagent of that root counts with its parent.
 //! A session that filed a design candidate still casts. The ballot is
 //! labelled `authored: CANDIDATE`. Consensus names that authorship when
@@ -12,7 +13,7 @@
 
 use anyhow::Result;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -289,7 +290,9 @@ fn withdrawal_cuts(notes: &[String], home: &str) -> BTreeMap<(String, String), u
     for (at, note) in notes.iter().enumerate() {
         if let Some(w) = ballot_sig::parse_withdrawn(note) {
             let issue = w.issue.unwrap_or_else(|| home.to_string());
-            cuts.entry((issue, w.voter)).or_insert(at);
+            let voter = crate::voter_id(&w.voter);
+            let voter = if voter.is_empty() { w.voter } else { voter };
+            cuts.entry((issue, voter)).or_insert(at);
         }
     }
     cuts
@@ -300,19 +303,43 @@ fn withdrawn_at(
     issue: &str,
     voter: &str,
 ) -> Option<usize> {
+    let voter = crate::voter_id(voter);
+    if voter.is_empty() {
+        return None;
+    }
     if issue.is_empty() {
-        let field = ballot_sig::field(voter);
         return cuts
             .iter()
-            .find_map(|((_issue, v), at)| (v == voter || v == &field).then_some(*at));
+            .find_map(|((_issue, v), at)| (v == &voter).then_some(*at));
     }
-    let named = (issue.to_string(), voter.to_string());
-    let field = (issue.to_string(), ballot_sig::field(voter));
-    cuts.get(&named).or_else(|| cuts.get(&field)).copied()
+    cuts.get(&(issue.to_string(), voter)).copied()
 }
 
 fn same_voter(signed: &str, voter: &str) -> bool {
-    signed == voter.trim() || signed == ballot_sig::field(voter)
+    let signed = crate::voter_id(signed);
+    let voter = crate::voter_id(voter);
+    !signed.is_empty() && signed == voter
+}
+
+/// Whether `stored` and `choice` are the one choice a ballot counts.
+/// The cast writes this text and the signature covers it.
+#[must_use]
+pub(crate) fn same_counted_choice(stored: &str, choice: &str) -> bool {
+    crate::ballot_choice(stored) == crate::ballot_choice(choice)
+}
+
+/// Whether a standing signature covers `choice` for `voter`. The tally
+/// counts a row only when this is so, or when the row has no signature.
+/// The cast stores [`crate::ballot_choice`], which this compares.
+#[must_use]
+pub(crate) fn signature_covers(
+    voter: &str,
+    choice: &str,
+    sigs: &[(bool, ballot_sig::SigNote)],
+) -> bool {
+    sigs.iter().any(|(standing, sig)| {
+        *standing && same_voter(&sig.voter, voter) && same_counted_choice(&sig.choice, choice)
+    })
 }
 
 fn matching_ballot_issue(
@@ -850,6 +877,15 @@ fn held_choice(issue: &str, voter: &str) -> Option<String> {
         .map(|row| row["choice"].as_str().unwrap_or("").trim().to_string())
 }
 
+/// Drop the in-process mark so `voter` can cast again after a withdrawal.
+/// The drawer row is a separate write.
+pub fn release_session_ballot(issue: &str, voter: &str) {
+    let mark = format!("{}\n{}", issue.trim(), crate::voter_id(voter));
+    if let Ok(mut held) = CAST.lock() {
+        held.remove(&mark);
+    }
+}
+
 /// Reserve `voter`'s ballot on `issue`. Another persona from this session
 /// is recorded with it. The same voter withdraws before casting again.
 /// This process holds that voter's claim across the gap before the note
@@ -885,7 +921,16 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
         });
         return Err(crate::policy_label::labelled("repeated-ballot", why));
     }
-    let mark = format!("{}\n{voter}", issue.trim());
+    let id = crate::voter_id(voter);
+    let mark = format!(
+        "{}\n{}",
+        issue.trim(),
+        if id.is_empty() {
+            voter.trim()
+        } else {
+            id.as_str()
+        }
+    );
     let mut held = CAST.lock().unwrap_or_else(|e| e.into_inner());
     if !held.insert(mark.clone()) {
         ballot_sig::end_cast();
@@ -1089,12 +1134,36 @@ fn fold_why(members: &[usize], rows: &[Value], links: &BTreeMap<String, VoiceLin
     }
 }
 
+/// Personas. The session fold is only the seat's own ballots, where the
+/// provenance persona and the caster are the same name. A persona is its
+/// own voter and never folds with the seat or with another persona.
+fn own_voice_voters(notes: &[String]) -> BTreeSet<String> {
+    let mut own = BTreeSet::new();
+    for note in notes {
+        let Some((persona, caster, _)) = ballot_sig::parse_from(note) else {
+            continue;
+        };
+        if persona.is_empty() || persona == "-" || caster.is_empty() || caster == "-" {
+            continue;
+        }
+        if crate::canonical_persona(&persona) == crate::canonical_persona(&caster) {
+            continue;
+        }
+        own.insert(persona.clone());
+        own.insert(crate::voter_id(&persona));
+        own.insert(ballot_sig::caster_persona_voter(&caster, &persona));
+    }
+    own
+}
+
 /// Keep one row per session. A session is a shared session id or a shared
 /// parent, whichever seat name or key the ballots carry. The kept row is
 /// the latest ballot. The others stay recorded and are named here.
+/// A persona cast by another seat (`own`) is not folded into that session.
 fn fold_one_voice(
     rows: Vec<Value>,
     links: &BTreeMap<String, VoiceLink>,
+    own: &BTreeSet<String>,
 ) -> (Vec<Value>, Vec<String>) {
     let n = rows.len();
     let mut uf: Vec<usize> = (0..n).collect();
@@ -1102,6 +1171,9 @@ fn fold_one_voice(
     let mut parent_at = BTreeMap::new();
     for (i, row) in rows.iter().enumerate() {
         let voter = row["agent"].as_str().unwrap_or("").trim();
+        if own.contains(voter) || own.contains(&crate::voter_id(voter)) {
+            continue;
+        }
         let Some(link) = links.get(voter) else {
             continue;
         };
@@ -1204,7 +1276,7 @@ fn tally_voices(
             continue;
         }
         let entry = bound
-            .entry(sig.voter.clone())
+            .entry(crate::voter_id(&sig.voter))
             .or_insert_with(|| (key, None, sig.seat_only()));
         if entry.1.is_none() && *standing {
             entry.1 = Some(sig.choice.clone());
@@ -1215,16 +1287,17 @@ fn tally_voices(
     let mut seen = std::collections::BTreeSet::new();
     for row in rows {
         let voter = row["agent"].as_str().unwrap_or("").trim();
-        if voter.is_empty() || !seen.insert(voter.to_string()) {
+        let id = crate::voter_id(voter);
+        if id.is_empty() || !seen.insert(id.clone()) {
             continue;
         }
         let any_standing = sigs
             .iter()
-            .any(|(standing, sig)| *standing && sig.voter == voter);
-        if withdrawn_at(&cuts, issue, voter).is_some() && !any_standing {
+            .any(|(standing, sig)| *standing && same_voter(&sig.voter, &id));
+        if withdrawn_at(&cuts, issue, &id).is_some() && !any_standing {
             continue;
         }
-        if let Some((key, oldest, seat_only)) = bound.get(voter) {
+        if let Some((key, oldest, seat_only)) = bound.get(&id) {
             if authors.contains(key) {
                 ignored.push(IgnoredBallot {
                     voter: voter.to_string(),
@@ -1237,11 +1310,8 @@ fn tally_voices(
             let Some(choice) = oldest.clone() else {
                 continue;
             };
-            let drawer = row["choice"].as_str().unwrap_or("").trim();
-            let signed = sigs
-                .iter()
-                .any(|(standing, sig)| *standing && sig.voter == voter && sig.choice == drawer);
-            if !signed {
+            let drawer = row["choice"].as_str().unwrap_or("");
+            if !signature_covers(&id, drawer, &sigs) {
                 continue;
             }
             let mut row = row.clone();
@@ -1251,10 +1321,17 @@ fn tally_voices(
             counted.push(row);
             continue;
         }
+        let drawer = row["choice"].as_str().unwrap_or("");
+        let saw_signature = sigs
+            .iter()
+            .any(|(standing, sig)| *standing && same_voter(&sig.voter, &id));
+        if saw_signature && !signature_covers(&id, drawer, &sigs) {
+            continue;
+        }
         counted.push(row.clone());
     }
     let links = voice_links(&sigs);
-    let (counted, folds) = fold_one_voice(counted, &links);
+    let (counted, folds) = fold_one_voice(counted, &links, &own_voice_voters(notes));
     Tally {
         counted,
         ignored,
@@ -1729,7 +1806,8 @@ fn plan(issue: &str, harness: &str, designers: usize, personas: &[String]) -> Ve
             Err(_) => format!(
                 "You are {name}, in your own harness session. Cast exactly one ballot on {issue} \
                  and stop. Do not read `vissue vote {issue}` or another persona's ballot first.\n\
-                 `ljos vote {issue} --for OPTION --expect OPTION --as {name} --confidence 0.7 --used none`.\n"
+                 `ljos vote {issue} --for OPTION --expect OPTION --as {name} --confidence 0.7 --used DEED`. \
+                 A persona needs a real deed.\n"
             ),
         };
         jobs.push(Job {

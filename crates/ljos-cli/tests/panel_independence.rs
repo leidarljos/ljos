@@ -1283,7 +1283,11 @@ fn a_family_ballot_names_where_to_withdraw_over_mcp() {
         .unwrap_or_default()
         .to_string();
     assert!(done["result"]["isError"] == true, "{done:?}");
-    assert!(said.contains("packset url missing"), "{done:?}");
+    assert!(
+        said.contains("withdrawn")
+            && said.contains("ballot withdrawn; the forecast for saddle was not"),
+        "{done:?}"
+    );
     let pass = serde_json::json!({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {
         "name": "ljos_vote",
         "arguments": {"issue": "child-a", "choice": "hold", "used": "none"}}});
@@ -1457,7 +1461,11 @@ fn a_withdraw_on_child_keeps_parents_row_over_mcp() {
         .unwrap_or_default()
         .to_string();
     assert!(found["result"]["isError"] == true, "{said}");
-    assert!(said.contains("packset url missing"), "{said}");
+    assert!(
+        said.contains("withdrawn")
+            && said.contains("ballot withdrawn; the forecast for saddle was not"),
+        "{said}"
+    );
     let ballots: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(world.state.join("ballots.json")).unwrap())
             .unwrap();
@@ -2780,9 +2788,9 @@ fn a_seat_no_harness_names_is_an_unverified_session() {
         ],
     );
     let said = text(&second);
-    assert!(second.status.success(), "{said}");
+    assert!(!second.status.success(), "{said}");
     assert!(
-        said.contains("reviewer-b cast by ljosbot, parent ljosbot"),
+        said.contains("a ballot cast as reviewer-b needs --used naming a deed"),
         "{said}"
     );
     let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
@@ -2790,13 +2798,9 @@ fn a_seat_no_harness_names_is_an_unverified_session() {
     assert!(tally.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&tally.stdout);
     assert!(stdout.contains("1 ballot counts"), "{said}");
-    assert!(stdout.contains("reviewer-b  hold"), "{said}");
-    assert!(
-        stdout.contains("folded into one voice (same session ljosbot):"),
-        "{said}"
-    );
-    assert!(stdout.contains("counted reviewer-b"), "{said}");
-    assert!(stdout.contains("ljosbot"), "{said}");
+    assert!(stdout.contains("ljosbot  ship"), "{said}");
+    assert!(!stdout.contains("reviewer-b"), "{said}");
+    assert!(!stdout.contains("folded into one voice"), "{said}");
     assert!(stdout.contains(&unverified), "{said}");
     // A ballot that went around the cast gate, as a raw drawer row and a
     // later signature on the same seat leave it.
@@ -2874,7 +2878,7 @@ fn account_name() -> String {
 }
 
 #[test]
-fn a_named_standing_seat_is_the_casters_persona_ballot() {
+fn a_named_standing_seat_cannot_be_cast_by_another_seat() {
     let world = World::new();
     let issue = "demo-as-inky";
     let session = "sess-caster-0001";
@@ -2896,18 +2900,12 @@ fn a_named_standing_seat_is_the_casters_persona_ballot() {
         ],
     );
     let said = text(&cast);
-    assert!(cast.status.success(), "{said}");
-    let persona = "persona:saddle:inky";
+    assert!(!cast.status.success(), "{said}");
     assert!(
-        said.contains("inky cast by saddle, parent sess-caster-0001"),
+        said.contains("a seat cannot cast a ballot for inky"),
         "{said}"
     );
-    assert!(
-        said.contains(&format!("ballot signed by {persona}")),
-        "{said}"
-    );
-    assert!(!said.contains("ballot signed by inky"), "{said}");
-    assert_eq!(signed_key(&said, persona), saddle_key, "{said}");
+    assert!(!said.contains("persona:saddle:inky"), "{said}");
 
     let inky = world.ljos(
         "inky",
@@ -2916,56 +2914,46 @@ fn a_named_standing_seat_is_the_casters_persona_ballot() {
     );
     let inky_said = text(&inky);
     assert!(inky.status.success(), "{inky_said}");
-    assert_ne!(signed_key(&inky_said, "inky"), saddle_key, "{inky_said}");
 
-    let tally = world.ljos("clerk", "sess-reader-0001", &["vote", issue]);
-    let said = text(&tally);
-    assert!(tally.status.success(), "{said}");
-    let stdout = String::from_utf8_lossy(&tally.stdout);
-    assert!(stdout.contains("2 ballots count"), "{said}");
-    assert!(stdout.contains("inky  ship"), "{said}");
-    assert!(stdout.contains(&format!("{persona}  hold")), "{said}");
-    assert!(
-        stdout.contains("inky cast by saddle, parent sess-caster-0001"),
-        "{said}"
-    );
-
-    let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
-    assert!(ballots.contains("\"agent\": \"inky\""), "{ballots}");
-    assert!(
-        ballots.contains(&format!("\"agent\": \"{persona}\"")),
-        "{ballots}"
-    );
-
-    let withdrawn = world.ljos(
-        "saddle",
-        session,
-        &["vote", issue, "--withdraw", "--as", "inky"],
-    );
-    assert_withdraw_forecast_error(&withdrawn, issue, persona);
-    let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
-    assert!(ballots.contains("\"agent\": \"inky\""), "{ballots}");
-    assert!(
-        !ballots.contains(&format!("\"agent\": \"{persona}\"")),
-        "{ballots}"
-    );
     let tally = world.ljos("clerk", "sess-reader-0001", &["vote", issue]);
     let said = text(&tally);
     assert!(tally.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&tally.stdout);
     assert!(stdout.contains("1 ballot counts"), "{said}");
     assert!(stdout.contains("inky  ship"), "{said}");
+    assert!(!stdout.contains("persona:saddle:inky"), "{said}");
     assert!(!stdout.contains("hold"), "{said}");
 }
 
 #[test]
-fn a_named_person_is_the_casters_persona_ballot() {
+fn a_named_person_is_not_a_free_second_voter() {
     let world = World::new();
     let person = account_name();
     assert!(!person.is_empty());
     assert_ne!(person, "saddle");
+    let fresh = world.ljos(
+        "saddle",
+        "sess-person-0002",
+        &[
+            "vote",
+            "demo-person-deed",
+            "--for",
+            "hold",
+            "--used",
+            "none",
+            "--as",
+            &person,
+        ],
+    );
+    let said = text(&fresh);
+    assert!(!fresh.status.success(), "{said}");
+    assert!(
+        said.contains(&format!(
+            "a ballot cast as {person} needs --used naming a deed"
+        )),
+        "{said}"
+    );
     let issue = "demo-as-person";
-    let session = "sess-person-0001";
     let own = world.ljos(
         &person,
         "sess-login-0001",
@@ -2974,52 +2962,31 @@ fn a_named_person_is_the_casters_persona_ballot() {
     assert!(own.status.success(), "{}", text(&own));
     let cast = world.ljos(
         "saddle",
-        session,
+        "sess-person-0001",
         &[
             "vote", issue, "--for", "hold", "--used", "none", "--as", &person,
         ],
     );
     let said = text(&cast);
-    assert!(cast.status.success(), "{said}");
-    let persona = format!("persona:saddle:{person}");
     assert!(
-        said.contains(&format!("{person} cast by saddle, parent {session}")),
+        cast.status.success() && said.contains("label repeated-ballot"),
         "{said}"
     );
-    assert!(
-        !said.contains(&format!("ballot signed by {person}")),
-        "{said}"
-    );
-    let withdrawn = world.ljos(
-        "saddle",
-        session,
-        &["vote", issue, "--withdraw", "--as", &person],
-    );
-    assert_withdraw_forecast_error(&withdrawn, issue, &persona);
     let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
     assert!(
         ballots.contains(&format!("\"agent\": \"{person}\"")),
         "{ballots}"
     );
     assert!(
-        !ballots.contains(&format!("\"agent\": \"{persona}\"")),
+        !ballots.contains(&format!("\"agent\": \"persona:saddle:{person}\"")),
         "{ballots}"
     );
 }
 
 #[test]
-fn a_persona_prefix_is_wrapped_as_the_casters_ballot() {
+fn a_persona_prefix_with_a_separator_is_refused() {
     let world = World::new();
     let issue = "demo-as-mark";
-    let session = "sess-mark-0001";
-    let own = world.ljos(
-        "saddle",
-        session,
-        &["vote", "demo-own-mark", "--for", "ship", "--used", "none"],
-    );
-    let own_said = text(&own);
-    assert!(own.status.success(), "{own_said}");
-    let saddle_key = signed_key(&own_said, "saddle");
     let inky = world.ljos(
         "inky",
         "sess-inky-mark",
@@ -3027,10 +2994,9 @@ fn a_persona_prefix_is_wrapped_as_the_casters_ballot() {
     );
     let inky_said = text(&inky);
     assert!(inky.status.success(), "{inky_said}");
-    assert_ne!(signed_key(&inky_said, "inky"), saddle_key, "{inky_said}");
     let cast = world.ljos(
         "saddle",
-        session,
+        "sess-mark-0001",
         &[
             "vote",
             issue,
@@ -3043,33 +3009,15 @@ fn a_persona_prefix_is_wrapped_as_the_casters_ballot() {
         ],
     );
     let said = text(&cast);
-    assert!(cast.status.success(), "{said}");
-    let persona = "persona:saddle:inky:x";
-    assert!(said.contains("inky:x cast by saddle"), "{said}");
-    assert!(!said.contains("cast by inky"), "{said}");
+    assert!(!cast.status.success(), "{said}");
     assert!(
-        said.contains(&format!("ballot signed by {persona}")),
+        said.contains("a persona name may use only letters, digits, '.', '_' and '-'"),
         "{said}"
     );
-    assert_eq!(signed_key(&said, persona), saddle_key, "{said}");
     let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
     assert!(ballots.contains("\"agent\": \"inky\""), "{ballots}");
-    assert!(
-        ballots.contains(&format!("\"agent\": \"{persona}\"")),
-        "{ballots}"
-    );
-    let withdrawn = world.ljos(
-        "saddle",
-        session,
-        &["vote", issue, "--withdraw", "--as", "persona:inky:x"],
-    );
-    assert_withdraw_forecast_error(&withdrawn, issue, persona);
-    let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
-    assert!(ballots.contains("\"agent\": \"inky\""), "{ballots}");
-    assert!(
-        !ballots.contains(&format!("\"agent\": \"{persona}\"")),
-        "{ballots}"
-    );
+    assert!(!ballots.contains("persona:saddle:"), "{ballots}");
+    assert!(!ballots.contains("inky:x"), "{ballots}");
 }
 
 #[test]

@@ -234,11 +234,11 @@ fn the_vote_howto_names_used_on_a_persona_ballot() {
     for rel in ["source/howto-vote.rst", "orgmode/howto-vote.org"] {
         let text = std::fs::read_to_string(root.join(rel)).unwrap();
         assert!(
-            text.contains("ljos vote $id --for hold --used none --as reviewer"),
+            text.contains("ljos vote $id --for hold --used deed-9f3a --as reviewer"),
             "{rel}\n{text}"
         );
         assert!(
-            text.contains("ljos vote $id --for ship --used none --as reader"),
+            text.contains("ljos vote $id --for ship --used deed-2c1b --as reader"),
             "{rel}"
         );
     }
